@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
 # Mock data — matches actual icid schema
-# project_user (singular), user_id bigint
+# project_users.user_uuid references users.uuid (Postgres UUID)
 # ---------------------------------------------------------------------------
 
 MOCK_PROJECT_ROWS = [
@@ -20,11 +20,11 @@ MOCK_PROJECT_DETAIL_ROW = (
     "active",
 )
 
-DEV_USER_ID = 28  # bigint in DB
+DEV_USER_ID = "7f3c2a9e-1b4d-4c8a-9e2f-3a5b6c7d8e90"  # users.uuid
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/projects/?user_id=<int>
+# GET /v1/projects/?user_id=<uuid>
 # ---------------------------------------------------------------------------
 
 class TestListProjectsForUser:
@@ -65,8 +65,12 @@ class TestListProjectsForUser:
         response = client.get("/v1/projects/")
         assert response.status_code == 422
 
-    def test_non_integer_user_id_returns_422(self, client):
-        response = client.get("/v1/projects/?user_id=not-an-int")
+    def test_non_uuid_user_id_returns_422(self, client):
+        response = client.get("/v1/projects/?user_id=not-a-uuid")
+        assert response.status_code == 422
+
+    def test_integer_user_id_returns_422(self, client):
+        response = client.get("/v1/projects/?user_id=28")
         assert response.status_code == 422
 
     def test_db_failure_returns_500(self, client):

@@ -14,3 +14,4 @@ __pycache__
 *.sublime-workspace
 *.env
 .env.*
+venv/
