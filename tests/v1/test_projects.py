@@ -1,24 +1,43 @@
 from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
-# Mock data — matches actual icid schema
+# Mock data — dict rows, as run_query returns them under dict_row.
+# Keys match the SELECT column names in api/queries/projects.py.
 # project_users.user_uuid references users.uuid (Postgres UUID)
 # ---------------------------------------------------------------------------
 
 MOCK_PROJECT_ROWS = [
-    ("P001", "Brooklyn Bridge Rehab", "Brooklyn", "active", "inspector"),
-    ("P002", "Queens Plaza Upgrade", "Queens", "active", "supervisor"),
-    ("P003", "Bronx Transit Hub", "Bronx", "pending", "inspector"),
+    {
+        "project_id": "P001",
+        "project_name": "Brooklyn Bridge Rehab",
+        "borough": "Brooklyn",
+        "status": "active",
+        "user_role": "inspector",
+    },
+    {
+        "project_id": "P002",
+        "project_name": "Queens Plaza Upgrade",
+        "borough": "Queens",
+        "status": "active",
+        "user_role": "supervisor",
+    },
+    {
+        "project_id": "P003",
+        "project_name": "Bronx Transit Hub",
+        "borough": "Bronx",
+        "status": "pending",
+        "user_role": "inspector",
+    },
 ]
 
-MOCK_PROJECT_DETAIL_ROW = (
-    "P001",
-    "Brooklyn Bridge Rehab",
-    "Full rehabilitation of the Brooklyn Bridge deck.",
-    "REG-2024-001",
-    "Brooklyn",
-    "active",
-)
+MOCK_PROJECT_DETAIL_ROW = {
+    "project_id": "P001",
+    "project_name": "Brooklyn Bridge Rehab",
+    "project_description": "Full rehabilitation of the Brooklyn Bridge deck.",
+    "registration_code": "REG-2024-001",
+    "borough": "Brooklyn",
+    "status": "active",
+}
 
 DEV_USER_ID = "7f3c2a9e-1b4d-4c8a-9e2f-3a5b6c7d8e90"  # users.uuid
 
@@ -111,7 +130,14 @@ class TestGetProjectDetail:
         assert response.status_code == 404
 
     def test_optional_fields_can_be_null(self, client):
-        row_with_nulls = ("P002", "Queens Plaza Upgrade", None, None, "Queens", "active")
+        row_with_nulls = {
+            "project_id": "P002",
+            "project_name": "Queens Plaza Upgrade",
+            "project_description": None,
+            "registration_code": None,
+            "borough": "Queens",
+            "status": "active",
+        }
         with patch("api.queries.projects.run_query", return_value=[row_with_nulls]):
             project = client.get("/v1/projects/P002").json()["data"]
         assert project["project_description"] is None

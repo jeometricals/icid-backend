@@ -1,32 +1,29 @@
+from typing import Any
+
 from fastapi import APIRouter
-from api.db.runner import run_query
+
+from api.queries.debug import get_schema_table_names, get_table_columns
 
 router = APIRouter(prefix="/debug", tags=["Debug"])
 
 
 @router.get("/schema")
-def get_schema():
+def get_schema() -> dict[str, Any]:
     """
-    List all tables and their columns in the icid schema.
+    List every table and its columns in the icid schema.
+    Takes no arguments.
+    Returns the schema name and a mapping of table name to column definitions.
     Dev-only endpoint — remove before production.
     """
-    tables_sql = """
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema = 'icid'
-        ORDER BY table_name;
-    """
-    tables = run_query(tables_sql) or []
+    tables = get_schema_table_names() or []
 
-    result = {}
-    for (table_name,) in tables:
-        columns_sql = """
-            SELECT column_name, data_type
-            FROM information_schema.columns
-            WHERE table_schema = 'icid' AND table_name = %s
-            ORDER BY ordinal_position;
-        """
-        cols = run_query(columns_sql, (table_name,)) or []
-        result[table_name] = [{"column": col, "type": dtype} for col, dtype in cols]
+    result: dict[str, list[dict[str, str]]] = {}
+    for table in tables:
+        table_name = table["table_name"]
+        columns = get_table_columns(table_name) or []
+        result[table_name] = [
+            {"column": column["column_name"], "type": column["data_type"]}
+            for column in columns
+        ]
 
     return {"schema": "icid", "tables": result}

@@ -2,12 +2,27 @@ from unittest.mock import patch
 from uuid import UUID
 
 # ---------------------------------------------------------------------------
-# Mock data — matches actual icid.users schema (uuid, client_id aliased as employer)
+# Mock data — dict rows, as run_query returns them under dict_row.
+# Keys match the SELECT aliases in api/queries/users.py.
 # ---------------------------------------------------------------------------
 
 MOCK_USER_ROWS = [
-    (UUID("7f3c2a9e-1b4d-4c8a-9e2f-3a5b6c7d8e90"), "KhanG@magnoleng.pc", "Genghis", "Khan", "(914) 345-6789", "C00046"),
-    (UUID("0d9e8f7a-6b5c-4d3e-8f1a-2b3c4d5e6f70"), "Nadir.shah@goorkaneng.com", "Nadir", "Shah", "(201) 987-6543", "C00045"),
+    {
+        "user_id": UUID("7f3c2a9e-1b4d-4c8a-9e2f-3a5b6c7d8e90"),
+        "email": "KhanG@magnoleng.pc",
+        "first_name": "Genghis",
+        "last_name": "Khan",
+        "phone_number": "(914) 345-6789",
+        "employer": "C00046",
+    },
+    {
+        "user_id": UUID("0d9e8f7a-6b5c-4d3e-8f1a-2b3c4d5e6f70"),
+        "email": "Nadir.shah@goorkaneng.com",
+        "first_name": "Nadir",
+        "last_name": "Shah",
+        "phone_number": "(201) 987-6543",
+        "employer": "C00045",
+    },
 ]
 
 
