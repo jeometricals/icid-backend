@@ -74,15 +74,15 @@ FROM (VALUES
 JOIN user_map m ON m.excel_id = src.excel_id;
 
 ------------------------------------------------------------
--- REPORTS (resolve reporter to generated uuid)
+-- REPORTS (resolve reporter to generated uuid; report_id is generated)
 ------------------------------------------------------------
-INSERT INTO icid.reports (report_id, reporter_uuid, project_id, report_date)
-SELECT src.report_id, m.uuid, src.project_id, src.report_date::DATE
+INSERT INTO icid.reports (reporter_uuid, project_id, report_date)
+SELECT m.uuid, src.project_id, src.report_date::DATE
 FROM (VALUES
-    ('R1', 1, 'HWS0023', '2025-09-16'),
-    ('R2', 2, 'HWS0023', '2025-09-16'),
-    ('R3', 3, 'HWS0023', '2025-09-16')
-) AS src (report_id, excel_id, project_id, report_date)
+    (1, 'HWS0023', '2025-09-16'),
+    (2, 'HWS0023', '2025-09-16'),
+    (3, 'HWS0023', '2025-09-16')
+) AS src (excel_id, project_id, report_date)
 JOIN user_map m ON m.excel_id = src.excel_id;
 
 ------------------------------------------------------------

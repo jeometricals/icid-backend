@@ -93,7 +93,7 @@ CREATE INDEX idx_project_clients_client ON icid.project_clients(client_id);
 -- REPORT
 ------------------------------------------------------------
 CREATE TABLE icid.reports (
-    report_id          TEXT PRIMARY KEY,
+    report_id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     reporter_uuid      UUID NOT NULL,
     project_id         TEXT NOT NULL,
     report_date        DATE,
@@ -131,8 +131,8 @@ CREATE TABLE icid.form_templates (
 ------------------------------------------------------------
 CREATE TABLE icid.completed_forms (
     id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    completed_form_id  TEXT UNIQUE NOT NULL,
-    report_id          TEXT NOT NULL,
+    completed_form_id  TEXT UNIQUE NOT NULL DEFAULT uuid_generate_v4()::text,
+    report_id          UUID NOT NULL,
     form_template_id   TEXT NOT NULL,
     form_data          JSONB,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -140,7 +140,9 @@ CREATE TABLE icid.completed_forms (
     CONSTRAINT fk_completed_forms_report
         FOREIGN KEY (report_id) REFERENCES icid.reports(report_id),
     CONSTRAINT fk_completed_forms_template
-        FOREIGN KEY (form_template_id) REFERENCES icid.form_templates(form_template_id)
+        FOREIGN KEY (form_template_id) REFERENCES icid.form_templates(form_template_id),
+    CONSTRAINT uq_completed_forms_report_template
+        UNIQUE (report_id, form_template_id)
 );
 
 CREATE INDEX idx_completed_forms_report ON icid.completed_forms(report_id);
