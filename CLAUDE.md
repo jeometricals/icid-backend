@@ -8,7 +8,7 @@ This is the backend for **ICID (Integrated Construction Information Database)**,
 platform for construction inspection reporting. Inspectors are assigned to projects, file
 reports against them, and complete structured forms attached to those reports.
 
-Stack: **Python + FastAPI + Postgres** (Neon), accessed with **psycopg 3**, deployed on
+Stack: **Python + FastAPI + Postgres** (Supabase), accessed with **psycopg 3**, deployed on
 **Vercel** as a serverless function. `api/index.py` is the entrypoint — `vercel.json` routes
 every request to it.
 
@@ -73,7 +73,7 @@ Any change must follow these.
 - **Fix one bug at a time.** If you notice unrelated bugs while fixing something, mention
   them and move on — do not touch them. Scope creep in fixes hurts more than it helps.
 - **`schema.sql` is authoritative.** Any database schema change updates `schema.sql` in the
-  same change. Never alter tables only through Supabase/Neon — the file must reflect reality.
+  same change. Never alter tables only through Supabase — the file must reflect reality.
 - **Flag downstream docs.** If a change affects the ER diagram or the working document, say
   so explicitly and remind me to update them. Don't assume I'll remember.
 - **Don't invent structure.** New resources follow the existing four-layer pattern
