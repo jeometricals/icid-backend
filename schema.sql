@@ -97,8 +97,11 @@ CREATE TABLE icid.reports (
     reporter_uuid      UUID NOT NULL,
     project_id         TEXT NOT NULL,
     report_date        DATE,
+    status             TEXT NOT NULL DEFAULT 'draft',
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_reports_status
+        CHECK (status IN ('draft', 'submitted')),
     CONSTRAINT fk_reports_project
         FOREIGN KEY (project_id) REFERENCES icid.projects(project_id),
     CONSTRAINT fk_reports_reporter
@@ -131,7 +134,7 @@ CREATE TABLE icid.completed_forms (
     completed_form_id  TEXT UNIQUE NOT NULL,
     report_id          TEXT NOT NULL,
     form_template_id   TEXT NOT NULL,
-    form_data          TEXT,
+    form_data          JSONB,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT fk_completed_forms_report
