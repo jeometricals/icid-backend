@@ -1,11 +1,12 @@
 from datetime import date
+from typing import Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 
 from api.queries.completed_forms import get_completed_form, upsert_completed_form
 from api.queries.projects import get_project_by_id, is_user_on_project
-from api.queries.reports import create_report, get_report_by_id, touch_report
+from api.queries.reports import create_report, get_report_by_id, list_reports, touch_report
 from api.queries.users import get_user_by_id
 from api.schemas.general_form import GeneralFormData
 from api.schemas.report import (
@@ -13,6 +14,8 @@ from api.schemas.report import (
     GeneralFormSaveResponse,
     Report,
     ReportCreate,
+    ReportListItem,
+    ReportListResponse,
     ReportResponse,
     ReportWithGeneral,
     ReportWithGeneralResponse,
@@ -48,6 +51,29 @@ def create_draft_report(body: ReportCreate) -> ReportResponse:
         status="success",
         message="Draft report created",
         data=Report.model_validate(row),
+    )
+
+
+@router.get("/", response_model=ReportListResponse)
+def list_project_reports(
+    project_id: str,
+    reporter_uuid: Optional[UUID] = None,
+    status: Optional[Literal["draft", "submitted"]] = None,
+) -> ReportListResponse:
+    """
+    List a project's reports, most recently edited first, with a General Form description preview.
+    Takes project_id (required) and optional reporter_uuid and status query parameters.
+    Returns a ReportListResponse (empty data list when nothing matches), or raises 500 on a query failure.
+    """
+    rows = list_reports(project_id, GENERAL_TEMPLATE_ID, reporter_uuid, status)
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to list reports")
+
+    return ReportListResponse(
+        status="success",
+        message=f"{len(rows)} report(s) for project {project_id}",
+        data=[ReportListItem.model_validate(row) for row in rows],
     )
 
 

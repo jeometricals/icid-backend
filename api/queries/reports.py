@@ -59,3 +59,44 @@ def touch_report(report_id: UUID) -> None:
         WHERE report_id = %s;
     """
     run_query(sql, (report_id,))
+
+
+def list_reports(
+    project_id: str,
+    form_template_id: str,
+    reporter_uuid: Optional[UUID] = None,
+    status: Optional[str] = None,
+) -> Optional[list[dict[str, Any]]]:
+    """
+    List a project's reports, newest edit first, optionally filtered by reporter and status.
+    Takes the project id, the form template whose description is previewed, and optional reporter uuid and status.
+    Returns a list of report dicts with a description_preview column (None if that form was never saved).
+    """
+    conditions = ["r.project_id = %s"]
+    params: list[Any] = [form_template_id, project_id]
+
+    if reporter_uuid is not None:
+        conditions.append("r.reporter_uuid = %s")
+        params.append(reporter_uuid)
+
+    if status is not None:
+        conditions.append("r.status = %s")
+        params.append(status)
+
+    sql = f"""
+        SELECT
+            r.report_id,
+            r.reporter_uuid,
+            r.project_id,
+            r.report_date,
+            r.status,
+            r.created_at,
+            r.updated_at,
+            NULLIF(LEFT(cf.form_data->>'description', 80), '') AS description_preview
+        FROM icid.reports r
+        LEFT JOIN icid.completed_forms cf
+            ON cf.report_id = r.report_id AND cf.form_template_id = %s
+        WHERE {" AND ".join(conditions)}
+        ORDER BY r.updated_at DESC;
+    """
+    return run_query(sql, tuple(params))

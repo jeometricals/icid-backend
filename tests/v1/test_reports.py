@@ -331,3 +331,85 @@ class TestGetReport:
     def test_non_uuid_report_id_returns_422(self, client):
         response = client.get("/v1/reports/R1")
         assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/reports/?project_id=...
+# ---------------------------------------------------------------------------
+
+MOCK_LIST_ROW = {**MOCK_REPORT_ROW, "description_preview": "Excavated trench along the east curb line."}
+MOCK_LIST_ROW_NO_FORM = {
+    **MOCK_REPORT_ROW,
+    "report_id": UUID("5d6e7f80-1a2b-4c3d-8e9f-0a1b2c3d4e5f"),
+    "description_preview": None,
+}
+
+
+class TestListReports:
+    url = "/v1/reports/"
+
+    def test_returns_200(self, client):
+        with patched(reports=[MOCK_LIST_ROW]):
+            response = client.get(self.url, params={"project_id": "HWS0023"})
+        assert response.status_code == 200
+
+    def test_response_shape(self, client):
+        with patched(reports=[MOCK_LIST_ROW, MOCK_LIST_ROW_NO_FORM]):
+            data = client.get(self.url, params={"project_id": "HWS0023"}).json()
+        assert data["status"] == "success"
+        assert len(data["data"]) == 2
+        first = data["data"][0]
+        assert first["report_id"] == REPORT_ID
+        assert first["status"] == "draft"
+        assert first["report_date"] == "2026-09-22"
+        assert first["description_preview"] == "Excavated trench along the east curb line."
+
+    def test_preview_null_when_form_never_saved(self, client):
+        with patched(reports=[MOCK_LIST_ROW_NO_FORM]):
+            data = client.get(self.url, params={"project_id": "HWS0023"}).json()
+        assert data["data"][0]["description_preview"] is None
+
+    def test_no_matches_returns_empty_list(self, client):
+        with patched(reports=[]):
+            response = client.get(self.url, params={"project_id": "HWS0023", "status": "draft"})
+        assert response.status_code == 200
+        assert response.json()["data"] == []
+
+    def test_all_filters_reach_the_query(self, client):
+        with patched(reports=[]) as mocks:
+            client.get(self.url, params={"project_id": "HWS0023", "reporter_uuid": REPORTER_UUID, "status": "draft"})
+        sql, params = mocks["reports"].call_args.args
+        assert "r.reporter_uuid = %s" in sql
+        assert "r.status = %s" in sql
+        assert params == ("GENERAL", "HWS0023", UUID(REPORTER_UUID), "draft")
+
+    def test_optional_filters_omitted_when_not_given(self, client):
+        with patched(reports=[]) as mocks:
+            client.get(self.url, params={"project_id": "HWS0023"})
+        sql, params = mocks["reports"].call_args.args
+        assert "r.reporter_uuid = %s" not in sql
+        assert "r.status = %s" not in sql
+        assert params == ("GENERAL", "HWS0023")
+
+    def test_orders_by_most_recently_edited(self, client):
+        with patched(reports=[]) as mocks:
+            client.get(self.url, params={"project_id": "HWS0023"})
+        sql, _ = mocks["reports"].call_args.args
+        assert "ORDER BY r.updated_at DESC" in sql
+
+    def test_missing_project_id_returns_422(self, client):
+        response = client.get(self.url)
+        assert response.status_code == 422
+
+    def test_invalid_status_returns_422(self, client):
+        response = client.get(self.url, params={"project_id": "HWS0023", "status": "approved"})
+        assert response.status_code == 422
+
+    def test_non_uuid_reporter_returns_422(self, client):
+        response = client.get(self.url, params={"project_id": "HWS0023", "reporter_uuid": "28"})
+        assert response.status_code == 422
+
+    def test_query_failure_returns_500(self, client):
+        with patched(reports=None):
+            response = client.get(self.url, params={"project_id": "HWS0023"})
+        assert response.status_code == 500

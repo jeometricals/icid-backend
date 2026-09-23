@@ -49,3 +49,13 @@ class ReportWithGeneralResponse(BaseModel):
     status: str
     message: str
     data: ReportWithGeneral
+
+
+class ReportListItem(Report):
+    description_preview: Optional[str] = None
+
+
+class ReportListResponse(BaseModel):
+    status: str
+    message: str
+    data: list[ReportListItem]
