@@ -6,7 +6,13 @@ from fastapi import APIRouter, HTTPException
 
 from api.queries.completed_forms import get_completed_form, upsert_completed_form
 from api.queries.projects import get_project_by_id, is_user_on_project
-from api.queries.reports import create_report, get_report_by_id, list_reports, touch_report
+from api.queries.reports import (
+    create_report,
+    get_report_by_id,
+    list_reports,
+    submit_report,
+    touch_report,
+)
 from api.queries.users import get_user_by_id
 from api.schemas.general_form import GeneralFormData
 from api.schemas.report import (
@@ -107,6 +113,36 @@ def save_general_form(report_id: UUID, body: GeneralFormData) -> GeneralFormSave
             completed_form_id=saved["completed_form_id"],
             saved_at=saved["updated_at"],
         ),
+    )
+
+
+@router.post("/{report_id}/submit", response_model=ReportResponse)
+def submit_draft_report(report_id: UUID) -> ReportResponse:
+    """
+    Submit a draft report, locking it from further edits and stamping submitted_at.
+    Takes the report uuid as a path parameter; no body.
+    Returns a ReportResponse, or raises 404 if the report does not exist and 409 if it is not a draft or its General Form was never saved.
+    """
+    report = get_report_by_id(report_id)
+
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    if report["status"] != "draft":
+        raise HTTPException(status_code=409, detail="Only draft reports can be submitted")
+
+    if get_completed_form(report_id, GENERAL_TEMPLATE_ID) is None:
+        raise HTTPException(status_code=409, detail="Save the General Form before submitting")
+
+    row = submit_report(report_id)
+
+    if row is None:
+        raise HTTPException(status_code=500, detail="Failed to submit report")
+
+    return ReportResponse(
+        status="success",
+        message="Report submitted",
+        data=Report.model_validate(row),
     )
 
 

@@ -37,6 +37,7 @@ every request to it.
 - `GET /v1/reports/?project_id=&reporter_uuid=&status=` — list a project's reports (reporter/status optional)
 - `GET /v1/reports/{report_id}` — report plus its saved General Form
 - `PUT /v1/reports/{report_id}/general` — save the General Form on a draft
+- `POST /v1/reports/{report_id}/submit` — submit a draft (locks it, stamps `submitted_at`)
 - `GET /debug/schema` — dev-only
 
 ## 3. Modularity rules

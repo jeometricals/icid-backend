@@ -23,9 +23,10 @@ MOCK_REPORT_ROW = {
     "status": "draft",
     "created_at": NOW,
     "updated_at": NOW,
+    "submitted_at": None,
 }
 
-MOCK_SUBMITTED_REPORT_ROW = {**MOCK_REPORT_ROW, "status": "submitted"}
+MOCK_SUBMITTED_REPORT_ROW = {**MOCK_REPORT_ROW, "status": "submitted", "submitted_at": NOW}
 
 MOCK_PROJECT_ROW = {
     "project_id": "HWS0023",
@@ -331,6 +332,66 @@ class TestGetReport:
     def test_non_uuid_report_id_returns_422(self, client):
         response = client.get("/v1/reports/R1")
         assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/reports/{report_id}/submit
+# ---------------------------------------------------------------------------
+
+# Submitting reads the report, then runs the conditional UPDATE, both through
+# api.queries.reports. Side effects supply one result per call.
+DRAFT_THEN_SUBMITTED = ([MOCK_REPORT_ROW], [MOCK_SUBMITTED_REPORT_ROW])
+
+
+class TestSubmitReport:
+    url = f"/v1/reports/{REPORT_ID}/submit"
+
+    def test_returns_200_with_submitted_report(self, client):
+        with patched(reports=DRAFT_THEN_SUBMITTED, completed_forms=[MOCK_COMPLETED_FORM_ROW]):
+            response = client.post(self.url)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["data"]["report_id"] == REPORT_ID
+        assert data["data"]["status"] == "submitted"
+        assert data["data"]["submitted_at"] == "2026-09-22T15:30:00Z"
+
+    def test_update_sets_status_and_submitted_at_only_on_drafts(self, client):
+        with patched(reports=DRAFT_THEN_SUBMITTED, completed_forms=[MOCK_COMPLETED_FORM_ROW]) as mocks:
+            client.post(self.url)
+        sql, params = mocks["reports"].call_args.args
+        assert "UPDATE icid.reports" in sql
+        assert "status = 'submitted'" in sql
+        assert "submitted_at = now()" in sql
+        assert "status = 'draft'" in sql
+        assert params == (UUID(REPORT_ID),)
+
+    def test_missing_report_returns_404(self, client):
+        with patched(reports=[]) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 404
+        assert mocks["reports"].call_count == 1
+
+    def test_already_submitted_returns_409(self, client):
+        with patched(reports=[MOCK_SUBMITTED_REPORT_ROW]) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 409
+        assert mocks["reports"].call_count == 1
+
+    def test_unsaved_general_form_returns_409(self, client):
+        with patched(reports=[MOCK_REPORT_ROW], completed_forms=[]) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 409
+        assert mocks["reports"].call_count == 1
+
+    def test_non_uuid_report_id_returns_422(self, client):
+        response = client.post("/v1/reports/R1/submit")
+        assert response.status_code == 422
+
+    def test_update_failure_returns_500(self, client):
+        with patched(reports=([MOCK_REPORT_ROW], None), completed_forms=[MOCK_COMPLETED_FORM_ROW]):
+            response = client.post(self.url)
+        assert response.status_code == 500
 
 
 # ---------------------------------------------------------------------------

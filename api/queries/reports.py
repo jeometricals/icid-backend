@@ -11,7 +11,8 @@ REPORT_COLUMNS = """
     report_date,
     status,
     created_at,
-    updated_at
+    updated_at,
+    submitted_at
 """
 
 
@@ -61,6 +62,22 @@ def touch_report(report_id: UUID) -> None:
     run_query(sql, (report_id,))
 
 
+def submit_report(report_id: UUID) -> Optional[dict[str, Any]]:
+    """
+    Mark a draft report as submitted, stamping submitted_at and updated_at with now.
+    Takes the report uuid; only a report still in draft status is changed.
+    Returns the updated report dict, or None if it was not a draft (or on failure).
+    """
+    sql = f"""
+        UPDATE icid.reports
+        SET status = 'submitted', submitted_at = now(), updated_at = now()
+        WHERE report_id = %s AND status = 'draft'
+        RETURNING {REPORT_COLUMNS};
+    """
+    rows = run_query(sql, (report_id,))
+    return rows[0] if rows else None
+
+
 def list_reports(
     project_id: str,
     form_template_id: str,
@@ -92,6 +109,7 @@ def list_reports(
             r.status,
             r.created_at,
             r.updated_at,
+            r.submitted_at,
             NULLIF(LEFT(cf.form_data->>'description', 80), '') AS description_preview
         FROM icid.reports r
         LEFT JOIN icid.completed_forms cf
