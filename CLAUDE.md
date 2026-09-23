@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`users.py`, `projects.py`, `debug.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`users.py`, `projects.py`, `reports.py`, `debug.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -25,6 +25,19 @@ every request to it.
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data. |
 | `scripts/` | One-off local utilities (seeding, ad-hoc SQL). Not imported by the app. |
+
+### Endpoints
+
+<!-- Update this list when endpoints change -->
+- `GET /status`
+- `GET /v1/users/`
+- `GET /v1/projects/?user_id=` (user uuid)
+- `GET /v1/projects/{project_id}`
+- `POST /v1/reports/` — create a draft report
+- `GET /v1/reports/?project_id=&reporter_uuid=&status=` — list a project's reports (reporter/status optional)
+- `GET /v1/reports/{report_id}` — report plus its saved General Form
+- `PUT /v1/reports/{report_id}/general` — save the General Form on a draft
+- `GET /debug/schema` — dev-only
 
 ## 3. Modularity rules
 
@@ -86,8 +99,8 @@ Not rules — current state, documented so nobody mistakes these for the intende
 
 - `api/v1/debug.py` exposes the live `icid` schema and is **dev-only**. Delete before
   production. It has no test coverage.
-- Only `users` and `projects` have endpoints. `api/schemas/` already defines models for
-  clients, reports, form templates, completed forms and the join tables — those schemas run
+- Only `users`, `projects` and `reports` have endpoints. `api/schemas/` already defines models for
+  clients, form templates, completed forms and the join tables — those schemas run
   ahead of the endpoints and may not match `schema.sql` exactly. Verify against `schema.sql`
   before building on them.
 - `api/v1/`, `api/db/`, `api/core/` and `api/schemas/` have no `__init__.py`; only
