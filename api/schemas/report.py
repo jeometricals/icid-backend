@@ -1,33 +1,51 @@
-# app/schemas/report.py
+from datetime import date, datetime
+from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel
-from uuid import UUID
-from typing import Optional
-from datetime import datetime
+
+from api.schemas.general_form import GeneralFormData
 
 
-class ReportBase(BaseModel):
-    report_id: str
+class ReportCreate(BaseModel):
+    project_id: str
+    reporter_uuid: UUID
+    report_date: Optional[date] = None
+
+
+class Report(BaseModel):
+    report_id: UUID
     reporter_uuid: UUID
     project_id: str
-    report_date: Optional[str] = None
-
-
-class ReportCreate(ReportBase):
-    pass
-
-
-class ReportUpdate(BaseModel):
-    report_date: Optional[str] = None
-
-class ReportRead(ReportBase):
+    report_date: Optional[date] = None
+    status: str
     created_at: datetime
     updated_at: datetime
 
-    model_config = {"from_attributes": True}
 
-class ReportResponse(ReportBase):
-    created_at: str
-    updated_at: str
+class ReportResponse(BaseModel):
+    status: str
+    message: str
+    data: Report
 
-    model_config = {"from_attributes": True}
+
+class GeneralFormSaved(BaseModel):
+    report_id: UUID
+    completed_form_id: str
+    saved_at: datetime
+
+
+class GeneralFormSaveResponse(BaseModel):
+    status: str
+    message: str
+    data: GeneralFormSaved
+
+
+class ReportWithGeneral(Report):
+    general_form: Optional[GeneralFormData] = None
+
+
+class ReportWithGeneralResponse(BaseModel):
+    status: str
+    message: str
+    data: ReportWithGeneral

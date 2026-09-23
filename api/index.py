@@ -28,10 +28,12 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 def include_routers(app: FastAPI):
     from api.v1.users import router as users_router
     from api.v1.projects import router as projects_router
+    from api.v1.reports import router as reports_router
     from api.v1.debug import router as debug_router
 
     app.include_router(users_router)
     app.include_router(projects_router)
+    app.include_router(reports_router)
     app.include_router(debug_router)
 
 

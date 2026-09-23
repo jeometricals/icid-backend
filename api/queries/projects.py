@@ -25,6 +25,22 @@ def get_projects_for_user(user_id: UUID) -> Optional[list[dict[str, Any]]]:
     return run_query(sql, (user_id,))
 
 
+def is_user_on_project(user_id: UUID, project_id: str) -> bool:
+    """
+    Check whether a user is assigned to a project.
+    Takes the user uuid and the project id.
+    Returns True if an assignment row exists, False otherwise.
+    """
+    sql = """
+        SELECT 1
+        FROM icid.project_users
+        WHERE user_uuid = %s AND project_id = %s
+        LIMIT 1;
+    """
+    rows = run_query(sql, (user_id, project_id))
+    return bool(rows)
+
+
 def get_project_by_id(project_id: str) -> Optional[dict[str, Any]]:
     """
     Fetch the full detail of a single project.
