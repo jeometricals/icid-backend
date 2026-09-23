@@ -319,6 +319,18 @@ class TestGetReport:
         assert data["data"]["status"] == "draft"
         assert data["data"]["general_form"] == GENERAL_FORM
 
+    def test_draft_has_null_submitted_at(self, client):
+        with patched(reports=[MOCK_REPORT_ROW], completed_forms=[MOCK_COMPLETED_FORM_ROW]) as mocks:
+            data = client.get(self.url).json()
+        assert "submitted_at" in mocks["reports"].call_args.args[0]
+        assert data["data"]["submitted_at"] is None
+
+    def test_submitted_report_includes_submitted_at(self, client):
+        with patched(reports=[MOCK_SUBMITTED_REPORT_ROW], completed_forms=[MOCK_COMPLETED_FORM_ROW]):
+            data = client.get(self.url).json()
+        assert data["data"]["status"] == "submitted"
+        assert data["data"]["submitted_at"] == "2026-09-22T15:30:00Z"
+
     def test_general_form_null_when_not_saved(self, client):
         with patched(reports=[MOCK_REPORT_ROW], completed_forms=[]):
             data = client.get(self.url).json()
@@ -424,6 +436,14 @@ class TestListReports:
         assert first["status"] == "draft"
         assert first["report_date"] == "2026-09-22"
         assert first["description_preview"] == "Excavated trench along the east curb line."
+
+    def test_submitted_at_null_for_drafts_and_set_for_submitted(self, client):
+        submitted = {**MOCK_SUBMITTED_REPORT_ROW, "description_preview": None}
+        with patched(reports=[MOCK_LIST_ROW, submitted]) as mocks:
+            data = client.get(self.url, params={"project_id": "HWS0023"}).json()
+        assert "r.submitted_at" in mocks["reports"].call_args.args[0]
+        assert data["data"][0]["submitted_at"] is None
+        assert data["data"][1]["submitted_at"] == "2026-09-22T15:30:00Z"
 
     def test_preview_null_when_form_never_saved(self, client):
         with patched(reports=[MOCK_LIST_ROW_NO_FORM]):
