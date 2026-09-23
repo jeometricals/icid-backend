@@ -100,6 +100,7 @@ CREATE TABLE icid.reports (
     status             TEXT NOT NULL DEFAULT 'draft',
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    submitted_at       TIMESTAMPTZ,
     CONSTRAINT chk_reports_status
         CHECK (status IN ('draft', 'submitted')),
     CONSTRAINT fk_reports_project
