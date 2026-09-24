@@ -1,4 +1,14 @@
 -- schema.sql
+-- Authoritative DDL for the icid schema.
+--
+-- Data model: IDR (Inspector Daily Diary). One icid.idrs row per inspector
+-- per project per day holds the shared header; icid.idr_reports holds the
+-- typed reports (General, addenda, ...) filed under it. Introduced in
+-- migrations/004_idr_refactor.sql (Phase R, Slice R1).
+--
+-- LEGACY: icid.reports and icid.completed_forms are the pre-IDR model. Their
+-- data was migrated into idrs/idr_reports; the tables are kept until the
+-- backend and frontend move over, and are dropped in Slice R5.
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE SCHEMA IF NOT EXISTS icid;
 
@@ -90,7 +100,7 @@ CREATE INDEX idx_project_clients_project ON icid.project_clients(project_id);
 CREATE INDEX idx_project_clients_client ON icid.project_clients(client_id);
 
 ------------------------------------------------------------
--- REPORT
+-- REPORT (LEGACY - superseded by idrs/idr_reports, dropped in Slice R5)
 ------------------------------------------------------------
 CREATE TABLE icid.reports (
     report_id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -128,7 +138,7 @@ CREATE TABLE icid.form_templates (
 );
 
 ------------------------------------------------------------
--- COMPLETED FORM
+-- COMPLETED FORM (LEGACY - superseded by idr_reports, dropped in Slice R5)
 ------------------------------------------------------------
 CREATE TABLE icid.completed_forms (
     id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -148,3 +158,53 @@ CREATE TABLE icid.completed_forms (
 
 CREATE INDEX idx_completed_forms_report ON icid.completed_forms(report_id);
 CREATE INDEX idx_completed_forms_template ON icid.completed_forms(form_template_id);
+
+------------------------------------------------------------
+-- IDR (one per inspector per project per day)
+------------------------------------------------------------
+CREATE TABLE icid.idrs (
+    idr_id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id             TEXT NOT NULL REFERENCES icid.projects(project_id),
+    reporter_uuid          UUID NOT NULL REFERENCES icid.users(uuid),
+    report_date            DATE NOT NULL,
+    work_start_time        TIME NULL,
+    work_end_time          TIME NULL,
+    inspector_start_time   TIME NULL,
+    inspector_end_time     TIME NULL,
+    temp_low               NUMERIC(4,1) NULL,
+    temp_high              NUMERIC(4,1) NULL,
+    weather_am             TEXT NULL,
+    weather_pm             TEXT NULL,
+    total_pages            INTEGER NULL,
+    status                 TEXT NOT NULL DEFAULT 'draft',
+    submitted_at           TIMESTAMPTZ NULL,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_idrs_status CHECK (status IN ('draft', 'submitted')),
+    CONSTRAINT uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date)
+);
+
+CREATE INDEX idx_idrs_project_status ON icid.idrs(project_id, status);
+CREATE INDEX idx_idrs_reporter ON icid.idrs(reporter_uuid);
+
+------------------------------------------------------------
+-- IDR REPORT (typed report within an IDR; addenda link to a parent)
+------------------------------------------------------------
+CREATE TABLE icid.idr_reports (
+    report_id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    idr_id                UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    report_type           TEXT NOT NULL,
+    is_addendum           BOOLEAN NOT NULL DEFAULT false,
+    parent_report_id      UUID NULL REFERENCES icid.idr_reports(report_id) ON DELETE CASCADE,
+    page_number           INTEGER NULL,
+    report_data           JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_idr_reports_parent CHECK (
+        (is_addendum = false AND parent_report_id IS NULL)
+        OR (is_addendum = true)
+    )
+);
+
+CREATE INDEX idx_idr_reports_idr ON icid.idr_reports(idr_id);
+CREATE INDEX idx_idr_reports_parent ON icid.idr_reports(parent_report_id) WHERE parent_report_id IS NOT NULL;
