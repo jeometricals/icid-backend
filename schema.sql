@@ -208,3 +208,8 @@ CREATE TABLE icid.idr_reports (
 
 CREATE INDEX idx_idr_reports_idr ON icid.idr_reports(idr_id);
 CREATE INDEX idx_idr_reports_parent ON icid.idr_reports(parent_report_id) WHERE parent_report_id IS NOT NULL;
+
+-- At most one non-addendum General per IDR (migrations/005_one_general_per_idr.sql).
+CREATE UNIQUE INDEX uq_idr_reports_one_gen_per_idr
+    ON icid.idr_reports(idr_id)
+    WHERE report_type = 'GEN' AND is_addendum = false;
