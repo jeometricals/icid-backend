@@ -3,6 +3,8 @@ from datetime import date, datetime, timezone
 from unittest.mock import patch
 from uuid import UUID
 
+from psycopg.types.json import Jsonb
+
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType
 
 # ---------------------------------------------------------------------------
@@ -505,3 +507,117 @@ class TestReportTypeEnum:
         assert ADDENDUM_TYPES <= set(ReportType)
         assert ReportType.DSP not in ADDENDUM_TYPES
         assert len(ADDENDUM_TYPES) == 6
+
+
+# ---------------------------------------------------------------------------
+# PUT /v1/idrs/{idr_id}/reports/{report_id}
+# ---------------------------------------------------------------------------
+
+# Deliberately odd shape: camelCase, deep nesting, keys no model knows about.
+SAVE_BODY = {
+    "description": "Poured sidewalk flag at 12 Main St.",
+    "payItems": [{"itemNo": "4.02", "payQuantity": "12"}],
+    "nested": {"deeper": {"deepest": [1, "two", None, True]}},
+    "someFutureField": "frontend owns this",
+}
+
+MOCK_SAVED_ROW = {**MOCK_GEN_REPORT_ROW, "report_data": SAVE_BODY}
+
+
+class TestSaveReportData:
+    url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
+
+    def test_returns_200_with_saved_report(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]):
+            response = client.put(self.url, json=SAVE_BODY)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["data"]["report_id"] == GEN_REPORT_ID
+        assert data["data"]["idr_id"] == IDR_ID
+        assert data["data"]["report_data"] == SAVE_BODY
+
+    def test_stores_body_as_jsonb_unchanged(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
+            client.put(self.url, json=SAVE_BODY)
+        params = mocks["idr_reports"].call_args.args[1]
+        assert isinstance(params[0], Jsonb)
+        assert params[0].obj == SAVE_BODY
+        assert params[1:] == (UUID(IDR_ID), UUID(GEN_REPORT_ID))
+
+    def test_single_statement_replaces_data_and_stamps_both_updated_at(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
+            client.put(self.url, json=SAVE_BODY)
+        assert mocks["idr_reports"].call_count == 1
+        assert mocks["idrs"].call_count == 1  # IDR lookup only; the touch is inside the CTE
+        sql = mocks["idr_reports"].call_args.args[0]
+        assert "UPDATE icid.idr_reports" in sql
+        assert "SET report_data = %s, updated_at = now()" in sql
+        assert "UPDATE icid.idrs" in sql
+        assert sql.count("updated_at = now()") == 2
+        assert "||" not in sql  # replace, not merge
+
+    def test_update_scoped_to_report_in_draft_idr(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
+            client.put(self.url, json=SAVE_BODY)
+        sql = mocks["idr_reports"].call_args.args[0]
+        assert "r.idr_id = %s AND r.report_id = %s" in sql
+        assert "i.status = 'draft'" in sql
+
+    def test_empty_object_is_accepted(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
+            response = client.put(self.url, json={})
+        assert response.status_code == 200
+        assert mocks["idr_reports"].call_args.args[1][0].obj == {}
+
+    def test_addendum_report_can_be_saved(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{ADDENDUM_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_ADDENDUM_ROW]):
+            response = client.put(url, json=MOCK_ADDENDUM_ROW["report_data"])
+        assert response.status_code == 200
+        assert response.json()["data"]["is_addendum"] is True
+
+    def test_missing_idr_returns_404(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.put(self.url, json=SAVE_BODY)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "IDR not found"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_submitted_idr_returns_409(self, client):
+        with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
+            response = client.put(self.url, json=SAVE_BODY)
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Only draft IDRs can be edited"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_report_not_in_idr_returns_404(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
+            response = client.put(self.url, json=SAVE_BODY)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Report not found in this IDR"
+
+    def test_array_body_returns_422_with_message(self, client):
+        with patched() as mocks:
+            response = client.put(self.url, json=[{"a": 1}])
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["msg"] == "report_data must be a JSON object"
+        mocks["idrs"].assert_not_called()
+
+    def test_scalar_bodies_return_422(self, client):
+        for body in ["text", 42, True, None]:
+            response = client.put(self.url, json=body)
+            assert response.status_code == 422, body
+
+    def test_missing_body_returns_422(self, client):
+        response = client.put(self.url)
+        assert response.status_code == 422
+
+    def test_non_uuid_ids_return_422(self, client):
+        assert client.put(f"/v1/idrs/IDR1/reports/{GEN_REPORT_ID}", json={}).status_code == 422
+        assert client.put(f"/v1/idrs/{IDR_ID}/reports/R1", json={}).status_code == 422
+
+    def test_update_failure_returns_500(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
+            response = client.put(self.url, json=SAVE_BODY)
+        assert response.status_code == 500

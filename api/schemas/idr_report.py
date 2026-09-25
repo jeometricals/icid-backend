@@ -1,9 +1,10 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
+from pydantic_core import PydanticCustomError
 
 
 class ReportType(StrEnum):
@@ -40,6 +41,21 @@ ADDENDUM_TYPES = frozenset({
     ReportType.WM_3,
     ReportType.CONC_CYL,
 })
+
+
+def require_json_object(value: Any) -> Any:
+    """
+    Reject a report_data body whose top level is not a JSON object.
+    Takes the raw parsed JSON value.
+    Returns it unchanged, or raises a validation error (surfaced as 422).
+    """
+    if not isinstance(value, dict):
+        raise PydanticCustomError("report_data_not_object", "report_data must be a JSON object")
+    return value
+
+
+# Unvalidated report body: any JSON object, contents stored as-is.
+ReportData = Annotated[dict[str, Any], BeforeValidator(require_json_object)]
 
 
 class IdrReportCreate(BaseModel):

@@ -1,6 +1,8 @@
 from typing import Any, Optional
 from uuid import UUID
 
+from psycopg.types.json import Jsonb
+
 from api.db.runner import run_query
 
 IDR_REPORT_COLUMNS = """
@@ -76,3 +78,31 @@ def get_general_report_id(idr_id: UUID) -> Optional[UUID]:
     """
     rows = run_query(sql, (idr_id,))
     return rows[0]["report_id"] if rows else None
+
+
+def save_report_data(
+    idr_id: UUID, report_id: UUID, report_data: dict[str, Any]
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Replace a report's report_data and stamp updated_at on both the report and its IDR, in one statement.
+    Takes the IDR uuid, the report uuid and the data dict (stored as JSONB); only a report in that IDR, while the IDR is a draft, is changed.
+    Returns a one-row list with the saved report, an empty list if no such report in a draft IDR, or None on failure.
+    """
+    sql = f"""
+        WITH saved AS (
+            UPDATE icid.idr_reports r
+            SET report_data = %s, updated_at = now()
+            FROM icid.idrs i
+            WHERE r.idr_id = %s AND r.report_id = %s
+                AND i.idr_id = r.idr_id AND i.status = 'draft'
+            RETURNING r.*
+        ),
+        touched AS (
+            UPDATE icid.idrs
+            SET updated_at = now()
+            WHERE idr_id IN (SELECT idr_id FROM saved)
+        )
+        SELECT {IDR_REPORT_COLUMNS}
+        FROM saved;
+    """
+    return run_query(sql, (Jsonb(report_data), idr_id, report_id))
