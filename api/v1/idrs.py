@@ -4,8 +4,13 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from api.queries.idr_reports import list_reports_for_idr
-from api.queries.idrs import create_idr, get_idr_by_id, get_idr_id_for_day
+from api.queries.idr_reports import (
+    create_idr_report,
+    get_general_report_id,
+    get_idr_report,
+    list_reports_for_idr,
+)
+from api.queries.idrs import create_idr, get_idr_by_id, get_idr_id_for_day, touch_idr
 from api.queries.projects import get_project_by_id, is_user_on_project
 from api.schemas.idr import (
     Idr,
@@ -14,6 +19,12 @@ from api.schemas.idr import (
     IdrResponse,
     IdrWithReports,
     IdrWithReportsResponse,
+)
+from api.schemas.idr_report import (
+    IdrReport,
+    IdrReportConflict,
+    IdrReportCreate,
+    IdrReportResponse,
 )
 
 router = APIRouter(prefix="/v1/idrs", tags=["IDRs"])
@@ -82,4 +93,62 @@ def get_idr(idr_id: UUID) -> IdrWithReportsResponse:
         status="success",
         message="IDR detail",
         data=IdrWithReports.model_validate({**idr, "reports": reports}),
+    )
+
+
+@router.post(
+    "/{idr_id}/reports",
+    response_model=IdrReportResponse,
+    status_code=201,
+    responses={409: {"model": IdrReportConflict, "description": "IDR is not a draft, or already has a General"}},
+)
+def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, JSONResponse]:
+    """
+    Add an empty report of the given type to a draft IDR, optionally as an addendum to one of its main reports.
+    Takes the IDR uuid as a path parameter and an IdrReportCreate body.
+    Returns an IdrReportResponse; raises 404 (no IDR), 409 (not draft, or second General with existing_report_id) and 400 (bad parent).
+    """
+    idr = get_idr_by_id(idr_id)
+
+    if idr is None:
+        raise HTTPException(status_code=404, detail="IDR not found")
+
+    if idr["status"] != "draft":
+        raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
+
+    if body.parent_report_id is not None:
+        if not body.is_addendum:
+            raise HTTPException(status_code=400, detail="Only addendums can have a parent report")
+
+        parent = get_idr_report(idr_id, body.parent_report_id)
+
+        if parent is None:
+            raise HTTPException(status_code=400, detail="Parent report not found in this IDR")
+
+        if parent["is_addendum"]:
+            raise HTTPException(status_code=400, detail="An addendum's parent must be a main report, not another addendum")
+
+    rows = create_idr_report(idr_id, body.report_type.value, body.is_addendum, body.parent_report_id)
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to add report")
+
+    if not rows:
+        existing_report_id = get_general_report_id(idr_id)
+
+        if existing_report_id is None:
+            raise HTTPException(status_code=500, detail="Failed to add report")
+
+        conflict = IdrReportConflict(
+            detail="IDR already has a General report",
+            existing_report_id=existing_report_id,
+        )
+        return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
+
+    touch_idr(idr_id)
+
+    return IdrReportResponse(
+        status="success",
+        message="Report added",
+        data=IdrReport.model_validate(rows[0]),
     )

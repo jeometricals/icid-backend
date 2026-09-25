@@ -72,3 +72,17 @@ def get_idr_id_for_day(
     """
     rows = run_query(sql, (project_id, reporter_uuid, report_date))
     return rows[0]["idr_id"] if rows else None
+
+
+def touch_idr(idr_id: UUID) -> None:
+    """
+    Set an IDR's updated_at to now.
+    Takes the IDR uuid.
+    Returns nothing.
+    """
+    sql = """
+        UPDATE icid.idrs
+        SET updated_at = now()
+        WHERE idr_id = %s;
+    """
+    run_query(sql, (idr_id,))

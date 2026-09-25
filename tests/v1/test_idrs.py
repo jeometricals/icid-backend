@@ -3,6 +3,8 @@ from datetime import date, datetime, timezone
 from unittest.mock import patch
 from uuid import UUID
 
+from api.schemas.idr_report import ADDENDUM_TYPES, ReportType
+
 # ---------------------------------------------------------------------------
 # Mock data — dict rows, as run_query returns them under dict_row.
 # Keys match the column names in api/queries/idrs.py and projects.py.
@@ -323,3 +325,183 @@ class TestGetIdr:
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
             response = client.get(self.url)
         assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/idrs/{idr_id}/reports
+# ---------------------------------------------------------------------------
+
+NEW_REPORT_ID = "e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091"
+
+MOCK_NEW_SWR_ROW = {
+    **MOCK_GEN_REPORT_ROW,
+    "report_id": UUID(NEW_REPORT_ID),
+    "report_type": "SWR",
+    "report_data": {},
+}
+
+MOCK_NEW_SKETCH_ROW = {
+    **MOCK_NEW_SWR_ROW,
+    "report_type": "SKETCH",
+    "is_addendum": True,
+    "parent_report_id": UUID(GEN_REPORT_ID),
+}
+
+# api.queries.idrs is read for the IDR, then written by touch_idr (no result set).
+DRAFT_IDR_THEN_TOUCH = ([MOCK_IDR_ROW], None)
+
+# A second General: the insert returns no row, then the lookup finds the existing one.
+GEN_COLLISION = ([], [{"report_id": UUID(GEN_REPORT_ID)}])
+
+
+class TestAddReport:
+    url = f"/v1/idrs/{IDR_ID}/reports"
+
+    def test_returns_201_with_new_report(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]):
+            response = client.post(self.url, json={"report_type": "SWR"})
+        assert response.status_code == 201
+        data = response.json()
+        assert data["status"] == "success"
+        report = data["data"]
+        assert report["report_id"] == NEW_REPORT_ID
+        assert report["idr_id"] == IDR_ID
+        assert report["report_type"] == "SWR"
+        assert report["report_data"] == {}
+        assert report["page_number"] is None
+
+    def test_insert_defaults_to_main_report_without_parent(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
+            client.post(self.url, json={"report_type": "SWR"})
+        assert mocks["idr_reports"].call_count == 1
+        sql, params = mocks["idr_reports"].call_args.args
+        assert "INSERT INTO icid.idr_reports" in sql
+        assert params == (UUID(IDR_ID), "SWR", False, None)
+
+    def test_insert_guards_second_general_with_on_conflict(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
+            client.post(self.url, json={"report_type": "SWR"})
+        sql = mocks["idr_reports"].call_args.args[0]
+        assert "ON CONFLICT (idr_id) WHERE report_type = 'GEN' AND is_addendum = false DO NOTHING" in sql
+
+    def test_addendum_types_default_to_not_addendum(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
+            client.post(self.url, json={"report_type": "SKETCH"})
+        assert mocks["idr_reports"].call_args.args[1][2] is False
+
+    def test_touches_idr_updated_at(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
+            client.post(self.url, json={"report_type": "SWR"})
+        assert mocks["idrs"].call_count == 2
+        sql, params = mocks["idrs"].call_args.args
+        assert "UPDATE icid.idrs" in sql
+        assert "updated_at = now()" in sql
+        assert params == (UUID(IDR_ID),)
+
+    def test_standalone_addendum_without_parent_is_allowed(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
+            response = client.post(self.url, json={"report_type": "FIELD_MEMO", "is_addendum": True})
+        assert response.status_code == 201
+        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "FIELD_MEMO", True, None)
+
+    def test_addendum_with_parent_in_same_idr(self, client):
+        body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": GEN_REPORT_ID}
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([MOCK_GEN_REPORT_ROW], [MOCK_NEW_SKETCH_ROW])) as mocks:
+            response = client.post(self.url, json=body)
+        assert response.status_code == 201
+        assert response.json()["data"]["parent_report_id"] == GEN_REPORT_ID
+        parent_sql, parent_params = mocks["idr_reports"].call_args_list[0].args
+        assert "WHERE idr_id = %s AND report_id = %s" in parent_sql
+        assert parent_params == (UUID(IDR_ID), UUID(GEN_REPORT_ID))
+        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "SKETCH", True, UUID(GEN_REPORT_ID))
+
+    def test_second_general_returns_409_with_existing_id(self, client):
+        with patched(idrs=([MOCK_IDR_ROW],), idr_reports=GEN_COLLISION) as mocks:
+            response = client.post(self.url, json={"report_type": "GEN"})
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "IDR already has a General report",
+            "existing_report_id": GEN_REPORT_ID,
+        }
+        lookup_sql, lookup_params = mocks["idr_reports"].call_args.args
+        assert "report_type = 'GEN' AND is_addendum = false" in lookup_sql
+        assert lookup_params == (UUID(IDR_ID),)
+        assert mocks["idrs"].call_count == 1  # no touch on conflict
+
+    def test_missing_idr_returns_404(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.post(self.url, json={"report_type": "SWR"})
+        assert response.status_code == 404
+        assert response.json()["detail"] == "IDR not found"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_submitted_idr_returns_409(self, client):
+        with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
+            response = client.post(self.url, json={"report_type": "SWR"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Only draft IDRs can be edited"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_parent_on_main_report_returns_400(self, client):
+        body = {"report_type": "SWR", "parent_report_id": GEN_REPORT_ID}
+        with patched(idrs=[MOCK_IDR_ROW]) as mocks:
+            response = client.post(self.url, json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Only addendums can have a parent report"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_parent_not_in_this_idr_returns_400(self, client):
+        body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": GEN_REPORT_ID}
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
+            response = client.post(self.url, json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Parent report not found in this IDR"
+        assert mocks["idr_reports"].call_count == 1  # lookup only, no insert
+
+    def test_addendum_parent_returns_400(self, client):
+        body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": ADDENDUM_REPORT_ID}
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_ADDENDUM_ROW]) as mocks:
+            response = client.post(self.url, json=body)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "An addendum's parent must be a main report, not another addendum"
+        assert mocks["idr_reports"].call_count == 1
+
+    def test_unknown_report_type_returns_422(self, client):
+        with patched() as mocks:
+            response = client.post(self.url, json={"report_type": "WM"})
+        assert response.status_code == 422
+        assert "GEN" in str(response.json()["detail"])
+        mocks["idrs"].assert_not_called()
+
+    def test_missing_report_type_returns_422(self, client):
+        response = client.post(self.url, json={"is_addendum": True})
+        assert response.status_code == 422
+
+    def test_non_uuid_idr_id_returns_422(self, client):
+        response = client.post("/v1/idrs/IDR1/reports", json={"report_type": "SWR"})
+        assert response.status_code == 422
+
+    def test_non_uuid_parent_returns_422(self, client):
+        body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": "R1"}
+        response = client.post(self.url, json=body)
+        assert response.status_code == 422
+
+    def test_insert_failure_returns_500(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
+            response = client.post(self.url, json={"report_type": "SWR"})
+        assert response.status_code == 500
+
+    def test_collision_without_existing_general_returns_500(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([], [])):
+            response = client.post(self.url, json={"report_type": "GEN"})
+        assert response.status_code == 500
+
+
+class TestReportTypeEnum:
+    def test_has_21_types(self):
+        assert len(ReportType) == 21
+
+    def test_addendum_types_are_report_types_and_exclude_dsp(self):
+        assert ADDENDUM_TYPES <= set(ReportType)
+        assert ReportType.DSP not in ADDENDUM_TYPES
+        assert len(ADDENDUM_TYPES) == 6
