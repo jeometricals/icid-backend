@@ -807,3 +807,79 @@ class TestSaveHeader:
         with patched(idrs=([MOCK_IDR_ROW], None)):
             response = client.put(self.url, json={"weather_am": "Rain"})
         assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# DELETE /v1/idrs/{idr_id}/reports/{report_id}
+# ---------------------------------------------------------------------------
+
+class TestDeleteReport:
+    url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
+
+    def test_returns_204_with_empty_body(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(NEW_REPORT_ID)}]):
+            response = client.delete(self.url)
+        assert response.status_code == 204
+        assert response.content == b""
+
+    def test_single_statement_deletes_scoped_to_draft_and_stamps_idr(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(NEW_REPORT_ID)}]) as mocks:
+            client.delete(self.url)
+        assert mocks["idrs"].call_count == 1  # IDR lookup only; the touch is inside the CTE
+        assert mocks["idr_reports"].call_count == 1
+        sql, params = mocks["idr_reports"].call_args.args
+        assert "DELETE FROM icid.idr_reports" in sql
+        assert "r.idr_id = %s AND r.report_id = %s" in sql
+        assert "i.status = 'draft'" in sql
+        assert "UPDATE icid.idrs" in sql
+        assert "updated_at = now()" in sql
+        assert params == (UUID(IDR_ID), UUID(NEW_REPORT_ID))
+
+    def test_general_can_be_deleted(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(GEN_REPORT_ID)}]):
+            response = client.delete(url)
+        assert response.status_code == 204
+
+    def test_addendum_can_be_deleted(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{ADDENDUM_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(ADDENDUM_REPORT_ID)}]) as mocks:
+            response = client.delete(url)
+        assert response.status_code == 204
+        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), UUID(ADDENDUM_REPORT_ID))
+
+    def test_addendums_left_to_cascade_not_deleted_by_code(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(GEN_REPORT_ID)}]) as mocks:
+            client.delete(url)
+        assert mocks["idr_reports"].call_count == 1
+        assert "parent_report_id" not in mocks["idr_reports"].call_args.args[0]
+
+    def test_missing_idr_returns_404(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.delete(self.url)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "IDR not found"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_submitted_idr_returns_409(self, client):
+        with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
+            response = client.delete(self.url)
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Only draft IDRs can be edited"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_report_not_in_idr_returns_404(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
+            response = client.delete(self.url)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Report not found in this IDR"
+
+    def test_non_uuid_ids_return_422(self, client):
+        assert client.delete(f"/v1/idrs/IDR1/reports/{NEW_REPORT_ID}").status_code == 422
+        assert client.delete(f"/v1/idrs/{IDR_ID}/reports/R1").status_code == 422
+
+    def test_delete_failure_returns_500(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
+            response = client.delete(self.url)
+        assert response.status_code == 500

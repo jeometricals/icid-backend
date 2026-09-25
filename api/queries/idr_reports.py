@@ -106,3 +106,28 @@ def save_report_data(
         FROM saved;
     """
     return run_query(sql, (Jsonb(report_data), idr_id, report_id))
+
+
+def delete_idr_report(idr_id: UUID, report_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Delete a report (its addendums go with it via ON DELETE CASCADE) and stamp its IDR's updated_at, in one statement.
+    Takes the IDR uuid and the report uuid; only a report in that IDR, while the IDR is a draft, is deleted.
+    Returns a one-row list with the deleted report_id, an empty list if no such report in a draft IDR, or None on failure.
+    """
+    sql = """
+        WITH deleted AS (
+            DELETE FROM icid.idr_reports r
+            USING icid.idrs i
+            WHERE r.idr_id = %s AND r.report_id = %s
+                AND i.idr_id = r.idr_id AND i.status = 'draft'
+            RETURNING r.report_id, r.idr_id
+        ),
+        touched AS (
+            UPDATE icid.idrs
+            SET updated_at = now()
+            WHERE idr_id IN (SELECT idr_id FROM deleted)
+        )
+        SELECT report_id
+        FROM deleted;
+    """
+    return run_query(sql, (idr_id, report_id))

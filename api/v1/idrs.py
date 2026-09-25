@@ -2,10 +2,11 @@ from typing import Annotated, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Body, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from api.queries.idr_reports import (
     create_idr_report,
+    delete_idr_report,
     get_general_report_id,
     get_idr_report,
     list_reports_for_idr,
@@ -231,3 +232,29 @@ def save_header(idr_id: UUID, body: IdrHeaderUpdate) -> IdrResponse:
         message="IDR header saved",
         data=Idr.model_validate(rows[0]),
     )
+
+
+@router.delete("/{idr_id}/reports/{report_id}", status_code=204, response_class=Response)
+def delete_report(idr_id: UUID, report_id: UUID) -> Response:
+    """
+    Remove a report from a draft IDR, together with any addendums attached to it, and bump the IDR's updated_at.
+    Takes the IDR and report uuids as path parameters.
+    Returns an empty 204; raises 404 (no IDR), 409 (IDR not draft) and 404 (report not in this IDR).
+    """
+    idr = get_idr_by_id(idr_id)
+
+    if idr is None:
+        raise HTTPException(status_code=404, detail="IDR not found")
+
+    if idr["status"] != "draft":
+        raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
+
+    rows = delete_idr_report(idr_id, report_id)
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to delete report")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Report not found in this IDR")
+
+    return Response(status_code=204)
