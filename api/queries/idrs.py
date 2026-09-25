@@ -86,3 +86,37 @@ def touch_idr(idr_id: UUID) -> None:
         WHERE idr_id = %s;
     """
     run_query(sql, (idr_id,))
+
+
+HEADER_COLUMNS = (
+    "work_start_time",
+    "work_end_time",
+    "inspector_start_time",
+    "inspector_end_time",
+    "temp_low",
+    "temp_high",
+    "weather_am",
+    "weather_pm",
+)
+
+
+def update_idr_header(idr_id: UUID, fields: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    """
+    Set the given header columns on a draft IDR and stamp updated_at; columns not in fields are untouched.
+    Takes the IDR uuid and a dict of header column -> value (None clears); keys must be in HEADER_COLUMNS.
+    Returns a one-row list with the updated IDR, an empty list if the IDR is not a draft, or None on failure.
+    """
+    unknown = set(fields) - set(HEADER_COLUMNS)
+    if unknown:
+        raise ValueError(f"Not header columns: {sorted(unknown)}")
+
+    columns = [column for column in HEADER_COLUMNS if column in fields]
+    assignments = [f"{column} = %s" for column in columns] + ["updated_at = now()"]
+
+    sql = f"""
+        UPDATE icid.idrs
+        SET {", ".join(assignments)}
+        WHERE idr_id = %s AND status = 'draft'
+        RETURNING {IDR_COLUMNS};
+    """
+    return run_query(sql, (*[fields[column] for column in columns], idr_id))

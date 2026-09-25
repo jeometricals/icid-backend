@@ -1,5 +1,6 @@
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
@@ -620,4 +621,189 @@ class TestSaveReportData:
     def test_update_failure_returns_500(self, client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
             response = client.put(self.url, json=SAVE_BODY)
+        assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# PUT /v1/idrs/{idr_id}/header
+# ---------------------------------------------------------------------------
+
+FULL_HEADER = {
+    "work_start_time": "07:00",
+    "work_end_time": "15:30",
+    "inspector_start_time": "06:45",
+    "inspector_end_time": "16:00",
+    "temp_low": 58,
+    "temp_high": 74.5,
+    "weather_am": "Clear",
+    "weather_pm": "Cloudy",
+}
+
+MOCK_HEADER_ROW = {
+    **MOCK_IDR_ROW,
+    "work_start_time": time(7, 0),
+    "work_end_time": time(15, 30),
+    "inspector_start_time": time(6, 45),
+    "inspector_end_time": time(16, 0),
+    "temp_low": Decimal("58.0"),
+    "temp_high": Decimal("74.5"),
+    "weather_am": "Clear",
+    "weather_pm": "Cloudy",
+}
+
+
+def header_calls(row=MOCK_HEADER_ROW, stored=MOCK_IDR_ROW):
+    """
+    Side effects for api.queries.idrs.run_query on a header save: the IDR read, then the UPDATE.
+    Takes the row the UPDATE returns and the row the read returns.
+    Returns the side_effect tuple.
+    """
+    return ([stored], [row])
+
+
+class TestSaveHeader:
+    url = f"/v1/idrs/{IDR_ID}/header"
+
+    def test_returns_200_with_full_idr(self, client):
+        with patched(idrs=header_calls()):
+            response = client.put(self.url, json=FULL_HEADER)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        idr = data["data"]
+        assert idr["idr_id"] == IDR_ID
+        assert idr["work_start_time"] == "07:00:00"
+        assert idr["temp_low"] == 58.0
+        assert idr["temp_high"] == 74.5
+        assert idr["weather_pm"] == "Cloudy"
+        assert "reports" not in idr
+
+    def test_all_fields_reach_the_update(self, client):
+        with patched(idrs=header_calls()) as mocks:
+            client.put(self.url, json=FULL_HEADER)
+        sql, params = mocks["idrs"].call_args.args
+        for column in FULL_HEADER:
+            assert f"{column} = %s" in sql
+        assert params == (time(7, 0), time(15, 30), time(6, 45), time(16, 0), 58.0, 74.5, "Clear", "Cloudy", UUID(IDR_ID))
+
+    def test_omitted_fields_are_not_touched(self, client):
+        with patched(idrs=header_calls()) as mocks:
+            client.put(self.url, json={"weather_am": "Rain"})
+        sql, params = mocks["idrs"].call_args.args
+        assert "weather_am = %s" in sql
+        for column in FULL_HEADER:
+            if column != "weather_am":
+                assert column not in sql.split("WHERE")[0].split("SET")[1]
+        assert params == ("Rain", UUID(IDR_ID))
+
+    def test_explicit_null_clears_the_field(self, client):
+        with patched(idrs=header_calls()) as mocks:
+            response = client.put(self.url, json={"weather_am": None})
+        assert response.status_code == 200
+        sql, params = mocks["idrs"].call_args.args
+        assert "weather_am = %s" in sql
+        assert params == (None, UUID(IDR_ID))
+
+    def test_update_is_atomic_draft_guard_and_stamps_updated_at(self, client):
+        with patched(idrs=header_calls()) as mocks:
+            client.put(self.url, json={"weather_am": "Rain"})
+        assert mocks["idrs"].call_count == 2
+        sql = mocks["idrs"].call_args.args[0]
+        assert "UPDATE icid.idrs" in sql
+        assert "updated_at = now()" in sql
+        assert "WHERE idr_id = %s AND status = 'draft'" in sql
+
+    def test_empty_body_only_stamps_updated_at(self, client):
+        with patched(idrs=header_calls(row=MOCK_IDR_ROW)) as mocks:
+            response = client.put(self.url, json={})
+        assert response.status_code == 200
+        sql, params = mocks["idrs"].call_args.args
+        assert "SET updated_at = now()" in sql
+        assert params == (UUID(IDR_ID),)
+
+    def test_seconds_in_time_are_accepted(self, client):
+        with patched(idrs=header_calls()) as mocks:
+            response = client.put(self.url, json={"work_start_time": "07:00:30"})
+        assert response.status_code == 200
+        assert mocks["idrs"].call_args.args[1][0] == time(7, 0, 30)
+
+    def test_overnight_work_times_are_allowed(self, client):
+        with patched(idrs=header_calls()):
+            response = client.put(self.url, json={"work_start_time": "22:00", "work_end_time": "06:00"})
+        assert response.status_code == 200
+
+    def test_temp_low_above_temp_high_returns_400(self, client):
+        with patched(idrs=([MOCK_IDR_ROW],)) as mocks:
+            response = client.put(self.url, json={"temp_low": 80, "temp_high": 60})
+        assert response.status_code == 400
+        assert response.json()["detail"] == "temp_low cannot be greater than temp_high"
+        assert mocks["idrs"].call_count == 1  # no update
+
+    def test_temp_order_checked_against_stored_value(self, client):
+        stored = {**MOCK_IDR_ROW, "temp_low": Decimal("70.0")}
+        with patched(idrs=([stored],)):
+            response = client.put(self.url, json={"temp_high": 65})
+        assert response.status_code == 400
+
+    def test_temp_order_skipped_when_other_side_cleared(self, client):
+        stored = {**MOCK_IDR_ROW, "temp_low": Decimal("70.0")}
+        with patched(idrs=header_calls(stored=stored)):
+            response = client.put(self.url, json={"temp_low": None, "temp_high": 65})
+        assert response.status_code == 200
+
+    def test_missing_idr_returns_404(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.put(self.url, json={"weather_am": "Rain"})
+        assert response.status_code == 404
+        assert mocks["idrs"].call_count == 1
+
+    def test_submitted_idr_returns_409(self, client):
+        with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
+            response = client.put(self.url, json={"weather_am": "Rain"})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Only draft IDRs can be edited"
+        assert mocks["idrs"].call_count == 1
+
+    def test_submitted_between_check_and_update_returns_409(self, client):
+        with patched(idrs=([MOCK_IDR_ROW], [])):
+            response = client.put(self.url, json={"weather_am": "Rain"})
+        assert response.status_code == 409
+
+    def test_disallowed_field_returns_422_naming_it(self, client):
+        with patched() as mocks:
+            response = client.put(self.url, json={"weather_am": "Rain", "status": "submitted"})
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["msg"] == "Field 'status' cannot be edited via this endpoint."
+        mocks["idrs"].assert_not_called()
+
+    def test_several_disallowed_fields_are_all_named(self, client):
+        response = client.put(self.url, json={"weatherAM": "Clear", "report_date": "2026-09-01"})
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["msg"] == (
+            "Fields 'report_date', 'weatherAM' cannot be edited via this endpoint."
+        )
+
+    def test_malformed_time_returns_422(self, client):
+        response = client.put(self.url, json={"work_start_time": "7am"})
+        assert response.status_code == 422
+
+    def test_extreme_temps_are_accepted(self, client):
+        with patched(idrs=header_calls()) as mocks:
+            response = client.put(self.url, json={"temp_low": -60, "temp_high": 130})
+        assert response.status_code == 200
+        assert mocks["idrs"].call_args.args[1] == (-60.0, 130.0, UUID(IDR_ID))
+
+    def test_fractional_seconds_in_time_are_accepted(self, client):
+        with patched(idrs=header_calls()) as mocks:
+            response = client.put(self.url, json={"work_start_time": "07:00:30.123456"})
+        assert response.status_code == 200
+        assert mocks["idrs"].call_args.args[1][0] == time(7, 0, 30, 123456)
+
+    def test_non_uuid_idr_id_returns_422(self, client):
+        response = client.put("/v1/idrs/IDR1/header", json={"weather_am": "Rain"})
+        assert response.status_code == 422
+
+    def test_update_failure_returns_500(self, client):
+        with patched(idrs=([MOCK_IDR_ROW], None)):
+            response = client.put(self.url, json={"weather_am": "Rain"})
         assert response.status_code == 500

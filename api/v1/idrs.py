@@ -11,12 +11,19 @@ from api.queries.idr_reports import (
     list_reports_for_idr,
     save_report_data,
 )
-from api.queries.idrs import create_idr, get_idr_by_id, get_idr_id_for_day, touch_idr
+from api.queries.idrs import (
+    create_idr,
+    get_idr_by_id,
+    get_idr_id_for_day,
+    touch_idr,
+    update_idr_header,
+)
 from api.queries.projects import get_project_by_id, is_user_on_project
 from api.schemas.idr import (
     Idr,
     IdrConflict,
     IdrCreate,
+    IdrHeaderUpdate,
     IdrResponse,
     IdrWithReports,
     IdrWithReportsResponse,
@@ -185,4 +192,42 @@ def save_report(
         status="success",
         message="Report saved",
         data=IdrReport.model_validate(rows[0]),
+    )
+
+
+@router.put("/{idr_id}/header", response_model=IdrResponse)
+def save_header(idr_id: UUID, body: IdrHeaderUpdate) -> IdrResponse:
+    """
+    Update any subset of a draft IDR's header fields (null clears one) and bump its updated_at.
+    Takes the IDR uuid as a path parameter and an IdrHeaderUpdate body.
+    Returns an IdrResponse; raises 404 (no IDR), 409 (not draft) and 400 (temp_low above temp_high after the update).
+    """
+    idr = get_idr_by_id(idr_id)
+
+    if idr is None:
+        raise HTTPException(status_code=404, detail="IDR not found")
+
+    if idr["status"] != "draft":
+        raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
+
+    fields = body.model_dump(exclude_unset=True)
+
+    temp_low = fields.get("temp_low", idr["temp_low"])
+    temp_high = fields.get("temp_high", idr["temp_high"])
+
+    if temp_low is not None and temp_high is not None and temp_low > temp_high:
+        raise HTTPException(status_code=400, detail="temp_low cannot be greater than temp_high")
+
+    rows = update_idr_header(idr_id, fields)
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to save IDR header")
+
+    if not rows:
+        raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
+
+    return IdrResponse(
+        status="success",
+        message="IDR header saved",
+        data=Idr.model_validate(rows[0]),
     )
