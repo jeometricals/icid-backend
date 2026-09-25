@@ -1006,3 +1006,137 @@ class TestListIdrs:
         with patched(idrs=None):
             response = client.get(self.url, params={"project_id": "HWS0023"})
         assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/idrs/{idr_id}/submit
+# ---------------------------------------------------------------------------
+
+MOCK_JUST_SUBMITTED_ROW = {**MOCK_IDR_ROW, "status": "submitted", "submitted_at": NOW, "total_pages": 2}
+
+NUMBERED_REPORTS = [
+    {**MOCK_GEN_REPORT_ROW, "page_number": 1},
+    {**MOCK_ADDENDUM_ROW, "page_number": 2},
+]
+
+# api.queries.idrs: the IDR read, then the submit statement.
+DRAFT_THEN_SUBMITTED_IDR = ([MOCK_IDR_ROW], [MOCK_JUST_SUBMITTED_ROW])
+
+# api.queries.idr_reports: the pre-submit report list, then the numbered list.
+REPORTS_THEN_NUMBERED = (
+    [MOCK_GEN_REPORT_ROW, MOCK_ADDENDUM_ROW],
+    NUMBERED_REPORTS,
+)
+
+
+class TestSubmitIdr:
+    url = f"/v1/idrs/{IDR_ID}/submit"
+
+    def submit_sql(self, client):
+        """
+        Submit through the endpoint with a happy-path setup and capture the submit statement.
+        Takes the test client.
+        Returns the (sql, params) the submit statement was run with.
+        """
+        with patched(idrs=DRAFT_THEN_SUBMITTED_IDR, idr_reports=REPORTS_THEN_NUMBERED) as mocks:
+            client.post(self.url)
+        return mocks["idrs"].call_args.args
+
+    def test_returns_200_with_submitted_idr_and_numbered_reports(self, client):
+        with patched(idrs=DRAFT_THEN_SUBMITTED_IDR, idr_reports=REPORTS_THEN_NUMBERED):
+            response = client.post(self.url)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        idr = data["data"]
+        assert idr["idr_id"] == IDR_ID
+        assert idr["status"] == "submitted"
+        assert idr["submitted_at"] == "2026-09-25T15:30:00Z"
+        assert idr["total_pages"] == 2
+        assert [r["page_number"] for r in idr["reports"]] == [1, 2]
+        assert idr["reports"][1]["parent_report_id"] == GEN_REPORT_ID
+
+    def test_submit_statement_takes_idr_id_only(self, client):
+        _, params = self.submit_sql(client)
+        assert params == (UUID(IDR_ID),)
+
+    def test_locks_draft_row_before_numbering(self, client):
+        sql, _ = self.submit_sql(client)
+        assert "WHERE idr_id = %s AND status = 'draft'" in sql
+        assert "FOR UPDATE" in sql
+
+    def test_sets_status_timestamps_and_total_pages(self, client):
+        sql, _ = self.submit_sql(client)
+        assert "status = 'submitted'" in sql
+        assert "submitted_at = now()" in sql
+        assert "total_pages = (SELECT COUNT(*) FROM ordered)" in sql
+        assert sql.count("updated_at = now()") == 2  # the IDR and every numbered report
+
+    def test_numbers_every_report_in_page_order(self, client):
+        sql, _ = self.submit_sql(client)
+        assert "ROW_NUMBER() OVER" in sql
+        assert "SET page_number = o.page_number" in sql
+        order = sql.split("ORDER BY")[1].split(") AS page_number")[0]
+        keys = [line.strip().rstrip(",") for line in order.strip().splitlines()]
+        assert keys == [
+            "(r.is_addendum AND r.parent_report_id IS NULL)",
+            "(COALESCE(p.report_type, r.report_type) = 'GEN') DESC",
+            "COALESCE(p.created_at, r.created_at)",
+            "COALESCE(p.report_id, r.report_id)",
+            "r.is_addendum",
+            "r.created_at",
+            "r.report_id",
+        ]
+
+    def test_statement_refuses_empty_idr(self, client):
+        sql, _ = self.submit_sql(client)
+        assert "EXISTS (SELECT 1 FROM ordered)" in sql
+
+    def test_addendum_only_idr_can_be_submitted(self, client):
+        standalone = {**MOCK_ADDENDUM_ROW, "parent_report_id": None}
+        with patched(idrs=DRAFT_THEN_SUBMITTED_IDR, idr_reports=([standalone], [{**standalone, "page_number": 1}])):
+            response = client.post(self.url)
+        assert response.status_code == 200
+
+    def test_missing_idr_returns_404(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "IDR not found"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_already_submitted_returns_409(self, client):
+        with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Only draft IDRs can be submitted"
+        assert mocks["idrs"].call_count == 1  # no submit statement
+        mocks["idr_reports"].assert_not_called()
+
+    def test_empty_idr_returns_400(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "IDR must contain at least one report before submission."
+        assert mocks["idrs"].call_count == 1  # no submit statement
+
+    def test_concurrent_change_returns_409(self, client):
+        with patched(idrs=([MOCK_IDR_ROW], []), idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 409
+        assert mocks["idr_reports"].call_count == 1  # no numbered re-read
+
+    def test_non_uuid_idr_id_returns_422(self, client):
+        response = client.post("/v1/idrs/IDR1/submit")
+        assert response.status_code == 422
+
+    def test_submit_failure_returns_500(self, client):
+        with patched(idrs=([MOCK_IDR_ROW], None), idr_reports=[MOCK_GEN_REPORT_ROW]):
+            response = client.post(self.url)
+        assert response.status_code == 500
+
+    def test_report_list_failure_returns_500(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=None) as mocks:
+            response = client.post(self.url)
+        assert response.status_code == 500
+        assert mocks["idrs"].call_count == 1  # no submit statement

@@ -167,3 +167,51 @@ def list_idrs(
         ORDER BY i.updated_at DESC, i.created_at DESC, i.idr_id;
     """
     return run_query(sql, tuple(params))
+
+
+def submit_idr(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Submit a draft IDR in one statement: lock it, number its reports, set total_pages, status, submitted_at and updated_at.
+    Takes the IDR uuid. Pages run General's group first, then other main reports by creation, each followed by its addendums, then standalone addendums.
+    Returns a one-row list with the submitted IDR, an empty list if it is not a draft or has no reports, or None on failure.
+    """
+    sql = f"""
+        WITH target AS (
+            SELECT idr_id
+            FROM icid.idrs
+            WHERE idr_id = %s AND status = 'draft'
+            FOR UPDATE
+        ),
+        ordered AS (
+            SELECT
+                r.report_id,
+                ROW_NUMBER() OVER (
+                    ORDER BY
+                        (r.is_addendum AND r.parent_report_id IS NULL),
+                        (COALESCE(p.report_type, r.report_type) = 'GEN') DESC,
+                        COALESCE(p.created_at, r.created_at),
+                        COALESCE(p.report_id, r.report_id),
+                        r.is_addendum,
+                        r.created_at,
+                        r.report_id
+                ) AS page_number
+            FROM icid.idr_reports r
+            JOIN target t ON t.idr_id = r.idr_id
+            LEFT JOIN icid.idr_reports p ON p.report_id = r.parent_report_id
+        ),
+        numbered AS (
+            UPDATE icid.idr_reports r
+            SET page_number = o.page_number, updated_at = now()
+            FROM ordered o
+            WHERE r.report_id = o.report_id
+        )
+        UPDATE icid.idrs
+        SET status = 'submitted',
+            submitted_at = now(),
+            updated_at = now(),
+            total_pages = (SELECT COUNT(*) FROM ordered)
+        WHERE idr_id IN (SELECT idr_id FROM target)
+            AND EXISTS (SELECT 1 FROM ordered)
+        RETURNING {IDR_COLUMNS};
+    """
+    return run_query(sql, (idr_id,))

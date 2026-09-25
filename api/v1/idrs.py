@@ -17,6 +17,7 @@ from api.queries.idrs import (
     get_idr_by_id,
     get_idr_id_for_day,
     list_idrs,
+    submit_idr,
     touch_idr,
     update_idr_header,
 )
@@ -283,4 +284,47 @@ def list_project_idrs(
         status="success",
         message=f"{len(rows)} IDR(s)",
         data=[IdrListItem.model_validate(row) for row in rows],
+    )
+
+
+@router.post("/{idr_id}/submit", response_model=IdrWithReportsResponse)
+def submit_draft_idr(idr_id: UUID) -> IdrWithReportsResponse:
+    """
+    Submit a draft IDR: lock it, stamp submitted_at, number every report and set total_pages.
+    Takes the IDR uuid as a path parameter; no body.
+    Returns an IdrWithReportsResponse with the reports in page order; raises 404 (no IDR), 409 (not draft) and 400 (no reports).
+    """
+    idr = get_idr_by_id(idr_id)
+
+    if idr is None:
+        raise HTTPException(status_code=404, detail="IDR not found")
+
+    if idr["status"] != "draft":
+        raise HTTPException(status_code=409, detail="Only draft IDRs can be submitted")
+
+    reports = list_reports_for_idr(idr_id)
+
+    if reports is None:
+        raise HTTPException(status_code=500, detail="Failed to load IDR reports")
+
+    if not reports:
+        raise HTTPException(status_code=400, detail="IDR must contain at least one report before submission.")
+
+    rows = submit_idr(idr_id)
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to submit IDR")
+
+    if not rows:
+        raise HTTPException(status_code=409, detail="IDR changed during submission; reload and try again")
+
+    numbered = list_reports_for_idr(idr_id)
+
+    if numbered is None:
+        raise HTTPException(status_code=500, detail="Failed to load IDR reports")
+
+    return IdrWithReportsResponse(
+        status="success",
+        message="IDR submitted",
+        data=IdrWithReports.model_validate({**rows[0], "reports": numbered}),
     )
