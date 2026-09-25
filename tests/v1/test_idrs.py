@@ -883,3 +883,126 @@ class TestDeleteReport:
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
             response = client.delete(self.url)
         assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/idrs/?project_id=&status=&reporter_uuid=
+# ---------------------------------------------------------------------------
+
+MOCK_LIST_DRAFT_ROW = {**MOCK_IDR_ROW, "report_count": 3, "has_general": True}
+MOCK_LIST_EMPTY_DRAFT_ROW = {
+    **MOCK_IDR_ROW,
+    "idr_id": UUID(EXISTING_IDR_ID),
+    "report_count": 0,
+    "has_general": False,
+}
+MOCK_LIST_SUBMITTED_ROW = {**MOCK_SUBMITTED_IDR_ROW, "report_count": 2, "has_general": True}
+
+
+class TestListIdrs:
+    url = "/v1/idrs/"
+
+    def test_returns_200_with_summary_fields(self, client):
+        with patched(idrs=[MOCK_LIST_DRAFT_ROW, MOCK_LIST_EMPTY_DRAFT_ROW]):
+            response = client.get(self.url, params={"project_id": "HWS0023"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert len(data["data"]) == 2
+        first, second = data["data"]
+        assert first["idr_id"] == IDR_ID
+        assert first["report_date"] == "2026-09-25"
+        assert first["status"] == "draft"
+        assert first["report_count"] == 3
+        assert first["has_general"] is True
+        assert second["report_count"] == 0
+        assert second["has_general"] is False
+        assert "reports" not in first
+
+    def test_submitted_item_carries_submit_fields(self, client):
+        with patched(idrs=[MOCK_LIST_SUBMITTED_ROW]):
+            item = client.get(self.url, params={"status": "submitted"}).json()["data"][0]
+        assert item["status"] == "submitted"
+        assert item["submitted_at"] == "2026-09-25T15:30:00Z"
+        assert item["total_pages"] == 2
+
+    def test_no_matches_returns_empty_list(self, client):
+        with patched(idrs=[]):
+            response = client.get(self.url, params={"project_id": "NOPE999"})
+        assert response.status_code == 200
+        assert response.json()["data"] == []
+
+    def test_all_filters_reach_the_query(self, client):
+        params = {"project_id": "HWS0023", "status": "draft", "reporter_uuid": REPORTER_UUID}
+        with patched(idrs=[]) as mocks:
+            client.get(self.url, params=params)
+        sql, query_params = mocks["idrs"].call_args.args
+        assert "i.project_id = %s" in sql
+        assert "i.status = %s" in sql
+        assert "i.reporter_uuid = %s" in sql
+        assert query_params == ("HWS0023", "draft", UUID(REPORTER_UUID))
+
+    def test_each_filter_is_optional(self, client):
+        with patched(idrs=[]) as mocks:
+            client.get(self.url, params={"status": "submitted"})
+        sql, query_params = mocks["idrs"].call_args.args
+        assert "i.project_id = %s" not in sql
+        assert "i.reporter_uuid = %s" not in sql
+        assert query_params == ("submitted",)
+
+    def test_no_filters_lists_everything(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.get(self.url)
+        assert response.status_code == 200
+        sql, query_params = mocks["idrs"].call_args.args
+        assert "WHERE" not in sql.split("FROM icid.idrs i")[1]
+        assert query_params == ()
+
+    def test_drafts_without_reporter_are_allowed(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.get(self.url, params={"project_id": "HWS0023", "status": "draft"})
+        assert response.status_code == 200
+        assert mocks["idrs"].call_args.args[1] == ("HWS0023", "draft")
+
+    def test_single_sort_by_updated_at_with_tiebreakers(self, client):
+        for status in ("draft", "submitted"):
+            with patched(idrs=[]) as mocks:
+                client.get(self.url, params={"status": status})
+            sql = mocks["idrs"].call_args.args[0]
+            assert "ORDER BY i.updated_at DESC, i.created_at DESC, i.idr_id" in sql
+            assert "submitted_at DESC" not in sql
+
+    def test_report_count_counts_all_reports(self, client):
+        with patched(idrs=[]) as mocks:
+            client.get(self.url)
+        sql = mocks["idrs"].call_args.args[0]
+        count_subquery = sql.split("AS report_count")[0]
+        assert "COUNT(*)" in count_subquery
+        assert "is_addendum" not in count_subquery
+
+    def test_has_general_checks_non_addendum_gen(self, client):
+        with patched(idrs=[]) as mocks:
+            client.get(self.url)
+        sql = mocks["idrs"].call_args.args[0]
+        assert "EXISTS" in sql
+        assert "r.report_type = 'GEN' AND r.is_addendum = false" in sql
+
+    def test_one_query_only(self, client):
+        with patched(idrs=[], projects=[]) as mocks:
+            client.get(self.url, params={"project_id": "HWS0023"})
+        assert mocks["idrs"].call_count == 1
+        mocks["projects"].assert_not_called()  # unknown project is [] not 404
+        mocks["idr_reports"].assert_not_called()
+
+    def test_invalid_status_returns_422(self, client):
+        response = client.get(self.url, params={"status": "approved"})
+        assert response.status_code == 422
+
+    def test_non_uuid_reporter_returns_422(self, client):
+        response = client.get(self.url, params={"reporter_uuid": "28"})
+        assert response.status_code == 422
+
+    def test_query_failure_returns_500(self, client):
+        with patched(idrs=None):
+            response = client.get(self.url, params={"project_id": "HWS0023"})
+        assert response.status_code == 500

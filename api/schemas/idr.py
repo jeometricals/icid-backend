@@ -40,6 +40,17 @@ class IdrResponse(BaseModel):
     data: Idr
 
 
+class IdrListItem(Idr):
+    report_count: int
+    has_general: bool
+
+
+class IdrListResponse(BaseModel):
+    status: str
+    message: str
+    data: list[IdrListItem]
+
+
 class IdrHeaderUpdate(BaseModel):
     """
     Partial IDR header update: omitted fields are left alone, null clears a field.

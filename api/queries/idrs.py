@@ -120,3 +120,50 @@ def update_idr_header(idr_id: UUID, fields: dict[str, Any]) -> Optional[list[dic
         RETURNING {IDR_COLUMNS};
     """
     return run_query(sql, (*[fields[column] for column in columns], idr_id))
+
+
+def list_idrs(
+    project_id: Optional[str] = None,
+    status: Optional[str] = None,
+    reporter_uuid: Optional[UUID] = None,
+) -> Optional[list[dict[str, Any]]]:
+    """
+    List IDRs, most recently edited first, each with its report count and whether it holds a General.
+    Takes optional project id, status and reporter uuid filters; any left as None is not applied.
+    Returns a list of IDR dicts with report_count and has_general columns (empty if none match), or None on failure.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if project_id is not None:
+        conditions.append("i.project_id = %s")
+        params.append(project_id)
+
+    if status is not None:
+        conditions.append("i.status = %s")
+        params.append(status)
+
+    if reporter_uuid is not None:
+        conditions.append("i.reporter_uuid = %s")
+        params.append(reporter_uuid)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    sql = f"""
+        SELECT
+            {IDR_COLUMNS},
+            (
+                SELECT COUNT(*)
+                FROM icid.idr_reports r
+                WHERE r.idr_id = i.idr_id
+            ) AS report_count,
+            EXISTS (
+                SELECT 1
+                FROM icid.idr_reports r
+                WHERE r.idr_id = i.idr_id AND r.report_type = 'GEN' AND r.is_addendum = false
+            ) AS has_general
+        FROM icid.idrs i
+        {where}
+        ORDER BY i.updated_at DESC, i.created_at DESC, i.idr_id;
+    """
+    return run_query(sql, tuple(params))

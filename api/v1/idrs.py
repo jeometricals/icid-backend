@@ -1,4 +1,4 @@
-from typing import Annotated, Union
+from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Body, HTTPException
@@ -16,6 +16,7 @@ from api.queries.idrs import (
     create_idr,
     get_idr_by_id,
     get_idr_id_for_day,
+    list_idrs,
     touch_idr,
     update_idr_header,
 )
@@ -25,6 +26,8 @@ from api.schemas.idr import (
     IdrConflict,
     IdrCreate,
     IdrHeaderUpdate,
+    IdrListItem,
+    IdrListResponse,
     IdrResponse,
     IdrWithReports,
     IdrWithReportsResponse,
@@ -258,3 +261,26 @@ def delete_report(idr_id: UUID, report_id: UUID) -> Response:
         raise HTTPException(status_code=404, detail="Report not found in this IDR")
 
     return Response(status_code=204)
+
+
+@router.get("/", response_model=IdrListResponse)
+def list_project_idrs(
+    project_id: Optional[str] = None,
+    status: Optional[Literal["draft", "submitted"]] = None,
+    reporter_uuid: Optional[UUID] = None,
+) -> IdrListResponse:
+    """
+    List IDRs most recently edited first, each with report_count and has_general; every filter is optional.
+    Takes optional project_id, status and reporter_uuid query parameters.
+    Returns an IdrListResponse (empty data list when nothing matches), or raises 500 on a query failure.
+    """
+    rows = list_idrs(project_id, status, reporter_uuid)
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to list IDRs")
+
+    return IdrListResponse(
+        status="success",
+        message=f"{len(rows)} IDR(s)",
+        data=[IdrListItem.model_validate(row) for row in rows],
+    )
