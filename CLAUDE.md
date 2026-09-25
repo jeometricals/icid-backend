@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`users.py`, `projects.py`, `reports.py`, `debug.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`users.py`, `projects.py`, `idrs.py`, `debug.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -33,11 +33,14 @@ every request to it.
 - `GET /v1/users/`
 - `GET /v1/projects/?user_id=` (user uuid)
 - `GET /v1/projects/{project_id}`
-- `POST /v1/reports/` — create a draft report
-- `GET /v1/reports/?project_id=&reporter_uuid=&status=` — list a project's reports (reporter/status optional)
-- `GET /v1/reports/{report_id}` — report plus its saved General Form
-- `PUT /v1/reports/{report_id}/general` — save the General Form on a draft
-- `POST /v1/reports/{report_id}/submit` — submit a draft (locks it, stamps `submitted_at`)
+- `POST /v1/idrs/` — create a draft IDR (409 with `existing_idr_id` if one exists for that reporter, project and date)
+- `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count` and `has_general` (all filters optional)
+- `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order
+- `PUT /v1/idrs/{idr_id}/header` — partial update of the shared header fields on a draft
+- `POST /v1/idrs/{idr_id}/reports` — add a report (typed by `ReportType`; addendums may name a parent)
+- `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
+- `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
+- `POST /v1/idrs/{idr_id}/submit` — submit a draft (locks it, numbers pages, sets `total_pages`)
 - `GET /debug/schema` — dev-only
 
 ## 3. Modularity rules
@@ -100,10 +103,12 @@ Not rules — current state, documented so nobody mistakes these for the intende
 
 - `api/v1/debug.py` exposes the live `icid` schema and is **dev-only**. Delete before
   production. It has no test coverage.
-- Only `users`, `projects` and `reports` have endpoints. `api/schemas/` already defines models for
+- Only `users`, `projects` and `idrs` have endpoints. `api/schemas/` already defines models for
   clients, form templates, completed forms and the join tables — those schemas run
   ahead of the endpoints and may not match `schema.sql` exactly. Verify against `schema.sql`
   before building on them.
+- The legacy `icid.reports` and `icid.completed_forms` tables are still in the database but no
+  code reads them; they are dropped in Slice R5.
 - `api/v1/`, `api/db/`, `api/core/` and `api/schemas/` have no `__init__.py`; only
   `api/queries/` does. Imports work regardless, but don't take the inconsistency as intent.
 - CORS is `allow_origins=["*"]`. Tighten before production.
