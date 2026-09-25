@@ -47,7 +47,7 @@ MOCK_ASSIGNMENT_ROW = {"?column?": 1}  # is_user_on_project does SELECT 1
 
 
 @contextmanager
-def patched(idrs=None, projects=None):
+def patched(idrs=None, idr_reports=None, projects=None):
     """
     Patch run_query in each query module the IDR endpoints use.
     Takes the return value (or side_effect tuple) for each module's run_query.
@@ -57,8 +57,9 @@ def patched(idrs=None, projects=None):
         return {"side_effect": value} if isinstance(value, tuple) else {"return_value": value}
 
     with patch("api.queries.idrs.run_query", **kwargs(idrs)) as i, \
+         patch("api.queries.idr_reports.run_query", **kwargs(idr_reports)) as ir, \
          patch("api.queries.projects.run_query", **kwargs(projects)) as p:
-        yield {"idrs": i, "projects": p}
+        yield {"idrs": i, "idr_reports": ir, "projects": p}
 
 
 # ---------------------------------------------------------------------------
@@ -190,4 +191,135 @@ class TestCreateIdr:
     def test_collision_without_existing_row_returns_500(self, client):
         with patched(idrs=([], []), projects=ASSIGNED):
             response = client.post(self.url, json=CREATE_BODY)
+        assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/idrs/{idr_id}
+# ---------------------------------------------------------------------------
+
+GEN_REPORT_ID = "c4d5e6f7-a8b9-4c0d-9e1f-2a3b4c5d6e7f"  # idr_reports.report_id
+ADDENDUM_REPORT_ID = "d5e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80"
+
+# report_data exactly as stored in JSONB — nested, camelCase, shape owned by the frontend.
+GEN_REPORT_DATA = {
+    "description": "Excavated trench along the east curb line.",
+    "payItems": [{"itemNo": "6.01", "payQuantity": "40"}],
+    "workforce": {"foreman": "1", "operator": "2"},
+    "safetyChecks": {"fencing": False, "plates": None},
+}
+
+MOCK_GEN_REPORT_ROW = {
+    "report_id": UUID(GEN_REPORT_ID),
+    "idr_id": UUID(IDR_ID),
+    "report_type": "GEN",
+    "is_addendum": False,
+    "parent_report_id": None,
+    "page_number": None,
+    "report_data": GEN_REPORT_DATA,
+    "created_at": NOW,
+    "updated_at": NOW,
+}
+
+MOCK_ADDENDUM_ROW = {
+    **MOCK_GEN_REPORT_ROW,
+    "report_id": UUID(ADDENDUM_REPORT_ID),
+    "report_type": "SKETCH",
+    "is_addendum": True,
+    "parent_report_id": UUID(GEN_REPORT_ID),
+    "report_data": {"anyShape": ["the", "frontend", "wants"], "nested": {"x": 1}},
+}
+
+MOCK_SUBMITTED_IDR_ROW = {**MOCK_IDR_ROW, "status": "submitted", "submitted_at": NOW, "total_pages": 2}
+
+
+class TestGetIdr:
+    url = f"/v1/idrs/{IDR_ID}"
+
+    def test_returns_200_with_idr_fields(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]):
+            response = client.get(self.url)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        idr = data["data"]
+        assert idr["idr_id"] == IDR_ID
+        assert idr["project_id"] == "HWS0023"
+        assert idr["reporter_uuid"] == REPORTER_UUID
+        assert idr["report_date"] == "2026-09-25"
+        assert idr["status"] == "draft"
+
+    def test_reports_nested_with_report_data_as_stored(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]):
+            reports = client.get(self.url).json()["data"]["reports"]
+        assert len(reports) == 1
+        report = reports[0]
+        assert report["report_id"] == GEN_REPORT_ID
+        assert report["idr_id"] == IDR_ID
+        assert report["report_type"] == "GEN"
+        assert report["is_addendum"] is False
+        assert report["parent_report_id"] is None
+        assert report["report_data"] == GEN_REPORT_DATA
+
+    def test_page_number_present_when_null(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]):
+            report = client.get(self.url).json()["data"]["reports"][0]
+        assert "page_number" in report
+        assert report["page_number"] is None
+
+    def test_no_reports_returns_empty_list(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
+            idr = client.get(self.url).json()["data"]
+        assert idr["reports"] == []
+
+    def test_addendum_with_arbitrary_report_data(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW, MOCK_ADDENDUM_ROW]):
+            reports = client.get(self.url).json()["data"]["reports"]
+        addendum = reports[1]
+        assert addendum["is_addendum"] is True
+        assert addendum["parent_report_id"] == GEN_REPORT_ID
+        assert addendum["report_data"] == MOCK_ADDENDUM_ROW["report_data"]
+
+    def test_submitted_idr_includes_submit_fields_and_page_numbers(self, client):
+        pages = [
+            {**MOCK_GEN_REPORT_ROW, "page_number": 1},
+            {**MOCK_ADDENDUM_ROW, "page_number": 2},
+        ]
+        with patched(idrs=[MOCK_SUBMITTED_IDR_ROW], idr_reports=pages):
+            idr = client.get(self.url).json()["data"]
+        assert idr["status"] == "submitted"
+        assert idr["submitted_at"] == "2026-09-25T15:30:00Z"
+        assert idr["total_pages"] == 2
+        assert [r["page_number"] for r in idr["reports"]] == [1, 2]
+
+    def test_queries_read_both_tables_by_idr_id(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
+            client.get(self.url)
+        idr_sql, idr_params = mocks["idrs"].call_args.args
+        assert "FROM icid.idrs" in idr_sql
+        assert idr_params == (UUID(IDR_ID),)
+        reports_sql, reports_params = mocks["idr_reports"].call_args.args
+        assert "FROM icid.idr_reports" in reports_sql
+        assert reports_params == (UUID(IDR_ID),)
+
+    def test_reports_ordered_by_page_then_creation(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
+            client.get(self.url)
+        sql = mocks["idr_reports"].call_args.args[0]
+        assert "ORDER BY page_number NULLS LAST, created_at" in sql
+
+    def test_missing_idr_returns_404(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.get(self.url)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "IDR not found"
+        mocks["idr_reports"].assert_not_called()
+
+    def test_non_uuid_idr_id_returns_422(self, client):
+        response = client.get("/v1/idrs/IDR1")
+        assert response.status_code == 422
+
+    def test_reports_query_failure_returns_500(self, client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
+            response = client.get(self.url)
         assert response.status_code == 500

@@ -42,6 +42,21 @@ def create_idr(
     return run_query(sql, (project_id, reporter_uuid, report_date))
 
 
+def get_idr_by_id(idr_id: UUID) -> Optional[dict[str, Any]]:
+    """
+    Fetch a single IDR with its header fields.
+    Takes the IDR uuid.
+    Returns the IDR dict, or None if no IDR matches.
+    """
+    sql = f"""
+        SELECT {IDR_COLUMNS}
+        FROM icid.idrs
+        WHERE idr_id = %s;
+    """
+    rows = run_query(sql, (idr_id,))
+    return rows[0] if rows else None
+
+
 def get_idr_id_for_day(
     project_id: str, reporter_uuid: UUID, report_date: date
 ) -> Optional[UUID]:

@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from api.schemas.idr_report import IdrReport
+
 
 class IdrCreate(BaseModel):
     project_id: str
@@ -35,6 +37,16 @@ class IdrResponse(BaseModel):
     status: str
     message: str
     data: Idr
+
+
+class IdrWithReports(Idr):
+    reports: list[IdrReport]
+
+
+class IdrWithReportsResponse(BaseModel):
+    status: str
+    message: str
+    data: IdrWithReports
 
 
 class IdrConflict(BaseModel):

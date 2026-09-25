@@ -1,11 +1,20 @@
 from typing import Union
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from api.queries.idrs import create_idr, get_idr_id_for_day
+from api.queries.idr_reports import list_reports_for_idr
+from api.queries.idrs import create_idr, get_idr_by_id, get_idr_id_for_day
 from api.queries.projects import get_project_by_id, is_user_on_project
-from api.schemas.idr import Idr, IdrConflict, IdrCreate, IdrResponse
+from api.schemas.idr import (
+    Idr,
+    IdrConflict,
+    IdrCreate,
+    IdrResponse,
+    IdrWithReports,
+    IdrWithReportsResponse,
+)
 
 router = APIRouter(prefix="/v1/idrs", tags=["IDRs"])
 
@@ -49,4 +58,28 @@ def create_draft_idr(body: IdrCreate) -> Union[IdrResponse, JSONResponse]:
         status="success",
         message="Draft IDR created",
         data=Idr.model_validate(rows[0]),
+    )
+
+
+@router.get("/{idr_id}", response_model=IdrWithReportsResponse)
+def get_idr(idr_id: UUID) -> IdrWithReportsResponse:
+    """
+    Return an IDR with its header fields and every report inside it, report_data as stored.
+    Takes the IDR uuid as a path parameter.
+    Returns an IdrWithReportsResponse (reports is [] when none), or raises 404 if the IDR does not exist.
+    """
+    idr = get_idr_by_id(idr_id)
+
+    if idr is None:
+        raise HTTPException(status_code=404, detail="IDR not found")
+
+    reports = list_reports_for_idr(idr_id)
+
+    if reports is None:
+        raise HTTPException(status_code=500, detail="Failed to load IDR reports")
+
+    return IdrWithReportsResponse(
+        status="success",
+        message="IDR detail",
+        data=IdrWithReports.model_validate({**idr, "reports": reports}),
     )
