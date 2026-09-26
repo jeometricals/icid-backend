@@ -1288,6 +1288,14 @@ class TestBuildAutoGeneralData:
     def test_no_pay_items_yields_empty_list(self):
         assert build_auto_general_data([_child("SWR", {"description": "x"})])["payItems"] == []
 
+    def test_report_data_holds_only_aggregated_keys(self):
+        # Regeneration full-replaces report_data, so non-aggregated child keys must never leak in.
+        children = [
+            _child("SWR", {"description": "x", "payItems": [], "workforce": {"foreman": "2"}, "comments": "note"}),
+            _child("CONC", {"safetyChecks": {"fencing": True}, "equipment": {"backhoe": {"model": "X"}}}),
+        ]
+        assert set(build_auto_general_data(children).keys()) == {"description", "payItems"}
+
 
 @contextmanager
 def patched_service(idr=None, general=None, main_reports=None):
@@ -1372,6 +1380,13 @@ class TestRegenerateAutoGeneral:
             regenerate_auto_general(IDR_ID_UUID)
         m["get_general"].assert_not_called()
         m["create"].assert_not_called()
+
+    def test_regeneration_writes_exactly_the_aggregated_shape(self, client):
+        # Locks the full-replace invariant: the auto-General's report_data is only {description, payItems}.
+        with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=[_child("SWR"), _child("CONC")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        written = m["update"].call_args.args[1]
+        assert set(written.keys()) == {"description", "payItems"}
 
 
 MOCK_NEW_GEN_ROW = {**MOCK_GEN_REPORT_ROW, "report_id": UUID(NEW_REPORT_ID)}

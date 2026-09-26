@@ -114,7 +114,7 @@ def build_auto_general_data(children: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Build the auto-General's report_data from the contributing (non-addendum, non-General) children.
     Takes the contributing report rows in creation order.
-    Returns a dict with aggregated description and payItems; workforce, equipment, safetyChecks and comments are left for the inspector.
+    Returns a dict with exactly the aggregated fields (description and payItems); no other keys, since regeneration full-replaces report_data and an auto-General is read-only.
     """
     return {
         "description": _aggregate_description(children),
