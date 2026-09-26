@@ -28,6 +28,7 @@ class Idr(BaseModel):
     weather_am: Optional[str] = None
     weather_pm: Optional[str] = None
     total_pages: Optional[int] = None
+    has_dismissed_auto_general: bool = False
     status: str
     submitted_at: Optional[datetime] = None
     created_at: datetime

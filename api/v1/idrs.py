@@ -17,11 +17,13 @@ from api.queries.idrs import (
     get_idr_by_id,
     get_idr_id_for_day,
     list_idrs,
+    set_dismissed_auto_general,
     submit_idr,
     touch_idr,
     update_idr_header,
 )
 from api.queries.projects import get_project_by_id, is_user_on_project
+from api.services.auto_general import regenerate_auto_general
 from api.schemas.idr import (
     Idr,
     IdrConflict,
@@ -39,6 +41,7 @@ from api.schemas.idr_report import (
     IdrReportCreate,
     IdrReportResponse,
     ReportData,
+    ReportType,
 )
 
 router = APIRouter(prefix="/v1/idrs", tags=["IDRs"])
@@ -161,6 +164,9 @@ def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, 
 
     touch_idr(idr_id)
 
+    if body.report_type != ReportType.GEN:
+        regenerate_auto_general(idr_id)
+
     return IdrReportResponse(
         status="success",
         message="Report added",
@@ -192,6 +198,9 @@ def save_report(
 
     if not rows:
         raise HTTPException(status_code=404, detail="Report not found in this IDR")
+
+    if rows[0]["report_type"] != ReportType.GEN:
+        regenerate_auto_general(idr_id)
 
     return IdrReportResponse(
         status="success",
@@ -260,6 +269,16 @@ def delete_report(idr_id: UUID, report_id: UUID) -> Response:
 
     if not rows:
         raise HTTPException(status_code=404, detail="Report not found in this IDR")
+
+    deleted = rows[0]
+    is_general = deleted["report_type"] == ReportType.GEN and not deleted["is_addendum"]
+
+    if is_general:
+        # Deleting the auto-General is a dismissal; an inspector's own General does not cascade.
+        if deleted["is_auto_generated"]:
+            set_dismissed_auto_general(idr_id)
+    else:
+        regenerate_auto_general(idr_id)
 
     return Response(status_code=204)
 

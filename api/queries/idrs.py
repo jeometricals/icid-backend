@@ -18,6 +18,7 @@ IDR_COLUMNS = """
     weather_am,
     weather_pm,
     total_pages,
+    has_dismissed_auto_general,
     status,
     submitted_at,
     created_at,
@@ -83,6 +84,20 @@ def touch_idr(idr_id: UUID) -> None:
     sql = """
         UPDATE icid.idrs
         SET updated_at = now()
+        WHERE idr_id = %s;
+    """
+    run_query(sql, (idr_id,))
+
+
+def set_dismissed_auto_general(idr_id: UUID) -> None:
+    """
+    Mark an IDR as having its auto-generated General dismissed, blocking future auto-creation, and stamp updated_at.
+    Takes the IDR uuid.
+    Returns nothing.
+    """
+    sql = """
+        UPDATE icid.idrs
+        SET has_dismissed_auto_general = true, updated_at = now()
         WHERE idr_id = %s;
     """
     run_query(sql, (idr_id,))

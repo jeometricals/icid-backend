@@ -176,6 +176,7 @@ CREATE TABLE icid.idrs (
     weather_am             TEXT NULL,
     weather_pm             TEXT NULL,
     total_pages            INTEGER NULL,
+    has_dismissed_auto_general BOOLEAN NOT NULL DEFAULT false,
     status                 TEXT NOT NULL DEFAULT 'draft',
     submitted_at           TIMESTAMPTZ NULL,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -198,6 +199,7 @@ CREATE TABLE icid.idr_reports (
     parent_report_id      UUID NULL REFERENCES icid.idr_reports(report_id) ON DELETE CASCADE,
     page_number           INTEGER NULL,
     report_data           JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_auto_generated     BOOLEAN NOT NULL DEFAULT false,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_idr_reports_parent CHECK (

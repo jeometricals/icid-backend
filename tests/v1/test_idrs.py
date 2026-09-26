@@ -7,6 +7,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType
+from api.services.auto_general import build_auto_general_data, regenerate_auto_general
 
 # ---------------------------------------------------------------------------
 # Mock data — dict rows, as run_query returns them under dict_row.
@@ -33,6 +34,7 @@ MOCK_IDR_ROW = {
     "weather_am": None,
     "weather_pm": None,
     "total_pages": None,
+    "has_dismissed_auto_general": False,
     "status": "draft",
     "submitted_at": None,
     "created_at": NOW,
@@ -54,17 +56,19 @@ MOCK_ASSIGNMENT_ROW = {"?column?": 1}  # is_user_on_project does SELECT 1
 @contextmanager
 def patched(idrs=None, idr_reports=None, projects=None):
     """
-    Patch run_query in each query module the IDR endpoints use.
+    Patch run_query in each query module the IDR endpoints use, plus the auto-General hooks.
     Takes the return value (or side_effect tuple) for each module's run_query.
-    Yields a dict of the mocks keyed by module name.
+    Yields a dict of the mocks keyed by module name, with "regen" and "dismiss" for the hooks.
     """
     def kwargs(value):
         return {"side_effect": value} if isinstance(value, tuple) else {"return_value": value}
 
     with patch("api.queries.idrs.run_query", **kwargs(idrs)) as i, \
          patch("api.queries.idr_reports.run_query", **kwargs(idr_reports)) as ir, \
-         patch("api.queries.projects.run_query", **kwargs(projects)) as p:
-        yield {"idrs": i, "idr_reports": ir, "projects": p}
+         patch("api.queries.projects.run_query", **kwargs(projects)) as p, \
+         patch("api.v1.idrs.regenerate_auto_general") as regen, \
+         patch("api.v1.idrs.set_dismissed_auto_general") as dismiss:
+        yield {"idrs": i, "idr_reports": ir, "projects": p, "regen": regen, "dismiss": dismiss}
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +226,7 @@ MOCK_GEN_REPORT_ROW = {
     "parent_report_id": None,
     "page_number": None,
     "report_data": GEN_REPORT_DATA,
+    "is_auto_generated": False,
     "created_at": NOW,
     "updated_at": NOW,
 }
@@ -813,17 +818,39 @@ class TestSaveHeader:
 # DELETE /v1/idrs/{idr_id}/reports/{report_id}
 # ---------------------------------------------------------------------------
 
+# delete_idr_report now returns the deleted row's classification fields so the
+# endpoint can decide whether to regenerate / dismiss the auto-General.
+DELETED_SWR = [{
+    "report_id": UUID(NEW_REPORT_ID),
+    "report_type": "SWR",
+    "is_addendum": False,
+    "is_auto_generated": False,
+}]
+DELETED_INSPECTOR_GEN = [{
+    "report_id": UUID(GEN_REPORT_ID),
+    "report_type": "GEN",
+    "is_addendum": False,
+    "is_auto_generated": False,
+}]
+DELETED_ADDENDUM = [{
+    "report_id": UUID(ADDENDUM_REPORT_ID),
+    "report_type": "SKETCH",
+    "is_addendum": True,
+    "is_auto_generated": False,
+}]
+
+
 class TestDeleteReport:
     url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
 
     def test_returns_204_with_empty_body(self, client):
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(NEW_REPORT_ID)}]):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_SWR):
             response = client.delete(self.url)
         assert response.status_code == 204
         assert response.content == b""
 
     def test_single_statement_deletes_scoped_to_draft_and_stamps_idr(self, client):
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(NEW_REPORT_ID)}]) as mocks:
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_SWR) as mocks:
             client.delete(self.url)
         assert mocks["idrs"].call_count == 1  # IDR lookup only; the touch is inside the CTE
         assert mocks["idr_reports"].call_count == 1
@@ -837,20 +864,20 @@ class TestDeleteReport:
 
     def test_general_can_be_deleted(self, client):
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(GEN_REPORT_ID)}]):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_INSPECTOR_GEN):
             response = client.delete(url)
         assert response.status_code == 204
 
     def test_addendum_can_be_deleted(self, client):
         url = f"/v1/idrs/{IDR_ID}/reports/{ADDENDUM_REPORT_ID}"
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(ADDENDUM_REPORT_ID)}]) as mocks:
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_ADDENDUM) as mocks:
             response = client.delete(url)
         assert response.status_code == 204
         assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), UUID(ADDENDUM_REPORT_ID))
 
     def test_addendums_left_to_cascade_not_deleted_by_code(self, client):
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[{"report_id": UUID(GEN_REPORT_ID)}]) as mocks:
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_INSPECTOR_GEN) as mocks:
             client.delete(url)
         assert mocks["idr_reports"].call_count == 1
         assert "parent_report_id" not in mocks["idr_reports"].call_args.args[0]
@@ -1140,3 +1167,262 @@ class TestSubmitIdr:
             response = client.post(self.url)
         assert response.status_code == 500
         assert mocks["idrs"].call_count == 1  # no submit statement
+
+
+# ---------------------------------------------------------------------------
+# Slice R4a — auto-generated General
+# ---------------------------------------------------------------------------
+
+
+def _child(report_type, report_data=None):
+    """
+    Build a minimal contributing report row for aggregation tests.
+    Takes a report type and an optional report_data dict.
+    Returns a dict with just the keys the aggregator reads.
+    """
+    return {"report_type": report_type, "report_data": report_data or {}}
+
+
+def _pay(item_no, budget_code, pay_quantity, description="", quantity_chk=""):
+    """
+    Build a single pay item as the frontend stores it, for aggregation tests.
+    Takes itemNo, budgetCode, payQuantity and optional description / quantityChk.
+    Returns the pay item dict.
+    """
+    return {
+        "itemNo": item_no,
+        "budgetCode": budget_code,
+        "payQuantity": pay_quantity,
+        "description": description,
+        "quantityChk": quantity_chk,
+    }
+
+
+class TestBuildAutoGeneralData:
+    """The pure aggregator: description composition and pay-item combining."""
+
+    def test_description_uses_label_and_text_when_present(self):
+        children = [_child("SWR", {"description": "Excavated trench along the east curb."})]
+        assert build_auto_general_data(children)["description"] == "Sewer: Excavated trench along the east curb."
+
+    def test_description_falls_back_to_label_work_when_missing(self):
+        children = [_child("PILE", {}), _child("WM_1", {"description": "   "})]
+        # Blank/whitespace description falls back; entries are blank-line separated.
+        assert build_auto_general_data(children)["description"] == "Pile Driving work\n\nWater Main work"
+
+    def test_description_concatenates_in_order(self):
+        children = [
+            _child("SWR", {"description": "Trench."}),
+            _child("CONC", {}),
+        ]
+        assert build_auto_general_data(children)["description"] == "Sewer: Trench.\n\nConcrete work"
+
+    def test_pay_items_combine_on_item_and_budget(self):
+        children = [
+            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "100", "4\" Conc. Sidewalk", "RM")]}),
+            _child("CONC", {"payItems": [_pay("4.21", "HWS-01", "50", "", "")]}),
+        ]
+        items = build_auto_general_data(children)["payItems"]
+        assert items == [{
+            "itemNo": "4.21",
+            "budgetCode": "HWS-01",
+            "description": "4\" Conc. Sidewalk",
+            "payQuantity": "150.00",
+            "quantityChk": "RM",
+        }]
+
+    def test_pay_items_kept_separate_on_different_budget_code(self):
+        children = [
+            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
+            _child("CONC", {"payItems": [_pay("4.21", "HWS-02", "50")]}),
+        ]
+        items = build_auto_general_data(children)["payItems"]
+        assert [(i["itemNo"], i["budgetCode"], i["payQuantity"]) for i in items] == [
+            ("4.21", "HWS-01", "100.00"),
+            ("4.21", "HWS-02", "50.00"),
+        ]
+
+    def test_pay_quantity_always_two_decimals(self):
+        children = [
+            _child("SWR", {"payItems": [_pay("6.01", "B", "100")]}),
+            _child("CONC", {"payItems": [_pay("6.01", "B", "50.5")]}),
+        ]
+        assert build_auto_general_data(children)["payItems"][0]["payQuantity"] == "150.50"
+
+    def test_unparseable_quantity_falls_back_to_first_non_empty(self):
+        children = [
+            _child("SWR", {"payItems": [_pay("6.01", "B", "100")]}),
+            _child("CONC", {"payItems": [_pay("6.01", "B", "TBD")]}),
+        ]
+        # Any unparseable member skips summing; keeps the first non-empty raw value.
+        assert build_auto_general_data(children)["payItems"][0]["payQuantity"] == "100"
+
+    def test_unparseable_skips_blank_and_keeps_first_real_string(self):
+        children = [
+            _child("SWR", {"payItems": [_pay("6.01", "B", "")]}),
+            _child("CONC", {"payItems": [_pay("6.01", "B", "TBD")]}),
+        ]
+        assert build_auto_general_data(children)["payItems"][0]["payQuantity"] == "TBD"
+
+    def test_combined_description_and_chk_take_first_non_empty(self):
+        children = [
+            _child("SWR", {"payItems": [_pay("6.01", "B", "TBD", description="", quantity_chk="")]}),
+            _child("CONC", {"payItems": [_pay("6.01", "B", "TBD", description="Real desc", quantity_chk="CM")]}),
+        ]
+        item = build_auto_general_data(children)["payItems"][0]
+        assert item["description"] == "Real desc"
+        assert item["quantityChk"] == "CM"
+
+    def test_no_pay_items_yields_empty_list(self):
+        assert build_auto_general_data([_child("SWR", {"description": "x"})])["payItems"] == []
+
+
+@contextmanager
+def patched_service(idr=None, general=None, main_reports=None):
+    """
+    Patch the query functions regenerate_auto_general calls, isolating its case logic from SQL.
+    Takes the idr row, the current General row (or None) and the non-General main report list.
+    Yields a dict of the create/update/delete/list/get_general mocks.
+    """
+    with patch("api.services.auto_general.get_idr_by_id", return_value=idr) as gi, \
+         patch("api.services.auto_general.get_general_report", return_value=general) as gg, \
+         patch("api.services.auto_general.list_non_general_main_reports", return_value=main_reports or []) as lm, \
+         patch("api.services.auto_general.create_auto_general") as cr, \
+         patch("api.services.auto_general.update_auto_general") as up, \
+         patch("api.services.auto_general.delete_auto_general") as dl:
+        yield {"idr": gi, "get_general": gg, "list": lm, "create": cr, "update": up, "delete": dl}
+
+
+IDR_ID_UUID = UUID(IDR_ID)
+IDR_ACTIVE = {"has_dismissed_auto_general": False}
+IDR_DISMISSED = {"has_dismissed_auto_general": True}
+AUTO_GENERAL = {"is_auto_generated": True}
+INSPECTOR_GENERAL = {"is_auto_generated": False}
+
+
+class TestRegenerateAutoGeneral:
+    """The orchestrator: the five behavioral cases A–E."""
+
+    def test_case_a_single_report_creates_nothing(self, client):
+        with patched_service(idr=IDR_ACTIVE, general=None, main_reports=[_child("SWR")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_not_called()
+        m["update"].assert_not_called()
+        m["delete"].assert_not_called()
+
+    def test_case_c_creates_auto_general_on_second_report(self, client):
+        with patched_service(idr=IDR_ACTIVE, general=None, main_reports=[_child("SWR"), _child("CONC")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_called_once()
+        assert m["create"].call_args.args[0] == IDR_ID_UUID
+        assert "description" in m["create"].call_args.args[1]
+        m["update"].assert_not_called()
+        m["delete"].assert_not_called()
+
+    def test_case_c_refreshes_existing_auto_general(self, client):
+        with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=[_child("SWR"), _child("CONC")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["update"].assert_called_once()
+        assert m["update"].call_args.args[0] == IDR_ID_UUID
+        m["create"].assert_not_called()
+        m["delete"].assert_not_called()
+
+    def test_case_b_leaves_inspector_general_untouched(self, client):
+        with patched_service(idr=IDR_ACTIVE, general=INSPECTOR_GENERAL, main_reports=[_child("SWR"), _child("CONC")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_not_called()
+        m["update"].assert_not_called()
+        m["delete"].assert_not_called()
+        m["list"].assert_not_called()  # returns before even reading the children
+
+    def test_case_e_deletes_auto_general_below_threshold(self, client):
+        with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=[_child("SWR")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["delete"].assert_called_once_with(IDR_ID_UUID)
+        m["create"].assert_not_called()
+        m["update"].assert_not_called()
+
+    def test_dismissed_idr_never_recreates(self, client):
+        with patched_service(idr=IDR_DISMISSED, general=None, main_reports=[_child("SWR"), _child("CONC")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_not_called()
+        m["update"].assert_not_called()
+        m["delete"].assert_not_called()
+
+    def test_addendum_type_main_reports_do_not_count(self, client):
+        # A SKETCH filed as a main report is an addendum-by-nature type: excluded, so only one contributor remains.
+        with patched_service(idr=IDR_ACTIVE, general=None, main_reports=[_child("SWR"), _child("SKETCH")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_not_called()
+
+    def test_missing_idr_is_a_noop(self, client):
+        with patched_service(idr=None, general=None, main_reports=[_child("SWR"), _child("CONC")]) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["get_general"].assert_not_called()
+        m["create"].assert_not_called()
+
+
+MOCK_NEW_GEN_ROW = {**MOCK_GEN_REPORT_ROW, "report_id": UUID(NEW_REPORT_ID)}
+DELETED_AUTO_GEN = [{
+    "report_id": UUID(GEN_REPORT_ID),
+    "report_type": "GEN",
+    "is_addendum": False,
+    "is_auto_generated": True,
+}]
+
+
+class TestAutoGeneralHooks:
+    """Which mutations trigger regeneration / dismissal at the endpoint boundary."""
+
+    reports_url = f"/v1/idrs/{IDR_ID}/reports"
+
+    def test_post_non_general_regenerates(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
+            client.post(self.reports_url, json={"report_type": "SWR"})
+        mocks["regen"].assert_called_once_with(IDR_ID_UUID)
+        mocks["dismiss"].assert_not_called()
+
+    def test_post_general_does_not_regenerate(self, client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_GEN_ROW]) as mocks:
+            client.post(self.reports_url, json={"report_type": "GEN"})
+        mocks["regen"].assert_not_called()
+
+    def test_put_non_general_regenerates(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
+            client.put(url, json={"description": "x"})
+        mocks["regen"].assert_called_once_with(IDR_ID_UUID)
+
+    def test_put_general_does_not_regenerate(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
+            client.put(url, json={"description": "x"})
+        mocks["regen"].assert_not_called()
+
+    def test_delete_non_general_regenerates(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_SWR) as mocks:
+            client.delete(url)
+        mocks["regen"].assert_called_once_with(IDR_ID_UUID)
+        mocks["dismiss"].assert_not_called()
+
+    def test_delete_auto_general_sets_dismissed(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_AUTO_GEN) as mocks:
+            client.delete(url)
+        mocks["dismiss"].assert_called_once_with(IDR_ID_UUID)
+        mocks["regen"].assert_not_called()
+
+    def test_delete_inspector_general_does_nothing(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_INSPECTOR_GEN) as mocks:
+            client.delete(url)
+        mocks["regen"].assert_not_called()
+        mocks["dismiss"].assert_not_called()
+
+    def test_delete_addendum_regenerates(self, client):
+        url = f"/v1/idrs/{IDR_ID}/reports/{ADDENDUM_REPORT_ID}"
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_ADDENDUM) as mocks:
+            client.delete(url)
+        mocks["regen"].assert_called_once_with(IDR_ID_UUID)
+        mocks["dismiss"].assert_not_called()

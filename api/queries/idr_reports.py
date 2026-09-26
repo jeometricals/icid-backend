@@ -13,6 +13,7 @@ IDR_REPORT_COLUMNS = """
     parent_report_id,
     page_number,
     report_data,
+    is_auto_generated,
     created_at,
     updated_at
 """
@@ -80,6 +81,84 @@ def get_general_report_id(idr_id: UUID) -> Optional[UUID]:
     return rows[0]["report_id"] if rows else None
 
 
+def get_general_report(idr_id: UUID) -> Optional[dict[str, Any]]:
+    """
+    Fetch the IDR's General (non-addendum GEN) report in full, including is_auto_generated.
+    Takes the IDR uuid.
+    Returns the General report dict, or None if the IDR has no General.
+    """
+    sql = f"""
+        SELECT {IDR_REPORT_COLUMNS}
+        FROM icid.idr_reports
+        WHERE idr_id = %s AND report_type = 'GEN' AND is_addendum = false;
+    """
+    rows = run_query(sql, (idr_id,))
+    return rows[0] if rows else None
+
+
+def list_non_general_main_reports(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    List an IDR's non-addendum, non-General reports in creation order, for auto-summary aggregation.
+    Takes the IDR uuid.
+    Returns a list of report dicts (empty when none), or None on failure.
+    """
+    sql = f"""
+        SELECT {IDR_REPORT_COLUMNS}
+        FROM icid.idr_reports
+        WHERE idr_id = %s AND report_type != 'GEN' AND is_addendum = false
+        ORDER BY created_at, report_id;
+    """
+    return run_query(sql, (idr_id,))
+
+
+def create_auto_general(
+    idr_id: UUID, report_data: dict[str, Any]
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Insert a backend-managed (is_auto_generated) General with the given aggregated report_data.
+    Takes the IDR uuid and the report_data dict (stored as JSONB); does nothing if a General already exists.
+    Returns a one-row list with the new General, an empty list if one already exists, or None on failure.
+    """
+    sql = f"""
+        INSERT INTO icid.idr_reports (idr_id, report_type, is_addendum, is_auto_generated, report_data)
+        VALUES (%s, 'GEN', false, true, %s)
+        ON CONFLICT (idr_id) WHERE report_type = 'GEN' AND is_addendum = false DO NOTHING
+        RETURNING {IDR_REPORT_COLUMNS};
+    """
+    return run_query(sql, (idr_id, Jsonb(report_data)))
+
+
+def update_auto_general(
+    idr_id: UUID, report_data: dict[str, Any]
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Replace the report_data of the IDR's auto-generated General and stamp its updated_at.
+    Takes the IDR uuid and the aggregated report_data dict (stored as JSONB); only an is_auto_generated General is touched.
+    Returns a one-row list with the updated General, an empty list if there is no auto-General, or None on failure.
+    """
+    sql = f"""
+        UPDATE icid.idr_reports
+        SET report_data = %s, updated_at = now()
+        WHERE idr_id = %s AND report_type = 'GEN' AND is_addendum = false AND is_auto_generated = true
+        RETURNING {IDR_REPORT_COLUMNS};
+    """
+    return run_query(sql, (Jsonb(report_data), idr_id))
+
+
+def delete_auto_general(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Delete the IDR's auto-generated General.
+    Takes the IDR uuid; only an is_auto_generated General is removed (an inspector's General is left alone).
+    Returns a one-row list with the deleted report_id, an empty list if there is no auto-General, or None on failure.
+    """
+    sql = """
+        DELETE FROM icid.idr_reports
+        WHERE idr_id = %s AND report_type = 'GEN' AND is_addendum = false AND is_auto_generated = true
+        RETURNING report_id;
+    """
+    return run_query(sql, (idr_id,))
+
+
 def save_report_data(
     idr_id: UUID, report_id: UUID, report_data: dict[str, Any]
 ) -> Optional[list[dict[str, Any]]]:
@@ -112,7 +191,7 @@ def delete_idr_report(idr_id: UUID, report_id: UUID) -> Optional[list[dict[str, 
     """
     Delete a report (its addendums go with it via ON DELETE CASCADE) and stamp its IDR's updated_at, in one statement.
     Takes the IDR uuid and the report uuid; only a report in that IDR, while the IDR is a draft, is deleted.
-    Returns a one-row list with the deleted report_id, an empty list if no such report in a draft IDR, or None on failure.
+    Returns a one-row list with the deleted report's id, type, is_addendum and is_auto_generated (for auto-summary classification), an empty list if no such report in a draft IDR, or None on failure.
     """
     sql = """
         WITH deleted AS (
@@ -120,14 +199,14 @@ def delete_idr_report(idr_id: UUID, report_id: UUID) -> Optional[list[dict[str, 
             USING icid.idrs i
             WHERE r.idr_id = %s AND r.report_id = %s
                 AND i.idr_id = r.idr_id AND i.status = 'draft'
-            RETURNING r.report_id, r.idr_id
+            RETURNING r.report_id, r.idr_id, r.report_type, r.is_addendum, r.is_auto_generated
         ),
         touched AS (
             UPDATE icid.idrs
             SET updated_at = now()
             WHERE idr_id IN (SELECT idr_id FROM deleted)
         )
-        SELECT report_id
+        SELECT report_id, report_type, is_addendum, is_auto_generated
         FROM deleted;
     """
     return run_query(sql, (idr_id, report_id))

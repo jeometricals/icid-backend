@@ -43,6 +43,45 @@ ADDENDUM_TYPES = frozenset({
 })
 
 
+# Human-readable label per report type, used when composing the auto-generated
+# General's Description of Work (e.g. "Sewer: <desc>" or "Sewer work"). Only
+# non-addendum, non-General reports reach the summary, but every type is mapped
+# so the label lookup never falls through. REVIEW during walkthrough: labels for
+# HC, AC, BOX, JACK, CCL, RE, DSP, OFF are best-guess domain expansions.
+TYPE_LABELS: dict[str, str] = {
+    ReportType.GEN.value: "General",
+    ReportType.SWR.value: "Sewer",
+    ReportType.HC.value: "House Connection",
+    ReportType.WM_1.value: "Water Main",
+    ReportType.WM_2.value: "Water Main",
+    ReportType.WM_3.value: "Water Main",
+    ReportType.AC.value: "Asphalt Concrete",
+    ReportType.CONC.value: "Concrete",
+    ReportType.BOX.value: "Box Culvert",
+    ReportType.PILE.value: "Pile Driving",
+    ReportType.JACK.value: "Jacking",
+    ReportType.CCL.value: "Chlorination",
+    ReportType.RE.value: "Reinforcement",
+    ReportType.DSP.value: "Disposal",
+    ReportType.OFF.value: "Office",
+    ReportType.SKETCH.value: "Sketch",
+    ReportType.CONT.value: "Continuation",
+    ReportType.CONC_MIX.value: "Concrete Mix",
+    ReportType.CONC_CYL.value: "Concrete Cylinder",
+    ReportType.FIELD_MEMO.value: "Field Memo",
+    ReportType.FIELD_ORDER.value: "Field Order",
+}
+
+
+def label_for(report_type: str) -> str:
+    """
+    Give the human-readable label for a report type code.
+    Takes the stored report_type string.
+    Returns its label from TYPE_LABELS, or the raw code if unmapped.
+    """
+    return TYPE_LABELS.get(report_type, report_type)
+
+
 def require_json_object(value: Any) -> Any:
     """
     Reject a report_data body whose top level is not a JSON object.
@@ -72,6 +111,7 @@ class IdrReport(BaseModel):
     parent_report_id: Optional[UUID] = None
     page_number: Optional[int] = None
     report_data: dict[str, Any]
+    is_auto_generated: bool = False
     created_at: datetime
     updated_at: datetime
 
