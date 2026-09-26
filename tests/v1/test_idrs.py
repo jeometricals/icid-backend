@@ -7,7 +7,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType
-from api.services.auto_general import build_auto_general_data, regenerate_auto_general
+from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
 
 # ---------------------------------------------------------------------------
 # Mock data — dict rows, as run_query returns them under dict_row.
@@ -1203,19 +1203,31 @@ class TestBuildAutoGeneralData:
 
     def test_description_uses_label_and_text_when_present(self):
         children = [_child("SWR", {"description": "Excavated trench along the east curb."})]
-        assert build_auto_general_data(children)["description"] == "Sewer: Excavated trench along the east curb."
+        assert build_auto_general_data(children)["description"] == (
+            f"Sewer: Excavated trench along the east curb.\n\n{DESCRIPTION_FOOTER}"
+        )
 
     def test_description_falls_back_to_label_work_when_missing(self):
         children = [_child("PILE", {}), _child("WM_1", {"description": "   "})]
         # Blank/whitespace description falls back; entries are blank-line separated.
-        assert build_auto_general_data(children)["description"] == "Pile Driving work\n\nWater Main work"
+        assert build_auto_general_data(children)["description"] == (
+            f"Pile Driving work\n\nWater Main work\n\n{DESCRIPTION_FOOTER}"
+        )
 
     def test_description_concatenates_in_order(self):
         children = [
             _child("SWR", {"description": "Trench."}),
             _child("CONC", {}),
         ]
-        assert build_auto_general_data(children)["description"] == "Sewer: Trench.\n\nConcrete work"
+        assert build_auto_general_data(children)["description"] == (
+            f"Sewer: Trench.\n\nConcrete work\n\n{DESCRIPTION_FOOTER}"
+        )
+
+    def test_description_always_ends_with_footer_after_a_blank_line(self):
+        # Footer is appended whether children have real descriptions or the "[Type] work" fallback.
+        for children in ([_child("SWR", {"description": "Real text."})], [_child("SWR", {})]):
+            description = build_auto_general_data(children)["description"]
+            assert description.endswith(f"\n\n{DESCRIPTION_FOOTER}")
 
     def test_pay_items_combine_on_item_and_budget(self):
         children = [

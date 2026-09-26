@@ -15,6 +15,11 @@ from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, label_for
 # reports; below it, an existing auto-General is removed.
 AUTO_GENERAL_MIN_REPORTS = 2
 
+# Always closes an auto-generated description: even a full summary is only a
+# summary, so it points back to the source reports. Auto-Generals only — a
+# manual General's description is the inspector's, untouched.
+DESCRIPTION_FOOTER = "See the individual reports for the details of the work performed."
+
 
 def _first_non_empty(values: Iterable[Any]) -> Any:
     """
@@ -49,7 +54,7 @@ def _aggregate_description(children: list[dict[str, Any]]) -> str:
     """
     Compose the auto-General's Description of Work from the contributing children.
     Takes the contributing report rows in creation order.
-    Returns one entry per report ("[Label]: [description]" or "[Label] work" when blank), blank-line separated.
+    Returns one entry per report ("[Label]: [description]" or "[Label] work" when blank), blank-line separated, always ending with the fixed footer.
     """
     entries: list[str] = []
     for child in children:
@@ -58,6 +63,7 @@ def _aggregate_description(children: list[dict[str, Any]]) -> str:
         description = data.get("description")
         text = description.strip() if isinstance(description, str) else ""
         entries.append(f"{label}: {text}" if text else f"{label} work")
+    entries.append(DESCRIPTION_FOOTER)
     return "\n\n".join(entries)
 
 
