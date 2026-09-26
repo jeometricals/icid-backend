@@ -46,28 +46,28 @@ ADDENDUM_TYPES = frozenset({
 # Human-readable label per report type, used when composing the auto-generated
 # General's Description of Work (e.g. "Sewer: <desc>" or "Sewer work"). Only
 # non-addendum, non-General reports reach the summary, but every type is mapped
-# so the label lookup never falls through. REVIEW during walkthrough: labels for
-# HC, AC, BOX, JACK, CCL, RE, DSP, OFF are best-guess domain expansions.
+# so the label lookup never falls through. Must stay in sync with the frontend's
+# REPORT_TYPES labels (icid-frontend/src/data/reportTypes.js).
 TYPE_LABELS: dict[str, str] = {
     ReportType.GEN.value: "General",
     ReportType.SWR.value: "Sewer",
     ReportType.HC.value: "House Connection",
-    ReportType.WM_1.value: "Water Main",
-    ReportType.WM_2.value: "Water Main",
-    ReportType.WM_3.value: "Water Main",
+    ReportType.WM_1.value: "Water Main (Sheet 1)",
+    ReportType.WM_2.value: "Water Main (Sheet 2)",
+    ReportType.WM_3.value: "Water Main (Sheet 3)",
     ReportType.AC.value: "Asphalt Concrete",
-    ReportType.CONC.value: "Concrete",
-    ReportType.BOX.value: "Box Culvert",
+    ReportType.CONC.value: "Concrete (Structures)",
+    ReportType.BOX.value: "Box Sewer",
     ReportType.PILE.value: "Pile Driving",
     ReportType.JACK.value: "Jacking",
-    ReportType.CCL.value: "Chlorination",
-    ReportType.RE.value: "Reinforcement",
-    ReportType.DSP.value: "Disposal",
-    ReportType.OFF.value: "Office",
-    ReportType.SKETCH.value: "Sketch",
-    ReportType.CONT.value: "Continuation",
-    ReportType.CONC_MIX.value: "Concrete Mix",
-    ReportType.CONC_CYL.value: "Concrete Cylinder",
+    ReportType.CCL.value: "Community Construction Liaison",
+    ReportType.RE.value: "Resident Engineer's Daily Diary",
+    ReportType.DSP.value: "Daily Site Patrol",
+    ReportType.OFF.value: "Office Report",
+    ReportType.SKETCH.value: "Sketch Sheet",
+    ReportType.CONT.value: "Report Continuation",
+    ReportType.CONC_MIX.value: "Concrete Truck & Mix Info",
+    ReportType.CONC_CYL.value: "Concrete Cylinder Data",
     ReportType.FIELD_MEMO.value: "Field Memo",
     ReportType.FIELD_ORDER.value: "Field Order",
 }

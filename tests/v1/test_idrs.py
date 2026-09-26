@@ -1211,7 +1211,7 @@ class TestBuildAutoGeneralData:
         children = [_child("PILE", {}), _child("WM_1", {"description": "   "})]
         # Blank/whitespace description falls back; entries are blank-line separated.
         assert build_auto_general_data(children)["description"] == (
-            f"Pile Driving work\n\nWater Main work\n\n{DESCRIPTION_FOOTER}"
+            f"Pile Driving work\n\nWater Main (Sheet 1) work\n\n{DESCRIPTION_FOOTER}"
         )
 
     def test_description_concatenates_in_order(self):
@@ -1220,7 +1220,7 @@ class TestBuildAutoGeneralData:
             _child("CONC", {}),
         ]
         assert build_auto_general_data(children)["description"] == (
-            f"Sewer: Trench.\n\nConcrete work\n\n{DESCRIPTION_FOOTER}"
+            f"Sewer: Trench.\n\nConcrete (Structures) work\n\n{DESCRIPTION_FOOTER}"
         )
 
     def test_description_always_ends_with_footer_after_a_blank_line(self):
