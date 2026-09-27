@@ -74,18 +74,6 @@ FROM (VALUES
 JOIN user_map m ON m.excel_id = src.excel_id;
 
 ------------------------------------------------------------
--- REPORTS (resolve reporter to generated uuid; report_id is generated)
-------------------------------------------------------------
-INSERT INTO icid.reports (reporter_uuid, project_id, report_date)
-SELECT m.uuid, src.project_id, src.report_date::DATE
-FROM (VALUES
-    (1, 'HWS0023', '2025-09-16'),
-    (2, 'HWS0023', '2025-09-16'),
-    (3, 'HWS0023', '2025-09-16')
-) AS src (excel_id, project_id, report_date)
-JOIN user_map m ON m.excel_id = src.excel_id;
-
-------------------------------------------------------------
 -- FORM TEMPLATES
 ------------------------------------------------------------
 INSERT INTO icid.form_templates (form_template_id, form_name, form_description, form_status) VALUES

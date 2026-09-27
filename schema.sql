@@ -5,10 +5,6 @@
 -- per project per day holds the shared header; icid.idr_reports holds the
 -- typed reports (General, addenda, ...) filed under it. Introduced in
 -- migrations/004_idr_refactor.sql (Phase R, Slice R1).
---
--- LEGACY: icid.reports and icid.completed_forms are the pre-IDR model. Their
--- data was migrated into idrs/idr_reports; the tables are kept until the
--- backend and frontend move over, and are dropped in Slice R5.
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE SCHEMA IF NOT EXISTS icid;
 
@@ -100,29 +96,6 @@ CREATE INDEX idx_project_clients_project ON icid.project_clients(project_id);
 CREATE INDEX idx_project_clients_client ON icid.project_clients(client_id);
 
 ------------------------------------------------------------
--- REPORT (LEGACY - superseded by idrs/idr_reports, dropped in Slice R5)
-------------------------------------------------------------
-CREATE TABLE icid.reports (
-    report_id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    reporter_uuid      UUID NOT NULL,
-    project_id         TEXT NOT NULL,
-    report_date        DATE,
-    status             TEXT NOT NULL DEFAULT 'draft',
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    submitted_at       TIMESTAMPTZ,
-    CONSTRAINT chk_reports_status
-        CHECK (status IN ('draft', 'submitted')),
-    CONSTRAINT fk_reports_project
-        FOREIGN KEY (project_id) REFERENCES icid.projects(project_id),
-    CONSTRAINT fk_reports_reporter
-        FOREIGN KEY (reporter_uuid) REFERENCES icid.users(uuid)
-);
-
-CREATE INDEX idx_reports_project_id ON icid.reports(project_id);
-CREATE INDEX idx_reports_date ON icid.reports(report_date);
-
-------------------------------------------------------------
 -- FORM TEMPLATE
 ------------------------------------------------------------
 CREATE TABLE icid.form_templates (
@@ -136,28 +109,6 @@ CREATE TABLE icid.form_templates (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-------------------------------------------------------------
--- COMPLETED FORM (LEGACY - superseded by idr_reports, dropped in Slice R5)
-------------------------------------------------------------
-CREATE TABLE icid.completed_forms (
-    id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    completed_form_id  TEXT UNIQUE NOT NULL DEFAULT uuid_generate_v4()::text,
-    report_id          UUID NOT NULL,
-    form_template_id   TEXT NOT NULL,
-    form_data          JSONB,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT fk_completed_forms_report
-        FOREIGN KEY (report_id) REFERENCES icid.reports(report_id),
-    CONSTRAINT fk_completed_forms_template
-        FOREIGN KEY (form_template_id) REFERENCES icid.form_templates(form_template_id),
-    CONSTRAINT uq_completed_forms_report_template
-        UNIQUE (report_id, form_template_id)
-);
-
-CREATE INDEX idx_completed_forms_report ON icid.completed_forms(report_id);
-CREATE INDEX idx_completed_forms_template ON icid.completed_forms(form_template_id);
 
 ------------------------------------------------------------
 -- IDR (one per inspector per project per day)
