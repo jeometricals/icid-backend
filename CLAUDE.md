@@ -104,11 +104,9 @@ Not rules — current state, documented so nobody mistakes these for the intende
 - `api/v1/debug.py` exposes the live `icid` schema and is **dev-only**. Delete before
   production. It has no test coverage.
 - Only `users`, `projects` and `idrs` have endpoints. `api/schemas/` already defines models for
-  clients, form templates, completed forms and the join tables — those schemas run
+  clients, form templates and the join tables — those schemas run
   ahead of the endpoints and may not match `schema.sql` exactly. Verify against `schema.sql`
   before building on them.
-- The legacy `icid.reports` and `icid.completed_forms` tables are still in the database but no
-  code reads them; they are dropped in Slice R5.
 - `api/v1/`, `api/db/`, `api/core/` and `api/schemas/` have no `__init__.py`; only
   `api/queries/` does. Imports work regardless, but don't take the inconsistency as intent.
 - CORS is `allow_origins=["*"]`. Tighten before production.
