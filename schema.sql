@@ -166,3 +166,21 @@ CREATE INDEX idx_idr_reports_parent ON icid.idr_reports(parent_report_id) WHERE 
 CREATE UNIQUE INDEX uq_idr_reports_one_gen_per_idr
     ON icid.idr_reports(idr_id)
     WHERE report_type = 'GEN' AND is_addendum = false;
+
+------------------------------------------------------------
+-- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)
+------------------------------------------------------------
+CREATE TABLE icid.report_attachments (
+    attachment_id    UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    report_id        UUID NOT NULL REFERENCES icid.idr_reports(report_id) ON DELETE CASCADE,
+    file_name        TEXT NOT NULL,
+    file_type        TEXT NOT NULL,
+    file_size_bytes  INTEGER NOT NULL,
+    storage_path     TEXT NOT NULL UNIQUE,
+    uploaded_by      UUID NOT NULL REFERENCES icid.users(uuid),
+    uploaded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_report_attachments_size
+        CHECK (file_size_bytes > 0 AND file_size_bytes <= 10485760)
+);
+
+CREATE INDEX idx_report_attachments_report_id ON icid.report_attachments(report_id);

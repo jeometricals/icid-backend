@@ -1,6 +1,6 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 007 (end of Phase R).
+Developer reference for the `icid` schema as of migration 008 (Attachments Slice A1).
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -19,8 +19,11 @@ clients ──< users ──< project_users >── projects ──< project_cli
                               │ idr_id (ON DELETE CASCADE)
                               ▼
                          idr_reports ──┐
-                              ▲        │ parent_report_id (addendum → parent,
-                              └────────┘  ON DELETE CASCADE)
+                              ▲  │     │ parent_report_id (addendum → parent,
+                              └──┼─────┘  ON DELETE CASCADE)
+                                 │ report_id (ON DELETE CASCADE)
+                                 ▼
+                         report_attachments >── users (uploaded_by)
 ```
 
 - A **client** is an organisation. Every **user** belongs to one client.
@@ -30,6 +33,8 @@ clients ──< users ──< project_users >── projects ──< project_cli
   holds the header fields shared by every page of that day's paperwork.
 - **idr_reports** are the typed reports filed inside an IDR: a General, a Sewer report,
   addenda, and so on. Each one's form content is a JSON blob in `report_data`.
+- **report_attachments** are files (photos, PDFs) attached to a report. The row is metadata;
+  the bytes live in Supabase Storage.
 
 ## Tables
 
@@ -161,6 +166,29 @@ Cascades: deleting an IDR deletes its reports, and deleting a report deletes its
 2. Then each other main report, oldest first, with its addenda directly after it.
 3. Standalone addenda (no parent) last.
 
+### report_attachments
+
+Files attached to a report. Each row describes one file; the file itself is in the private
+Supabase Storage bucket `report-attachments`, which only the backend can reach (service key).
+
+| Column | Type | Notes |
+|---|---|---|
+| `attachment_id` | UUID PK | `uuid_generate_v4()` |
+| `report_id` | UUID NOT NULL | FK → `idr_reports.report_id`, **ON DELETE CASCADE** |
+| `file_name` | TEXT NOT NULL | The name the file was uploaded with |
+| `file_type` | TEXT NOT NULL | MIME type, e.g. `image/jpeg`, `application/pdf` |
+| `file_size_bytes` | INTEGER NOT NULL | CHECK `chk_report_attachments_size`: more than 0, at most 10 MB (10485760) |
+| `storage_path` | TEXT NOT NULL UNIQUE | Key in the bucket: `{report_id}/{attachment_id}_{sanitized file name}` |
+| `uploaded_by` | UUID NOT NULL | FK → `users.uuid` |
+| `uploaded_at` | TIMESTAMPTZ NOT NULL | Default `now()`. The table has no `created_at`/`updated_at`; rows are never edited. |
+
+Index: `idx_report_attachments_report_id (report_id)`.
+
+Storage is not part of the database transaction. Deleting a report cascades its attachment
+rows (and its addenda's), and the backend removes the matching Storage files separately, on a
+best-effort basis. A file whose removal fails is left orphaned in the bucket; nothing points
+at it.
+
 ### form_templates (present, unused)
 
 `id` UUID PK, `form_template_id` TEXT UNIQUE, `form_name`, `form_description`, `form_status`,
@@ -251,6 +279,7 @@ content as TEXT, linked to a report and a form template).
 | 005 | `005_one_general_per_idr.sql` | R2 | Added the partial unique index `uq_idr_reports_one_gen_per_idr`: at most one non-addendum General per IDR. |
 | 006 | `006_auto_general_flags.sql` | R4a | Added `idr_reports.is_auto_generated` and `idrs.has_dismissed_auto_general`, both `BOOLEAN NOT NULL DEFAULT false`, each with a column `COMMENT` describing it. |
 | 007 | `007_cleanup.sql` | R5 | Backfilled `total_pages = 1` and `page_number = 1` for the Slice 5 IDR (`8b2f887b-…`), which was submitted before page numbering existed. Dropped `completed_forms`, then `reports` (`CASCADE`). `form_templates` was not touched. |
+| 008 | `008_report_attachments.sql` | A1 | Created `report_attachments` (FK to `idr_reports` with ON DELETE CASCADE, FK to `users`, UNIQUE `storage_path`, size CHECK) and `idx_report_attachments_report_id`. |
 
 Where each current column came from:
 
@@ -262,3 +291,4 @@ Where each current column came from:
 | `idr_reports` | everything except the flag | 004 |
 | `idr_reports` | `is_auto_generated` | 006 |
 | `idr_reports` | `uq_idr_reports_one_gen_per_idr` (index) | 005 |
+| `report_attachments` | all | 008 |
