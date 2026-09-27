@@ -254,16 +254,12 @@ def delete_all_storage_files_for_report(report_id: UUID) -> None:
 
 def remove_storage_files(paths: Iterable[str]) -> None:
     """
-    Delete files from Storage on a best-effort basis.
+    Delete files from Storage on a best-effort basis, one request per file so one failure doesn't strand the rest.
     Takes the Storage paths to remove.
-    Returns nothing; a failure is logged at WARNING with the paths left orphaned, never raised.
+    Returns nothing; each failure is logged at WARNING with the path left orphaned, never raised.
     """
-    paths = list(paths)
-
-    if not paths:
-        return
-
-    try:
-        remove_files(paths)
-    except Exception as exc:
-        logger.warning("Could not remove %d attachment file(s) from Storage, left orphaned: %s (%s)", len(paths), paths, exc)
+    for path in paths:
+        try:
+            remove_files([path])
+        except Exception as exc:
+            logger.warning("Could not remove attachment file from Storage, left orphaned: %s (%s)", path, exc)

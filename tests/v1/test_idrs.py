@@ -1,7 +1,9 @@
+import logging
 from contextlib import contextmanager
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import ANY, MagicMock, call, patch
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
@@ -911,6 +913,125 @@ class TestDeleteReport:
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=(DELETED_SWR, None)):
             response = client.delete(self.url)
         assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# DELETE /v1/idrs/{idr_id}/reports/{report_id} — attachment cleanup
+# Runs the real Storage hook; only run_query and the Supabase client are mocked.
+# ---------------------------------------------------------------------------
+
+REPORT_FILE = f"{NEW_REPORT_ID}/3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f_site.jpg"
+ADDENDUM_FILE = f"{ADDENDUM_REPORT_ID}/4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f70_sketch.pdf"
+STORAGE_PATH_ROWS = [{"storage_path": REPORT_FILE}, {"storage_path": ADDENDUM_FILE}]
+
+
+@contextmanager
+def patched_report_delete(storage_paths, idr_reports=DELETED_SWR):
+    """
+    Patch everything a report delete touches except the attachment cleanup hook itself.
+    Takes the rows the storage-path lookup returns and the idr_reports run_query result.
+    Yields a dict with the idr_reports and report_attachments run_query mocks and the mock Storage bucket.
+    """
+    client = MagicMock()
+    with patch("api.queries.idrs.run_query", return_value=[MOCK_IDR_ROW]), \
+         patch("api.queries.idr_reports.run_query", return_value=idr_reports) as ir, \
+         patch("api.queries.report_attachments.run_query", return_value=storage_paths) as a, \
+         patch("api.storage.client.get_client", return_value=client), \
+         patch("api.v1.idrs.regenerate_auto_general"), \
+         patch("api.v1.idrs.set_dismissed_auto_general"):
+        yield {"idr_reports": ir, "attachments": a, "bucket": client.storage.from_.return_value}
+
+
+class TestDeleteReportAttachments:
+    url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
+
+    def test_removes_report_and_addendum_files_before_deleting_the_row(self, client):
+        # One parent mock records Storage removes and idr_reports queries in the order they happen.
+        timeline = MagicMock()
+        with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
+            timeline.attach_mock(mocks["bucket"].remove, "storage_remove")
+            timeline.attach_mock(mocks["idr_reports"], "idr_reports_query")
+            response = client.delete(self.url)
+
+        assert response.status_code == 204
+        ids = (UUID(IDR_ID), UUID(NEW_REPORT_ID))
+        assert timeline.mock_calls == [
+            call.idr_reports_query(ANY, ids),        # report lookup (scopes the files to this IDR)
+            call.storage_remove([REPORT_FILE]),      # the report's own file
+            call.storage_remove([ADDENDUM_FILE]),    # its addendum's file
+            call.idr_reports_query(ANY, ids),        # the report delete, last
+        ]
+        lookup_sql = timeline.mock_calls[0].args[0]
+        delete_sql = timeline.mock_calls[-1].args[0]
+        assert "DELETE" not in lookup_sql
+        assert "DELETE FROM icid.idr_reports" in delete_sql
+
+    def test_partial_storage_failure_keeps_going_and_still_deletes(self, client, caplog):
+        files = [f"{NEW_REPORT_ID}/{n}_photo{n}.jpg" for n in (1, 2, 3)]
+        with caplog.at_level(logging.WARNING, logger="api.services.attachments"):
+            with patched_report_delete([{"storage_path": f} for f in files]) as mocks:
+                # First remove succeeds, second raises, third succeeds.
+                mocks["bucket"].remove.side_effect = [None, RuntimeError("storage timeout"), None]
+                response = client.delete(self.url)
+
+        assert response.status_code == 204
+        # All three were attempted, in order: the failure on the second didn't stop the third.
+        assert mocks["bucket"].remove.call_args_list == [call([files[0]]), call([files[1]]), call([files[2]])]
+        # Exactly one warning, naming only the file that failed.
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert files[1] in warnings[0].getMessage()
+        assert files[0] not in caplog.text and files[2] not in caplog.text
+        # Best-effort: the report row was still deleted, after the Storage attempts.
+        assert "DELETE FROM icid.idr_reports" in mocks["idr_reports"].call_args.args[0]
+
+    def test_file_lookup_walks_the_addendum_tree(self, client):
+        with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
+            client.delete(self.url)
+        sql, params = mocks["attachments"].call_args.args
+        assert "WITH RECURSIVE" in sql
+        assert "r.parent_report_id = t.report_id" in sql
+        assert "icid.report_attachments" in sql
+        assert params == (UUID(NEW_REPORT_ID),)
+
+    def test_attachment_rows_are_left_to_the_cascade(self, client):
+        with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
+            client.delete(self.url)
+        assert mocks["attachments"].call_count == 1  # the path lookup only; no DELETE of attachment rows
+        schema = Path(__file__).resolve().parents[2].joinpath("schema.sql").read_text()
+        table = schema.split("CREATE TABLE icid.report_attachments", 1)[1].split(");", 1)[0]
+        assert "REFERENCES icid.idr_reports(report_id) ON DELETE CASCADE" in table
+
+    def test_report_without_attachments_skips_storage(self, client):
+        with patched_report_delete([]) as mocks:
+            response = client.delete(self.url)
+        assert response.status_code == 204
+        mocks["bucket"].remove.assert_not_called()
+
+    def test_storage_failure_still_deletes_the_report(self, client, caplog):
+        with caplog.at_level(logging.WARNING, logger="api.services.attachments"):
+            with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
+                mocks["bucket"].remove.side_effect = RuntimeError("storage down")
+                response = client.delete(self.url)
+        assert response.status_code == 204
+        assert "DELETE FROM icid.idr_reports" in mocks["idr_reports"].call_args.args[0]
+        assert REPORT_FILE in caplog.text and ADDENDUM_FILE in caplog.text
+
+    def test_file_lookup_failure_still_deletes_the_report(self, client, caplog):
+        with caplog.at_level(logging.WARNING, logger="api.services.attachments"):
+            with patched_report_delete(None) as mocks:
+                response = client.delete(self.url)
+        assert response.status_code == 204
+        mocks["bucket"].remove.assert_not_called()
+        assert "DELETE FROM icid.idr_reports" in mocks["idr_reports"].call_args.args[0]
+        assert "left orphaned" in caplog.text
+
+    def test_report_not_in_idr_touches_no_files(self, client):
+        with patched_report_delete(STORAGE_PATH_ROWS, idr_reports=[]) as mocks:
+            response = client.delete(self.url)
+        assert response.status_code == 404
+        mocks["attachments"].assert_not_called()
+        mocks["bucket"].remove.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
