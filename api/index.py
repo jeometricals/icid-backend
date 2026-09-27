@@ -29,11 +29,13 @@ def include_routers(app: FastAPI):
     from api.v1.users import router as users_router
     from api.v1.projects import router as projects_router
     from api.v1.idrs import router as idrs_router
+    from api.v1.attachments import router as attachments_router
     from api.v1.debug import router as debug_router
 
     app.include_router(users_router)
     app.include_router(projects_router)
     app.include_router(idrs_router)
+    app.include_router(attachments_router)
     app.include_router(debug_router)
 
 

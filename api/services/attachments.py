@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 from uuid import UUID, uuid4
 
+from psycopg.errors import ForeignKeyViolation
+
 from api.core.config import STORAGE_URL_EXPIRY_SECONDS
 from api.queries.report_attachments import (
     delete_attachment_row,
@@ -37,6 +39,11 @@ MAX_FILE_NAME_LENGTH = 200
 # Stands in for a file name with nothing usable left after sanitizing.
 UNNAMED = "unnamed"
 
+# Default name of the uploaded_by foreign key (migrations/008_report_attachments.sql).
+UPLOADED_BY_FK = "report_attachments_uploaded_by_fkey"
+
+UPLOADER_NOT_FOUND = "Uploader user not found."
+
 
 class AttachmentError(Exception):
     """Base for attachment requests the service refuses; str(exc) is the client-facing message."""
@@ -56,6 +63,10 @@ class FileTooLargeError(AttachmentError):
 
 class UnsupportedFileTypeError(AttachmentError):
     """The uploaded file's Content-Type is not in ALLOWED_FILE_TYPES."""
+
+
+class InvalidUserError(AttachmentError):
+    """uploaded_by is not a user in icid.users."""
 
 
 class StorageUnavailableError(AttachmentError):
@@ -143,7 +154,7 @@ def upload_attachment(
     """
     Validate a file, store it in Storage, then record its metadata; the stored file is removed again if the record can't be written.
     Takes the target report row, the uploaded name and Content-Type, the file bytes and the uploader's uuid.
-    Returns the new attachment row, None if the insert returned nothing; raises a validation AttachmentError, or StorageUnavailableError if Storage refused the file.
+    Returns the new attachment row, None if the insert returned nothing; raises a validation AttachmentError, StorageUnavailableError if Storage refused the file, or InvalidUserError if uploaded_by is not a user.
     """
     file_type = normalize_file_type(content_type)
     validate_upload(report, file_type, len(content))
@@ -167,6 +178,11 @@ def upload_attachment(
             storage_path,
             uploaded_by,
         )
+    except ForeignKeyViolation as exc:
+        remove_storage_files([storage_path])
+        if exc.diag.constraint_name == UPLOADED_BY_FK:
+            raise InvalidUserError(UPLOADER_NOT_FOUND) from exc
+        raise
     except Exception:
         remove_storage_files([storage_path])
         raise

@@ -13,6 +13,7 @@ psycopg[binary]==3.2.10
 
 # Supabase Storage (attachments)
 supabase==2.31.0
+python-multipart==0.0.32
 
 anyio==4.10.0
 sniffio==1.3.1

@@ -23,6 +23,7 @@ from api.queries.idrs import (
     update_idr_header,
 )
 from api.queries.projects import get_project_by_id, is_user_on_project
+from api.services.attachments import delete_all_storage_files_for_report
 from api.services.auto_general import regenerate_auto_general
 from api.schemas.idr import (
     Idr,
@@ -250,7 +251,7 @@ def save_header(idr_id: UUID, body: IdrHeaderUpdate) -> IdrResponse:
 @router.delete("/{idr_id}/reports/{report_id}", status_code=204, response_class=Response)
 def delete_report(idr_id: UUID, report_id: UUID) -> Response:
     """
-    Remove a report from a draft IDR, together with any addendums attached to it, and bump the IDR's updated_at.
+    Remove a report from a draft IDR, together with its addendums and every attachment on them, and bump the IDR's updated_at.
     Takes the IDR and report uuids as path parameters.
     Returns an empty 204; raises 404 (no IDR), 409 (IDR not draft) and 404 (report not in this IDR).
     """
@@ -261,6 +262,15 @@ def delete_report(idr_id: UUID, report_id: UUID) -> Response:
 
     if idr["status"] != "draft":
         raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
+
+    # Confirm the report is in this IDR before touching Storage, so a mismatched
+    # idr_id can never remove another IDR's files.
+    if get_idr_report(idr_id, report_id) is None:
+        raise HTTPException(status_code=404, detail="Report not found in this IDR")
+
+    # Storage files first (best-effort, never raises), then the row; ON DELETE CASCADE
+    # removes the attachment rows. Not atomic: see delete_all_storage_files_for_report.
+    delete_all_storage_files_for_report(report_id)
 
     rows = delete_idr_report(idr_id, report_id)
 

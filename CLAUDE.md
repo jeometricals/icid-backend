@@ -21,6 +21,8 @@ every request to it.
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
+| `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
+| `api/services/` | Logic spanning several queries or Storage (`auto_general.py`, `attachments.py`). Endpoints call it; it never builds SQL. |
 | `api/core/` | App-wide configuration — env loading, `DATABASE_URL`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data. |
@@ -41,6 +43,10 @@ every request to it.
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
 - `POST /v1/idrs/{idr_id}/submit` — submit a draft (locks it, numbers pages, sets `total_pages`)
+- `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments` — upload a file (multipart: `file`, `uploaded_by`); draft only, not on an auto-General
+- `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments` — list a report's attachments
+- `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}/download-url` — short-lived signed URL
+- `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment (Storage file, then record)
 - `GET /debug/schema` — dev-only
 
 ## 3. Modularity rules

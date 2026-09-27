@@ -56,9 +56,9 @@ MOCK_ASSIGNMENT_ROW = {"?column?": 1}  # is_user_on_project does SELECT 1
 @contextmanager
 def patched(idrs=None, idr_reports=None, projects=None):
     """
-    Patch run_query in each query module the IDR endpoints use, plus the auto-General hooks.
+    Patch run_query in each query module the IDR endpoints use, plus the auto-General and attachment-Storage hooks.
     Takes the return value (or side_effect tuple) for each module's run_query.
-    Yields a dict of the mocks keyed by module name, with "regen" and "dismiss" for the hooks.
+    Yields a dict of the mocks keyed by module name, with "regen", "dismiss" and "storage" for the hooks.
     """
     def kwargs(value):
         return {"side_effect": value} if isinstance(value, tuple) else {"return_value": value}
@@ -67,8 +67,9 @@ def patched(idrs=None, idr_reports=None, projects=None):
          patch("api.queries.idr_reports.run_query", **kwargs(idr_reports)) as ir, \
          patch("api.queries.projects.run_query", **kwargs(projects)) as p, \
          patch("api.v1.idrs.regenerate_auto_general") as regen, \
-         patch("api.v1.idrs.set_dismissed_auto_general") as dismiss:
-        yield {"idrs": i, "idr_reports": ir, "projects": p, "regen": regen, "dismiss": dismiss}
+         patch("api.v1.idrs.set_dismissed_auto_general") as dismiss, \
+         patch("api.v1.idrs.delete_all_storage_files_for_report") as storage:
+        yield {"idrs": i, "idr_reports": ir, "projects": p, "regen": regen, "dismiss": dismiss, "storage": storage}
 
 
 # ---------------------------------------------------------------------------
@@ -853,7 +854,7 @@ class TestDeleteReport:
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_SWR) as mocks:
             client.delete(self.url)
         assert mocks["idrs"].call_count == 1  # IDR lookup only; the touch is inside the CTE
-        assert mocks["idr_reports"].call_count == 1
+        assert mocks["idr_reports"].call_count == 2  # report lookup (before Storage), then the delete
         sql, params = mocks["idr_reports"].call_args.args
         assert "DELETE FROM icid.idr_reports" in sql
         assert "r.idr_id = %s AND r.report_id = %s" in sql
@@ -879,7 +880,7 @@ class TestDeleteReport:
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_INSPECTOR_GEN) as mocks:
             client.delete(url)
-        assert mocks["idr_reports"].call_count == 1
+        assert mocks["idr_reports"].call_count == 2  # report lookup, then the delete
         assert "parent_report_id" not in mocks["idr_reports"].call_args.args[0]
 
     def test_missing_idr_returns_404(self, client):
@@ -907,7 +908,7 @@ class TestDeleteReport:
         assert client.delete(f"/v1/idrs/{IDR_ID}/reports/R1").status_code == 422
 
     def test_delete_failure_returns_500(self, client):
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=(DELETED_SWR, None)):
             response = client.delete(self.url)
         assert response.status_code == 500
 
