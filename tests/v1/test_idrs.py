@@ -994,6 +994,16 @@ class TestDeleteReportAttachments:
         assert "icid.report_attachments" in sql
         assert params == (UUID(NEW_REPORT_ID),)
 
+    def test_pending_and_uploaded_files_are_both_removed(self, client):
+        # REPORT_FILE stands for an uploaded attachment, PENDING_FILE for one whose client
+        # uploaded the file but never called upload-complete. Both must leave Storage.
+        pending_file = f"{NEW_REPORT_ID}/5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7081_pending.jpg"
+        with patched_report_delete([{"storage_path": REPORT_FILE}, {"storage_path": pending_file}]) as mocks:
+            response = client.delete(self.url)
+        assert response.status_code == 204
+        assert "is_uploaded" not in mocks["attachments"].call_args.args[0]  # the lookup doesn't filter pending rows
+        assert mocks["bucket"].remove.call_args_list == [call([REPORT_FILE]), call([pending_file])]
+
     def test_attachment_rows_are_left_to_the_cascade(self, client):
         with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
             client.delete(self.url)
