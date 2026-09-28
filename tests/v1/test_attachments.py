@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 from psycopg.errors import ForeignKeyViolation
 
-from api.core.config import STORAGE_UPLOAD_URL_EXPIRY_SECONDS, STORAGE_URL_EXPIRY_SECONDS
+from api.core.config import STORAGE_URL_EXPIRY_SECONDS
 from api.services.attachments import MAX_FILE_SIZE_BYTES, UPLOADED_BY_FK, sanitize_file_name
 
 # ---------------------------------------------------------------------------
@@ -253,13 +253,14 @@ class TestUploadRequest:
             "Crack along the north wall footing.",
         )
 
-    def test_upload_url_expiry_uses_the_configured_window(self, client):
+    def test_upload_url_expiry_is_supabases_7200_second_lifetime(self, client):
+        # 7200 is written out, not imported, so a change to the service constant fails here.
         before = datetime.now(timezone.utc)
         with patched(**upload_ok()):
             data = client.post(UPLOAD_REQUEST, json=REQUEST_BODY).json()["data"]
         expires_at = datetime.fromisoformat(data["upload_url_expires_at"])
-        assert before + timedelta(seconds=STORAGE_UPLOAD_URL_EXPIRY_SECONDS) <= expires_at
-        assert expires_at <= datetime.now(timezone.utc) + timedelta(seconds=STORAGE_UPLOAD_URL_EXPIRY_SECONDS)
+        assert before + timedelta(seconds=7200) <= expires_at
+        assert expires_at <= datetime.now(timezone.utc) + timedelta(seconds=7200)
 
     def test_upload_headers_carry_the_normalized_content_type(self, client):
         with patched(**upload_ok()) as mocks:

@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from psycopg.errors import ForeignKeyViolation
 
-from api.core.config import STORAGE_UPLOAD_URL_EXPIRY_SECONDS, STORAGE_URL_EXPIRY_SECONDS
+from api.core.config import STORAGE_URL_EXPIRY_SECONDS
 from api.queries.report_attachments import (
     delete_attachment_row,
     insert_attachment,
@@ -37,6 +37,13 @@ ALLOWED_FILE_TYPES = frozenset({
 
 
 MAX_FILE_NAME_LENGTH = 200
+
+# Supabase's signed upload URL has a server-side lifetime of exactly 7200 seconds (2 hours),
+# verified 2026-09-28 by requesting a signed upload URL and decoding the JWT `exp` claim
+# (exp - iat = 7200). Can't be shortened via the client library. Client-side upload logic
+# should honor this deadline. If Supabase changes this limit in the future, re-verify and
+# update the constant.
+SUPABASE_UPLOAD_URL_LIFETIME_SECONDS = 7200
 
 # Limits matching chk_report_attachments_name and chk_report_attachments_description.
 MAX_ATTACHMENT_NAME_LENGTH = 200
@@ -207,11 +214,8 @@ def upload_request(
     attachment_id = uuid4()
     storage_path = build_storage_path(report["report_id"], attachment_id, file_name)
 
-    # Supabase's signed upload URL is fixed at ~2 hours by Storage; the client library has no
-    # option to shorten it. The expires_at we report is the window the client is asked to
-    # complete the upload in — Supabase itself would accept the URL for longer. Client-side
-    # upload timeout logic should honor upload_url_expires_at.
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=STORAGE_UPLOAD_URL_EXPIRY_SECONDS)
+    # Stamped before the request, so the reported expiry is never later than the real one.
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=SUPABASE_UPLOAD_URL_LIFETIME_SECONDS)
 
     try:
         upload_url = create_signed_upload_url(storage_path)
