@@ -6,14 +6,16 @@ from uuid import UUID, uuid4
 
 from psycopg.errors import ForeignKeyViolation
 
-from api.core.config import STORAGE_URL_EXPIRY_SECONDS
+from api.core.config import STORAGE_UPLOAD_URL_EXPIRY_SECONDS, STORAGE_URL_EXPIRY_SECONDS
 from api.queries.report_attachments import (
     delete_attachment_row,
     insert_attachment,
     list_attachments_for_report,
     list_storage_paths_for_report_tree,
+    mark_attachment_uploaded,
+    update_attachment_metadata_row,
 )
-from api.storage.client import create_signed_url, remove_files, upload_file
+from api.storage.client import create_signed_upload_url, create_signed_url, remove_files
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,10 @@ ALLOWED_FILE_TYPES = frozenset({
 
 MAX_FILE_NAME_LENGTH = 200
 
+# Limits matching chk_report_attachments_name and chk_report_attachments_description.
+MAX_ATTACHMENT_NAME_LENGTH = 200
+MAX_ATTACHMENT_DESCRIPTION_LENGTH = 2000
+
 # Stands in for a file name with nothing usable left after sanitizing.
 UNNAMED = "unnamed"
 
@@ -54,23 +60,35 @@ class AttachmentNotAllowedOnAutoGeneralError(AttachmentError):
 
 
 class EmptyFileError(AttachmentError):
-    """The uploaded file has no bytes."""
+    """The declared file size is zero or less."""
 
 
 class FileTooLargeError(AttachmentError):
-    """The uploaded file is over MAX_FILE_SIZE_BYTES."""
+    """The declared file size is over MAX_FILE_SIZE_BYTES."""
 
 
 class UnsupportedFileTypeError(AttachmentError):
-    """The uploaded file's Content-Type is not in ALLOWED_FILE_TYPES."""
+    """The declared file type is not in ALLOWED_FILE_TYPES."""
+
+
+class InvalidAttachmentMetadataError(AttachmentError):
+    """attachment_name or attachment_description is blank or too long."""
 
 
 class InvalidUserError(AttachmentError):
     """uploaded_by is not a user in icid.users."""
 
 
+class AttachmentNotUploadedError(AttachmentError):
+    """The attachment is still pending: upload-complete has not been called for it."""
+
+
+class IdrNotDraftError(AttachmentError):
+    """The attachment's IDR is not a draft, so its attachments can no longer be edited."""
+
+
 class StorageUnavailableError(AttachmentError):
-    """Supabase Storage refused or failed an upload or a signed-URL request."""
+    """Supabase Storage refused or failed a signed-URL request."""
 
 
 def sanitize_file_name(file_name: Optional[str]) -> str:
@@ -127,12 +145,12 @@ def _check_not_auto_generated(report: dict[str, Any]) -> None:
 def validate_upload(report: dict[str, Any], file_type: str, size: int) -> None:
     """
     Check that a file may be attached to a report.
-    Takes the target report row, the normalized MIME type and the file size in bytes.
+    Takes the target report row, the normalized MIME type and the declared file size in bytes.
     Returns nothing; raises AttachmentNotAllowedOnAutoGeneralError, EmptyFileError, FileTooLargeError or UnsupportedFileTypeError.
     """
     _check_not_auto_generated(report)
 
-    if size == 0:
+    if size <= 0:
         raise EmptyFileError("File is empty")
 
     if size > MAX_FILE_SIZE_BYTES:
@@ -144,29 +162,62 @@ def validate_upload(report: dict[str, Any], file_type: str, size: int) -> None:
         )
 
 
-def upload_attachment(
+def validate_attachment_metadata(attachment_name: str, attachment_description: str) -> tuple[str, str]:
+    """
+    Check an attachment's name and description against the table's CHECK constraints.
+    Takes the name and description as sent; surrounding whitespace is trimmed.
+    Returns the trimmed (name, description); raises InvalidAttachmentMetadataError if either is blank or too long.
+    """
+    name = attachment_name.strip()
+    description = attachment_description.strip()
+
+    if not name:
+        raise InvalidAttachmentMetadataError("attachment_name must not be blank")
+
+    if len(name) > MAX_ATTACHMENT_NAME_LENGTH:
+        raise InvalidAttachmentMetadataError("attachment_name must be at most 200 characters")
+
+    if not description:
+        raise InvalidAttachmentMetadataError("attachment_description must not be blank")
+
+    if len(description) > MAX_ATTACHMENT_DESCRIPTION_LENGTH:
+        raise InvalidAttachmentMetadataError("attachment_description must be at most 2000 characters")
+
+    return name, description
+
+
+def upload_request(
     report: dict[str, Any],
-    file_name: Optional[str],
-    content_type: Optional[str],
-    content: bytes,
     uploaded_by: UUID,
+    file_name: str,
+    file_type: str,
+    file_size_bytes: int,
+    attachment_name: str,
+    attachment_description: str,
 ) -> Optional[dict[str, Any]]:
     """
-    Validate a file, store it in Storage, then record its metadata; the stored file is removed again if the record can't be written.
-    Takes the target report row, the uploaded name and Content-Type, the file bytes and the uploader's uuid.
-    Returns the new attachment row, None if the insert returned nothing; raises a validation AttachmentError, StorageUnavailableError if Storage refused the file, or InvalidUserError if uploaded_by is not a user.
+    Start a two-step upload: validate the file details, sign an upload URL for a new Storage path, and record the attachment as pending.
+    Takes the target report row, the uploader's uuid, the file's name, MIME type and size, and the attachment's name and description.
+    Returns the pending attachment row plus upload_url, upload_url_expires_at and upload_headers (the Content-Type the upload must send), None if the insert returned nothing; raises a validation AttachmentError, StorageUnavailableError or InvalidUserError.
     """
-    file_type = normalize_file_type(content_type)
-    validate_upload(report, file_type, len(content))
+    file_type = normalize_file_type(file_type)
+    validate_upload(report, file_type, file_size_bytes)
+    attachment_name, attachment_description = validate_attachment_metadata(attachment_name, attachment_description)
 
     attachment_id = uuid4()
     storage_path = build_storage_path(report["report_id"], attachment_id, file_name)
 
+    # Supabase's signed upload URL is fixed at ~2 hours by Storage; the client library has no
+    # option to shorten it. The expires_at we report is the window the client is asked to
+    # complete the upload in — Supabase itself would accept the URL for longer. Client-side
+    # upload timeout logic should honor upload_url_expires_at.
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=STORAGE_UPLOAD_URL_EXPIRY_SECONDS)
+
     try:
-        upload_file(storage_path, content, file_type)
+        upload_url = create_signed_upload_url(storage_path)
     except Exception as exc:
-        logger.error("Storage upload failed for %s: %s", storage_path, exc)
-        raise StorageUnavailableError("Could not store the file") from exc
+        logger.error("Storage could not sign an upload for %s: %s", storage_path, exc)
+        raise StorageUnavailableError("Could not create an upload link") from exc
 
     try:
         rows = insert_attachment(
@@ -174,29 +225,59 @@ def upload_attachment(
             report["report_id"],
             file_name or UNNAMED,
             file_type,
-            len(content),
+            file_size_bytes,
             storage_path,
             uploaded_by,
+            attachment_name,
+            attachment_description,
         )
     except ForeignKeyViolation as exc:
-        remove_storage_files([storage_path])
         if exc.diag.constraint_name == UPLOADED_BY_FK:
             raise InvalidUserError(UPLOADER_NOT_FOUND) from exc
         raise
-    except Exception:
-        remove_storage_files([storage_path])
-        raise
 
     if not rows:
-        remove_storage_files([storage_path])
         return None
 
-    return rows[0]
+    return {
+        **rows[0],
+        "upload_url": upload_url,
+        "upload_url_expires_at": expires_at,
+        "upload_headers": {"Content-Type": file_type},
+    }
+
+
+def upload_complete(report_id: UUID, attachment_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Finish a two-step upload by marking the attachment uploaded, so it is listed and downloadable; the client's word is trusted and repeating it is harmless.
+    Takes the report uuid and the attachment uuid.
+    Returns a one-row list with the attachment, an empty list if the report has no such attachment, or None on failure.
+    """
+    return mark_attachment_uploaded(report_id, attachment_id)
+
+
+def update_attachment_metadata(
+    idr: dict[str, Any],
+    report_id: UUID,
+    attachment_id: UUID,
+    attachment_name: str,
+    attachment_description: str,
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Replace an attachment's name and description; the file and its details are left alone.
+    Takes the IDR row, the report and attachment uuids, and the new name and description.
+    Returns a one-row list with the attachment, an empty list if there was none, or None on failure; raises IdrNotDraftError or InvalidAttachmentMetadataError.
+    """
+    if idr["status"] != "draft":
+        raise IdrNotDraftError("Only draft IDRs can be edited")
+
+    attachment_name, attachment_description = validate_attachment_metadata(attachment_name, attachment_description)
+    return update_attachment_metadata_row(report_id, attachment_id, attachment_name, attachment_description)
 
 
 def list_attachments(report_id: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    List a report's attachments, oldest upload first.
+    List a report's uploaded attachments, oldest upload first; pending ones are left out.
     Takes the report uuid.
     Returns a list of attachment rows (empty if none), or None on failure.
     """
@@ -205,10 +286,13 @@ def list_attachments(report_id: UUID) -> Optional[list[dict[str, Any]]]:
 
 def get_download_url(attachment: dict[str, Any]) -> dict[str, Any]:
     """
-    Generate a fresh signed URL for an attachment; nothing is cached.
+    Generate a fresh signed URL for an uploaded attachment; nothing is cached.
     Takes the attachment row; the URL downloads the file under its original file_name and lives STORAGE_URL_EXPIRY_SECONDS.
-    Returns {download_url, expires_at}; raises StorageUnavailableError if Storage can't sign it.
+    Returns {download_url, expires_at}; raises AttachmentNotUploadedError if it is still pending, StorageUnavailableError if Storage can't sign it.
     """
+    if not attachment["is_uploaded"]:
+        raise AttachmentNotUploadedError("Attachment upload has not been completed")
+
     # Stamped before the request, so the reported expiry is never later than the real one.
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=STORAGE_URL_EXPIRY_SECONDS)
 
@@ -223,7 +307,7 @@ def get_download_url(attachment: dict[str, Any]) -> dict[str, Any]:
 
 def delete_attachment(report_id: UUID, attachment: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
     """
-    Remove an attachment: its Storage file first (best-effort), then its metadata row regardless.
+    Remove an attachment, pending or uploaded: its Storage file first (best-effort), then its metadata row regardless.
     Takes the report uuid and the attachment row.
     Returns the delete query's result: a one-row list, an empty list if the row was already gone, or None on failure.
     """
@@ -233,7 +317,7 @@ def delete_attachment(report_id: UUID, attachment: dict[str, Any]) -> Optional[l
 
 def delete_all_storage_files_for_report(report_id: UUID) -> None:
     """
-    Remove from Storage every file attached to a report and to the addendums below it, ahead of deleting that report.
+    Remove from Storage every file attached to a report and to the addendums below it, pending ones included, ahead of deleting that report.
     Takes the report uuid.
     Returns nothing; failures are logged as warnings and never raised.
     """
@@ -243,6 +327,7 @@ def delete_all_storage_files_for_report(report_id: UUID) -> None:
     # (the row pointing at it is deleted anyway). If the report delete fails after
     # this runs, its attachment rows survive but their files may already be gone.
     # Both trade-offs are accepted: Storage and Postgres can't share a transaction.
+    # Pending rows are included: the client may have uploaded without calling upload-complete.
     rows = list_storage_paths_for_report_tree(report_id)
 
     if rows is None:

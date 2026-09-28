@@ -1,7 +1,7 @@
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
 from api.queries.idr_reports import get_idr_report
@@ -15,13 +15,20 @@ from api.schemas.report_attachment import (
     AttachmentResponse,
     DownloadUrl,
     DownloadUrlResponse,
+    UpdateAttachmentMetadataBody,
+    UploadCompleteBody,
+    UploadRequest,
+    UploadRequestBody,
+    UploadRequestResponse,
 )
 from api.services.attachments import (
-    MAX_FILE_SIZE_BYTES,
     AttachmentError,
     AttachmentNotAllowedOnAutoGeneralError,
+    AttachmentNotUploadedError,
     EmptyFileError,
     FileTooLargeError,
+    IdrNotDraftError,
+    InvalidAttachmentMetadataError,
     InvalidUserError,
     StorageUnavailableError,
     UPLOADER_NOT_FOUND,
@@ -29,7 +36,9 @@ from api.services.attachments import (
     delete_attachment,
     get_download_url,
     list_attachments,
-    upload_attachment,
+    update_attachment_metadata,
+    upload_complete,
+    upload_request,
 )
 
 router = APIRouter(prefix="/v1/idrs", tags=["Attachments"])
@@ -38,7 +47,10 @@ router = APIRouter(prefix="/v1/idrs", tags=["Attachments"])
 ERROR_STATUS: dict[type[AttachmentError], int] = {
     AttachmentNotAllowedOnAutoGeneralError: 400,
     EmptyFileError: 400,
+    InvalidAttachmentMetadataError: 400,
     InvalidUserError: 400,
+    AttachmentNotUploadedError: 404,
+    IdrNotDraftError: 409,
     FileTooLargeError: 413,
     UnsupportedFileTypeError: 415,
     StorageUnavailableError: 502,
@@ -85,7 +97,7 @@ def _require_draft(idr: dict[str, Any]) -> None:
 
 def _load_attachment(report_id: UUID, attachment_id: UUID) -> dict[str, Any]:
     """
-    Fetch one attachment on a report.
+    Fetch one attachment on a report, pending or uploaded.
     Takes the report and attachment uuids from the path.
     Returns the attachment row; raises 404 if the report has no such attachment.
     """
@@ -97,49 +109,116 @@ def _load_attachment(report_id: UUID, attachment_id: UUID) -> dict[str, Any]:
     return attachment
 
 
-@router.post("/{idr_id}/reports/{report_id}/attachments", response_model=AttachmentResponse, status_code=201)
-def upload_report_attachment(
-    idr_id: UUID,
-    report_id: UUID,
-    file: UploadFile = File(...),
-    uploaded_by: UUID = Form(...),
-) -> AttachmentResponse:
+def _single_attachment(rows: Optional[list[dict[str, Any]]], failure: str) -> Attachment:
     """
-    Attach a file (multipart form: file + uploaded_by) to a report on a draft IDR.
-    Takes the IDR and report uuids as path parameters and the uploaded file and uploader uuid as form fields.
-    Returns an AttachmentResponse; raises 404, 409 (not draft), 400 (unknown uploader, auto-General or empty), 403 (uploader not on project), 413, 415 and 502.
+    Turn a one-row attachment query result into the response model.
+    Takes the query result and the 500 message to use if it failed.
+    Returns the Attachment; raises 500 if the result is None, 404 if it is empty.
+    """
+    if rows is None:
+        raise HTTPException(status_code=500, detail=failure)
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    return Attachment.model_validate(rows[0])
+
+
+@router.post(
+    "/{idr_id}/reports/{report_id}/attachments/upload-request",
+    response_model=UploadRequestResponse,
+    status_code=201,
+)
+def request_attachment_upload(idr_id: UUID, report_id: UUID, body: UploadRequestBody) -> UploadRequestResponse:
+    """
+    Start uploading a file to a report on a draft IDR: records a pending attachment and returns a signed URL to upload the file to.
+    Takes the IDR and report uuids as path parameters and an UploadRequestBody.
+    Returns an UploadRequestResponse; raises 404, 409 (not draft), 400 (unknown uploader, auto-General, empty file, blank or long name/description), 403 (uploader not on project), 413, 415, 500 and 502.
     """
     idr, report = _load_report(idr_id, report_id)
     _require_draft(idr)
 
-    if get_user_by_id(str(uploaded_by)) is None:
+    if get_user_by_id(str(body.uploaded_by)) is None:
         raise HTTPException(status_code=400, detail=UPLOADER_NOT_FOUND)
 
-    if not is_user_on_project(uploaded_by, idr["project_id"]):
+    if not is_user_on_project(body.uploaded_by, idr["project_id"]):
         raise HTTPException(status_code=403, detail="Uploader is not assigned to this project")
 
-    # One byte past the limit is enough to know the file is too large without reading it all.
-    content = file.file.read(MAX_FILE_SIZE_BYTES + 1)
-
     try:
-        row = upload_attachment(report, file.filename, file.content_type, content, uploaded_by)
+        row = upload_request(
+            report,
+            body.uploaded_by,
+            body.file_name,
+            body.file_type,
+            body.file_size_bytes,
+            body.attachment_name,
+            body.attachment_description,
+        )
     except AttachmentError as exc:
         raise _http_error(exc) from exc
 
     if row is None:
         raise HTTPException(status_code=500, detail="Failed to save attachment")
 
+    return UploadRequestResponse(
+        status="success",
+        message="Upload URL created",
+        data=UploadRequest.model_validate(row),
+    )
+
+
+@router.post("/{idr_id}/reports/{report_id}/attachments/upload-complete", response_model=AttachmentResponse)
+def complete_attachment_upload(idr_id: UUID, report_id: UUID, body: UploadCompleteBody) -> AttachmentResponse:
+    """
+    Mark a pending attachment on a draft IDR as uploaded, once the client has stored its file at the signed URL.
+    Takes the IDR and report uuids as path parameters and an UploadCompleteBody.
+    Returns an AttachmentResponse; raises 404, 409 (not draft) and 500.
+    """
+    idr, _ = _load_report(idr_id, report_id)
+    _require_draft(idr)
+
+    rows = upload_complete(report_id, body.attachment_id)
+
     return AttachmentResponse(
         status="success",
         message="Attachment uploaded",
-        data=Attachment.model_validate(row),
+        data=_single_attachment(rows, "Failed to complete upload"),
+    )
+
+
+@router.put("/{idr_id}/reports/{report_id}/attachments/{attachment_id}", response_model=AttachmentResponse)
+def update_report_attachment(
+    idr_id: UUID,
+    report_id: UUID,
+    attachment_id: UUID,
+    body: UpdateAttachmentMetadataBody,
+) -> AttachmentResponse:
+    """
+    Replace an attachment's name and description on a draft IDR.
+    Takes the IDR, report and attachment uuids as path parameters and an UpdateAttachmentMetadataBody.
+    Returns an AttachmentResponse; raises 404, 409 (not draft), 400 (blank or long name/description) and 500.
+    """
+    idr, _ = _load_report(idr_id, report_id)
+    _load_attachment(report_id, attachment_id)
+
+    try:
+        rows = update_attachment_metadata(
+            idr, report_id, attachment_id, body.attachment_name, body.attachment_description
+        )
+    except AttachmentError as exc:
+        raise _http_error(exc) from exc
+
+    return AttachmentResponse(
+        status="success",
+        message="Attachment updated",
+        data=_single_attachment(rows, "Failed to update attachment"),
     )
 
 
 @router.get("/{idr_id}/reports/{report_id}/attachments", response_model=AttachmentListResponse)
 def list_report_attachments(idr_id: UUID, report_id: UUID) -> AttachmentListResponse:
     """
-    List a report's attachments, oldest upload first; works on draft and submitted IDRs.
+    List a report's uploaded attachments, oldest upload first; works on draft and submitted IDRs.
     Takes the IDR and report uuids as path parameters.
     Returns an AttachmentListResponse (empty data list if none); raises 404 and 500.
     """
@@ -165,7 +244,7 @@ def get_attachment_download_url(idr_id: UUID, report_id: UUID, attachment_id: UU
     """
     Issue a short-lived signed URL the frontend can fetch the file from; works on draft and submitted IDRs.
     Takes the IDR, report and attachment uuids as path parameters.
-    Returns a DownloadUrlResponse with download_url and expires_at; raises 404 and 502.
+    Returns a DownloadUrlResponse with download_url and expires_at; raises 404 (including a pending upload) and 502.
     """
     _load_report(idr_id, report_id)
     attachment = _load_attachment(report_id, attachment_id)
@@ -189,7 +268,7 @@ def get_attachment_download_url(idr_id: UUID, report_id: UUID, attachment_id: UU
 )
 def delete_report_attachment(idr_id: UUID, report_id: UUID, attachment_id: UUID) -> Response:
     """
-    Remove an attachment from a report on a draft IDR: its Storage file (best-effort), then its record.
+    Remove an attachment, pending or uploaded, from a report on a draft IDR: its Storage file (best-effort), then its record.
     Takes the IDR, report and attachment uuids as path parameters.
     Returns an empty 204; raises 404, 409 (not draft) and 500.
     """

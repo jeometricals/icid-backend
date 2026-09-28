@@ -26,13 +26,17 @@ def _bucket():
     return get_client().storage.from_(STORAGE_BUCKET_NAME)
 
 
-def upload_file(path: str, content: bytes, content_type: str) -> None:
+def create_signed_upload_url(path: str) -> str:
     """
-    Store a file in the attachments bucket, refusing to overwrite an existing object.
-    Takes the object path, the file bytes and its MIME type.
-    Returns nothing; raises the Storage client's error on failure.
+    Make a signed URL the client can upload one object to directly, without other credentials.
+    Takes the object path the file must be stored at.
+    Returns the signed upload URL, or raises RuntimeError if Storage returned none.
     """
-    _bucket().upload(path, content, {"content-type": content_type, "upsert": "false"})
+    result = _bucket().create_signed_upload_url(path)
+    url = result.get("signed_url") or result.get("signedUrl")
+    if not url:
+        raise RuntimeError(f"Storage returned no signed upload URL for {path}")
+    return url
 
 
 def remove_files(paths: list[str]) -> None:
