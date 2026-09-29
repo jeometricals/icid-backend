@@ -11,6 +11,7 @@ class ReportType(StrEnum):
     GEN = "GEN"
     SWR = "SWR"
     HC = "HC"
+    SWCB = "SWCB"
     WM_1 = "WM_1"
     WM_2 = "WM_2"
     WM_3 = "WM_3"
@@ -52,6 +53,7 @@ TYPE_LABELS: dict[str, str] = {
     ReportType.GEN.value: "General",
     ReportType.SWR.value: "Sewer",
     ReportType.HC.value: "House Connection",
+    ReportType.SWCB.value: "Sidewalk, Curb, Concrete Base",
     ReportType.WM_1.value: "Water Main (Sheet 1)",
     ReportType.WM_2.value: "Water Main (Sheet 2)",
     ReportType.WM_3.value: "Water Main (Sheet 3)",

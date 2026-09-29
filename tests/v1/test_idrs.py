@@ -8,7 +8,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from api.schemas.idr_report import ADDENDUM_TYPES, ReportType
+from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, TYPE_LABELS, label_for
 from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
 
 # ---------------------------------------------------------------------------
@@ -381,6 +381,14 @@ class TestAddReport:
         assert report["report_data"] == {}
         assert report["page_number"] is None
 
+    def test_swcb_report_can_be_created(self, client):
+        swcb_row = {**MOCK_NEW_SWR_ROW, "report_type": "SWCB"}
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[swcb_row]) as mocks:
+            response = client.post(self.url, json={"report_type": "SWCB"})
+        assert response.status_code == 201
+        assert response.json()["data"]["report_type"] == "SWCB"
+        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "SWCB", False, None)
+
     def test_insert_defaults_to_main_report_without_parent(self, client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
             client.post(self.url, json={"report_type": "SWR"})
@@ -509,8 +517,16 @@ class TestAddReport:
 
 
 class TestReportTypeEnum:
-    def test_has_21_types(self):
-        assert len(ReportType) == 21
+    def test_has_22_types(self):
+        assert len(ReportType) == 22
+
+    def test_swcb_is_a_main_report_type_with_its_label(self):
+        assert ReportType("SWCB") == ReportType.SWCB
+        assert ReportType.SWCB not in ADDENDUM_TYPES
+        assert label_for("SWCB") == "Sidewalk, Curb, Concrete Base"
+
+    def test_every_type_has_a_label(self):
+        assert set(TYPE_LABELS) == {t.value for t in ReportType}
 
     def test_addendum_types_are_report_types_and_exclude_dsp(self):
         assert ADDENDUM_TYPES <= set(ReportType)
@@ -572,6 +588,20 @@ class TestSaveReportData:
         sql = mocks["idr_reports"].call_args.args[0]
         assert "r.idr_id = %s AND r.report_id = %s" in sql
         assert "i.status = 'draft'" in sql
+
+    def test_swcb_report_stores_arbitrary_body_unchanged(self, client):
+        swcb_body = {
+            "description": "Replaced 3 sidewalk flags.",
+            "sidewalk": {"flags": [{"sqft": "25", "thickness": "4in"}]},
+            "curb": None,
+        }
+        swcb_row = {**MOCK_GEN_REPORT_ROW, "report_type": "SWCB", "report_data": swcb_body}
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[swcb_row]) as mocks:
+            response = client.put(self.url, json=swcb_body)
+        assert response.status_code == 200
+        assert response.json()["data"]["report_type"] == "SWCB"
+        assert response.json()["data"]["report_data"] == swcb_body
+        assert mocks["idr_reports"].call_args.args[1][0].obj == swcb_body
 
     def test_empty_object_is_accepted(self, client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
@@ -1470,6 +1500,20 @@ class TestRegenerateAutoGeneral:
         assert "description" in m["create"].call_args.args[1]
         m["update"].assert_not_called()
         m["delete"].assert_not_called()
+
+    def test_swcb_contributes_to_auto_general_with_its_label(self, client):
+        children = [
+            _child("SWCB", {"description": "Poured 40 ft of curb."}),
+            _child("SWR", {"description": "Laid 20 ft of 12in pipe."}),
+        ]
+        with patched_service(idr=IDR_ACTIVE, general=None, main_reports=children) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_called_once()
+        assert m["create"].call_args.args[1]["description"] == (
+            "Sidewalk, Curb, Concrete Base: Poured 40 ft of curb.\n\n"
+            "Sewer: Laid 20 ft of 12in pipe.\n\n"
+            f"{DESCRIPTION_FOOTER}"
+        )
 
     def test_case_c_refreshes_existing_auto_general(self, client):
         with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=[_child("SWR"), _child("CONC")]) as m:
