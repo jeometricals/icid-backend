@@ -57,7 +57,7 @@ TYPE_LABELS: dict[str, str] = {
     ReportType.WM_1.value: "Water Main (Sheet 1)",
     ReportType.WM_2.value: "Water Main (Sheet 2)",
     ReportType.WM_3.value: "Water Main (Sheet 3)",
-    ReportType.AC.value: "Asphalt Concrete",
+    ReportType.AC.value: "Asphaltic Concrete",
     ReportType.CONC.value: "Concrete (Structures)",
     ReportType.BOX.value: "Box Sewer",
     ReportType.PILE.value: "Pile Driving",

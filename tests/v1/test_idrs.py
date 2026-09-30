@@ -525,6 +525,11 @@ class TestReportTypeEnum:
         assert ReportType.SWCB not in ADDENDUM_TYPES
         assert label_for("SWCB") == "Sidewalk, Curb, Concrete Base"
 
+    def test_ac_is_a_main_report_type_with_its_label(self):
+        assert ReportType("AC") == ReportType.AC
+        assert ReportType.AC not in ADDENDUM_TYPES
+        assert TYPE_LABELS["AC"] == "Asphaltic Concrete"
+
     def test_every_type_has_a_label(self):
         assert set(TYPE_LABELS) == {t.value for t in ReportType}
 
