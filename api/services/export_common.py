@@ -199,15 +199,15 @@ def mark_truncated(lines: list[str], width: int) -> list[str]:
     return lines[:-1] + [lines[-1][:room].rstrip() + TEXT_OVERFLOW]
 
 
-def write_lines(workbook: WorkbookTemplate, sheet: str, rows: range, lines: list[str]) -> None:
+def write_lines(workbook: WorkbookTemplate, sheet: str, rows: range, lines: list[str], column: str = "B") -> None:
     """
     Write lines onto a block of ruled lines, left-aligned, blanking the rest of the block.
-    Takes the workbook, sheet name, the rows (column B) and the lines.
+    Takes the workbook, sheet name, the rows, the lines and the column the lines start in (B unless given).
     Returns nothing.
     """
     for index, row in enumerate(rows):
-        workbook.set_cell(sheet, f"B{row}", lines[index] if index < len(lines) else None)
-        workbook.align_left(sheet, f"B{row}")
+        workbook.set_cell(sheet, f"{column}{row}", lines[index] if index < len(lines) else None)
+        workbook.align_left(sheet, f"{column}{row}")
 
 
 # ---- Pay items --------------------------------------------------------------
@@ -490,3 +490,88 @@ def stamp_safety(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, d
         workbook.set_cell(sheet, f"{layout.remarks_column}{row}", remark)
         wrote = wrote or answer is not None or remark is not None
     return wrote
+
+
+# ---- Long text: front page -> back page -> Report Cont ----------------------
+#
+# A report's Description of Work fills its front page's ruled lines; what doesn't fit continues on the back page's
+# remark lines under "Description of work (continued):", followed by the comments ("Comments:" when both are there).
+# What doesn't fit there continues on the Report Cont sheet, and what doesn't fit on Report Cont is cut with a note
+# pointing to ICID. The template has one Report Cont, so only one report per export can continue onto it; a report
+# that can't has its back page's last line cut instead.
+
+REPORT_CONT = "Report Cont"
+REPORT_CONT_DAY_CELLS = ("I11", "J11", "K11", "L11", "M11", "N11", "O11")  # S M T W T F S
+REPORT_CONT_PROJECT_CELLS = {"G14": "project_id", "P14": "registration_code", "I15": "project_description",
+                             "F17": "borough"}
+
+
+@dataclass(frozen=True)
+class TextArea:
+    """A block of ruled lines: its rows, the column the text goes in, and the characters a line holds."""
+
+    rows: range
+    column: str
+    line_chars: int
+
+
+REPORT_CONT_TEXT = TextArea(rows=range(21, 46), column="B", line_chars=85)  # B21 … B45, 10 pt lines spanning B:AI
+
+
+@dataclass(frozen=True)
+class TextFlow:
+    """Where a report's description and comments landed."""
+
+    front: list[str]
+    back: list[str]
+    report_cont: list[str]
+    past_front: bool   # the description continued past the front page
+    past_back: bool    # the text continued past the back page (onto Report Cont, or cut when it isn't available)
+
+
+def flow_text(description: Any, comments: Any, front: TextArea, back: TextArea,
+              report_cont: Optional[TextArea]) -> TextFlow:
+    """
+    Lay a report's description and comments out across its front page, back page and (when available) Report Cont.
+    Takes the description and comments (non-text counts as empty), the front and back areas, and Report Cont's area,
+    or None when another report already uses Report Cont.
+    Returns a TextFlow with each area's lines; text past the last available area is cut with the "continued" note.
+    """
+    queue = paragraphs(description)
+    front_lines = fill_lines(queue, len(front.rows), front.line_chars)
+    past_front = bool(queue)
+    remarks = paragraphs(comments)
+    continuation = []
+    if queue:
+        continuation += ["Description of work (continued):"] + queue
+        if remarks:
+            continuation.append("Comments:")
+    continuation += remarks
+    back_lines = fill_lines(continuation, len(back.rows), back.line_chars)
+    past_back = bool(continuation)
+    cont_lines: list[str] = []
+    if continuation and report_cont is None:
+        back_lines = mark_truncated(back_lines, back.line_chars)
+    elif continuation:
+        cont_lines = fill_lines(continuation, len(report_cont.rows), report_cont.line_chars)
+        if continuation:
+            cont_lines = mark_truncated(cont_lines, report_cont.line_chars)
+    return TextFlow(front_lines, back_lines, cont_lines, past_front, past_back)
+
+
+def stamp_report_cont(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any],
+                      inspector: Optional[str], lines: list[str]) -> None:
+    """
+    Fill the Report Cont sheet: its header (date, day, project details as values, inspector; its blank-line
+    placeholders cleared) and the continued text on its ruled lines.
+    Takes the workbook, IDR row, project details, inspector name and the lines.
+    Returns nothing.
+    """
+    workbook.set_cell(REPORT_CONT, "I10", short_date(idr["report_date"]))
+    highlight_day(workbook, REPORT_CONT, REPORT_CONT_DAY_CELLS, idr["report_date"])
+    workbook.set_cell(REPORT_CONT, "U10", None)  # I.R. No. "__________"
+    workbook.set_cell(REPORT_CONT, "AA10", "Sheet No.:")  # was "Sheet No.: ____ of ____"
+    for cell, field in REPORT_CONT_PROJECT_CELLS.items():
+        workbook.set_cell(REPORT_CONT, cell, project.get(field))
+    workbook.set_cell(REPORT_CONT, "H19", inspector)
+    write_lines(workbook, REPORT_CONT, REPORT_CONT_TEXT.rows, lines, REPORT_CONT_TEXT.column)

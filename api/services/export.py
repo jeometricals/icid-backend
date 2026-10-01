@@ -2,7 +2,8 @@
 Exports a submitted IDR as an .xlsx file built on the DDC report-forms template.
 
 This module loads the IDR's data and assembles the workbook; each report's pages are stamped by its own module
-(export_general for the General). Pages that hold nothing stay hidden, so the file prints only the IDR's pages.
+(export_general for the General, export_swcb for a Sidewalk, Curb, Concrete Base report). Pages that hold nothing stay
+hidden, so the file prints only the IDR's pages.
 """
 
 from dataclasses import dataclass
@@ -10,13 +11,15 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-from api.queries.idr_reports import get_general_report, list_non_general_main_reports
+from api.queries.idr_reports import get_general_report, list_non_general_main_reports, list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
 from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
+from api.services import export_swcb
 from api.services.auto_general import build_auto_general_data
-from api.services.export_general import GEN_BACK, REPORT_CONT, stamp_general
+from api.services.export_common import REPORT_CONT
+from api.services.export_general import GEN_BACK, stamp_general
 from api.services.xlsx_template import WorkbookTemplate
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "report_forms.xlsx"
@@ -76,6 +79,19 @@ def _general_for_export(idr_id: UUID) -> tuple[dict[str, Any], Optional[int]]:
     return build_auto_general_data(contributing), None
 
 
+def _swcb_report(idr_id: UUID) -> Optional[dict[str, Any]]:
+    """
+    Find the IDR's SWCB report to print on Conc Fr / Conc Bk.
+    Takes the IDR uuid.
+    Returns the first non-addendum SWCB report in page order, or None; raises ExportDataError if reports can't load.
+    The template has one Conc Fr / Conc Bk pair, so a second SWCB report in the same IDR isn't exported yet.
+    """
+    reports = list_reports_for_idr(idr_id)
+    if reports is None:
+        raise ExportDataError("Failed to load IDR reports")
+    return next((r for r in reports if r["report_type"] == "SWCB" and not r["is_addendum"]), None)
+
+
 def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) -> None:
     """
     Write the project details the forms' header formulas read (kept even though visible pages get the values directly).
@@ -96,7 +112,7 @@ def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) ->
 
 def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
-    Build a submitted IDR's .xlsx export from the report-forms template.
+    Build a submitted IDR's .xlsx export from the report-forms template: the General's pages, then the SWCB report's.
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError, IdrNotSubmittedError or ExportDataError.
     """
@@ -112,13 +128,25 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     project = {**project, "contractor": get_project_contractor_name(idr["project_id"])}
     inspector = _inspector_name(get_user_by_id(idr["reporter_uuid"]))
     general_data, page_number = _general_for_export(idr_id)
+    swcb = _swcb_report(idr_id)
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
     _stamp_contract_info(workbook, project)
     pages = stamp_general(workbook, idr, project, inspector, general_data, page_number)
+    report_cont_owner = GEN_BACK if REPORT_CONT in pages else None
 
-    # The template keeps Report Cont near the front; as the General's continuation it prints after Gen Bk
-    workbook.move_sheet(REPORT_CONT, after=GEN_BACK)
+    if swcb is not None:
+        # The General comes first, so it keeps Report Cont if it needed it; the SWCB's long text is then cut instead
+        swcb_pages = export_swcb.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
+                                        page_number=swcb["page_number"], report_data=swcb["report_data"],
+                                        report_cont_available=report_cont_owner is None)
+        if REPORT_CONT in swcb_pages:
+            report_cont_owner = export_swcb.CONC_BACK
+        pages += [page for page in swcb_pages if page not in pages]
+
+    # The template keeps Report Cont near the front; it prints right after the back page of the report it continues
+    # (visible sheets print in tab order, and the first page listed, Gen Fr, is the tab the file opens on)
+    workbook.move_sheet(REPORT_CONT, after=report_cont_owner or GEN_BACK)
     for page in pages:
         workbook.fit_to_letter_page(page)
     workbook.show_only(pages)

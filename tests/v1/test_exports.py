@@ -18,7 +18,8 @@ from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
 )
-from api.services.export_general import GEN_FRONT_PAY_ITEMS, REPORT_CONT_LINE_CHARS
+from api.services.export_common import REPORT_CONT_TEXT
+from api.services.export_general import GEN_FRONT_PAY_ITEMS
 from api.services.xlsx_template import WorkbookTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -91,10 +92,11 @@ GENERAL = {
 
 @contextmanager
 def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers Contracting Co.", user=USER,
-                   general=GENERAL, main_reports=None):
+                   general=GENERAL, main_reports=None, reports=None):
     """
     Patch the queries generate_idr_export reads, so it runs without a database.
-    Takes the IDR, project, contractor name, user, General report (or None) and non-General main reports.
+    Takes the IDR, project, contractor name, user, General report (or None), non-General main reports, and all the
+    IDR's reports (where the SWCB report is found).
     Yields a dict of the mocks.
     """
     with patch.object(export, "get_idr_by_id", return_value=idr) as gi, \
@@ -102,8 +104,8 @@ def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers 
          patch.object(export, "get_project_contractor_name", return_value=contractor) as gc, \
          patch.object(export, "get_user_by_id", return_value=user) as gu, \
          patch.object(export, "get_general_report", return_value=general) as gg, \
-         patch.object(export, "list_non_general_main_reports", return_value=main_reports or []) as lm:
-        yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm}
+         patch.object(export, "list_non_general_main_reports", return_value=main_reports or []) as lm,          patch.object(export, "list_reports_for_idr", return_value=reports or []) as lr:
+        yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm, "reports": lr}
 
 
 def exported_workbook(**overrides) -> openpyxl.Workbook:
@@ -529,7 +531,7 @@ class TestDescriptionCascade:
     def test_text_past_report_cont_is_cut_with_a_note(self, full_cascade):
         sheet = full_cascade[1]["Report Cont"]
         assert sheet["B45"].value.endswith("… (continued in ICID)")
-        assert len(sheet["B45"].value) <= REPORT_CONT_LINE_CHARS
+        assert len(sheet["B45"].value) <= REPORT_CONT_TEXT.line_chars
 
     def test_report_cont_header_is_stamped_and_placeholders_cleared(self, full_cascade):
         sheet = full_cascade[1]["Report Cont"]
@@ -667,7 +669,9 @@ def swcb_render_bytes(idr: dict = SUBMITTED_IDR) -> bytes:
     Returns the .xlsx bytes.
     """
     workbook = WorkbookTemplate(TEMPLATE)
-    export_swcb.render(workbook, idr, PROJECT, "Benny Bowers Contracting Co.", inspector="Genghis Khan", page_number=2)
+    pages = export_swcb.render(workbook, idr, PROJECT, "Benny Bowers Contracting Co.", inspector="Genghis Khan",
+                               page_number=2)
+    workbook.show_only(pages)  # as the dispatcher does with the pages render returns
     return workbook.to_bytes()
 
 
@@ -768,14 +772,15 @@ OPERATION_CELLS = ("S29", "K29", "E29", "Z29")  # base, sidewalk, curb, structur
 
 
 class TestSwcbFront:
-    def test_description_fills_five_left_aligned_lines_and_is_cut_after(self):
+    def test_description_fills_five_left_aligned_lines_then_continues_on_conc_bk(self):
         _, workbook = swcb_body(description=" ".join(f"word{n}" for n in range(120)))
         sheet = workbook["Conc Fr"]
         lines = [sheet[f"B{row}"].value for row in range(23, 28)]
         assert all(lines) and lines[0].startswith("word0 ")
-        assert lines[-1].endswith("… (continued in ICID)")
+        assert "continued in ICID" not in lines[-1]
         assert sheet["B22"].value is None and sheet["B28"].value is None
         assert sheet["B23"].alignment.horizontal == "left"
+        assert workbook["Conc Bk"]["C20"].value == "Description of work (continued):"
 
     def test_base_is_ticked_from_a_base_answer(self):
         sheet = swcb_body(inspectionMatrix=matrix(subgradeCompacted={"base": "N", "sidewalk": None, "curb": None}))[1]["Conc Fr"]
@@ -924,15 +929,137 @@ class TestSwcbBack:
         assert (sheet["R44"].value, sheet["R49"].value) == ("Good", "Swept")
         assert sheet["R40"].value is None
 
-    def test_remarks_lines_stay_empty_for_now(self):
+    def test_comments_go_on_the_remarks_lines_when_the_description_fits(self):
         sheet = swcb_body(description="Poured curb.", comments="Visitor from DEP.")[1]["Conc Bk"]
         assert sheet["C19"].value == "Remarks:"
-        assert [sheet[f"C{row}"].value for row in range(20, 35)] == [None] * 15
+        assert sheet["C20"].value == "Visitor from DEP."  # no "Comments:" label when only comments continue
+        assert sheet["C20"].alignment.horizontal == "left"
+        assert [sheet[f"C{row}"].value for row in range(21, 35)] == [None] * 14
 
     def test_signatures_stay_blank(self):
         sheet = swcb_body(description="Poured curb.")[1]["Conc Bk"]
         assert [sheet[c].value for c in ("C59", "S59", "AE59")] == [None, None, None]
         assert sheet["C60"].value == "Inspector's Signature"
+
+
+# ---------------------------------------------------------------------------
+# export_swcb.render: the description / comments cascade (Conc Fr -> Conc Bk Remarks -> Report Cont)
+# ---------------------------------------------------------------------------
+
+def swcb_pages_and_book(report_cont_available: bool = True, **report_data) -> tuple[list[str], openpyxl.Workbook]:
+    """
+    Render an SWCB report and return the pages render reported along with the result opened read-only.
+    Takes whether Report Cont is free, and report_data fields as keyword arguments.
+    Returns (render's pages, the workbook).
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    pages = export_swcb.render(workbook, SUBMITTED_IDR, PROJECT, None, inspector="Genghis Khan",
+                               report_data=report_data, report_cont_available=report_cont_available)
+    return pages, openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), read_only=True)
+
+
+class TestSwcbCascade:
+    def test_level_1_short_description_stays_on_conc_fr(self):
+        pages, workbook = swcb_pages_and_book(description="Poured curb along Main St.")
+        assert workbook["Conc Fr"]["B23"].value == "Poured curb along Main St."
+        assert [workbook["Conc Bk"][f"C{row}"].value for row in range(20, 35)] == [None] * 15
+        assert workbook["Conc Bk"]["C52"].value is None
+        assert pages == ["Conc Fr", "Conc Bk"]
+
+    def test_level_2_spills_onto_the_conc_bk_remarks(self):
+        pages, workbook = swcb_pages_and_book(description=words(80))
+        assert all(workbook["Conc Fr"][f"B{row}"].value for row in range(23, 28))
+        back = workbook["Conc Bk"]
+        assert back["C20"].value == "Description of work (continued):"
+        remarks = [back[f"C{row}"].value for row in range(21, 35) if back[f"C{row}"].value]
+        assert remarks and remarks[-1].endswith("word79")  # the rest of the description, ending with its last word
+        assert back["C52"].value is None  # nothing continues past the Remarks
+        assert pages == ["Conc Fr", "Conc Bk"]
+
+    def test_level_3_continues_on_report_cont_and_ticks_attached_pages(self):
+        pages, workbook = swcb_pages_and_book(description=words(600))
+        back = workbook["Conc Bk"]
+        assert all(back[f"C{row}"].value for row in range(20, 35))
+        assert back["C52"].value == "X"
+        assert back["C52"].font.sz == 6
+        assert (back["C52"].alignment.horizontal, back["C52"].alignment.vertical) == ("center", "center")
+        cont = workbook["Report Cont"]
+        assert cont["B21"].value.startswith("word")
+        assert (cont["I10"].value, cont["H19"].value) == ("9/30/26", "Genghis Khan")
+        assert cont["B45"].value.endswith("… (continued in ICID)")  # 600 words outrun Report Cont too
+        assert pages == ["Conc Fr", "Conc Bk", "Report Cont"]
+
+    def test_comments_follow_the_description_onto_report_cont(self):
+        # Enough description to fill the Remarks, so the comments land on Report Cont
+        pages, workbook = swcb_pages_and_book(description=words(220), comments="Visitor from DEP at 10am.")
+        cont = [workbook["Report Cont"][f"B{row}"].value for row in range(21, 46)]
+        assert "Comments:" in cont
+        assert cont[cont.index("Comments:") + 1] == "Visitor from DEP at 10am."
+        assert pages[-1] == "Report Cont"
+
+    def test_without_report_cont_the_remarks_are_cut_and_nothing_is_ticked(self):
+        pages, workbook = swcb_pages_and_book(report_cont_available=False, description=words(600))
+        back = workbook["Conc Bk"]
+        assert back["C34"].value.endswith("… (continued in ICID)")
+        assert len(back["C34"].value) <= 75
+        assert back["C52"].value is None
+        assert pages == ["Conc Fr", "Conc Bk"]
+
+
+# ---------------------------------------------------------------------------
+# generate_idr_export with an SWCB report (the dispatcher)
+# ---------------------------------------------------------------------------
+
+def swcb_report(page_number: int = 2, **report_data) -> dict:
+    """
+    Build the SWCB report row list_reports_for_idr returns.
+    Takes its page number and report_data fields as keyword arguments.
+    Returns the row.
+    """
+    return {"report_id": UUID("1b2c3d4e-5f60-4718-8293-a4b5c6d7e8f9"), "report_type": "SWCB", "is_addendum": False,
+            "page_number": page_number, "report_data": report_data}
+
+
+class TestSwcbExport:
+    def test_an_swcb_report_is_exported_on_conc_fr_and_conc_bk(self):
+        content = export_bytes(reports=[swcb_report(description="Formed and poured curb.", structural=True)])
+        assert visible_sheets(content) == ["Gen Fr", "Conc Fr", "Conc Bk"]
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Fr"]
+        assert sheet["B23"].value == "Formed and poured curb."
+        assert sheet["Z29"].value == "X"
+
+    def test_the_header_gets_the_inspector_and_the_reports_own_page_number(self):
+        content = export_bytes(reports=[swcb_report(page_number=2, description="x")])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Fr"]
+        assert sheet["H17"].value == "Genghis Khan"
+        assert (sheet["AH8"].value, sheet["AM8"].value) == (2, 3)
+
+    def test_without_an_swcb_report_conc_fr_stays_hidden(self):
+        addendum_only = {**swcb_report(), "is_addendum": True}
+        assert visible_sheets(export_bytes(reports=[addendum_only])) == ["Gen Fr"]
+
+    def test_report_cont_prints_after_conc_bk_when_the_swcb_uses_it(self):
+        content = export_bytes(reports=[swcb_report(description=words(600))])
+        assert visible_sheets(content) == ["Gen Fr", "Conc Fr", "Conc Bk", "Report Cont"]
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        names = workbook.sheetnames
+        assert names.index("Conc Bk") + 1 == names.index("Report Cont")
+        assert workbook.active.title == "Gen Fr"
+        # The one sheet-scoped name, AC Fr's print area, moved with AC Fr when Report Cont moved past it
+        xml = zipfile.ZipFile(io.BytesIO(content)).read("xl/workbook.xml").decode()
+        assert re.search(r'localSheetId="(\d+)"', xml).group(1) == str(names.index("AC Fr"))
+        assert re.search(r"<definedName [^>]*>([^<]*)</definedName>", xml).group(1) == "'AC Fr'!$A$1:$AQ$63"
+
+    def test_the_general_keeps_report_cont_and_the_swcb_text_is_cut(self):
+        content = export_bytes(general=general_with(description=words(600)),
+                               reports=[swcb_report(description=words(600))])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Report Cont", "Conc Fr", "Conc Bk"]
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert workbook.sheetnames.index("Gen Bk") + 1 == workbook.sheetnames.index("Report Cont")
+        back = workbook["Conc Bk"]
+        assert back["C34"].value.endswith("… (continued in ICID)")
+        assert back["C52"].value is None
+        assert workbook["Report Cont"]["B21"].value.startswith("word")  # the General's continuation
 
 
 # ---------------------------------------------------------------------------

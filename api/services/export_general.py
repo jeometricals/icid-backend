@@ -15,15 +15,14 @@ Cell positions come from reading templates/report_forms.xlsx; see the constants 
 from typing import Any, Optional
 
 from api.services.export_common import (
-    CHECK_MARK, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, WorkforceLayout, fill_lines,
-    highlight_day, mark_truncated, paragraphs, short_date, stamp_common_header, stamp_equipment,
-    stamp_pay_items, stamp_safety, stamp_workforce, write_lines,
+    CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout,
+    TextArea, WorkforceLayout, flow_text, stamp_common_header, stamp_equipment, stamp_pay_items,
+    stamp_report_cont, stamp_safety, stamp_workforce, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
 GEN_FRONT = "Gen Fr"
 GEN_BACK = "Gen Bk"
-REPORT_CONT = "Report Cont"
 
 # ---- Gen Fr -----------------------------------------------------------------
 
@@ -39,8 +38,7 @@ GEN_FRONT_HEADER = HeaderLayout(
     inspector="H17",
 )
 
-DESCRIPTION_ROWS = range(22, 35)  # B22:AP22 … B34:AP34, size-14 ruled lines
-DESCRIPTION_LINE_CHARS = 60
+GEN_FRONT_TEXT = TextArea(rows=range(22, 35), column="B", line_chars=60)  # B22:AP22 … B34:AP34, 14 pt lines
 REVERSE_PAGE_BOX = "AC36"  # "Reverse page used for additional remarks."
 
 # Pay Items: rows 39-50 under the header at row 38 (row 51 is the form's footer). The Description cell (X:AP,
@@ -54,8 +52,8 @@ GEN_FRONT_PAY_ITEMS = PayItemsLayout(
 
 # ---- Gen Bk -----------------------------------------------------------------
 
-COMMENT_ROWS = range(3, 7)  # B3:AI3 … B6:AI6, size-14 ruled lines; rows 7-25 are the sketch grid
-COMMENT_LINE_CHARS = 60
+# Comment lines B3:AI3 … B6:AI6, 14 pt; rows 7-25 below them are the sketch grid
+GEN_BACK_TEXT = TextArea(rows=range(3, 7), column="B", line_chars=60)
 CONTINUED_BOX = "Z27"  # "Continued on next page (if any)."
 
 GEN_BACK_SAFETY = SafetyLayout(
@@ -83,15 +81,6 @@ GEN_BACK_EQUIPMENT = EquipmentLayout(
     slots=(("N", "V"), ("Y", "AG")),  # each row has two Model / Size + No. pairs
 )
 
-# ---- Report Cont ------------------------------------------------------------
-
-REPORT_CONT_ROWS = range(21, 46)  # B21 … B45, size-10 ruled lines spanning B:AI
-REPORT_CONT_LINE_CHARS = 85
-REPORT_CONT_DAY_CELLS = ("I11", "J11", "K11", "L11", "M11", "N11", "O11")  # S M T W T F S
-REPORT_CONT_PROJECT_CELLS = {"G14": "project_id", "P14": "registration_code", "I15": "project_description",
-                             "F17": "borough"}
-
-
 # ---- Gen Fr ------------------------------------------------------------------
 
 def _stamp_front_header(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any],
@@ -103,25 +92,6 @@ def _stamp_front_header(workbook: WorkbookTemplate, idr: dict[str, Any], project
     """
     stamp_common_header(workbook, GEN_FRONT, GEN_FRONT_HEADER, idr, project, project.get("contractor"),
                         inspector, page_number)
-
-
-# ---- Report Cont ------------------------------------------------------------
-
-def _stamp_report_cont_header(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any],
-                              inspector: Optional[str]) -> None:
-    """
-    Write Report Cont's header: date, day, project details (as values) and inspector, clearing its blank-line
-    placeholders.
-    Takes the workbook, IDR row, project details and inspector name.
-    Returns nothing.
-    """
-    workbook.set_cell(REPORT_CONT, "I10", short_date(idr["report_date"]))
-    highlight_day(workbook, REPORT_CONT, REPORT_CONT_DAY_CELLS, idr["report_date"])
-    workbook.set_cell(REPORT_CONT, "U10", None)  # I.R. No. "__________"
-    workbook.set_cell(REPORT_CONT, "AA10", "Sheet No.:")  # was "Sheet No.: ____ of ____"
-    for cell, field in REPORT_CONT_PROJECT_CELLS.items():
-        workbook.set_cell(REPORT_CONT, cell, project.get(field))
-    workbook.set_cell(REPORT_CONT, "H19", inspector)
 
 
 # ---- The General ------------------------------------------------------------
@@ -137,34 +107,21 @@ def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict
     _stamp_front_header(workbook, idr, project, inspector, page_number)
     stamp_pay_items(workbook, GEN_FRONT, GEN_FRONT_PAY_ITEMS, general_data.get("payItems"))
 
-    description = paragraphs(general_data.get("description"))
-    write_lines(workbook, GEN_FRONT, DESCRIPTION_ROWS, fill_lines(description, len(DESCRIPTION_ROWS), DESCRIPTION_LINE_CHARS))
+    # The General is stamped first, so Report Cont is always free for it
+    flow = flow_text(general_data.get("description"), general_data.get("comments"),
+                     GEN_FRONT_TEXT, GEN_BACK_TEXT, REPORT_CONT_TEXT)
+    write_lines(workbook, GEN_FRONT, GEN_FRONT_TEXT.rows, flow.front, GEN_FRONT_TEXT.column)
+    workbook.set_cell(GEN_FRONT, REVERSE_PAGE_BOX, CHECK_MARK if flow.past_front else None)
+    write_lines(workbook, GEN_BACK, GEN_BACK_TEXT.rows, flow.back, GEN_BACK_TEXT.column)
+    workbook.set_cell(GEN_BACK, CONTINUED_BOX, CHECK_MARK if flow.past_back else None)
 
-    # What continues past Gen Fr: the rest of the description, then the comments
-    comments = paragraphs(general_data.get("comments"))
-    continuation = []
-    if description:
-        continuation += ["Description of work (continued):"] + description
-        if comments:
-            continuation.append("Comments:")
-    continuation += comments
-    workbook.set_cell(GEN_FRONT, REVERSE_PAGE_BOX, CHECK_MARK if description else None)
-
-    back_lines = fill_lines(continuation, len(COMMENT_ROWS), COMMENT_LINE_CHARS)
-    write_lines(workbook, GEN_BACK, COMMENT_ROWS, back_lines)
-    workbook.set_cell(GEN_BACK, CONTINUED_BOX, CHECK_MARK if continuation else None)
-
-    back_used = bool(back_lines)
+    back_used = bool(flow.back)
     back_used = stamp_workforce(workbook, GEN_BACK, GEN_BACK_WORKFORCE, general_data) or back_used
     back_used = stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, general_data) or back_used
     back_used = stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, general_data) or back_used
 
     sheets = [GEN_FRONT] + ([GEN_BACK] if back_used else [])
-    if continuation:
-        cont_lines = fill_lines(continuation, len(REPORT_CONT_ROWS), REPORT_CONT_LINE_CHARS)
-        if continuation:
-            cont_lines = mark_truncated(cont_lines, REPORT_CONT_LINE_CHARS)
-        _stamp_report_cont_header(workbook, idr, project, inspector)
-        write_lines(workbook, REPORT_CONT, REPORT_CONT_ROWS, cont_lines)
+    if flow.report_cont:
+        stamp_report_cont(workbook, idr, project, inspector, flow.report_cont)
         sheets.append(REPORT_CONT)
     return sheets

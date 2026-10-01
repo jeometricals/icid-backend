@@ -3,8 +3,8 @@ Stamps an IDR's Sidewalk, Curb, Concrete Base (SWCB) report onto the DDC templat
 
 Conc Fr is the front: the header block, the Description of Work, the operation line (Curb / Sidewalk / Concrete Base
 / Structural, and the subcontractor), Detailed Activity, the Inspection Matrix and Pay Items. Conc Bk is the back:
-work force, equipment, the MPT/safety checklist and remarks (the remarks come with the text cascade, D3.2d).
-export.py doesn't call this module until it is complete.
+work force, equipment, the MPT/safety checklist and remarks. A description longer than Conc Fr's five lines continues
+on Conc Bk's Remarks, followed by the comments, and then on Report Cont (see export_common.flow_text).
 
 Cell positions come from reading templates/report_forms.xlsx.
 """
@@ -12,9 +12,9 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
-    CHECK_MARK, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, WorkforceLayout, fill_lines,
-    mark_truncated, paragraphs, stamp_common_header, stamp_equipment, stamp_pay_items, stamp_safety, stamp_workforce,
-    text_value, write_lines,
+    CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
+    WorkforceLayout, flow_text, stamp_common_header, stamp_equipment, stamp_pay_items, stamp_report_cont, stamp_safety,
+    stamp_workforce, text_value, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -37,11 +37,9 @@ CONC_FRONT_HEADER = HeaderLayout(
 )
 
 # Description of Work: five ruled lines B23:AP23 … B27:AP27 in 10 pt (B22 is a spacer row). They span the same width
-# as Gen Fr's 14 pt lines, which hold 60 characters, so 10 pt lines hold about 60 x 14 / 10 = 84.
-# TODO(D3.2d): continue a longer description onto Conc Bk's Remarks and Report Cont, as the General does; for now it
-# is cut on the fifth line with the "continued in ICID" note.
-DESCRIPTION_ROWS = range(23, 28)
-DESCRIPTION_LINE_CHARS = 84
+# as Gen Fr's 14 pt lines, which hold 60 characters, so 10 pt lines hold about 60 x 14 / 10 = 84. There is no "reverse
+# page used" box on Conc Fr, so nothing is ticked when the description continues on Conc Bk.
+CONC_FRONT_TEXT = TextArea(rows=range(23, 28), column="B", line_chars=84)
 
 # The operation line (row 29): checkbox rectangles (transparent since the template cleanup) over these cells, an
 # 8 x 8 px box centred in each 16 x 17 px cell; a centred 6 pt "X" sits inside the outline.
@@ -117,10 +115,12 @@ CONC_BACK_SAFETY = SafetyLayout(
     yes_column="N", no_column="P", remarks_column="R",
 )
 
-# Remarks: the "Remarks:" label at C19, then ruled lines C20:AH20 … C34:AH34.
-# TODO(D3.2d): fill these with the Description of Work's overflow and the comments, as Gen Bk's comment lines are.
-# Signatures (rows 55-60) stay blank: the inspector and RE sign the printed page.
-CONC_BACK_REMARK_ROWS = range(20, 35)
+# Remarks: the "Remarks:" label at C19, then fifteen 11 pt ruled lines C20:AH20 … C34:AH34 (about 600 px; 75
+# characters a line at the same margin as Gen Bk's comment lines). They take the description's overflow and the
+# comments. "Attached Pages for Additional Remarks / Sketches / Calculations" (C52, a transparent checkbox rectangle)
+# is ticked when the text continues on Report Cont. Signatures (rows 55-60) stay blank: the inspector and RE sign.
+CONC_BACK_TEXT = TextArea(rows=range(20, 35), column="C", line_chars=75)
+ATTACHED_PAGES_BOX = "C52"
 
 
 def _section(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -173,17 +173,16 @@ def operation_types(data: dict[str, Any]) -> dict[str, bool]:
     return ticked
 
 
-def _stamp_description(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
+def _tick(workbook: WorkbookTemplate, sheet: str, cell: str, ticked: bool) -> None:
     """
-    Write the Description of Work on Conc Fr's five ruled lines, left-aligned, cut with a note if it doesn't fit.
-    Takes the workbook and the report_data.
+    Tick (or clear) one of the drawn checkbox rectangles: a small centred "X" in the cell under it.
+    Takes the workbook, sheet name, the cell under the rectangle and whether to tick it.
     Returns nothing.
     """
-    queue = paragraphs(data.get("description"))
-    lines = fill_lines(queue, len(DESCRIPTION_ROWS), DESCRIPTION_LINE_CHARS)
-    if queue:
-        lines = mark_truncated(lines, DESCRIPTION_LINE_CHARS)
-    write_lines(workbook, CONC_FRONT, DESCRIPTION_ROWS, lines)
+    workbook.set_cell(sheet, cell, CHECK_MARK if ticked else None)
+    if ticked:
+        workbook.set_font_size(sheet, cell, OPERATION_MARK_FONT_PT)
+        workbook.center_cell(sheet, cell)
 
 
 def _stamp_operation(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
@@ -193,11 +192,7 @@ def _stamp_operation(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
     Returns nothing.
     """
     for operation, ticked in operation_types(data).items():
-        cell = OPERATION_BOXES[operation]
-        workbook.set_cell(CONC_FRONT, cell, CHECK_MARK if ticked else None)
-        if ticked:
-            workbook.set_font_size(CONC_FRONT, cell, OPERATION_MARK_FONT_PT)
-            workbook.center_cell(CONC_FRONT, cell)
+        _tick(workbook, CONC_FRONT, OPERATION_BOXES[operation], ticked)
     workbook.set_cell(CONC_FRONT, SUBCONTRACTOR_CELL, text_value(data.get("subcontractor")))
     workbook.shrink_to_fit_cell(CONC_FRONT, SUBCONTRACTOR_CELL)
 
@@ -237,16 +232,24 @@ def _stamp_matrix(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
-           report_data: Optional[dict[str, Any]] = None) -> None:
+           report_data: Optional[dict[str, Any]] = None, report_cont_available: bool = True) -> list[str]:
     """
-    Stamp an SWCB report onto Conc Fr / Conc Bk and set the workbook to show and print just those two pages.
+    Stamp an SWCB report onto Conc Fr / Conc Bk, and onto Report Cont when its text runs past Conc Bk's Remarks.
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
-    (None leaves Sheet No. blank) and its report_data (None stamps the header only).
-    Returns nothing; the calculation chain is dropped when the workbook is serialized (WorkbookTemplate.to_bytes).
+    (None leaves Sheet No. blank), its report_data (None stamps the header only), and whether Report Cont is free
+    (False when another report in the export already continues onto it; the Remarks are then cut with a note).
+    Returns the sheets it used, in print order: Conc Fr, Conc Bk, and Report Cont when used; each is set to print on
+    one Letter page, and the caller decides which sheets the workbook shows.
     """
     stamp_common_header(workbook, CONC_FRONT, CONC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
     data = report_data if isinstance(report_data, dict) else {}
-    _stamp_description(workbook, data)
+
+    flow = flow_text(data.get("description"), data.get("comments"), CONC_FRONT_TEXT, CONC_BACK_TEXT,
+                     REPORT_CONT_TEXT if report_cont_available else None)
+    write_lines(workbook, CONC_FRONT, CONC_FRONT_TEXT.rows, flow.front, CONC_FRONT_TEXT.column)
+    write_lines(workbook, CONC_BACK, CONC_BACK_TEXT.rows, flow.back, CONC_BACK_TEXT.column)
+    _tick(workbook, CONC_BACK, ATTACHED_PAGES_BOX, bool(flow.report_cont))
+
     _stamp_operation(workbook, data)
     _stamp_activity(workbook, data)
     _stamp_matrix(workbook, data)
@@ -254,6 +257,11 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     stamp_workforce(workbook, CONC_BACK, CONC_BACK_WORKFORCE, data)
     stamp_equipment(workbook, CONC_BACK, CONC_BACK_EQUIPMENT, data)
     stamp_safety(workbook, CONC_BACK, CONC_BACK_SAFETY, data)
-    for sheet in (CONC_FRONT, CONC_BACK):
+
+    pages = [CONC_FRONT, CONC_BACK]
+    if flow.report_cont:
+        stamp_report_cont(workbook, idr, project, inspector, flow.report_cont)
+        pages.append(REPORT_CONT)
+    for sheet in pages:
         workbook.fit_to_letter_page(sheet)
-    workbook.show_only([CONC_FRONT, CONC_BACK])
+    return pages
