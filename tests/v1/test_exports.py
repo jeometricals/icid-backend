@@ -428,8 +428,17 @@ def gen_front_cell_style(content: bytes, coordinate: str) -> str:
 # ---------------------------------------------------------------------------
 
 class TestGenBack:
-    def test_gen_bk_stays_hidden_with_nothing_on_it(self):
-        assert visible_sheets(export_bytes()) == ["Gen Fr"]
+    def test_gen_bk_is_shown_even_with_nothing_on_it(self):
+        # Gen Bk carries the certification and signature lines, so every General prints it
+        content = export_bytes(general=general_with(description="Poured curb."))
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk"]
+
+    def test_gen_bk_is_shown_with_workforce_only(self):
+        content = export_bytes(general=general_with(description="Poured curb.", workforce={"laborers": "4"}))
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk"]
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Bk"]
+        assert sheet["G46"].value == 4
+        assert [sheet[f"B{row}"].value for row in range(3, 7)] == [None] * 4  # no text cascaded onto it
 
     def test_workforce_counts_including_legacy_keys(self):
         general = general_with(workforce={"superintendent": "1", "foreman": "2", "laborers": "6", "flaggers": "x2"})
@@ -507,7 +516,7 @@ class TestDescriptionCascade:
         sheet = workbook["Gen Fr"]
         assert sheet["B22"].value == "Poured curb along Main St."
         assert sheet["AC36"].value is None
-        assert visible_sheets(content) == ["Gen Fr"]
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk"]  # Gen Bk always prints; Report Cont doesn't
         # The template centres the first line; every description line is left-aligned
         assert [sheet[f"B{row}"].alignment.horizontal for row in (22, 23, 34)] == ["left"] * 3
 
@@ -1023,7 +1032,7 @@ def swcb_report(page_number: int = 2, **report_data) -> dict:
 class TestSwcbExport:
     def test_an_swcb_report_is_exported_on_conc_fr_and_conc_bk(self):
         content = export_bytes(reports=[swcb_report(description="Formed and poured curb.", structural=True)])
-        assert visible_sheets(content) == ["Gen Fr", "Conc Fr", "Conc Bk"]
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk"]
         sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Fr"]
         assert sheet["B23"].value == "Formed and poured curb."
         assert sheet["Z29"].value == "X"
@@ -1034,13 +1043,22 @@ class TestSwcbExport:
         assert sheet["H17"].value == "Genghis Khan"
         assert (sheet["AH8"].value, sheet["AM8"].value) == (2, 3)
 
+    def test_conc_bk_is_shown_for_an_swcb_report_with_no_back_page_content(self):
+        content = export_bytes(reports=[swcb_report(description="Poured curb.")])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk"]
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Bk"]
+        assert [sheet[f"C{row}"].value for row in range(20, 35)] == [None] * 15
+        assert export_swcb.render(WorkbookTemplate(TEMPLATE), SUBMITTED_IDR, PROJECT, None, report_data={}) == [
+            "Conc Fr", "Conc Bk",
+        ]
+
     def test_without_an_swcb_report_conc_fr_stays_hidden(self):
         addendum_only = {**swcb_report(), "is_addendum": True}
-        assert visible_sheets(export_bytes(reports=[addendum_only])) == ["Gen Fr"]
+        assert visible_sheets(export_bytes(reports=[addendum_only])) == ["Gen Fr", "Gen Bk"]
 
     def test_report_cont_prints_after_conc_bk_when_the_swcb_uses_it(self):
         content = export_bytes(reports=[swcb_report(description=words(600))])
-        assert visible_sheets(content) == ["Gen Fr", "Conc Fr", "Conc Bk", "Report Cont"]
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Report Cont"]
         workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
         names = workbook.sheetnames
         assert names.index("Conc Bk") + 1 == names.index("Report Cont")

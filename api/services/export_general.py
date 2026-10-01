@@ -102,7 +102,8 @@ def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict
     Stamp the General onto Gen Fr, Gen Bk and (for long text) Report Cont.
     Takes the workbook, IDR row, project details (with "contractor"), inspector name, the General's report_data
     and its page number (None for a composed General).
-    Returns the sheets that now hold content, in print order: Gen Fr always, Gen Bk and Report Cont when used.
+    Returns the sheets to print, in order: Gen Fr and Gen Bk always (Gen Bk carries the certification and the
+    signature lines even when nothing else is on it), then Report Cont when the text continues onto it.
     """
     _stamp_front_header(workbook, idr, project, inspector, page_number)
     stamp_pay_items(workbook, GEN_FRONT, GEN_FRONT_PAY_ITEMS, general_data.get("payItems"))
@@ -115,12 +116,11 @@ def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict
     write_lines(workbook, GEN_BACK, GEN_BACK_TEXT.rows, flow.back, GEN_BACK_TEXT.column)
     workbook.set_cell(GEN_BACK, CONTINUED_BOX, CHECK_MARK if flow.past_back else None)
 
-    back_used = bool(flow.back)
-    back_used = stamp_workforce(workbook, GEN_BACK, GEN_BACK_WORKFORCE, general_data) or back_used
-    back_used = stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, general_data) or back_used
-    back_used = stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, general_data) or back_used
+    stamp_workforce(workbook, GEN_BACK, GEN_BACK_WORKFORCE, general_data)
+    stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, general_data)
+    stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, general_data)
 
-    sheets = [GEN_FRONT] + ([GEN_BACK] if back_used else [])
+    sheets = [GEN_FRONT, GEN_BACK]
     if flow.report_cont:
         stamp_report_cont(workbook, idr, project, inspector, flow.report_cont)
         sheets.append(REPORT_CONT)
