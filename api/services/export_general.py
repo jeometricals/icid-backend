@@ -40,11 +40,18 @@ REVERSE_PAGE_BOX = "AC36"  # "Reverse page used for additional remarks."
 
 PAY_ITEM_ROWS = range(39, 51)  # under the header at row 38; row 51 is the form's footer
 PAY_ITEM_COLUMNS = {"itemNo": "B", "budgetCode": "G", "payQuantity": "N", "quantityChk": "S", "description": "X"}
-# The Description cell (X:AP, merged, centred Arial 10) fits about 40 characters a line. Its rows are a fixed 18 pt,
-# about one line, and Excel won't grow rows holding merged cells, so a longer description gets a taller row.
-PAY_DESCRIPTION_LINE_CHARS = 40
+# The Description cell (X:AP, merged, centred Arial 10) is about 293 px wide inside its padding: measured Arial
+# fits ~46 characters a line at 10 pt and ~55 at 8 pt. The budgets keep a safety margin (a 43-character item was seen
+# clipping in a viewer). A description gets at most two lines: at 10 pt, then shrunk to 8 pt, then cut with "...".
+# Its rows are a fixed 18 pt (one line), and Excel won't grow rows holding merged cells, so two lines get a taller row.
+PAY_DESCRIPTION_FONT_PT = 10  # the template's
+PAY_DESCRIPTION_SHRINK_FONT_PT = 8
+PAY_DESCRIPTION_LINE_CHARS_10PT = 40
+PAY_DESCRIPTION_LINE_CHARS_8PT = 48
+PAY_DESCRIPTION_MAX_LINES = 2
+PAY_DESCRIPTION_TRUNCATE_SUFFIX = "..."
 PAY_ITEM_ROW_HEIGHT = 18.0
-LINE_HEIGHT = 12.75  # points per line of Arial 10
+LINE_HEIGHT = {10: 12.75, 8: 11.25}  # points per line of Arial at that size (Excel's default row heights)
 
 # ---- Gen Bk -----------------------------------------------------------------
 
@@ -259,6 +266,41 @@ def pay_item_rows(pay_items: Any) -> list[dict[str, Optional[str]]]:
     return rows
 
 
+def fit_pay_description(description: str) -> tuple[str, int, int]:
+    """
+    Fit a pay item's description into its cell's two lines: at the template's 10 pt, else shrunk to 8 pt, else cut.
+    Takes the description text.
+    Returns (the text to write, how many lines it takes, the font size); cut text ends in "..." at a word boundary.
+    """
+    for font_size, width in ((PAY_DESCRIPTION_FONT_PT, PAY_DESCRIPTION_LINE_CHARS_10PT),
+                             (PAY_DESCRIPTION_SHRINK_FONT_PT, PAY_DESCRIPTION_LINE_CHARS_8PT)):
+        lines = textwrap.wrap(description, width)
+        if len(lines) <= PAY_DESCRIPTION_MAX_LINES:
+            return description, len(lines), font_size
+    text = truncate_to_lines(description, PAY_DESCRIPTION_LINE_CHARS_8PT, PAY_DESCRIPTION_MAX_LINES,
+                             PAY_DESCRIPTION_TRUNCATE_SUFFIX)
+    return text, PAY_DESCRIPTION_MAX_LINES, PAY_DESCRIPTION_SHRINK_FONT_PT
+
+
+def truncate_to_lines(text: str, width: int, max_lines: int, suffix: str) -> str:
+    """
+    Cut text so that it, plus a suffix, wraps into at most max_lines lines, preferring to end on a whole word.
+    Takes the text, the characters per line, the number of lines and the suffix (e.g. "...").
+    Returns the cut text ending in the suffix; a cut backs up to a space when one is within 10 characters.
+    """
+    limit = width * max_lines - len(suffix)
+    while limit > 0:
+        cut = text[:limit]
+        space = cut.rfind(" ")
+        if space > 0 and space >= limit - 10:
+            cut = cut[:space]
+        candidate = cut.rstrip(" ,;:-") + suffix
+        if len(textwrap.wrap(candidate, width)) <= max_lines:
+            return candidate
+        limit = (space if space > 0 else limit) - 1
+    return suffix
+
+
 def _stamp_pay_items(workbook: WorkbookTemplate, pay_items: Any) -> None:
     """
     Write the pay items into Gen Fr's table, blanking unused rows. Descriptions wrap, and a row whose description
@@ -273,10 +315,14 @@ def _stamp_pay_items(workbook: WorkbookTemplate, pay_items: Any) -> None:
             workbook.set_cell(GEN_FRONT, f"{column}{row}", values.get(field))
         description = values.get("description")
         if description:
-            workbook.wrap_cell(GEN_FRONT, f"{PAY_ITEM_COLUMNS['description']}{row}")
-            lines = len(textwrap.wrap(description, PAY_DESCRIPTION_LINE_CHARS))
+            cell = f"{PAY_ITEM_COLUMNS['description']}{row}"
+            text, lines, font_size = fit_pay_description(description)
+            workbook.set_cell(GEN_FRONT, cell, text)
+            workbook.wrap_cell(GEN_FRONT, cell)
+            if font_size != PAY_DESCRIPTION_FONT_PT:
+                workbook.set_font_size(GEN_FRONT, cell, font_size)
             if lines > 1:
-                workbook.set_row_height(GEN_FRONT, row, max(PAY_ITEM_ROW_HEIGHT, lines * LINE_HEIGHT))
+                workbook.set_row_height(GEN_FRONT, row, lines * LINE_HEIGHT[font_size])
 
 
 # ---- Gen Bk ------------------------------------------------------------------

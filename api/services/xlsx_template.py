@@ -306,6 +306,37 @@ class WorkbookTemplate:
         """
         self.set_style(sheet, coordinate, self.wrap_text_style(self.cell_style(sheet, coordinate)))
 
+    def font_size_style(self, style: Optional[str], points: float) -> str:
+        """
+        Get a copy of a cell style whose font is a different size, keeping the font's name, weight and colour.
+        Takes the style index to copy (None for the default style) and the size in points.
+        Returns the new style's index; the cell's own font is copied, never edited (several styles share fonts).
+        """
+        def change(styles: str, start_tag: str, rest: str) -> tuple[str, str, str]:
+            fonts = re.search(r"<fonts\b[^>]*>(.*?)</fonts>", styles, re.DOTALL)
+            font_id = re.search(r'\sfontId="(\d+)"', start_tag)
+            source = re.findall(r"<font\b[^>]*?(?:/>|>.*?</font>)", fonts.group(1), re.DOTALL)[int(font_id.group(1)) if font_id else 0]
+            size = f'<sz val="{points:g}"/>'
+            if "<sz " in source:
+                font = re.sub(r"<sz\b[^>]*/>", size, source, count=1)
+            elif source.endswith("/>"):
+                font = source[:-2] + ">" + size + "</font>"
+            else:
+                font = re.sub(r"(<font\b[^>]*>)", r"\1" + size, source, count=1)
+            styles, new_font_id = self._append_style_entry(styles, "fonts", font)
+            start_tag = _set_attribute(_set_attribute(start_tag, "fontId", str(new_font_id)), "applyFont", "1")
+            return styles, start_tag, rest
+
+        return self._derive_style(f"font-size:{points:g}", style, change)
+
+    def set_font_size(self, sheet: str, coordinate: str, points: float) -> None:
+        """
+        Change one cell's font size, keeping the rest of its style.
+        Takes the sheet name, cell reference and the size in points.
+        Returns nothing.
+        """
+        self.set_style(sheet, coordinate, self.font_size_style(self.cell_style(sheet, coordinate), points))
+
     def set_row_height(self, sheet: str, row: int, points: float) -> None:
         """
         Fix a row's height (Excel never auto-fits rows with merged cells, so wrapped text there needs this).

@@ -1,5 +1,6 @@
 import io
 import re
+import textwrap
 import zipfile
 from contextlib import contextmanager
 from datetime import date, datetime, time
@@ -14,7 +15,9 @@ import pytest
 from api.queries.projects import get_project_contractor_name
 from api.services import export
 from api.services.export import generate_idr_export
-from api.services.export_general import REPORT_CONT_LINE_CHARS, fill_lines, paragraphs, pay_item_rows
+from api.services.export_general import (
+    REPORT_CONT_LINE_CHARS, fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
+)
 from api.services.xlsx_template import WorkbookTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -319,6 +322,35 @@ class TestPayItems:
         assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]["X39"].alignment.wrap_text is True
         assert gen_front_row_height(content, 39) == 18.0
 
+    def test_descriptions_shrink_to_8pt_before_being_cut(self):
+        level_1 = "Plastic Barrels"
+        level_2 = 'Thermoplastic Reflectorized Pavement Markings (4" Wide)'
+        level_3 = "Reinforced Concrete Pavement (Full Width Pavement) with dowels and tie bars at all joints"
+        level_4 = ('Thermoplastic Reflectorized Pavement Markings (4" Wide) including surface preparation, primer, '
+                   "layout and removal of existing markings where shown")
+        items = [pay_item(n, description=d) for n, d in enumerate((level_1, level_2, level_3, level_4))]
+        content = export_bytes(general=general_with(payItems=items))
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]
+        cells = [sheet[f"X{row}"] for row in (39, 40, 41, 42)]
+        assert [c.font.sz for c in cells] == [10, 10, 8, 8]
+        assert [gen_front_row_height(content, row) for row in (39, 40, 41, 42)] == [18.0, 25.5, 22.5, 22.5]
+        assert [c.value for c in cells[:3]] == [level_1, level_2, level_3]  # not cut
+        assert cells[3].value.endswith("preparation...") and len(textwrap.wrap(cells[3].value, 48)) == 2
+        assert all(c.alignment.wrap_text for c in cells)
+
+    def test_fit_pay_description_levels(self):
+        assert fit_pay_description("Plastic Barrels") == ("Plastic Barrels", 1, 10)
+        assert fit_pay_description("word " * 15)[1:] == (2, 10)
+        assert fit_pay_description("word " * 18)[1:] == (2, 8)
+        text, lines, size = fit_pay_description("word " * 40)
+        assert (lines, size) == (2, 8) and text.endswith("word...")
+
+    def test_truncation_ends_on_a_word_and_handles_one_long_word(self):
+        cut = truncate_to_lines("alpha beta gamma delta epsilon zeta", width=12, max_lines=2, suffix="...")
+        assert cut == "alpha beta gamma..."
+        long_word = truncate_to_lines("X" * 130, width=48, max_lines=2, suffix="...")
+        assert long_word == "X" * 93 + "..." and len(textwrap.wrap(long_word, 48)) == 2
+
     def test_empty_pay_item_rows_keep_the_template_style(self):
         content = export_bytes(general=general_with(payItems=[pay_item(1)]))
         template_style = WorkbookTemplate(TEMPLATE).cell_style("Gen Fr", "X40")
@@ -554,6 +586,27 @@ class TestWorkbookTemplate:
         workbook.set_style("Gen Fr", "B23", workbook.wrap_text_style(left))
         cell = written(workbook)["Gen Fr"]["B23"]
         assert (cell.alignment.horizontal, cell.alignment.wrap_text) == ("left", True)
+
+    def test_font_size_style_points_at_a_new_8pt_font(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        style = workbook.font_size_style(None, 8)
+        assert workbook.font_size_style(None, 8) == style  # shared, not appended twice
+        styles = zipfile.ZipFile(io.BytesIO(workbook.to_bytes())).read("xl/styles.xml").decode()
+        fonts_block = re.search(r"<fonts\b[^>]*>(.*?)</fonts>", styles, re.DOTALL)
+        fonts = re.findall(r"<font\b[^>]*?(?:/>|>.*?</font>)", fonts_block.group(1), re.DOTALL)
+        assert re.search(r'count="(\d+)"', fonts_block.group(0)).group(1) == str(len(fonts))
+        xf = re.findall(r"<xf\b[^>]*?(?:/>|>.*?</xf>)", re.search(r"<cellXfs\b[^>]*>(.*?)</cellXfs>", styles, re.DOTALL).group(1), re.DOTALL)[int(style)]
+        new_font = fonts[int(re.search(r'fontId="(\d+)"', xf).group(1))]
+        assert '<sz val="8"/>' in new_font and '<name val="Arial"/>' in new_font
+        assert 'applyFont="1"' in xf
+        assert '<sz val="10"/>' in fonts[0]  # the shared default font is left alone
+
+    def test_set_font_size_keeps_the_cell_wrapping(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.wrap_cell("Gen Fr", "X39")
+        workbook.set_font_size("Gen Fr", "X39", 8)
+        cell = written(workbook)["Gen Fr"]["X39"]
+        assert (cell.font.sz, cell.alignment.wrap_text, cell.alignment.horizontal) == (8, True, "center")
 
     def test_set_row_height_fixes_the_height(self):
         workbook = WorkbookTemplate(TEMPLATE)
