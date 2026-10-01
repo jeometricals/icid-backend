@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Iterable, Optional
 from uuid import UUID
 
@@ -10,6 +11,8 @@ from api.queries.idr_reports import (
 )
 from api.queries.idrs import get_idr_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, label_for
+
+logger = logging.getLogger(__name__)
 
 # An auto-generated General appears once an IDR holds this many contributing
 # reports; below it, an existing auto-General is removed.
@@ -48,6 +51,20 @@ def _to_float(value: Any) -> Optional[float]:
         return float(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _resolve_unit(key: tuple[Any, Any], items: list[dict[str, Any]]) -> str:
+    """
+    Pick the unit for one combined pay-item group, warning when members disagree.
+    Takes the (itemNo, budgetCode) key and the group's pay items; a missing or blank unit counts as "".
+    Returns the first non-empty unit (first wins on conflict), or "" if none has one.
+    """
+    units = [item.get("unit") for item in items]
+    unit = _first_non_empty(units)
+    distinct = {u.strip() for u in units if isinstance(u, str) and u.strip()}
+    if len(distinct) > 1:
+        logger.warning("Conflicting units %s for pay item %s / %s; keeping %r", sorted(distinct), key[0], key[1], unit)
+    return unit if isinstance(unit, str) else str(unit)
 
 
 def _aggregate_description(children: list[dict[str, Any]]) -> str:
@@ -103,6 +120,7 @@ def _aggregate_pay_items(children: list[dict[str, Any]]) -> list[dict[str, Any]]
             "itemNo": item_no,
             "budgetCode": budget_code,
             "description": _first_non_empty(item.get("description") for item in items),
+            "unit": _resolve_unit(key, items),
             "payQuantity": pay_quantity,
             "quantityChk": _first_non_empty(item.get("quantityChk") for item in items),
         })

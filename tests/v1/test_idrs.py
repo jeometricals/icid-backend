@@ -1350,19 +1350,22 @@ def _child(report_type, report_data=None):
     return {"report_type": report_type, "report_data": report_data or {}}
 
 
-def _pay(item_no, budget_code, pay_quantity, description="", quantity_chk=""):
+def _pay(item_no, budget_code, pay_quantity, description="", quantity_chk="", unit=None):
     """
     Build a single pay item as the frontend stores it, for aggregation tests.
-    Takes itemNo, budgetCode, payQuantity and optional description / quantityChk.
+    Takes itemNo, budgetCode, payQuantity and optional description / quantityChk / unit (omitted when None).
     Returns the pay item dict.
     """
-    return {
+    item = {
         "itemNo": item_no,
         "budgetCode": budget_code,
         "payQuantity": pay_quantity,
         "description": description,
         "quantityChk": quantity_chk,
     }
+    if unit is not None:
+        item["unit"] = unit
+    return item
 
 
 class TestBuildAutoGeneralData:
@@ -1406,6 +1409,7 @@ class TestBuildAutoGeneralData:
             "itemNo": "4.21",
             "budgetCode": "HWS-01",
             "description": "4\" Conc. Sidewalk",
+            "unit": "",
             "payQuantity": "150.00",
             "quantityChk": "RM",
         }]
@@ -1451,6 +1455,54 @@ class TestBuildAutoGeneralData:
         item = build_auto_general_data(children)["payItems"][0]
         assert item["description"] == "Real desc"
         assert item["quantityChk"] == "CM"
+
+    def test_unit_carried_through_from_single_swcb_report(self):
+        children = [
+            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
+            _child("SWR", {"description": "x"}),
+        ]
+        assert build_auto_general_data(children)["payItems"][0]["unit"] == "SF"
+
+    def test_unit_carried_through_from_multiple_consistent_reports(self, caplog):
+        children = [
+            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
+            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF"), _pay("6.01", "B", "3", unit="TON")]}),
+        ]
+        with caplog.at_level(logging.WARNING, logger="api.services.auto_general"):
+            items = build_auto_general_data(children)["payItems"]
+        assert [(i["itemNo"], i["unit"], i["payQuantity"]) for i in items] == [
+            ("4.21", "SF", "150.00"),
+            ("6.01", "TON", "3.00"),
+        ]
+        assert caplog.records == []
+
+    def test_missing_or_empty_unit_becomes_empty_string(self):
+        children = [
+            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
+            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit=""), _pay("6.01", "B", "3", unit=None)]}),
+        ]
+        items = build_auto_general_data(children)["payItems"]
+        assert [i["unit"] for i in items] == ["", ""]
+
+    def test_unit_taken_from_first_row_that_has_one(self):
+        # An older child without a unit does not blank out a later child's unit.
+        children = [
+            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
+            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF")]}),
+        ]
+        assert build_auto_general_data(children)["payItems"][0]["unit"] == "SF"
+
+    def test_conflicting_units_first_wins_and_warns(self, caplog):
+        children = [
+            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
+            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SY")]}),
+        ]
+        with caplog.at_level(logging.WARNING, logger="api.services.auto_general"):
+            item = build_auto_general_data(children)["payItems"][0]
+        assert item["unit"] == "SF"
+        assert item["payQuantity"] == "150.00"
+        assert len(caplog.records) == 1
+        assert "Conflicting units" in caplog.records[0].getMessage()
 
     def test_no_pay_items_yields_empty_list(self):
         assert build_auto_general_data([_child("SWR", {"description": "x"})])["payItems"] == []
