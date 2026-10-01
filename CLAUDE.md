@@ -28,6 +28,7 @@ every request to it.
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. |
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
 | `docs/` | `data-model.md`: developer reference for the tables, the auto-General and the migration history. |
+| `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). |
 | `scripts/` | One-off local utilities (seeding, ad-hoc SQL). Not imported by the app. |
 
 ### Endpoints
@@ -51,6 +52,7 @@ every request to it.
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments` — list a report's uploaded attachments (pending ones left out)
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}/download-url` — short-lived signed URL; 404 while pending
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment, pending or uploaded (Storage file, then record); draft only
+- `GET /v1/idrs/{idr_id}/export` — a submitted IDR as an .xlsx on the DDC report-forms template (409 while draft)
 - `GET /v1/contract_items/?project_id=` — a project's contract items, each joined to its spec item (`item_no`, `description`, `spec_section`, `pay_unit`); `[]` when none
 - `GET /debug/schema` — dev-only
 
@@ -91,7 +93,8 @@ Any change must follow these.
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.
-- **Never commit** `venv/`, `.env`, `__pycache__/`, `.pytest_cache/`, or `.xlsx` files.
+- **Never commit** `venv/`, `.env`, `__pycache__/`, `.pytest_cache/`, or `.xlsx` files —
+  except `templates/report_forms.xlsx`, which ships with the app as the DDC export base.
   `.gitignore` covers all of these — check before every commit anyway.
 
 ## 5. Rules for Claude Code

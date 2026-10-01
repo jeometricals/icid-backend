@@ -31,6 +31,7 @@ def include_routers(app: FastAPI):
     from api.v1.idrs import router as idrs_router
     from api.v1.attachments import router as attachments_router
     from api.v1.contract_items import router as contract_items_router
+    from api.v1.exports import router as exports_router
     from api.v1.debug import router as debug_router
 
     app.include_router(users_router)
@@ -38,6 +39,7 @@ def include_routers(app: FastAPI):
     app.include_router(idrs_router)
     app.include_router(attachments_router)
     app.include_router(contract_items_router)
+    app.include_router(exports_router)
     app.include_router(debug_router)
 
 

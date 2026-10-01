@@ -41,6 +41,24 @@ def is_user_on_project(user_id: UUID, project_id: str) -> bool:
     return bool(rows)
 
 
+def get_project_contractor_name(project_id: str) -> Optional[str]:
+    """
+    Fetch the name of the organisation on a project in the Contractor role.
+    Takes the project id.
+    Returns the contractor's client_name (the first by name if several), or None when the project has none.
+    """
+    sql = """
+        SELECT c.client_name
+        FROM icid.project_clients pc
+        JOIN icid.clients c ON c.client_id = pc.client_id
+        WHERE pc.project_id = %s AND pc.client_role = 'Contractor'
+        ORDER BY c.client_name
+        LIMIT 1;
+    """
+    rows = run_query(sql, (project_id,))
+    return rows[0]["client_name"] if rows else None
+
+
 def get_project_by_id(project_id: str) -> Optional[dict[str, Any]]:
     """
     Fetch the full detail of a single project.

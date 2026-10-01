@@ -17,4 +17,6 @@ __pycache__
 !.env.example
 venv/
 *.xlsx
+# ...except the IDR export template, which ships with the app
+!templates/report_forms.xlsx
 .pytest_cache/
