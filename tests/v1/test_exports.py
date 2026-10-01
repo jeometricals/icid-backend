@@ -18,7 +18,7 @@ from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
 )
-from api.services.export_common import REPORT_CONT_TEXT
+from api.services.export_common import DRAFT_MARKER, REPORT_CONT_TEXT
 from api.services.export_general import GEN_FRONT_PAY_ITEMS
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -71,6 +71,8 @@ SUBMITTED_IDR = {
     "created_at": datetime(2026, 9, 30, 7, 0),
     "updated_at": datetime(2026, 9, 30, 17, 0),
 }
+
+DRAFT_IDR = {**SUBMITTED_IDR, "status": "draft", "submitted_at": None, "total_pages": None}
 
 PROJECT = {
     "project_id": "HWS0023",
@@ -304,9 +306,10 @@ class TestGeneralFrontHeader:
         with patched_export(idr=None), pytest.raises(export.IdrNotFoundError):
             generate_idr_export(IDR_ID)
 
-    def test_draft_idr_raises_not_submitted(self):
-        with patched_export(idr={**SUBMITTED_IDR, "status": "draft"}), pytest.raises(export.IdrNotSubmittedError):
-            generate_idr_export(IDR_ID)
+    def test_draft_idr_exports(self):
+        with patched_export(idr={**DRAFT_IDR}):
+            result = generate_idr_export(IDR_ID)
+        assert openpyxl.load_workbook(io.BytesIO(result.content), read_only=True)["Gen Fr"]["H17"].value == "Genghis Khan"
 
 
 # ---------------------------------------------------------------------------
@@ -1081,6 +1084,52 @@ class TestSwcbExport:
 
 
 # ---------------------------------------------------------------------------
+# Draft exports: "DRAFT - Not for Submission" across the top of every printed page
+# ---------------------------------------------------------------------------
+
+EXPORT_SHEETS = ("Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Report Cont")
+
+
+class TestDraftExport:
+    def test_every_visible_sheet_of_a_draft_is_marked(self):
+        content = export_bytes(idr=DRAFT_IDR, general=general_with(description=words(600)),
+                               reports=[swcb_report(description="Poured curb.")])
+        shown = visible_sheets(content)
+        assert shown == ["Gen Fr", "Gen Bk", "Report Cont", "Conc Fr", "Conc Bk"]
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        for name in shown:
+            cell = workbook[name]["B1"]
+            assert cell.value == "DRAFT - Not for Submission", name
+            assert (cell.font.sz, cell.font.b, cell.font.color.rgb) == (14, True, "FFFF0000"), name
+            assert (cell.alignment.horizontal, cell.alignment.vertical) == ("center", "center"), name
+            row = re.search(r'<row r="1"[^>]*?\sht="([\d.]+)"', zipfile.ZipFile(io.BytesIO(content)).read(
+                f"xl/worksheets/{SHEET_PARTS[name]}").decode()).group(1)
+            assert float(row) == 18.75, name  # raised so 14 pt fits
+        # A hidden sheet isn't marked
+        assert workbook["AC Fr"]["B1"].value is None
+
+    def test_a_submitted_export_has_no_marker(self):
+        content = export_bytes(general=general_with(description=words(600)), reports=[swcb_report(description="x")])
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [workbook[name]["B1"].value for name in visible_sheets(content)] == [None] * 5
+
+    def test_the_marker_cell_is_empty_in_the_template_on_every_sheet_it_uses(self):
+        template = openpyxl.load_workbook(TEMPLATE)
+        for name in EXPORT_SHEETS:
+            sheet = template[name]
+            assert sheet["B1"].value is None, name
+            assert any(str(r).startswith("B1:") for r in sheet.merged_cells.ranges), name  # a strip across the page
+        # and the header below it is untouched in a draft
+        workbook = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=DRAFT_IDR)), read_only=True)
+        assert (workbook["Gen Fr"]["G8"].value, workbook["Gen Fr"]["H17"].value) == ("HWS0023", "Genghis Khan")
+
+
+# Worksheet part for each export sheet in the template package
+SHEET_PARTS = {"Gen Fr": "sheet4.xml", "Gen Bk": "sheet5.xml", "Report Cont": "sheet3.xml",
+               "Conc Fr": "sheet19.xml", "Conc Bk": "sheet20.xml"}
+
+
+# ---------------------------------------------------------------------------
 # get_project_contractor_name (query)
 # ---------------------------------------------------------------------------
 
@@ -1114,11 +1163,11 @@ class TestExportEndpoint:
         workbook = openpyxl.load_workbook(io.BytesIO(response.content), read_only=True)
         assert workbook["Contract Info"]["C2"].value == "HWS0023"
 
-    def test_draft_idr_is_409(self, client):
-        with patched_export(idr={**SUBMITTED_IDR, "status": "draft"}):
+    def test_draft_idr_downloads_too(self, client):
+        with patched_export(idr=DRAFT_IDR):
             response = client.get(self.url)
-        assert response.status_code == 409
-        assert response.json()["detail"] == "Only submitted IDRs can be exported"
+        assert response.status_code == 200
+        assert openpyxl.load_workbook(io.BytesIO(response.content), read_only=True)["Gen Fr"]["B1"].value == DRAFT_MARKER
 
     def test_unknown_idr_is_404(self, client):
         with patched_export(idr=None):

@@ -3,7 +3,8 @@ Exports a submitted IDR as an .xlsx file built on the DDC report-forms template.
 
 This module loads the IDR's data and assembles the workbook; each report's pages are stamped by its own module
 (export_general for the General, export_swcb for a Sidewalk, Curb, Concrete Base report). Pages that hold nothing stay
-hidden, so the file prints only the IDR's pages.
+hidden, so the file prints only the IDR's pages. A draft IDR exports too, with "DRAFT - Not for Submission" across the
+top of every page it prints.
 """
 
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
 from api.services import export_swcb
 from api.services.auto_general import build_auto_general_data
-from api.services.export_common import REPORT_CONT
+from api.services.export_common import REPORT_CONT, stamp_draft_marker
 from api.services.export_general import GEN_BACK, stamp_general
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -33,10 +34,6 @@ class ExportError(Exception):
 
 class IdrNotFoundError(ExportError):
     """No IDR has that id."""
-
-
-class IdrNotSubmittedError(ExportError):
-    """The IDR is still a draft; only submitted IDRs are exported."""
 
 
 class ExportDataError(ExportError):
@@ -112,15 +109,14 @@ def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) ->
 
 def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
-    Build a submitted IDR's .xlsx export from the report-forms template: the General's pages, then the SWCB report's.
+    Build an IDR's .xlsx export from the report-forms template: the General's pages, then the SWCB report's. A draft
+    IDR's pages are each marked "DRAFT - Not for Submission".
     Takes the IDR uuid.
-    Returns an IdrExport (file name and bytes); raises IdrNotFoundError, IdrNotSubmittedError or ExportDataError.
+    Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
     idr = get_idr_by_id(idr_id)
     if idr is None:
         raise IdrNotFoundError("IDR not found")
-    if idr["status"] != "submitted":
-        raise IdrNotSubmittedError("Only submitted IDRs can be exported")
 
     project = get_project_by_id(idr["project_id"])
     if project is None:
@@ -149,6 +145,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     workbook.move_sheet(REPORT_CONT, after=report_cont_owner or GEN_BACK)
     for page in pages:
         workbook.fit_to_letter_page(page)
+        if idr["status"] != "submitted":
+            stamp_draft_marker(workbook, page)
     workbook.show_only(pages)
 
     return IdrExport(

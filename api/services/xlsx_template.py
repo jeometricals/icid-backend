@@ -324,28 +324,46 @@ class WorkbookTemplate:
         style = self.cell_style(sheet, coordinate)
         self.set_style(sheet, coordinate, self._alignment_style("shrink", style, "shrinkToFit", "1"))
 
-    def font_size_style(self, style: Optional[str], points: float) -> str:
+    def font_style(self, style: Optional[str], points: Optional[float] = None, bold: bool = False,
+                   rgb: Optional[str] = None) -> str:
         """
-        Get a copy of a cell style whose font is a different size, keeping the font's name, weight and colour.
-        Takes the style index to copy (None for the default style) and the size in points.
+        Get a copy of a cell style with its font changed: a size, bold, and / or a colour, keeping the font's name and
+        anything not asked for.
+        Takes the style index to copy (None for the default style), the size in points, whether to make it bold, and an
+        ARGB colour like "FFFF0000" (each optional).
         Returns the new style's index; the cell's own font is copied, never edited (several styles share fonts).
         """
+        def put(font: str, tag: str, element: str) -> str:
+            if re.search(rf"<{tag}\b[^>]*/>", font):
+                return re.sub(rf"<{tag}\b[^>]*/>", element, font, count=1)
+            if font.endswith("/>"):
+                return font[:-2] + ">" + element + "</font>"
+            return re.sub(r"(<font\b[^>]*>)", lambda m: m.group(1) + element, font, count=1)
+
         def change(styles: str, start_tag: str, rest: str) -> tuple[str, str, str]:
             fonts = re.search(r"<fonts\b[^>]*>(.*?)</fonts>", styles, re.DOTALL)
             font_id = re.search(r'\sfontId="(\d+)"', start_tag)
-            source = re.findall(r"<font\b[^>]*?(?:/>|>.*?</font>)", fonts.group(1), re.DOTALL)[int(font_id.group(1)) if font_id else 0]
-            size = f'<sz val="{points:g}"/>'
-            if "<sz " in source:
-                font = re.sub(r"<sz\b[^>]*/>", size, source, count=1)
-            elif source.endswith("/>"):
-                font = source[:-2] + ">" + size + "</font>"
-            else:
-                font = re.sub(r"(<font\b[^>]*>)", r"\1" + size, source, count=1)
+            font = re.findall(r"<font\b[^>]*?(?:/>|>.*?</font>)", fonts.group(1), re.DOTALL)[int(font_id.group(1)) if font_id else 0]
+            if points is not None:
+                font = put(font, "sz", f'<sz val="{points:g}"/>')
+            if bold:
+                font = put(font, "b", "<b/>")
+            if rgb is not None:
+                font = put(font, "color", f'<color rgb="{rgb}"/>')
             styles, new_font_id = self._append_style_entry(styles, "fonts", font)
             start_tag = _set_attribute(_set_attribute(start_tag, "fontId", str(new_font_id)), "applyFont", "1")
             return styles, start_tag, rest
 
-        return self._derive_style(f"font-size:{points:g}", style, change)
+        kind = f"font:{'' if points is None else f'{points:g}'}:{'b' if bold else ''}:{rgb or ''}"
+        return self._derive_style(kind, style, change)
+
+    def font_size_style(self, style: Optional[str], points: float) -> str:
+        """
+        Get a copy of a cell style whose font is a different size, keeping the font's name, weight and colour.
+        Takes the style index to copy (None for the default style) and the size in points.
+        Returns the new style's index.
+        """
+        return self.font_style(style, points=points)
 
     def set_font_size(self, sheet: str, coordinate: str, points: float) -> None:
         """

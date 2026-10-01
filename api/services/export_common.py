@@ -575,3 +575,29 @@ def stamp_report_cont(workbook: WorkbookTemplate, idr: dict[str, Any], project: 
         workbook.set_cell(REPORT_CONT, cell, project.get(field))
     workbook.set_cell(REPORT_CONT, "H19", inspector)
     write_lines(workbook, REPORT_CONT, REPORT_CONT_TEXT.rows, lines, REPORT_CONT_TEXT.column)
+
+
+# ---- Draft marker -----------------------------------------------------------
+
+# A draft IDR exports with this across the top of every printed page. Row 1 is an empty strip merged across the page
+# on every form (B1:AP1 on the fronts, B1:AI1 on the backs and Report Cont), above the logos and headers, and inside
+# the print area; it is raised from 14.25 pt so the 14 pt text fits.
+DRAFT_MARKER = "DRAFT - Not for Submission"
+DRAFT_MARKER_CELL = "B1"
+DRAFT_MARKER_FONT_PT = 14
+DRAFT_MARKER_COLOR = "FFFF0000"  # red
+DRAFT_MARKER_ROW_HEIGHT = 18.75
+
+
+def stamp_draft_marker(workbook: WorkbookTemplate, sheet: str) -> None:
+    """
+    Mark a sheet as a draft: "DRAFT - Not for Submission" in red bold 14 pt, centred across its top row.
+    Takes the workbook and sheet name.
+    Returns nothing.
+    """
+    workbook.set_cell(sheet, DRAFT_MARKER_CELL, DRAFT_MARKER)
+    style = workbook.cell_style(sheet, DRAFT_MARKER_CELL)
+    workbook.set_style(sheet, DRAFT_MARKER_CELL,
+                       workbook.font_style(style, points=DRAFT_MARKER_FONT_PT, bold=True, rgb=DRAFT_MARKER_COLOR))
+    workbook.center_cell(sheet, DRAFT_MARKER_CELL)
+    workbook.set_row_height(sheet, 1, DRAFT_MARKER_ROW_HEIGHT)

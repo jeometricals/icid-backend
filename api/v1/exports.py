@@ -7,7 +7,6 @@ from api.services.export import (
     ExportDataError,
     ExportError,
     IdrNotFoundError,
-    IdrNotSubmittedError,
     generate_idr_export,
 )
 
@@ -18,7 +17,6 @@ XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 # HTTP status for each export failure
 ERROR_STATUS = {
     IdrNotFoundError: 404,
-    IdrNotSubmittedError: 409,
     ExportDataError: 500,
 }
 
@@ -26,9 +24,9 @@ ERROR_STATUS = {
 @router.get("/{idr_id}/export", response_class=Response)
 def export_idr(idr_id: UUID) -> Response:
     """
-    Download a submitted IDR as an .xlsx file on the DDC report-forms template.
+    Download an IDR as an .xlsx file on the DDC report-forms template (a draft's pages are marked as a draft).
     Takes the IDR uuid as a path parameter.
-    Returns the file as an attachment; raises 404 (no such IDR), 409 (still a draft) and 500.
+    Returns the file as an attachment; raises 404 (no such IDR) and 500.
     """
     try:
         export = generate_idr_export(idr_id)
