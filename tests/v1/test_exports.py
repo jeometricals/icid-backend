@@ -15,9 +15,10 @@ import pytest
 from api.queries.projects import get_project_contractor_name
 from api.services import export, export_swcb
 from api.services.export import generate_idr_export
-from api.services.export_general import (
-    REPORT_CONT_LINE_CHARS, fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
+from api.services.export_common import (
+    fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
 )
+from api.services.export_general import GEN_FRONT_PAY_ITEMS, REPORT_CONT_LINE_CHARS
 from api.services.xlsx_template import WorkbookTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -341,7 +342,7 @@ class TestPayItems:
         assert sheet["X50"].value == "… 3 more items in ICID"
 
     def test_non_list_pay_items_are_none(self):
-        assert pay_item_rows(None) == [] and pay_item_rows({"a": 1}) == [] and pay_item_rows(["x"]) == []
+        assert pay_item_rows(None, 12) == [] and pay_item_rows({"a": 1}, 12) == [] and pay_item_rows(["x"], 12) == []
 
     def test_a_long_description_wraps_on_a_taller_row(self):
         long = 'Thermoplastic Reflectorized Pavement Markings (4" Wide)'  # 55 characters: two lines
@@ -374,10 +375,10 @@ class TestPayItems:
         assert all(c.alignment.wrap_text for c in cells)
 
     def test_fit_pay_description_levels(self):
-        assert fit_pay_description("Plastic Barrels") == ("Plastic Barrels", 1, 10)
-        assert fit_pay_description("word " * 15)[1:] == (2, 10)
-        assert fit_pay_description("word " * 18)[1:] == (2, 8)
-        text, lines, size = fit_pay_description("word " * 40)
+        assert fit_pay_description("Plastic Barrels", GEN_FRONT_PAY_ITEMS) == ("Plastic Barrels", 1, 10)
+        assert fit_pay_description("word " * 15, GEN_FRONT_PAY_ITEMS)[1:] == (2, 10)
+        assert fit_pay_description("word " * 18, GEN_FRONT_PAY_ITEMS)[1:] == (2, 8)
+        text, lines, size = fit_pay_description("word " * 40, GEN_FRONT_PAY_ITEMS)
         assert (lines, size) == (2, 8) and text.endswith("word...")
 
     def test_truncation_ends_on_a_word_and_handles_one_long_word(self):
@@ -726,6 +727,128 @@ class TestSwcbHeader:
         package = zipfile.ZipFile(io.BytesIO(full_swcb[0]))
         assert "xl/calcChain.xml" not in package.namelist()
         assert "calcChain" not in package.read("xl/_rels/workbook.xml.rels").decode()
+
+
+# ---------------------------------------------------------------------------
+# export_swcb.render: the Conc Fr body
+# ---------------------------------------------------------------------------
+
+def swcb_body(**report_data) -> tuple[bytes, openpyxl.Workbook]:
+    """
+    Render an SWCB report with the given report_data onto a fresh template.
+    Takes report_data fields as keyword arguments.
+    Returns (the .xlsx bytes, the workbook opened read-only).
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_swcb.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data=report_data)
+    content = workbook.to_bytes()
+    return content, openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+
+
+def conc_front_row_height(content: bytes, row: int) -> float:
+    """
+    Read one Conc Fr row's height from an export (Conc Fr is sheet19.xml in the template package).
+    Takes the .xlsx bytes and the row number.
+    Returns the height in points.
+    """
+    xml = zipfile.ZipFile(io.BytesIO(content)).read("xl/worksheets/sheet19.xml").decode()
+    return float(re.search(rf'<row r="{row}"[^>]*?\sht="([\d.]+)"', xml).group(1))
+
+
+def matrix(**lines) -> dict:
+    """
+    Build an Inspection Matrix with the given lines (others absent).
+    Takes item key -> {base, sidewalk, curb}.
+    Returns the inspectionMatrix dict.
+    """
+    return lines
+
+
+OPERATION_CELLS = ("S29", "K29", "E29", "Z29")  # base, sidewalk, curb, structural
+
+
+class TestSwcbFront:
+    def test_description_fills_five_left_aligned_lines_and_is_cut_after(self):
+        _, workbook = swcb_body(description=" ".join(f"word{n}" for n in range(120)))
+        sheet = workbook["Conc Fr"]
+        lines = [sheet[f"B{row}"].value for row in range(23, 28)]
+        assert all(lines) and lines[0].startswith("word0 ")
+        assert lines[-1].endswith("… (continued in ICID)")
+        assert sheet["B22"].value is None and sheet["B28"].value is None
+        assert sheet["B23"].alignment.horizontal == "left"
+
+    def test_base_is_ticked_from_a_base_answer(self):
+        sheet = swcb_body(inspectionMatrix=matrix(subgradeCompacted={"base": "N", "sidewalk": None, "curb": None}))[1]["Conc Fr"]
+        assert [sheet[c].value for c in OPERATION_CELLS] == ["X", None, None, None]
+
+    def test_sidewalk_is_ticked_from_write_in_text(self):
+        lines = matrix(otherCuringMethods={"base": "", "sidewalk": "Wet burlap", "curb": None})
+        sheet = swcb_body(inspectionMatrix=lines)[1]["Conc Fr"]
+        assert [sheet[c].value for c in OPERATION_CELLS] == [None, "X", None, None]
+
+    def test_curb_is_ticked_only_from_columns_that_take_curb(self):
+        # Curb answers on items without a Curb box (rows 42 and 43) don't count; one on Rebar does
+        lines = matrix(sidewalkFoundationPlaced={"base": None, "sidewalk": None, "curb": "Y"},
+                       roadwayStoneBasePlaced={"base": None, "sidewalk": None, "curb": "Y"})
+        assert [swcb_body(inspectionMatrix=lines)[1]["Conc Fr"][c].value for c in OPERATION_CELLS] == [None] * 4
+        lines["rebarInstalled"] = {"base": None, "sidewalk": None, "curb": "NA"}
+        assert [swcb_body(inspectionMatrix=lines)[1]["Conc Fr"][c].value for c in OPERATION_CELLS] == [None, None, "X", None]
+
+    def test_structural_ticks_its_box_with_a_small_centred_x(self):
+        sheet = swcb_body(structural=True)[1]["Conc Fr"]
+        assert [sheet[c].value for c in OPERATION_CELLS] == [None, None, None, "X"]
+        assert sheet["Z29"].font.sz == 6
+        assert (sheet["Z29"].alignment.horizontal, sheet["Z29"].alignment.vertical) == ("center", "center")
+        assert swcb_body(structural="yes")[1]["Conc Fr"]["Z29"].value is None  # only a real true ticks it
+
+    def test_subcontractor_goes_on_the_operation_line_and_shrinks_to_fit(self):
+        sheet = swcb_body(subcontractor="  Acme Concrete Corp.  ")[1]["Conc Fr"]
+        assert sheet["AJ29"].value == "Acme Concrete Corp."
+        assert sheet["AJ29"].alignment.shrink_to_fit is True
+
+    def test_detailed_activity_rows(self):
+        activity = {"excavation": {"fromStation": "9+50", "toStation": "10+00", "remarks": "Trench"},
+                    "formPrep": {"fromStation": "", "toStation": "", "remarks": "Forms set"},
+                    "pour": {"fromStation": "10+00", "toStation": "10+40", "remarks": "Curb pour"}}
+        sheet = swcb_body(activity=activity)[1]["Conc Fr"]
+        assert [[sheet[f"{c}{row}"].value for c in ("L", "R", "X")] for row in (33, 34, 35)] == [
+            ["9+50", "10+00", "Trench"], [None, None, "Forms set"], ["10+00", "10+40", "Curb pour"],
+        ]
+        assert [sheet[f"{c}36"].value for c in ("L", "R", "X")] == [None, None, None]  # the spare row stays blank
+
+    def test_matrix_answers_go_in_the_chosen_box(self):
+        lines = matrix(subgradeCompacted={"base": "Y", "sidewalk": "N", "curb": "NA"})
+        sheet = swcb_body(inspectionMatrix=lines)[1]["Conc Fr"]
+        boxes = ("X", "Z", "AB", "AD", "AF", "AH", "AJ", "AL", "AN")
+        assert [sheet[f"{c}40"].value for c in boxes] == ["X", None, None, None, "X", None, None, None, "X"]
+
+    def test_sidewalk_foundation_row_stamps_only_sidewalk(self):
+        lines = matrix(sidewalkFoundationPlaced={"base": "Y", "sidewalk": "N", "curb": "NA"})
+        sheet = swcb_body(inspectionMatrix=lines)[1]["Conc Fr"]
+        assert [sheet[f"{c}42"].value for c in ("X", "Z", "AB", "AD", "AF", "AH", "AJ")] == [None, None, None, None, "X", None, None]
+
+    def test_roadway_stone_base_row_stamps_only_base(self):
+        lines = matrix(roadwayStoneBasePlaced={"base": "NA", "sidewalk": "Y", "curb": "Y"})
+        sheet = swcb_body(inspectionMatrix=lines)[1]["Conc Fr"]
+        assert [sheet[f"{c}43"].value for c in ("X", "Z", "AB", "AD", "AJ")] == [None, None, "X", None, None]
+
+    def test_other_curing_methods_text_goes_in_each_column_box(self):
+        lines = matrix(otherCuringMethods={"base": "Wet burlap", "sidewalk": "", "curb": "Plastic sheet"})
+        sheet = swcb_body(inspectionMatrix=lines)[1]["Conc Fr"]
+        assert [sheet[c].value for c in ("X45", "AD45", "AJ45")] == ["Wet burlap", None, "Plastic sheet"]
+        assert sheet["X45"].alignment.shrink_to_fit is True
+
+    def test_pay_items_use_conc_fr_columns_and_its_wider_description_budget(self):
+        on_one_line_here = 'Corner Steel Faced Concrete Curb (18" Deep)'  # 43 chars: two lines on Gen Fr's 40, one here
+        long = ('Thermoplastic Reflectorized Pavement Markings (4" Wide) including surface preparation, primer, '
+                "layout and removal of existing markings")
+        items = [pay_item(1, description=on_one_line_here, quantityChk="RM"), pay_item(2, description=long)]
+        content, workbook = swcb_body(payItems=items)
+        sheet = workbook["Conc Fr"]
+        assert [sheet[f"{c}49"].value for c in "BFKPU"] == ["4.01 AAS", "12345", "312.50 S.F.", None, on_one_line_here]
+        assert (sheet["U49"].font.sz, conc_front_row_height(content, 49)) == (10, 15.0)  # one line: template's 15 pt
+        assert (sheet["U50"].font.sz, conc_front_row_height(content, 50)) == (8, 22.5)  # two lines at 8 pt
+        assert sheet["B51"].value is None
 
 
 # ---------------------------------------------------------------------------

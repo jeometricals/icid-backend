@@ -1,17 +1,40 @@
 """
-What every DDC report form's front page shares: the IDR header block (project details, date and day, I.R. No.,
-sheet number, times, temperatures, weather and inspector), and the value formatting used to fill it.
+What the DDC report forms share: the IDR header block (project details, date and day, I.R. No., sheet number, times,
+temperatures, weather and inspector), the Pay Items table, laying free text out on ruled lines, and the value
+formatting used to fill them.
 
-Each form puts that block in nearly the same cells; a HeaderLayout names them for one sheet, and
-stamp_common_header fills them. Per-report modules (export_general, export_swcb, ...) own their sheet's layout.
+Each form puts these in its own cells; a HeaderLayout or PayItemsLayout names them for one sheet, and the stamp_*
+functions fill them. Per-report modules (export_general, export_swcb, ...) own their sheets' layouts.
 """
 
+import textwrap
 from dataclasses import dataclass
 from datetime import date, time
 from decimal import Decimal
 from typing import Any, Optional
 
 from api.services.xlsx_template import WorkbookTemplate
+
+CHECK_MARK = "X"
+TEXT_OVERFLOW = " … (continued in ICID)"
+
+# A pay item's description gets at most two lines: at the template's 10 pt, then shrunk to 8 pt, then cut with "...".
+# Its rows are fixed-height (one line), and Excel won't grow rows holding merged cells, so two lines get a taller row.
+PAY_DESCRIPTION_FONT_PT = 10
+PAY_DESCRIPTION_SHRINK_FONT_PT = 8
+PAY_DESCRIPTION_MAX_LINES = 2
+PAY_DESCRIPTION_TRUNCATE_SUFFIX = "..."
+LINE_HEIGHT = {10: 12.75, 8: 11.25}  # points per line of Arial at that size (Excel's default row heights)
+
+
+@dataclass(frozen=True)
+class PayItemsLayout:
+    """Where one form's Pay Items table is, and how many description characters fit a line at 10 pt and 8 pt."""
+
+    rows: range
+    columns: dict[str, str]  # itemNo, budgetCode, payQuantity, quantityChk, description -> column letter
+    line_chars_10pt: int
+    line_chars_8pt: int
 
 
 @dataclass(frozen=True)
@@ -135,3 +158,138 @@ def stamp_common_header(workbook: WorkbookTemplate, sheet: str, layout: HeaderLa
     _weather(workbook, sheet, layout.weather_am, am_label, idr.get("weather_am"))
     _weather(workbook, sheet, layout.weather_pm, pm_label, idr.get("weather_pm"))
     workbook.set_cell(sheet, layout.inspector, inspector)
+
+
+# ---- Text layout ------------------------------------------------------------
+
+def paragraphs(text: Any) -> list[str]:
+    """
+    Split free text into the paragraphs that each start a new line on the form.
+    Takes the text (anything that isn't a string counts as empty).
+    Returns its non-blank lines, trimmed.
+    """
+    return [line.strip() for line in text.splitlines() if line.strip()] if isinstance(text, str) else []
+
+
+def fill_lines(queue: list[str], capacity: int, width: int) -> list[str]:
+    """
+    Take as much text as fits in a block of ruled lines, leaving the rest queued.
+    Takes the queued paragraphs (consumed in place), the number of lines and the characters per line.
+    Returns the lines, each paragraph starting a new one; a paragraph cut short stays queued with its remainder.
+    """
+    lines: list[str] = []
+    while queue and len(lines) < capacity:
+        wrapped = textwrap.wrap(queue[0], width)
+        room = capacity - len(lines)
+        lines.extend(wrapped[:room])
+        if len(wrapped) > room:
+            queue[0] = " ".join(wrapped[room:])
+        else:
+            queue.pop(0)
+    return lines
+
+
+def mark_truncated(lines: list[str], width: int) -> list[str]:
+    """
+    End a block of lines with the "continued in ICID" note, cutting the last line to make room.
+    Takes the lines and the characters per line.
+    Returns the lines with the note on the last one.
+    """
+    room = width - len(TEXT_OVERFLOW)
+    return lines[:-1] + [lines[-1][:room].rstrip() + TEXT_OVERFLOW]
+
+
+def write_lines(workbook: WorkbookTemplate, sheet: str, rows: range, lines: list[str]) -> None:
+    """
+    Write lines onto a block of ruled lines, left-aligned, blanking the rest of the block.
+    Takes the workbook, sheet name, the rows (column B) and the lines.
+    Returns nothing.
+    """
+    for index, row in enumerate(rows):
+        workbook.set_cell(sheet, f"B{row}", lines[index] if index < len(lines) else None)
+        workbook.align_left(sheet, f"B{row}")
+
+
+# ---- Pay items --------------------------------------------------------------
+
+def pay_item_rows(pay_items: Any, capacity: int) -> list[dict[str, Optional[str]]]:
+    """
+    Lay pay items out for a form's table: the unit folded into Pay Quantity, Quantity Chk left for the RE.
+    Takes the report's payItems (anything that isn't a list counts as none) and the table's row count.
+    Returns at most one dict per table row; when there are more items than rows, the last row says how many more.
+    """
+    items = [item for item in pay_items if isinstance(item, dict)] if isinstance(pay_items, list) else []
+    rows = []
+    for item in items:
+        quantity = " ".join(part for part in (text_value(item.get("payQuantity")), text_value(item.get("unit"))) if part)
+        rows.append({
+            "itemNo": text_value(item.get("itemNo")),
+            "budgetCode": text_value(item.get("budgetCode")),
+            "payQuantity": quantity or None,
+            "quantityChk": None,
+            "description": text_value(item.get("description")),
+        })
+    if len(rows) > capacity:
+        more = len(rows) - (capacity - 1)
+        rows = rows[: capacity - 1] + [{"itemNo": None, "budgetCode": None, "payQuantity": None, "quantityChk": None,
+                                        "description": f"… {more} more items in ICID"}]
+    return rows
+
+
+def truncate_to_lines(text: str, width: int, max_lines: int, suffix: str) -> str:
+    """
+    Cut text so that it, plus a suffix, wraps into at most max_lines lines, preferring to end on a whole word.
+    Takes the text, the characters per line, the number of lines and the suffix (e.g. "...").
+    Returns the cut text ending in the suffix; a cut backs up to a space when one is within 10 characters.
+    """
+    limit = width * max_lines - len(suffix)
+    while limit > 0:
+        cut = text[:limit]
+        space = cut.rfind(" ")
+        if space > 0 and space >= limit - 10:
+            cut = cut[:space]
+        candidate = cut.rstrip(" ,;:-") + suffix
+        if len(textwrap.wrap(candidate, width)) <= max_lines:
+            return candidate
+        limit = (space if space > 0 else limit) - 1
+    return suffix
+
+
+def fit_pay_description(description: str, layout: PayItemsLayout) -> tuple[str, int, int]:
+    """
+    Fit a pay item's description into its cell's two lines: at the template's 10 pt, else shrunk to 8 pt, else cut.
+    Takes the description text and the table's layout (its characters per line at each size).
+    Returns (the text to write, how many lines it takes, the font size); cut text ends in "..." at a word boundary.
+    """
+    for font_size, width in ((PAY_DESCRIPTION_FONT_PT, layout.line_chars_10pt),
+                             (PAY_DESCRIPTION_SHRINK_FONT_PT, layout.line_chars_8pt)):
+        lines = textwrap.wrap(description, width)
+        if len(lines) <= PAY_DESCRIPTION_MAX_LINES:
+            return description, len(lines), font_size
+    text = truncate_to_lines(description, layout.line_chars_8pt, PAY_DESCRIPTION_MAX_LINES,
+                             PAY_DESCRIPTION_TRUNCATE_SUFFIX)
+    return text, PAY_DESCRIPTION_MAX_LINES, PAY_DESCRIPTION_SHRINK_FONT_PT
+
+
+def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayout, pay_items: Any) -> None:
+    """
+    Write the pay items into a form's table, blanking unused rows. Descriptions wrap, and a row whose description
+    needs two lines gets a row tall enough for them (lines x the font's line height).
+    Takes the workbook, sheet name, the table's layout and the report's payItems.
+    Returns nothing.
+    """
+    rows = pay_item_rows(pay_items, len(layout.rows))
+    for index, row in enumerate(layout.rows):
+        values = rows[index] if index < len(rows) else {}
+        for field, column in layout.columns.items():
+            workbook.set_cell(sheet, f"{column}{row}", values.get(field))
+        description = values.get("description")
+        if description:
+            cell = f"{layout.columns['description']}{row}"
+            text, lines, font_size = fit_pay_description(description, layout)
+            workbook.set_cell(sheet, cell, text)
+            workbook.wrap_cell(sheet, cell)
+            if font_size != PAY_DESCRIPTION_FONT_PT:
+                workbook.set_font_size(sheet, cell, font_size)
+            if lines > 1:
+                workbook.set_row_height(sheet, row, lines * LINE_HEIGHT[font_size])

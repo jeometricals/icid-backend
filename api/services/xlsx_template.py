@@ -306,6 +306,24 @@ class WorkbookTemplate:
         """
         self.set_style(sheet, coordinate, self.wrap_text_style(self.cell_style(sheet, coordinate)))
 
+    def center_cell(self, sheet: str, coordinate: str) -> None:
+        """
+        Centre one cell's text horizontally and vertically, keeping the rest of its style.
+        Takes the sheet name and cell reference.
+        Returns nothing.
+        """
+        style = self._alignment_style("center-h", self.cell_style(sheet, coordinate), "horizontal", "center")
+        self.set_style(sheet, coordinate, self._alignment_style("center-v", style, "vertical", "center"))
+
+    def shrink_to_fit_cell(self, sheet: str, coordinate: str) -> None:
+        """
+        Let one cell shrink its text to fit on its line (Excel's "Shrink to fit"), keeping the rest of its style.
+        Takes the sheet name and cell reference.
+        Returns nothing.
+        """
+        style = self.cell_style(sheet, coordinate)
+        self.set_style(sheet, coordinate, self._alignment_style("shrink", style, "shrinkToFit", "1"))
+
     def font_size_style(self, style: Optional[str], points: float) -> str:
         """
         Get a copy of a cell style whose font is a different size, keeping the font's name, weight and colour.
