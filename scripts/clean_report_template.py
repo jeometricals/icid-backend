@@ -4,9 +4,10 @@ One-off: turn the DDC report-forms template into the export base workbook.
 Reads templates/report_forms_source.xltx, blanks the sample project values the template shipped
 with (Contract Info C2:C7, and the hardcoded borough on Sketch Cont and Report Cont), drops the
 sample results cached on every formula that reads Contract Info, sets the workbook to recalculate
-on open, and writes templates/report_forms.xlsx as a regular workbook. It edits the package XML
-directly instead of round-tripping through openpyxl, which would drop the forms' logos, checkbox
-rectangles and lines.
+on open, makes the white-filled checkbox rectangles on Conc Fr / Conc Bk transparent (keeping their
+outlines) so an "X" stamped in the cell beneath shows through, and writes templates/report_forms.xlsx
+as a regular workbook. It edits the package XML directly instead of round-tripping through openpyxl,
+which would drop the forms' logos, checkbox rectangles and lines.
 
 Run from the project root:
     python scripts/clean_report_template.py
@@ -30,6 +31,13 @@ CELLS_TO_BLANK = {
 # The sample values themselves, also left behind as unreferenced shared strings
 SAMPLE_VALUES = ["SER200220", "STORM/SANITARY SEWERS IN Jewett Ave", "Staten Island", "STATEN ISLAND",
                  "Inter LaPeruta JV", "Jay Patel"]
+
+# Sheet name -> cells under a drawn checkbox rectangle. The rectangles are filled white with a black outline, which
+# hides anything in the cell beneath; their fill is removed so a stamped "X" shows inside the outline.
+CHECKBOXES_TO_OPEN = {
+    "Conc Fr": ["E29", "K29", "S29", "Z29"],  # Curb, Sidewalk, Concrete Base, Structural
+    "Conc Bk": ["Z37", "C52"],  # "See attached Concrete Truck and Mixing Information", "Attached pages for remarks"
+}
 
 TEMPLATE_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml"
 WORKBOOK_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
@@ -96,6 +104,60 @@ def blank_sample_shared_strings(shared_strings_xml: str) -> str:
     return shared_strings_xml
 
 
+def drawing_path(package: zipfile.ZipFile, sheet_path: str) -> str:
+    """
+    Find the drawing part a worksheet shows (its logos and shapes).
+    Takes the open template package and the worksheet's part name.
+    Returns the drawing's part name, e.g. 'xl/drawings/drawing10.xml'; raises if the sheet has none.
+    """
+    folder, name = sheet_path.rsplit("/", 1)
+    rels = package.read(f"{folder}/_rels/{name}.rels").decode("utf-8")
+    target = re.search(r'Target="\.\./drawings/([^"]+)"', rels)
+    if not target:
+        raise ValueError(f"{sheet_path} has no drawing")
+    return f"xl/drawings/{target.group(1)}"
+
+
+def cell_position(coordinate: str) -> tuple[int, int]:
+    """
+    Convert a cell reference to the zero-based column and row a drawing anchor uses.
+    Takes a reference like 'E29'.
+    Returns (4, 28).
+    """
+    letters = re.match(r"[A-Z]+", coordinate).group(0)
+    column = 0
+    for letter in letters:
+        column = column * 26 + ord(letter) - 64
+    return column - 1, int(coordinate[len(letters):]) - 1
+
+
+def open_checkboxes(drawing_xml: str, cells: list[str]) -> str:
+    """
+    Remove the fill from the checkbox rectangles anchored on the given cells, keeping their outlines.
+    Takes the drawing XML and the cells (each must have exactly one filled shape anchored on it).
+    Returns the drawing XML with those shapes' fill set to <a:noFill/>; raises if a cell doesn't match exactly once.
+    """
+    for cell in cells:
+        column, row = cell_position(cell)
+        anchor = re.compile(
+            rf"<xdr:twoCellAnchor\b[^>]*><xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>\d+</xdr:colOff>"
+            rf"<xdr:row>{row}</xdr:row>.*?</xdr:twoCellAnchor>",
+            re.DOTALL,
+        )
+        matches = [m for m in anchor.finditer(drawing_xml) if "<xdr:sp>" in m.group(0) or "<xdr:sp " in m.group(0)]
+        if len(matches) != 1:
+            raise ValueError(f"expected one shape anchored on {cell}, found {len(matches)}")
+        shape = matches[0].group(0)
+        properties = re.search(r"<xdr:spPr\b[^>]*>(.*?)</xdr:spPr>", shape, re.DOTALL)
+        fill_area = properties.group(1).split("<a:ln", 1)[0]  # the shape's own fill comes before its outline
+        if "<a:solidFill>" not in fill_area:
+            raise ValueError(f"the shape on {cell} has no solid fill to remove")
+        new_fill_area = re.sub(r"<a:solidFill>.*?</a:solidFill>", "<a:noFill/>", fill_area, count=1, flags=re.DOTALL)
+        new_properties = properties.group(0).replace(fill_area, new_fill_area, 1)
+        drawing_xml = drawing_xml.replace(shape, shape.replace(properties.group(0), new_properties, 1), 1)
+    return drawing_xml
+
+
 def main() -> None:
     """
     Write the cleaned workbook next to the source template.
@@ -114,6 +176,11 @@ def main() -> None:
             dropped += count
             if sheet in CELLS_TO_BLANK or count:
                 edits[path] = xml.encode("utf-8")
+        opened = 0
+        for sheet, cells in CHECKBOXES_TO_OPEN.items():
+            drawing = drawing_path(source, paths[sheet])
+            edits[drawing] = open_checkboxes(source.read(drawing).decode("utf-8"), cells).encode("utf-8")
+            opened += len(cells)
         workbook = source.read("xl/workbook.xml").decode("utf-8")
         edits["xl/workbook.xml"] = re.sub(r"<calcPr ", '<calcPr fullCalcOnLoad="1" ', workbook, count=1).encode("utf-8")
         shared_strings = source.read("xl/sharedStrings.xml").decode("utf-8")
@@ -124,7 +191,7 @@ def main() -> None:
         with zipfile.ZipFile(TARGET, "w", zipfile.ZIP_DEFLATED) as target:
             for item in source.infolist():
                 target.writestr(item, edits.get(item.filename, source.read(item.filename)))
-    print(f"wrote {TARGET.relative_to(ROOT)} (dropped {dropped} cached formula results)")
+    print(f"wrote {TARGET.relative_to(ROOT)} (dropped {dropped} cached formula results, opened {opened} checkboxes)")
 
 
 if __name__ == "__main__":

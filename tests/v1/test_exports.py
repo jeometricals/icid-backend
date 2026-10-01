@@ -24,6 +24,25 @@ ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / "templates" / "report_forms.xlsx"
 SOURCE_TEMPLATE = ROOT / "templates" / "report_forms_source.xltx"
 
+# Drawing part -> cells under a checkbox rectangle the cleanup makes transparent (Conc Fr, Conc Bk)
+CHECKBOX_DRAWINGS = {
+    "xl/drawings/drawing10.xml": ["E29", "K29", "S29", "Z29"],
+    "xl/drawings/drawing11.xml": ["Z37", "C52"],
+}
+
+
+def cell_position(coordinate: str) -> tuple[int, int]:
+    """
+    Convert a cell reference to the zero-based column and row a drawing anchor uses.
+    Takes a reference like 'E29'.
+    Returns (4, 28).
+    """
+    letters = re.match(r"[A-Z]+", coordinate).group(0)
+    column = 0
+    for letter in letters:
+        column = column * 26 + ord(letter) - 64
+    return column - 1, int(coordinate[len(letters):]) - 1
+
 # The sample project the DDC template shipped with; none of it may survive the cleanup
 SAMPLE_VALUES = ["SER200220", "20151410922", "Jewett", "LaPeruta", "Jay Patel", "Staten Island", "STATEN ISLAND"]
 
@@ -142,8 +161,24 @@ class TestTemplate:
         assert drawing_parts(TEMPLATE.read_bytes()) == drawing_parts(SOURCE_TEMPLATE.read_bytes())
         source, cleaned = zipfile.ZipFile(SOURCE_TEMPLATE), zipfile.ZipFile(TEMPLATE)
         for name in source.namelist():
-            if name.startswith(("xl/drawings/", "xl/media/")):
+            if name.startswith("xl/media/") or (name.startswith("xl/drawings/") and name not in CHECKBOX_DRAWINGS):
                 assert cleaned.read(name) == source.read(name), name
+        # The Conc Fr / Conc Bk drawings only lose their checkboxes' fill: every shape is still there
+        for name in CHECKBOX_DRAWINGS:
+            anchors = lambda package: re.findall(r'<xdr:cNvPr id="\d+" name="[^"]+"', package.read(name).decode())
+            assert anchors(cleaned) == anchors(source), name
+
+    def test_conc_checkboxes_are_transparent_with_their_outlines(self):
+        cleaned = zipfile.ZipFile(TEMPLATE)
+        for drawing, cells in CHECKBOX_DRAWINGS.items():
+            xml = cleaned.read(drawing).decode()
+            for cell in cells:
+                column, row = cell_position(cell)
+                shape = re.search(rf"<xdr:twoCellAnchor\b[^>]*><xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>\d+"
+                                  rf"</xdr:colOff><xdr:row>{row}</xdr:row>.*?</xdr:twoCellAnchor>", xml, re.DOTALL).group(0)
+                fill, outline = re.search(r"<xdr:spPr\b[^>]*>(.*?)</xdr:spPr>", shape, re.DOTALL).group(1).split("<a:ln", 1)
+                assert "<a:noFill/>" in fill and "<a:solidFill>" not in fill, cell
+                assert '<a:srgbClr val="000000"/>' in outline, cell
 
 
 # ---------------------------------------------------------------------------
