@@ -1,4 +1,5 @@
 import io
+import re
 import zipfile
 from contextlib import contextmanager
 from datetime import date, datetime, time
@@ -12,7 +13,9 @@ import pytest
 
 from api.queries.projects import get_project_contractor_name
 from api.services import export
-from api.services.export import DESCRIPTION_LINE_CHARS, DESCRIPTION_ROWS, description_lines, generate_idr_export
+from api.services.export import generate_idr_export
+from api.services.export_general import REPORT_CONT_LINE_CHARS, fill_lines, paragraphs, pay_item_rows
+from api.services.xlsx_template import WorkbookTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = ROOT / "templates" / "report_forms.xlsx"
@@ -141,10 +144,56 @@ class TestTemplate:
 
 
 # ---------------------------------------------------------------------------
-# generate_idr_export
+# generate_idr_export: Gen Fr header
 # ---------------------------------------------------------------------------
 
-class TestGenerateIdrExport:
+def general_with(**report_data) -> dict:
+    """
+    Build the General report row the export reads, with the given report_data.
+    Takes report_data fields as keyword arguments.
+    Returns the row (page 1).
+    """
+    return {"report_type": "GEN", "page_number": 1, "report_data": report_data}
+
+
+def visible_sheets(content: bytes) -> list[str]:
+    """
+    List an export's visible sheets in tab order, read straight from workbook.xml (fast, no full load).
+    Takes the .xlsx bytes.
+    Returns the sheet names without state="hidden".
+    """
+    workbook = zipfile.ZipFile(io.BytesIO(content)).read("xl/workbook.xml").decode()
+    return [re.search(r'name="([^"]+)"', tag).group(1) for tag in re.findall(r"<sheet [^>]*/>", workbook)
+            if 'state="hidden"' not in tag]
+
+
+def export_bytes(**overrides) -> bytes:
+    """
+    Run generate_idr_export on stubbed data.
+    Takes patched_export's keyword overrides.
+    Returns the .xlsx bytes.
+    """
+    with patched_export(**overrides):
+        return generate_idr_export(IDR_ID).content
+
+
+# Long enough to fill Gen Fr, Gen Bk's comment lines and Report Cont, and still be cut
+LONG_DESCRIPTION = " ".join(f"word{n}" for n in range(400))
+CASCADE = general_with(description=LONG_DESCRIPTION, comments="Visitor from DEP at 10am.")
+
+
+@pytest.fixture(scope="module")
+def full_cascade() -> tuple[bytes, openpyxl.Workbook]:
+    """
+    An export whose description runs onto Gen Bk and Report Cont, fully loaded once for style and order checks.
+    Takes nothing.
+    Returns (the export's bytes, the loaded workbook).
+    """
+    content = export_bytes(general=CASCADE)
+    return content, openpyxl.load_workbook(io.BytesIO(content))
+
+
+class TestGeneralFrontHeader:
     def test_returns_a_valid_workbook_named_for_the_idr(self):
         with patched_export():
             result = generate_idr_export(IDR_ID)
@@ -158,30 +207,47 @@ class TestGenerateIdrExport:
             "Benny Bowers Contracting Co.", None,  # no Resident Engineer in the data model yet
         ]
 
-    def test_stamps_the_general_front_header(self):
+    def test_writes_project_values_over_the_contract_info_formulas(self):
+        sheet = exported_workbook()["Gen Fr"]
+        # A formula would read back as "='Contract Info'!C2"; the export leaves plain values for previewers
+        assert [sheet[c].value for c in ("G8", "P8", "I10", "F12", "F14")] == [
+            "HWS0023", "2024123457", "Installation of Curb, Sidewalk & Ped-Ramp <Queens>", "Queens",
+            "Benny Bowers Contracting Co.",
+        ]
+
+    def test_stamps_the_header_fields(self):
         sheet = exported_workbook()["Gen Fr"]
         assert sheet["AI4"].value == datetime(2026, 9, 30)
         assert sheet["AH8"].value == 1 and sheet["AM8"].value == 3
         assert sheet["AG10"].value == "( Start 07:00 End 15:30 )"
-        assert sheet["AG12"].value == "( Start 06:45 End ________ )"
-        assert sheet["AD13"].value == "Low  45"
-        assert sheet["AK13"].value == "High  62.5"
+        assert sheet["AG12"].value == "( Start 06:45 End ________ )"  # one of two times known keeps the other blank
+        assert sheet["AD13"].value == "Low  45" and sheet["AK13"].value == "High  62.5"
         assert sheet["AD17"].value == "Cloudy" and sheet["AK17"].value == "Rain"
         assert sheet["H17"].value == "Genghis Khan"
         assert sheet["AH6"].value is None  # no I.R. No. in the data model yet
+
+    def test_empty_fields_clear_the_template_placeholders(self):
+        idr = {**SUBMITTED_IDR, "work_start_time": None, "work_end_time": None, "inspector_start_time": None,
+               "temp_low": None, "temp_high": None, "weather_am": None, "weather_pm": "  "}
+        sheet = exported_workbook(idr=idr, contractor=None, user=None)["Gen Fr"]
+        assert sheet["AG10"].value is None and sheet["AG12"].value is None
+        assert sheet["AD17"].value is None and sheet["AK17"].value is None
+        assert sheet["F14"].value is None and sheet["H17"].value is None
+        # Low / High are the boxes' labels, not placeholders, so they stay
+        assert sheet["AD13"].value == "Low" and sheet["AK13"].value == "High"
 
     def test_highlights_only_the_day_of_week(self, full_export):
         sheet = full_export[1]["Gen Fr"]
         highlighted = [c for c in ("AI5", "AJ5", "AK5", "AL5", "AM5", "AN5", "AO5") if sheet[c].fill.fill_type == "solid"]
         assert highlighted == ["AL5"]
-        assert sheet["AL5"].value == "W"
-        assert sheet["AL5"].border.left.style == "medium"
+        assert sheet["AL5"].value == "W" and sheet["AL5"].border.left.style == "medium"
 
-    def test_writes_the_description_on_the_ruled_lines(self):
-        sheet = exported_workbook()["Gen Fr"]
-        assert sheet["B22"].value == "Poured curb along Main St."
-        assert sheet["B23"].value == "Inspected forms before the pour."
-        assert sheet["B24"].value is None
+    def test_sets_letter_portrait_one_page_print_setup(self, full_export):
+        sheet = full_export[1]["Gen Fr"]
+        assert sheet.page_setup.paperSize == 1  # US Letter
+        assert sheet.page_setup.orientation == "portrait"
+        assert sheet.sheet_properties.pageSetUpPr.fitToPage is True
+        assert (sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight) == (1, 1)
 
     def test_composes_a_general_when_the_idr_has_none(self):
         children = [
@@ -191,29 +257,7 @@ class TestGenerateIdrExport:
         sheet = exported_workbook(general=None, main_reports=children)["Gen Fr"]
         assert sheet["B22"].value == "Sidewalk, Curb, Concrete Base: Formed sidewalk."
         assert sheet["B23"].value.startswith("See the individual reports")
-        # A composed General isn't one of the IDR's numbered pages
-        assert sheet["AH8"].value is None and sheet["AM8"].value is None
-
-    def test_missing_optional_fields_leave_the_template_blanks(self):
-        idr = {**SUBMITTED_IDR, "work_start_time": None, "work_end_time": None, "temp_low": None, "weather_am": None}
-        sheet = exported_workbook(idr=idr, contractor=None, user=None)["Gen Fr"]
-        assert sheet["AG10"].value == "( Start ________ End ________ )"
-        assert sheet["AD13"].value == "Low"
-        assert sheet["AD17"].value is None
-        assert sheet["H17"].value is None
-
-    def test_sets_letter_portrait_one_page_print_setup_on_gen_fr(self, full_export):
-        sheet = full_export[1]["Gen Fr"]
-        assert sheet.page_setup.paperSize == 1  # US Letter
-        assert sheet.page_setup.orientation == "portrait"
-        assert sheet.sheet_properties.pageSetUpPr.fitToPage is True
-        assert (sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight) == (1, 1)
-
-    def test_shows_only_gen_fr_and_keeps_every_drawing(self, full_export):
-        content, workbook = full_export
-        assert [ws.title for ws in workbook.worksheets if ws.sheet_state == "visible"] == ["Gen Fr"]
-        assert workbook.active.title == "Gen Fr"
-        assert drawing_parts(content) == drawing_parts(TEMPLATE.read_bytes())
+        assert sheet["AH8"].value is None and sheet["AM8"].value is None  # not one of the IDR's numbered pages
 
     def test_unknown_idr_raises_not_found(self):
         with patched_export(idr=None), pytest.raises(export.IdrNotFoundError):
@@ -224,23 +268,234 @@ class TestGenerateIdrExport:
             generate_idr_export(IDR_ID)
 
 
-class TestDescriptionLines:
-    def test_wraps_long_paragraphs_to_the_line_width(self):
-        lines = description_lines("word " * 40)
-        assert len(lines) > 1
-        assert all(len(line) <= DESCRIPTION_LINE_CHARS for line in lines)
+# ---------------------------------------------------------------------------
+# Pay items (Gen Fr)
+# ---------------------------------------------------------------------------
 
-    def test_cuts_overflow_with_a_continued_note(self):
-        lines = description_lines("\n".join(f"Line {n}" for n in range(30)))
-        assert len(lines) == len(DESCRIPTION_ROWS)
-        assert lines[-1].endswith("(continued in ICID)")
+def pay_item(n: int, **overrides) -> dict:
+    """
+    Build a saved pay item.
+    Takes a number to make it distinct and field overrides.
+    Returns the pay item dict.
+    """
+    return {"itemNo": f"4.{n:02d} AAS", "budgetCode": "12345", "payQuantity": "312.50", "unit": "S.F.",
+            "description": f"Sidewalk {n}", **overrides}
 
-    def test_non_text_description_is_empty(self):
-        assert description_lines(None) == [] and description_lines({"a": 1}) == []
+
+class TestPayItems:
+    def test_stamps_each_column_with_the_unit_in_pay_quantity_and_chk_blank(self):
+        general = general_with(payItems=[pay_item(1, quantityChk="RM")])
+        sheet = exported_workbook(general=general)["Gen Fr"]
+        assert [sheet[f"{c}39"].value for c in "BGNSX"] == ["4.01 AAS", "12345", "312.50 S.F.", None, "Sidewalk 1"]
+        assert sheet["B40"].value is None
+
+    def test_pay_quantity_without_a_unit_is_just_the_number(self):
+        general = general_with(payItems=[pay_item(1, unit=""), pay_item(2, payQuantity="", unit="S.F.")])
+        sheet = exported_workbook(general=general)["Gen Fr"]
+        assert sheet["N39"].value == "312.50"
+        assert sheet["N40"].value == "S.F."
+
+    def test_more_items_than_rows_end_with_a_count(self):
+        general = general_with(payItems=[pay_item(n) for n in range(14)])
+        sheet = exported_workbook(general=general)["Gen Fr"]
+        assert sheet["B49"].value == "4.10 AAS"  # 11 items fit, then the note on the 12th row
+        assert [sheet[f"{c}50"].value for c in "BGNS"] == [None] * 4
+        assert sheet["X50"].value == "… 3 more items in ICID"
+
+    def test_non_list_pay_items_are_none(self):
+        assert pay_item_rows(None) == [] and pay_item_rows({"a": 1}) == [] and pay_item_rows(["x"]) == []
+
+
+# ---------------------------------------------------------------------------
+# Gen Bk: work force, equipment, safety, comments
+# ---------------------------------------------------------------------------
+
+class TestGenBack:
+    def test_gen_bk_stays_hidden_with_nothing_on_it(self):
+        assert visible_sheets(export_bytes()) == ["Gen Fr"]
+
+    def test_workforce_counts_including_legacy_keys(self):
+        general = general_with(workforce={"superintendent": "1", "foreman": "2", "laborers": "6", "flaggers": "x2"})
+        content = export_bytes(general=general)
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Bk"]
+        assert [sheet[f"G{row}"].value for row in range(43, 48)] == [1, 2, None, 6, "x2"]
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk"]
+
+    def test_added_trades_use_printed_rows_then_blank_rows_then_a_count(self):
+        trades = [{"label": "Masons", "count": "3"}, {"label": "Chauffeurs", "count": "1"},
+                  {"label": "Surveyors", "count": "2"}, {"label": "Welders", "count": "1"}]
+        sheet = exported_workbook(general=general_with(additionalWorkforce=trades))["Gen Bk"]
+        assert sheet["G50"].value == 3  # Masons' own row
+        assert (sheet["B52"].value, sheet["G52"].value) == ("Chauffeurs", 1)
+        assert (sheet["B53"].value, sheet["G53"].value) == ("+2 more (see ICID)", None)
+
+    def test_equipment_model_and_number(self):
+        general = general_with(equipment={"backhoe": {"model": "CAT 420", "number": "1"}, "excavator": {"model": "", "number": ""}})
+        sheet = exported_workbook(general=general)["Gen Bk"]
+        assert (sheet["N44"].value, sheet["V44"].value) == ("CAT 420", 1)
+        assert (sheet["N49"].value, sheet["V49"].value) == (None, None)
+
+    def test_added_equipment_shares_printed_rows_and_uses_the_blank_row(self):
+        extras = [{"label": "Crane", "model": "Grove", "number": "1"},
+                  {"label": "Roller – Static", "model": "BW120", "number": "1"},
+                  {"label": "Roller – Dynamic", "model": "CB24", "number": "2"},
+                  {"label": "Sweepers", "model": "Elgin", "number": "1"}]
+        sheet = exported_workbook(general=general_with(additionalEquipment=extras))["Gen Bk"]
+        assert (sheet["N45"].value, sheet["V45"].value) == ("Grove", 1)
+        # Both rollers on the Roller row, in its two Model / No. pairs, each keeping its variant name
+        assert (sheet["N47"].value, sheet["V47"].value) == ("Roller – Static BW120", 1)
+        assert (sheet["Y47"].value, sheet["AG47"].value) == ("Roller – Dynamic CB24", 2)
+        assert (sheet["I53"].value, sheet["N53"].value, sheet["V53"].value) == ("Sweepers", "Elgin", 1)
+
+    def test_safety_checklist_marks_y_or_n_and_writes_remarks(self):
+        general = general_with(
+            safetyChecks={"plasticBarrels": "Y", "fencing": "N", "plates": "NA", "arrowBoard": True, "timberCurbs": None},
+            safetyRemarks={"fencing": "Gap at gate", "plates": "None on site", "generalSafety": "Good"},
+        )
+        sheet = exported_workbook(general=general)["Gen Bk"]
+        row = lambda r: (sheet[f"N{r}"].value, sheet[f"P{r}"].value, sheet[f"R{r}"].value)
+        assert row(30) == ("X", None, None)                      # plasticBarrels: Y
+        assert row(36) == (None, "X", "Gap at gate")             # fencing: N
+        assert row(37) == (None, None, "N/A — None on site")      # plates: N/A has no column on the form
+        assert row(38) == ("X", None, None)                      # arrowBoard: older reports' True
+        assert row(32) == (None, None, None)                     # timberCurbs: unanswered
+        assert row(34) == (None, None, "Good")                   # a remark without an answer
+
+    def test_comments_go_on_the_back_without_continuing(self):
+        content = export_bytes(general=general_with(description="Short.", comments="Visitor from DEP at 10am."))
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert workbook["Gen Bk"]["B3"].value == "Visitor from DEP at 10am."
+        assert workbook["Gen Bk"]["B4"].value is None
+        assert workbook["Gen Bk"]["Z27"].value is None
+        assert workbook["Gen Fr"]["AC36"].value is None  # the description fit on the front
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk"]
+
+
+# ---------------------------------------------------------------------------
+# Description of Work overflow: Gen Fr → Gen Bk → Report Cont
+# ---------------------------------------------------------------------------
+
+def words(count: int, start: int = 0) -> str:
+    """
+    Make filler text of distinct words.
+    Takes how many words and the first word's number.
+    Returns the text.
+    """
+    return " ".join(f"word{n}" for n in range(start, start + count))
+
+
+class TestDescriptionCascade:
+    def test_level_1_fits_on_the_front(self, full_export):
+        content, workbook = full_export
+        sheet = workbook["Gen Fr"]
+        assert sheet["B22"].value == "Poured curb along Main St."
+        assert sheet["AC36"].value is None
+        assert visible_sheets(content) == ["Gen Fr"]
+        # The template centres the first line; every description line is left-aligned
+        assert [sheet[f"B{row}"].alignment.horizontal for row in (22, 23, 34)] == ["left"] * 3
+
+    def test_level_2_continues_on_the_back_and_ticks_reverse_page_used(self):
+        content = export_bytes(general=general_with(description=words(110), comments="Visitor."))
+        workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert workbook["Gen Fr"]["AC36"].value == "X"
+        back = [workbook["Gen Bk"][f"B{row}"].value for row in range(3, 7)]
+        assert back[0] == "Description of work (continued):"
+        assert back[-2:] == ["Comments:", "Visitor."]
+        assert workbook["Gen Bk"]["Z27"].value is None
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk"]
+
+    def test_level_3_continues_on_report_cont_and_ticks_continued(self, full_cascade):
+        content, workbook = full_cascade
+        assert workbook["Gen Fr"]["AC36"].value == "X"
+        assert workbook["Gen Bk"]["Z27"].value == "X"
+        assert workbook["Report Cont"]["B21"].value.startswith("word")
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Report Cont"]
+
+    def test_text_past_report_cont_is_cut_with_a_note(self, full_cascade):
+        sheet = full_cascade[1]["Report Cont"]
+        assert sheet["B45"].value.endswith("… (continued in ICID)")
+        assert len(sheet["B45"].value) <= REPORT_CONT_LINE_CHARS
+
+    def test_report_cont_header_is_stamped_and_placeholders_cleared(self, full_cascade):
+        sheet = full_cascade[1]["Report Cont"]
+        assert sheet["I10"].value == "9/30/26"
+        assert sheet["L11"].fill.fill_type == "solid"  # Wednesday
+        assert sheet["U10"].value is None and sheet["AA10"].value == "Sheet No.:"
+        assert [sheet[c].value for c in ("G14", "P14", "F17", "H19")] == ["HWS0023", "2024123457", "Queens", "Genghis Khan"]
+
+    def test_continuation_lines_are_left_aligned(self, full_cascade):
+        workbook = full_cascade[1]
+        assert workbook["Gen Bk"]["B3"].alignment.horizontal == "left"  # the template centres these
+        assert workbook["Report Cont"]["B21"].alignment.horizontal == "left"
+
+    def test_report_cont_prints_after_the_general_pages(self, full_cascade):
+        workbook = full_cascade[1]
+        names = workbook.sheetnames
+        assert names.index("Gen Fr") < names.index("Gen Bk") < names.index("Report Cont")
+        assert workbook.active.title == "Gen Fr"
+        # The one sheet-scoped name (AC Fr's print area) still points at AC Fr after the move
+        xml = zipfile.ZipFile(io.BytesIO(full_cascade[0])).read("xl/workbook.xml").decode()
+        assert re.search(r'localSheetId="(\d+)"', xml).group(1) == str(names.index("AC Fr"))
 
     def test_control_characters_do_not_break_the_file(self):
-        general = {**GENERAL, "report_data": {"description": "Bad \x01char & <tag>"}}
+        general = general_with(description="Bad \x01char & <tag>")
         assert exported_workbook(general=general)["Gen Fr"]["B22"].value == "Bad char & <tag>"
+
+
+class TestTextLayout:
+    def test_fill_lines_wraps_and_leaves_the_rest_queued(self):
+        queue = [words(30), "Second paragraph."]
+        lines = fill_lines(queue, capacity=2, width=40)
+        assert len(lines) == 2 and all(len(line) <= 40 for line in lines)
+        assert queue[0].startswith("word") and queue[1] == "Second paragraph."
+
+    def test_each_paragraph_starts_a_new_line(self):
+        assert fill_lines(["One.", "Two."], capacity=5, width=40) == ["One.", "Two."]
+
+    def test_paragraphs_ignores_blank_lines_and_non_text(self):
+        assert paragraphs("A\n\n  B  \n") == ["A", "B"]
+        assert paragraphs(None) == [] and paragraphs({"a": 1}) == []
+
+
+# ---------------------------------------------------------------------------
+# The XML writer
+# ---------------------------------------------------------------------------
+
+def written(workbook: WorkbookTemplate) -> openpyxl.Workbook:
+    """
+    Serialize a WorkbookTemplate and open it read-only.
+    Takes the workbook.
+    Returns the loaded workbook.
+    """
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), read_only=True)
+
+
+class TestWorkbookTemplate:
+    def test_a_value_replaces_a_formula(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        assert workbook.cell_style("Gen Fr", "G8") is not None
+        workbook.set_cell("Gen Fr", "G8", "HWS0023")
+        sheet = written(workbook)["Gen Fr"]
+        assert sheet["G8"].value == "HWS0023"
+        assert sheet["P8"].value == "='Contract Info'!C3"  # untouched neighbours keep their formulas
+
+    def test_left_alignment_keeps_the_other_alignment_settings(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.align_left("Gen Fr", "AD17")  # a centred, wrapped cell
+        cell = written(workbook)["Gen Fr"]["AD17"]
+        assert cell.alignment.horizontal == "left"
+        assert cell.alignment.wrap_text is True
+
+    def test_derived_styles_are_shared(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        style = workbook.cell_style("Gen Fr", "B23")
+        assert workbook.left_aligned_style(style) == workbook.left_aligned_style(style)
+
+    def test_the_calculation_chain_is_dropped(self):
+        package = zipfile.ZipFile(io.BytesIO(WorkbookTemplate(TEMPLATE).to_bytes()))
+        assert "xl/calcChain.xml" not in package.namelist()
+        assert "calcChain" not in package.read("xl/_rels/workbook.xml.rels").decode()
+        assert "calcChain" not in package.read("[Content_Types].xml").decode()
 
 
 # ---------------------------------------------------------------------------

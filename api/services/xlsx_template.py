@@ -12,7 +12,7 @@ from datetime import date
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 from xml.sax.saxutils import escape
 
 CellValue = Union[str, int, float, Decimal, date, None]
@@ -92,6 +92,8 @@ class WorkbookTemplate:
             self._infos = package.infolist()
             self._parts = {info.filename: package.read(info.filename) for info in self._infos}
         self._sheet_paths, self._sheet_order = self._read_sheets()
+        # Derived styles already added, keyed by (kind, source style), so repeated cells share one new style
+        self._style_cache: dict[tuple[str, Optional[str]], str] = {}
 
     def _text(self, part: str) -> str:
         """
@@ -214,28 +216,70 @@ class WorkbookTemplate:
         updated = updated.replace(f'count="{index}"', f'count="{index + 1}"', 1)
         return styles[: block.start()] + updated + styles[block.end():], index
 
-    def highlighted_style(self, style: Optional[str]) -> str:
+    def _derive_style(self, kind: str, style: Optional[str], change: Callable[[str, str, str], tuple[str, str, str]]) -> str:
         """
-        Add a copy of a cell style with a light-gray fill and a medium border, to mark one choice in a row of them.
-        Takes the style index to copy (None for the default style).
-        Returns the new style's index.
+        Add (once per source style and kind) a copy of a cell style with one change applied.
+        Takes a name for the change, the style index to copy (None for the default style) and a function turning
+        (styles XML, the xf's start tag, the rest of the xf) into their changed versions.
+        Returns the new style's index; asking again for the same kind and source returns the same index.
         """
+        key = (kind, style)
+        if key in self._style_cache:
+            return self._style_cache[key]
         styles = self._text("xl/styles.xml")
-        fill = '<fill><patternFill patternType="solid"><fgColor rgb="FFBFBFBF"/><bgColor indexed="64"/></patternFill></fill>'
-        styles, fill_id = self._append_style_entry(styles, "fills", fill)
-        side = '<{0} style="medium"><color auto="1"/></{0}>'
-        border = "<border>" + "".join(side.format(s) for s in ("left", "right", "top", "bottom")) + "<diagonal/></border>"
-        styles, border_id = self._append_style_entry(styles, "borders", border)
-
         cell_xfs = re.search(r"<cellXfs\b[^>]*>(.*?)</cellXfs>", styles, re.DOTALL)
         source = re.findall(r"<xf\b[^>]*?(?:/>|>.*?</xf>)", cell_xfs.group(1), re.DOTALL)[int(style or 0)]
         start_tag = re.match(r"<xf\b[^>]*?/?>", source).group(0)
-        new_start = start_tag
-        for name, value in (("fillId", fill_id), ("applyFill", 1), ("borderId", border_id), ("applyBorder", 1)):
-            new_start = _set_attribute(new_start, name, str(value))
-        styles, xf_id = self._append_style_entry(styles, "cellXfs", new_start + source[len(start_tag):])
+        styles, start_tag, rest = change(styles, start_tag, source[len(start_tag):])
+        styles, xf_id = self._append_style_entry(styles, "cellXfs", start_tag + rest)
         self._write("xl/styles.xml", styles)
+        self._style_cache[key] = str(xf_id)
         return str(xf_id)
+
+    def highlighted_style(self, style: Optional[str]) -> str:
+        """
+        Get a copy of a cell style with a light-gray fill and a medium border, to mark one choice in a row of them.
+        Takes the style index to copy (None for the default style).
+        Returns the new style's index.
+        """
+        def change(styles: str, start_tag: str, rest: str) -> tuple[str, str, str]:
+            fill = '<fill><patternFill patternType="solid"><fgColor rgb="FFBFBFBF"/><bgColor indexed="64"/></patternFill></fill>'
+            styles, fill_id = self._append_style_entry(styles, "fills", fill)
+            side = '<{0} style="medium"><color auto="1"/></{0}>'
+            border = "<border>" + "".join(side.format(s) for s in ("left", "right", "top", "bottom")) + "<diagonal/></border>"
+            styles, border_id = self._append_style_entry(styles, "borders", border)
+            for name, value in (("fillId", fill_id), ("applyFill", 1), ("borderId", border_id), ("applyBorder", 1)):
+                start_tag = _set_attribute(start_tag, name, str(value))
+            return styles, start_tag, rest
+
+        return self._derive_style("highlighted", style, change)
+
+    def left_aligned_style(self, style: Optional[str]) -> str:
+        """
+        Get a copy of a cell style aligned left horizontally, keeping its other alignment settings (vertical, wrap...).
+        Takes the style index to copy (None for the default style).
+        Returns the new style's index.
+        """
+        def change(styles: str, start_tag: str, rest: str) -> tuple[str, str, str]:
+            start_tag = _set_attribute(start_tag, "applyAlignment", "1")
+            alignment = re.search(r"<alignment\b[^>]*/>", rest)
+            if alignment:
+                rest = rest.replace(alignment.group(0), _set_attribute(alignment.group(0), "horizontal", "left"), 1)
+            elif start_tag.endswith("/>"):
+                start_tag, rest = start_tag[:-2] + ">", '<alignment horizontal="left"/></xf>'
+            else:
+                rest = '<alignment horizontal="left"/>' + rest
+            return styles, start_tag, rest
+
+        return self._derive_style("left", style, change)
+
+    def align_left(self, sheet: str, coordinate: str) -> None:
+        """
+        Left-align one cell, keeping the rest of its style.
+        Takes the sheet name and cell reference.
+        Returns nothing.
+        """
+        self.set_style(sheet, coordinate, self.left_aligned_style(self.cell_style(sheet, coordinate)))
 
     def fit_to_letter_page(self, sheet: str) -> None:
         """
@@ -298,12 +342,50 @@ class WorkbookTemplate:
             if cleared != xml:
                 self._write(part, cleared)
 
+    def move_sheet(self, sheet: str, after: str) -> None:
+        """
+        Move a sheet's tab to directly after another, keeping sheet-scoped names (print areas) on their sheets.
+        Takes the sheet to move and the sheet it should follow.
+        Returns nothing.
+        """
+        old_order = list(self._sheet_order)
+        new_order = [name for name in old_order if name != sheet]
+        new_order.insert(new_order.index(after) + 1, sheet)
+        new_index = {old_order.index(name): new_order.index(name) for name in old_order}
+
+        workbook = self._text("xl/workbook.xml")
+        tags = {re.search(r'name="([^"]+)"', tag).group(1): tag for tag in re.findall(r"<sheet [^>]*/>", workbook)}
+        sheets_block = re.search(r"<sheets>.*?</sheets>", workbook, re.DOTALL)
+        workbook = (workbook[: sheets_block.start()] + "<sheets>" + "".join(tags[n] for n in new_order) + "</sheets>"
+                    + workbook[sheets_block.end():])
+        workbook = re.sub(r'(<definedName\b[^>]*?\slocalSheetId=")(\d+)"',
+                          lambda m: f'{m.group(1)}{new_index[int(m.group(2))]}"', workbook)
+        self._write("xl/workbook.xml", workbook)
+        self._sheet_order = new_order
+
+    def _drop_calc_chain(self) -> None:
+        """
+        Remove the calculation chain, which lists formula cells and goes stale once a formula is overwritten with a value
+        (Excel then reports the file as damaged). Excel rebuilds it on open.
+        Takes nothing.
+        Returns nothing.
+        """
+        if "xl/calcChain.xml" not in self._parts:
+            return
+        del self._parts["xl/calcChain.xml"]
+        self._infos = [info for info in self._infos if info.filename != "xl/calcChain.xml"]
+        rels = re.sub(r"<Relationship [^>]*calcChain[^>]*/>", "", self._text("xl/_rels/workbook.xml.rels"))
+        self._write("xl/_rels/workbook.xml.rels", rels)
+        types = re.sub(r'<Override PartName="/xl/calcChain.xml"[^>]*/>', "", self._text("[Content_Types].xml"))
+        self._write("[Content_Types].xml", types)
+
     def to_bytes(self) -> bytes:
         """
-        Serialize the package back into an .xlsx file.
+        Serialize the package back into an .xlsx file, without the calculation chain.
         Takes nothing.
         Returns the file's bytes.
         """
+        self._drop_calc_chain()
         buffer = BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as package:
             for info in self._infos:
