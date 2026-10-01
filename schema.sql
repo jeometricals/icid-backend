@@ -176,11 +176,18 @@ CREATE TABLE icid.report_attachments (
     file_name        TEXT NOT NULL,
     file_type        TEXT NOT NULL,
     file_size_bytes  INTEGER NOT NULL,
-    storage_path     TEXT NOT NULL UNIQUE,
+    storage_path     TEXT NOT NULL,
     uploaded_by      UUID NOT NULL REFERENCES icid.users(uuid),
     uploaded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    attachment_name         TEXT    NOT NULL,
+    attachment_description  TEXT    NOT NULL,
+    is_uploaded             BOOLEAN NOT NULL DEFAULT false,
     CONSTRAINT chk_report_attachments_size
-        CHECK (file_size_bytes > 0 AND file_size_bytes <= 10485760)
+        CHECK (file_size_bytes > 0 AND file_size_bytes <= 10485760),
+    CONSTRAINT chk_report_attachments_name
+        CHECK (btrim(attachment_name) <> '' AND char_length(attachment_name) <= 200),
+    CONSTRAINT chk_report_attachments_description
+        CHECK (btrim(attachment_description) <> '' AND char_length(attachment_description) <= 2000)
 );
 
 CREATE INDEX idx_report_attachments_report_id ON icid.report_attachments(report_id);

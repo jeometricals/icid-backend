@@ -1,8 +1,6 @@
 # ICID data model
 
 Developer reference for the `icid` schema as of migration 011 (Slice F, pay-item catalog).
-Migrations 009 and 010 (attachment metadata and pending uploads) are not written up here yet;
-`schema.sql` doesn't carry them either.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -185,11 +183,22 @@ Supabase Storage bucket `report-attachments`, which only the backend can reach (
 | `file_name` | TEXT NOT NULL | The name the file was uploaded with |
 | `file_type` | TEXT NOT NULL | MIME type, e.g. `image/jpeg`, `application/pdf` |
 | `file_size_bytes` | INTEGER NOT NULL | CHECK `chk_report_attachments_size`: more than 0, at most 10 MB (10485760) |
-| `storage_path` | TEXT NOT NULL UNIQUE | Key in the bucket: `{report_id}/{attachment_id}_{sanitized file name}` |
+| `storage_path` | TEXT NOT NULL | Key in the bucket: `{report_id}/{attachment_id}_{sanitized file name}`. Not constrained unique (migration 010 dropped that); the embedded `attachment_id` keeps paths distinct. |
 | `uploaded_by` | UUID NOT NULL | FK → `users.uuid` |
-| `uploaded_at` | TIMESTAMPTZ NOT NULL | Default `now()`. The table has no `created_at`/`updated_at`; rows are never edited. |
+| `uploaded_at` | TIMESTAMPTZ NOT NULL | Default `now()`: set when the upload is requested and the row created, not when the file lands. The table has no `created_at`/`updated_at`. |
+| `attachment_name` | TEXT NOT NULL | The inspector's display name for the file. CHECK `chk_report_attachments_name`: not blank, at most 200 characters |
+| `attachment_description` | TEXT NOT NULL | CHECK `chk_report_attachments_description`: not blank, at most 2000 characters |
+| `is_uploaded` | BOOLEAN NOT NULL | Default `false`. `false` while pending; `true` once the client reports the file is in Storage |
 
 Index: `idx_report_attachments_report_id (report_id)`.
+
+**Two-step upload.** `upload-request` validates the file details, inserts a pending row
+(`is_uploaded = false`) and returns a signed URL the client PUTs the file to, straight to
+Storage. `upload-complete` then sets `is_uploaded = true`. Pending rows are left out of the
+attachment list and get no download URL; delete removes pending and uploaded rows alike.
+Nothing cleans up a pending row whose upload never completes. Rows are edited in place, with
+no timestamp: `upload-complete` flips `is_uploaded`, and `PUT` replaces `attachment_name` and
+`attachment_description`.
 
 Storage is not part of the database transaction. Deleting a report cascades its attachment
 rows (and its addenda's), and the backend removes the matching Storage files separately, on a
@@ -335,6 +344,8 @@ content as TEXT, linked to a report and a form template).
 | 006 | `006_auto_general_flags.sql` | R4a | Added `idr_reports.is_auto_generated` and `idrs.has_dismissed_auto_general`, both `BOOLEAN NOT NULL DEFAULT false`, each with a column `COMMENT` describing it. |
 | 007 | `007_cleanup.sql` | R5 | Backfilled `total_pages = 1` and `page_number = 1` for the Slice 5 IDR (`8b2f887b-…`), which was submitted before page numbering existed. Dropped `completed_forms`, then `reports` (`CASCADE`). `form_templates` was not touched. |
 | 008 | `008_report_attachments.sql` | A1 | Created `report_attachments` (FK to `idr_reports` with ON DELETE CASCADE, FK to `users`, UNIQUE `storage_path`, size CHECK) and `idx_report_attachments_report_id`. |
+| 009 | `009_attachment_metadata_and_pending.sql` | A2a | Added `report_attachments.attachment_name` and `attachment_description` (TEXT NOT NULL, each with a not-blank / max-length CHECK) and `is_uploaded` (BOOLEAN NOT NULL DEFAULT false), each with a column `COMMENT`. Re-asserted `chk_report_attachments_size`. Required the table to be empty, since the new text columns have no default. |
+| 010 | `010_drop_storage_path_unique.sql` | A2a | Dropped `report_attachments_storage_path_key`, the UNIQUE on `storage_path` from 008, which 009 had meant to drop but didn't. |
 | 011 | `011_spec_items_and_contract_items.sql` | F2 | Created `spec_items` (UNIQUE `item_no`) and `contract_items` (FK to `projects` with ON DELETE CASCADE, FK to `spec_items`, UNIQUE `(project_id, spec_item_id, budget_code)`) and the two `contract_items` indexes. |
 
 Where each current column came from:
@@ -347,5 +358,6 @@ Where each current column came from:
 | `idr_reports` | everything except the flag | 004 |
 | `idr_reports` | `is_auto_generated` | 006 |
 | `idr_reports` | `uq_idr_reports_one_gen_per_idr` (index) | 005 |
-| `report_attachments` | all | 008 |
+| `report_attachments` | everything except the three below | 008 (`storage_path` UNIQUE dropped in 010) |
+| `report_attachments` | `attachment_name`, `attachment_description`, `is_uploaded` | 009 |
 | `spec_items`, `contract_items` | all | 011 |
