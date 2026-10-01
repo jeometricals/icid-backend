@@ -254,24 +254,41 @@ class WorkbookTemplate:
 
         return self._derive_style("highlighted", style, change)
 
-    def left_aligned_style(self, style: Optional[str]) -> str:
+    def _alignment_style(self, kind: str, style: Optional[str], name: str, value: str) -> str:
         """
-        Get a copy of a cell style aligned left horizontally, keeping its other alignment settings (vertical, wrap...).
-        Takes the style index to copy (None for the default style).
+        Get a copy of a cell style with one alignment setting changed, keeping its other alignment settings.
+        Takes a name for the change (the cache key), the style index to copy (None for the default style), and the
+        <alignment> attribute and value to set (e.g. "horizontal", "left").
         Returns the new style's index.
         """
         def change(styles: str, start_tag: str, rest: str) -> tuple[str, str, str]:
             start_tag = _set_attribute(start_tag, "applyAlignment", "1")
             alignment = re.search(r"<alignment\b[^>]*/>", rest)
             if alignment:
-                rest = rest.replace(alignment.group(0), _set_attribute(alignment.group(0), "horizontal", "left"), 1)
+                rest = rest.replace(alignment.group(0), _set_attribute(alignment.group(0), name, value), 1)
             elif start_tag.endswith("/>"):
-                start_tag, rest = start_tag[:-2] + ">", '<alignment horizontal="left"/></xf>'
+                start_tag, rest = start_tag[:-2] + ">", f'<alignment {name}="{value}"/></xf>'
             else:
-                rest = '<alignment horizontal="left"/>' + rest
+                rest = f'<alignment {name}="{value}"/>' + rest
             return styles, start_tag, rest
 
-        return self._derive_style("left", style, change)
+        return self._derive_style(kind, style, change)
+
+    def left_aligned_style(self, style: Optional[str]) -> str:
+        """
+        Get a copy of a cell style aligned left horizontally, keeping its other alignment settings (vertical, wrap...).
+        Takes the style index to copy (None for the default style).
+        Returns the new style's index.
+        """
+        return self._alignment_style("left", style, "horizontal", "left")
+
+    def wrap_text_style(self, style: Optional[str]) -> str:
+        """
+        Get a copy of a cell style that wraps its text, keeping its other alignment settings (horizontal, vertical...).
+        Takes the style index to copy (None for the default style).
+        Returns the new style's index.
+        """
+        return self._alignment_style("wrap", style, "wrapText", "1")
 
     def align_left(self, sheet: str, coordinate: str) -> None:
         """
@@ -280,6 +297,27 @@ class WorkbookTemplate:
         Returns nothing.
         """
         self.set_style(sheet, coordinate, self.left_aligned_style(self.cell_style(sheet, coordinate)))
+
+    def wrap_cell(self, sheet: str, coordinate: str) -> None:
+        """
+        Make one cell wrap its text, keeping the rest of its style.
+        Takes the sheet name and cell reference.
+        Returns nothing.
+        """
+        self.set_style(sheet, coordinate, self.wrap_text_style(self.cell_style(sheet, coordinate)))
+
+    def set_row_height(self, sheet: str, row: int, points: float) -> None:
+        """
+        Fix a row's height (Excel never auto-fits rows with merged cells, so wrapped text there needs this).
+        Takes the sheet name, the row number and the height in points.
+        Returns nothing; raises KeyError if the template has no such row.
+        """
+        xml = self._sheet(sheet)
+        start_tag = re.search(rf'<row r="{row}"(?=[\s/>])[^>]*?/?>', xml)
+        if start_tag is None:
+            raise KeyError(f"{sheet} row {row} not in the template")
+        tag = _set_attribute(_set_attribute(start_tag.group(0), "ht", f"{points:g}"), "customHeight", "1")
+        self._write(self._sheet_paths[sheet], xml[: start_tag.start()] + tag + xml[start_tag.end():])
 
     def fit_to_letter_page(self, sheet: str) -> None:
         """

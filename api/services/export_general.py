@@ -40,6 +40,11 @@ REVERSE_PAGE_BOX = "AC36"  # "Reverse page used for additional remarks."
 
 PAY_ITEM_ROWS = range(39, 51)  # under the header at row 38; row 51 is the form's footer
 PAY_ITEM_COLUMNS = {"itemNo": "B", "budgetCode": "G", "payQuantity": "N", "quantityChk": "S", "description": "X"}
+# The Description cell (X:AP, merged, centred Arial 10) fits about 40 characters a line. Its rows are a fixed 18 pt,
+# about one line, and Excel won't grow rows holding merged cells, so a longer description gets a taller row.
+PAY_DESCRIPTION_LINE_CHARS = 40
+PAY_ITEM_ROW_HEIGHT = 18.0
+LINE_HEIGHT = 12.75  # points per line of Arial 10
 
 # ---- Gen Bk -----------------------------------------------------------------
 
@@ -256,7 +261,8 @@ def pay_item_rows(pay_items: Any) -> list[dict[str, Optional[str]]]:
 
 def _stamp_pay_items(workbook: WorkbookTemplate, pay_items: Any) -> None:
     """
-    Write the pay items into Gen Fr's table, blanking unused rows.
+    Write the pay items into Gen Fr's table, blanking unused rows. Descriptions wrap, and a row whose description
+    needs more than one line is made tall enough for it.
     Takes the workbook and the report's payItems.
     Returns nothing.
     """
@@ -265,6 +271,12 @@ def _stamp_pay_items(workbook: WorkbookTemplate, pay_items: Any) -> None:
         values = rows[index] if index < len(rows) else {}
         for field, column in PAY_ITEM_COLUMNS.items():
             workbook.set_cell(GEN_FRONT, f"{column}{row}", values.get(field))
+        description = values.get("description")
+        if description:
+            workbook.wrap_cell(GEN_FRONT, f"{PAY_ITEM_COLUMNS['description']}{row}")
+            lines = len(textwrap.wrap(description, PAY_DESCRIPTION_LINE_CHARS))
+            if lines > 1:
+                workbook.set_row_height(GEN_FRONT, row, max(PAY_ITEM_ROW_HEIGHT, lines * LINE_HEIGHT))
 
 
 # ---- Gen Bk ------------------------------------------------------------------

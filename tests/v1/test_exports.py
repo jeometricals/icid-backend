@@ -305,6 +305,53 @@ class TestPayItems:
     def test_non_list_pay_items_are_none(self):
         assert pay_item_rows(None) == [] and pay_item_rows({"a": 1}) == [] and pay_item_rows(["x"]) == []
 
+    def test_a_long_description_wraps_on_a_taller_row(self):
+        long = 'Thermoplastic Reflectorized Pavement Markings (4" Wide)'  # 55 characters: two lines
+        content = export_bytes(general=general_with(payItems=[pay_item(1, description=long)]))
+        cell = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]["X39"]
+        assert cell.value == long
+        assert cell.alignment.wrap_text is True
+        assert cell.alignment.horizontal == "center"  # the template's centring is kept
+        assert gen_front_row_height(content, 39) == 2 * 12.75
+
+    def test_a_short_description_wraps_but_keeps_the_row_height(self):
+        content = export_bytes(general=general_with(payItems=[pay_item(1, description="Plastic Barrels")]))
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]["X39"].alignment.wrap_text is True
+        assert gen_front_row_height(content, 39) == 18.0
+
+    def test_empty_pay_item_rows_keep_the_template_style(self):
+        content = export_bytes(general=general_with(payItems=[pay_item(1)]))
+        template_style = WorkbookTemplate(TEMPLATE).cell_style("Gen Fr", "X40")
+        assert gen_front_cell_style(content, "X40") == template_style
+        assert gen_front_row_height(content, 40) == 18.0
+
+
+def gen_front_xml(content: bytes) -> str:
+    """
+    Read Gen Fr's worksheet XML from an export.
+    Takes the .xlsx bytes.
+    Returns the XML (Gen Fr is sheet4.xml in the template package).
+    """
+    return zipfile.ZipFile(io.BytesIO(content)).read("xl/worksheets/sheet4.xml").decode()
+
+
+def gen_front_row_height(content: bytes, row: int) -> float:
+    """
+    Read one Gen Fr row's height from an export (read-only openpyxl doesn't expose row heights).
+    Takes the .xlsx bytes and the row number.
+    Returns the height in points.
+    """
+    return float(re.search(rf'<row r="{row}"[^>]*?\sht="([\d.]+)"', gen_front_xml(content)).group(1))
+
+
+def gen_front_cell_style(content: bytes, coordinate: str) -> str:
+    """
+    Read one Gen Fr cell's style index from an export.
+    Takes the .xlsx bytes and the cell reference.
+    Returns the style index.
+    """
+    return re.search(rf'<c r="{coordinate}"[^>]*?\ss="(\d+)"', gen_front_xml(content)).group(1)
+
 
 # ---------------------------------------------------------------------------
 # Gen Bk: work force, equipment, safety, comments
@@ -490,6 +537,28 @@ class TestWorkbookTemplate:
         workbook = WorkbookTemplate(TEMPLATE)
         style = workbook.cell_style("Gen Fr", "B23")
         assert workbook.left_aligned_style(style) == workbook.left_aligned_style(style)
+
+    def test_wrap_text_style_on_the_default_style(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        style = workbook.wrap_text_style(None)
+        styles = zipfile.ZipFile(io.BytesIO(workbook.to_bytes())).read("xl/styles.xml").decode()
+        cell_xfs = re.search(r"<cellXfs\b[^>]*>(.*?)</cellXfs>", styles, re.DOTALL)
+        assert re.search(r'count="(\d+)"', cell_xfs.group(0)).group(1) == str(int(style) + 1)
+        new_xf = re.findall(r"<xf\b[^>]*?(?:/>|>.*?</xf>)", cell_xfs.group(1), re.DOTALL)[int(style)]
+        assert 'applyAlignment="1"' in new_xf and '<alignment wrapText="1"/>' in new_xf
+
+    def test_wrap_style_is_shared_and_keeps_left_alignment(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        left = workbook.left_aligned_style(workbook.cell_style("Gen Fr", "B23"))
+        assert workbook.wrap_text_style(left) == workbook.wrap_text_style(left)
+        workbook.set_style("Gen Fr", "B23", workbook.wrap_text_style(left))
+        cell = written(workbook)["Gen Fr"]["B23"]
+        assert (cell.alignment.horizontal, cell.alignment.wrap_text) == ("left", True)
+
+    def test_set_row_height_fixes_the_height(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.set_row_height("Gen Fr", 39, 25.5)
+        assert gen_front_row_height(workbook.to_bytes(), 39) == 25.5
 
     def test_the_calculation_chain_is_dropped(self):
         package = zipfile.ZipFile(io.BytesIO(WorkbookTemplate(TEMPLATE).to_bytes()))
