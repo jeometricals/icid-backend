@@ -1,6 +1,8 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 008 (Attachments Slice A1).
+Developer reference for the `icid` schema as of migration 011 (Slice F, pay-item catalog).
+Migrations 009 and 010 (attachment metadata and pending uploads) are not written up here yet;
+`schema.sql` doesn't carry them either.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -24,6 +26,8 @@ clients ──< users ──< project_users >── projects ──< project_cli
                                  │ report_id (ON DELETE CASCADE)
                                  ▼
                          report_attachments >── users (uploaded_by)
+
+projects ──< contract_items >── spec_items      (project_id ON DELETE CASCADE)
 ```
 
 - A **client** is an organisation. Every **user** belongs to one client.
@@ -35,6 +39,9 @@ clients ──< users ──< project_users >── projects ──< project_cli
   addenda, and so on. Each one's form content is a JSON blob in `report_data`.
 - **report_attachments** are files (photos, PDFs) attached to a report. The row is metadata;
   the bytes live in Supabase Storage.
+- **spec_items** is the shared NYCDOT pay-item catalog. **contract_items** is one project's
+  Schedule of Bid Items: which spec items it pays for, under which budget codes, at what
+  quantity and price. See [Pay items](#pay-items).
 
 ## Tables
 
@@ -189,6 +196,40 @@ rows (and its addenda's), and the backend removes the matching Storage files sep
 best-effort basis. A file whose removal fails is left orphaned in the bucket; nothing points
 at it.
 
+### spec_items
+
+The standard NYCDOT pay-item catalog, shared by every project. Added in migration 011.
+
+| Column | Type | Notes |
+|---|---|---|
+| `spec_item_id` | UUID PK | `uuid_generate_v4()` |
+| `item_no` | TEXT NOT NULL | e.g. `4.13 AAS`. UNIQUE (`uq_spec_items_item_no`) |
+| `description` | TEXT NOT NULL | e.g. `4" Concrete Sidewalk (Unpigmented)` |
+| `spec_section` | TEXT NOT NULL | e.g. `4.13` |
+| `pay_unit` | TEXT NOT NULL | e.g. `S.F.`, `Ton`, `Each` |
+
+### contract_items
+
+A project's Schedule of Bid Items. "Contract" is the project here; there is no separate
+contracts table. Added in migration 011. Seeded only (`seed_sidewalk_pay_items.sql`, for
+`HWS0023`); there is no write endpoint yet.
+
+| Column | Type | Notes |
+|---|---|---|
+| `contract_item_id` | UUID PK | `uuid_generate_v4()` |
+| `project_id` | TEXT NOT NULL | FK → `projects.project_id`, **ON DELETE CASCADE** |
+| `spec_item_id` | UUID NOT NULL | FK → `spec_items.spec_item_id` |
+| `budget_code` | TEXT NOT NULL | |
+| `bid_quantity` | NUMERIC(12,2) NOT NULL | |
+| `bid_unit_price` | NUMERIC(12,2) NOT NULL | |
+
+`UNIQUE (project_id, spec_item_id, budget_code)` (`uq_contract_items_project_spec_budget`):
+the same spec item can appear under several budget codes in one project, but only once per
+code. Indexes: `idx_contract_items_project (project_id)`, `idx_contract_items_spec_item (spec_item_id)`.
+
+`GET /v1/contract_items/?project_id=` returns a project's rows joined to their spec item, so
+each carries `item_no`, `description`, `spec_section` and `pay_unit` inline.
+
 ### form_templates (present, unused)
 
 `id` UUID PK, `form_template_id` TEXT UNIQUE, `form_name`, `form_description`, `form_status`,
@@ -232,6 +273,16 @@ in the frontend dropdown.
 "Addendum by nature" is `ADDENDUM_TYPES`. It is only a hint for the frontend: the backend never
 derives `is_addendum` from the type. The client sends it.
 
+## Pay items
+
+A report's pay items live in its `report_data.payItems`, as an array of
+`{itemNo, budgetCode, payQuantity, unit, description}` strings. They are **copies**, not
+foreign keys: the frontend's picker fills them from the project's contract items (Item No.,
+Description and Unit from the spec item, plus Budget Code when the item has only one), and
+the inspector can edit any of them afterwards or type a row by hand (change orders). Nothing
+in the database ties a pay item to `contract_items`. `unit` was added in Slice F; rows saved
+before it have none, and the frontend loads them with `unit: ''`.
+
 ## Auto-generated General
 
 Added in Phase R, Slice R4a. The General is the IDR's summary page. When an inspector files
@@ -242,7 +293,11 @@ The two flags:
 
 - **`idr_reports.is_auto_generated`**: `true` marks a General the backend owns. Its
   `report_data` is exactly `{description, payItems}`. The description aggregates each
-  contributing report under its type label and ends with a fixed footer. The backend fully
+  contributing report under its type label and ends with a fixed footer. The pay items are
+  the contributing reports' pay items combined by `(itemNo, budgetCode)`: quantities are
+  summed to two decimals when they all parse as numbers (otherwise the first non-empty value
+  is kept), and `description`, `unit` and `quantityChk` take the first non-empty value. Two
+  different units under one key log a warning and the first wins. The backend fully
   rewrites that `report_data` on every regeneration, and the frontend shows it read-only. A
   General the inspector created themselves is always `false`, and the backend never touches it.
 - **`idrs.has_dismissed_auto_general`**: set to `true` when an inspector deletes an
@@ -280,6 +335,7 @@ content as TEXT, linked to a report and a form template).
 | 006 | `006_auto_general_flags.sql` | R4a | Added `idr_reports.is_auto_generated` and `idrs.has_dismissed_auto_general`, both `BOOLEAN NOT NULL DEFAULT false`, each with a column `COMMENT` describing it. |
 | 007 | `007_cleanup.sql` | R5 | Backfilled `total_pages = 1` and `page_number = 1` for the Slice 5 IDR (`8b2f887b-…`), which was submitted before page numbering existed. Dropped `completed_forms`, then `reports` (`CASCADE`). `form_templates` was not touched. |
 | 008 | `008_report_attachments.sql` | A1 | Created `report_attachments` (FK to `idr_reports` with ON DELETE CASCADE, FK to `users`, UNIQUE `storage_path`, size CHECK) and `idx_report_attachments_report_id`. |
+| 011 | `011_spec_items_and_contract_items.sql` | F2 | Created `spec_items` (UNIQUE `item_no`) and `contract_items` (FK to `projects` with ON DELETE CASCADE, FK to `spec_items`, UNIQUE `(project_id, spec_item_id, budget_code)`) and the two `contract_items` indexes. |
 
 Where each current column came from:
 
@@ -292,3 +348,4 @@ Where each current column came from:
 | `idr_reports` | `is_auto_generated` | 006 |
 | `idr_reports` | `uq_idr_reports_one_gen_per_idr` (index) | 005 |
 | `report_attachments` | all | 008 |
+| `spec_items`, `contract_items` | all | 011 |
