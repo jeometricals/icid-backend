@@ -3,8 +3,8 @@ Stamps an IDR's Sidewalk, Curb, Concrete Base (SWCB) report onto the DDC templat
 
 Conc Fr is the front: the header block, the Description of Work, the operation line (Curb / Sidewalk / Concrete Base
 / Structural, and the subcontractor), Detailed Activity, the Inspection Matrix and Pay Items. Conc Bk is the back:
-work force, equipment, remarks and the MPT/safety checklist (not stamped yet). export.py doesn't call this module until
-it is complete.
+work force, equipment, the MPT/safety checklist and remarks (the remarks come with the text cascade, D3.2d).
+export.py doesn't call this module until it is complete.
 
 Cell positions come from reading templates/report_forms.xlsx.
 """
@@ -12,8 +12,9 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
-    CHECK_MARK, HeaderLayout, PayItemsLayout, fill_lines, mark_truncated, paragraphs, stamp_common_header,
-    stamp_pay_items, text_value, write_lines,
+    CHECK_MARK, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, WorkforceLayout, fill_lines,
+    mark_truncated, paragraphs, stamp_common_header, stamp_equipment, stamp_pay_items, stamp_safety, stamp_workforce,
+    text_value, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -79,6 +80,47 @@ CONC_FRONT_PAY_ITEMS = PayItemsLayout(
     columns={"itemNo": "B", "budgetCode": "F", "payQuantity": "K", "quantityChk": "P", "description": "U"},
     line_chars_10pt=46, line_chars_8pt=55,
 )
+
+# ---- Conc Bk ----------------------------------------------------------------
+
+# Work Force (rows 5-17, No. in G:H): the frontend's five roles on rows 5-9; Teamsters, Surveyors and Masons are
+# pre-printed (rows 10-12) and filled when added as trades; other trades take blank rows 13-17, label in B.
+CONC_BACK_WORKFORCE = WorkforceLayout(
+    role_rows={"superintendent": 5, "foremen": 6, "operators": 7, "laborers": 8, "flaggers": 9},
+    trade_rows={"teamsters": 10, "surveyors": 11, "masons": 12},
+    free_rows=(13, 14, 15, 16, 17),
+    label_column="B", count_column="G",
+)
+
+# Equipment (rows 5-17, Model / Size N:U + No. V:X, then a second pair Y:AF + AG:AI). The SWCB form's four standard
+# types each have a row; its added-equipment options each have their own pre-printed row too (the template writes the
+# rollers with a hyphen, the frontend with an en dash). Excavator (only in older SWCB reports) and anything else go on
+# blank row 17, label written in; a second unit of a pre-printed type uses that row's second pair.
+CONC_BACK_EQUIPMENT_EXTRA_ROWS = {
+    "crane": 7, "paving machine": 8, "ac distributor": 9, "sweepers": 10, "trailers": 11,
+    "roller – static": 13, "roller - static": 13, "roller – dynamic": 14, "roller - dynamic": 14, "hand tamper": 16,
+}
+CONC_BACK_EQUIPMENT = EquipmentLayout(
+    standard_rows={"frontEndLoader": 5, "backhoe": 6, "truckDump": 12, "compressor": 15},
+    extra_rows=CONC_BACK_EQUIPMENT_EXTRA_ROWS,
+    row_names=frozenset(CONC_BACK_EQUIPMENT_EXTRA_ROWS),  # every pre-printed row is its own type: no variant names
+    free_rows=(17,),
+    label_column="I",
+    slots=(("N", "V"), ("Y", "AG")),
+)
+
+# End of the Day MPT/Safety Check List: rows 40-49, Y in N:O, N in P:Q, Remarks R:AI (no N/A column)
+CONC_BACK_SAFETY = SafetyLayout(
+    rows={"plasticBarrels": 40, "pedestrianBarricades": 41, "timberCurbs": 42, "timberBreakawayBarricades": 43,
+          "generalSafety": 44, "localEmergencyAccess": 45, "fencing": 46, "plates": 47, "arrowBoard": 48,
+          "siteCleaned": 49},
+    yes_column="N", no_column="P", remarks_column="R",
+)
+
+# Remarks: the "Remarks:" label at C19, then ruled lines C20:AH20 … C34:AH34.
+# TODO(D3.2d): fill these with the Description of Work's overflow and the comments, as Gen Bk's comment lines are.
+# Signatures (rows 55-60) stay blank: the inspector and RE sign the printed page.
+CONC_BACK_REMARK_ROWS = range(20, 35)
 
 
 def _section(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -209,6 +251,9 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     _stamp_activity(workbook, data)
     _stamp_matrix(workbook, data)
     stamp_pay_items(workbook, CONC_FRONT, CONC_FRONT_PAY_ITEMS, data.get("payItems"))
+    stamp_workforce(workbook, CONC_BACK, CONC_BACK_WORKFORCE, data)
+    stamp_equipment(workbook, CONC_BACK, CONC_BACK_EQUIPMENT, data)
+    stamp_safety(workbook, CONC_BACK, CONC_BACK_SAFETY, data)
     for sheet in (CONC_FRONT, CONC_BACK):
         workbook.fit_to_letter_page(sheet)
     workbook.show_only([CONC_FRONT, CONC_BACK])

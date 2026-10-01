@@ -854,6 +854,88 @@ class TestSwcbFront:
 
 
 # ---------------------------------------------------------------------------
+# export_swcb.render: the Conc Bk body
+# ---------------------------------------------------------------------------
+
+class TestSwcbBack:
+    def test_standard_workforce_rows(self):
+        workforce = {"superintendent": "1", "foreman": "2", "operators": "", "laborers": "6", "flaggers": "x2"}
+        sheet = swcb_body(workforce=workforce)[1]["Conc Bk"]
+        assert [sheet[f"G{row}"].value for row in range(5, 10)] == [1, 2, None, 6, "x2"]  # "foreman": older key
+        assert [sheet[f"G{row}"].value for row in (10, 11, 12)] == [None, None, None]  # Teamsters, Surveyors, Masons
+
+    def test_added_trades_use_printed_rows_then_blank_rows(self):
+        trades = [{"label": "Masons", "count": "3"}, {"label": "Carpenters", "count": "2"},
+                  {"label": "Surveyors", "count": "1"}, {"label": "Chauffeurs", "count": "4"}]
+        sheet = swcb_body(additionalWorkforce=trades)[1]["Conc Bk"]
+        assert (sheet["G11"].value, sheet["G12"].value) == (1, 3)  # Surveyors and Masons are printed here
+        assert [(sheet[f"B{row}"].value, sheet[f"G{row}"].value) for row in (13, 14, 15)] == [
+            ("Carpenters", 2), ("Chauffeurs", 4), (None, None),
+        ]
+
+    def test_too_many_added_trades_end_with_a_count(self):
+        trades = [{"label": f"Trade {n}", "count": "1"} for n in range(7)]
+        sheet = swcb_body(additionalWorkforce=trades)[1]["Conc Bk"]
+        assert [sheet[f"B{row}"].value for row in range(13, 17)] == ["Trade 0", "Trade 1", "Trade 2", "Trade 3"]
+        assert (sheet["B17"].value, sheet["G17"].value) == ("+3 more (see ICID)", None)
+
+    def test_standard_equipment_in_the_left_pair(self):
+        equipment = {"backhoe": {"model": "CAT 420", "number": "1"}, "truckDump": {"model": "Mack", "number": "2"},
+                     "compressor": {"model": "", "number": ""}}
+        sheet = swcb_body(equipment=equipment)[1]["Conc Bk"]
+        assert (sheet["N6"].value, sheet["V6"].value) == ("CAT 420", 1)
+        assert (sheet["N12"].value, sheet["V12"].value) == ("Mack", 2)  # Truck (Dump) is row 12 here
+        assert (sheet["N15"].value, sheet["V15"].value) == (None, None)
+        assert (sheet["Y6"].value, sheet["AG6"].value) == (None, None)
+
+    def test_added_equipment_on_its_printed_row_second_unit_in_the_right_pair(self):
+        extras = [{"label": "Crane", "model": "Grove", "number": "1"}, {"label": "Crane", "model": "Link-Belt", "number": "1"},
+                  {"label": "Paving Machine", "model": "Blaw-Knox", "number": "1"},
+                  {"label": "Roller – Dynamic", "model": "CB24", "number": "2"}]
+        sheet = swcb_body(additionalEquipment=extras)[1]["Conc Bk"]
+        assert (sheet["N7"].value, sheet["V7"].value, sheet["Y7"].value, sheet["AG7"].value) == ("Grove", 1, "Link-Belt", 1)
+        assert sheet["N8"].value == "Blaw-Knox"
+        assert (sheet["N14"].value, sheet["V14"].value) == ("CB24", 2)  # its own row: no variant name added
+        assert sheet["I17"].value == " "  # the blank row is untouched
+
+    def test_excavator_and_other_unprinted_equipment_go_on_the_blank_row(self):
+        content, workbook = swcb_body(equipment={"excavator": {"model": "PC200", "number": "1"}},
+                                      additionalEquipment=[{"label": "Pavement Cutter", "model": "Husqvarna", "number": "1"}])
+        sheet = workbook["Conc Bk"]
+        # One blank row: the first entry without a printed row gives way to a count of everything that didn't fit
+        assert (sheet["I17"].value, sheet["N17"].value, sheet["V17"].value) == ("+2 more (see ICID)", None, None)
+        alone = swcb_body(equipment={"excavator": {"model": "PC200", "number": "1"}})[1]["Conc Bk"]
+        assert (alone["I17"].value, alone["N17"].value, alone["V17"].value) == ("Excavator", "PC200", 1)
+
+    def test_safety_marks_y_or_n(self):
+        sheet = swcb_body(safetyChecks={"plasticBarrels": "Y", "fencing": "N", "arrowBoard": True})[1]["Conc Bk"]
+        assert (sheet["N40"].value, sheet["P40"].value) == ("X", None)
+        assert (sheet["N46"].value, sheet["P46"].value) == (None, "X")
+        assert (sheet["N48"].value, sheet["P48"].value) == ("X", None)  # older reports' True
+        assert (sheet["N41"].value, sheet["P41"].value) == (None, None)  # unanswered
+
+    def test_safety_na_leaves_both_boxes_empty(self):
+        sheet = swcb_body(safetyChecks={"plates": "NA"}, safetyRemarks={"plates": "None on site"})[1]["Conc Bk"]
+        assert (sheet["N47"].value, sheet["P47"].value) == (None, None)
+        assert sheet["R47"].value == "N/A — None on site"  # as on Gen Bk: the N/A goes at the start of the remarks
+
+    def test_safety_remarks(self):
+        sheet = swcb_body(safetyRemarks={"generalSafety": "Good", "siteCleaned": "  Swept  "})[1]["Conc Bk"]
+        assert (sheet["R44"].value, sheet["R49"].value) == ("Good", "Swept")
+        assert sheet["R40"].value is None
+
+    def test_remarks_lines_stay_empty_for_now(self):
+        sheet = swcb_body(description="Poured curb.", comments="Visitor from DEP.")[1]["Conc Bk"]
+        assert sheet["C19"].value == "Remarks:"
+        assert [sheet[f"C{row}"].value for row in range(20, 35)] == [None] * 15
+
+    def test_signatures_stay_blank(self):
+        sheet = swcb_body(description="Poured curb.")[1]["Conc Bk"]
+        assert [sheet[c].value for c in ("C59", "S59", "AE59")] == [None, None, None]
+        assert sheet["C60"].value == "Inspector's Signature"
+
+
+# ---------------------------------------------------------------------------
 # get_project_contractor_name (query)
 # ---------------------------------------------------------------------------
 

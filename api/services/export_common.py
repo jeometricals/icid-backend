@@ -10,7 +10,7 @@ functions fill them. Per-report modules (export_general, export_swcb, ...) own t
 import textwrap
 from dataclasses import dataclass
 from datetime import date, time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 from api.services.xlsx_template import WorkbookTemplate
@@ -293,3 +293,200 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
                 workbook.set_font_size(sheet, cell, font_size)
             if lines > 1:
                 workbook.set_row_height(sheet, row, lines * LINE_HEIGHT[font_size])
+
+
+# ---- Back pages: work force, equipment, MPT/safety checklist ----------------
+
+# Older reports used singular workforce keys; the frontend renames them to plurals on load
+LEGACY_WORKFORCE_KEYS = {"foreman": "foremen", "operator": "operators", "flagger": "flaggers"}
+
+# The frontend's standard equipment keys and their names (a form without a row for one exports it like added equipment)
+STANDARD_EQUIPMENT_LABELS = {"frontEndLoader": "Front End Loader", "backhoe": "Backhoe", "truckDump": "Truck (Dump)",
+                             "compressor": "Compressor", "excavator": "Excavator", "pavementCutter": "Pavement Cutter"}
+
+
+@dataclass(frozen=True)
+class WorkforceLayout:
+    """Where one form's Work Force table is."""
+
+    role_rows: dict[str, int]       # frontend workforce key -> row
+    trade_rows: dict[str, int]      # added trade label (lower-case) -> its pre-printed row
+    free_rows: tuple[int, ...]      # blank rows, label written in
+    label_column: str
+    count_column: str
+
+
+@dataclass(frozen=True)
+class EquipmentLayout:
+    """Where one form's Equipment table is."""
+
+    standard_rows: dict[str, int]   # frontend equipment key -> row
+    extra_rows: dict[str, int]      # added equipment label (lower-case) -> its pre-printed row
+    row_names: frozenset[str]       # labels (lower-case) that are exactly a pre-printed row's name
+    free_rows: tuple[int, ...]      # blank rows, label written in
+    label_column: str
+    slots: tuple[tuple[str, str], ...]  # each row's (Model / Size, No.) column pairs
+
+
+@dataclass(frozen=True)
+class SafetyLayout:
+    """Where one form's End of the Day MPT/Safety Check List is (Y and N boxes; no form has an N/A column)."""
+
+    rows: dict[str, int]            # frontend safety checklist key -> row
+    yes_column: str
+    no_column: str
+    remarks_column: str
+
+
+def count_value(value: Any) -> Any:
+    """
+    Turn a headcount or equipment number as typed (usually a string) into what the form's No. cell should show.
+    Takes the value.
+    Returns an int for a whole number, the trimmed text otherwise, or None when blank.
+    """
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return None
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return text
+    return int(number) if number == number.to_integral_value() else text
+
+
+def _place_extras(entries: list[dict[str, Any]], preprinted: dict[str, int],
+                  free_rows: tuple[int, ...], slots_per_row: int) -> tuple[list[tuple[int, int, dict[str, Any], bool]], int]:
+    """
+    Decide where added rows (extra trades or equipment) go: on the form's pre-printed row for their label when there
+    is one with room, otherwise on a blank row with their label written in.
+    Takes the entries ({label, ...}), label -> pre-printed row, the blank rows, and how many entries one row can take.
+    Returns ([(row, slot, entry, needs_label)], how many entries didn't fit).
+    """
+    used: dict[int, int] = {}
+    placed, unplaced = [], []
+    for entry in entries:
+        row = preprinted.get(str(entry.get("label") or "").strip().lower())
+        if row is not None and used.get(row, 0) < slots_per_row:
+            placed.append((row, used.get(row, 0), entry, False))
+            used[row] = used.get(row, 0) + 1
+        else:
+            unplaced.append(entry)
+    for row, entry in zip(free_rows, unplaced):
+        placed.append((row, 0, entry, True))
+    return placed, max(0, len(unplaced) - len(free_rows))
+
+
+def _overflow_label(placed: list[tuple[int, int, dict[str, Any], bool]], free_rows: tuple[int, ...], missing: int) -> list:
+    """
+    Give up the last blank row to a "+N more" note when added rows didn't all fit.
+    Takes the placements, the blank rows and how many entries didn't fit.
+    Returns the placements without the one on the last blank row (whose entry joins the count).
+    """
+    if not missing:
+        return placed
+    return [p for p in placed if not (p[3] and p[0] == free_rows[-1])]
+
+
+def stamp_workforce(workbook: WorkbookTemplate, sheet: str, layout: WorkforceLayout, data: dict[str, Any]) -> bool:
+    """
+    Write headcounts: the standard roles, then added trades on their pre-printed rows or, label written in, blank rows.
+    Takes the workbook, sheet name, the table's layout and the report_data.
+    Returns whether any headcount or trade was written.
+    """
+    saved = data.get("workforce") if isinstance(data.get("workforce"), dict) else {}
+    workforce = {LEGACY_WORKFORCE_KEYS.get(key, key): value for key, value in saved.items()}
+    wrote = False
+    for role, row in layout.role_rows.items():
+        count = count_value(workforce.get(role))
+        workbook.set_cell(sheet, f"{layout.count_column}{row}", count)
+        wrote = wrote or count is not None
+
+    extras = [e for e in data.get("additionalWorkforce") or [] if isinstance(e, dict)]
+    placed, missing = _place_extras(extras, layout.trade_rows, layout.free_rows, 1)
+    placed = _overflow_label(placed, layout.free_rows, missing)
+    for row, _, entry, needs_label in placed:
+        if needs_label:
+            workbook.set_cell(sheet, f"{layout.label_column}{row}", text_value(entry.get("label")))
+        workbook.set_cell(sheet, f"{layout.count_column}{row}", count_value(entry.get("count")))
+        wrote = True
+    if missing:
+        workbook.set_cell(sheet, f"{layout.label_column}{layout.free_rows[-1]}", f"+{missing + 1} more (see ICID)")
+    return wrote
+
+
+def stamp_equipment(workbook: WorkbookTemplate, sheet: str, layout: EquipmentLayout, data: dict[str, Any]) -> bool:
+    """
+    Write equipment: model / size and number for the standard types the form has a row for, then added equipment (and
+    any standard type it has no row for) on its pre-printed row, using either of the row's Model / No. pairs, or on a
+    blank row with its label written in.
+    Takes the workbook, sheet name, the table's layout and the report_data.
+    Returns whether anything was written.
+    """
+    equipment = data.get("equipment") if isinstance(data.get("equipment"), dict) else {}
+    model_column, number_column = layout.slots[0]
+    wrote = False
+    without_row = []
+    for key, label in STANDARD_EQUIPMENT_LABELS.items():
+        entry = equipment.get(key) if isinstance(equipment.get(key), dict) else {}
+        model, number = text_value(entry.get("model")), count_value(entry.get("number"))
+        if key in layout.standard_rows:
+            row = layout.standard_rows[key]
+            workbook.set_cell(sheet, f"{model_column}{row}", model)
+            workbook.set_cell(sheet, f"{number_column}{row}", number)
+            wrote = wrote or model is not None or number is not None
+        elif model is not None or number is not None:
+            without_row.append({"label": label, "model": entry.get("model"), "number": entry.get("number")})
+
+    extras = without_row + [e for e in data.get("additionalEquipment") or [] if isinstance(e, dict)]
+    placed, missing = _place_extras(extras, layout.extra_rows, layout.free_rows, len(layout.slots))
+    placed = _overflow_label(placed, layout.free_rows, missing)
+    for row, slot, entry, needs_label in placed:
+        label = text_value(entry.get("label"))
+        model = text_value(entry.get("model"))
+        if needs_label:
+            workbook.set_cell(sheet, f"{layout.label_column}{row}", label)
+        elif label and label.lower() not in layout.row_names:
+            # A variant on a shared pre-printed row (Roller - Dynamic on Gen Bk's Roller) keeps its name by the model
+            model = " ".join(part for part in (label, model) if part)
+        model_column, number_column = layout.slots[slot]
+        workbook.set_cell(sheet, f"{model_column}{row}", model)
+        workbook.set_cell(sheet, f"{number_column}{row}", count_value(entry.get("number")))
+        wrote = True
+    if missing:
+        workbook.set_cell(sheet, f"{layout.label_column}{layout.free_rows[-1]}", f"+{missing + 1} more (see ICID)")
+    return wrote
+
+
+def _safety_answer(value: Any) -> Optional[str]:
+    """
+    Normalise a safety checklist answer, including older reports' booleans.
+    Takes the saved value.
+    Returns 'Y', 'N', 'NA', or None when unanswered.
+    """
+    if value is True:
+        return "Y"
+    if value is False:
+        return "N"
+    return value if value in ("Y", "N", "NA") else None
+
+
+def stamp_safety(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, data: dict[str, Any]) -> bool:
+    """
+    Write the MPT/safety checklist: an X under Y or N, and the remarks. The forms have no N/A column, so an N/A answer
+    leaves both boxes empty and is written at the start of the remarks instead.
+    Takes the workbook, sheet name, the checklist's layout and the report_data.
+    Returns whether any answer or remark was written.
+    """
+    checks = data.get("safetyChecks") if isinstance(data.get("safetyChecks"), dict) else {}
+    remarks = data.get("safetyRemarks") if isinstance(data.get("safetyRemarks"), dict) else {}
+    wrote = False
+    for key, row in layout.rows.items():
+        answer = _safety_answer(checks.get(key))
+        remark = text_value(remarks.get(key))
+        if answer == "NA":
+            remark = f"N/A — {remark}" if remark else "N/A"
+        workbook.set_cell(sheet, f"{layout.yes_column}{row}", CHECK_MARK if answer == "Y" else None)
+        workbook.set_cell(sheet, f"{layout.no_column}{row}", CHECK_MARK if answer == "N" else None)
+        workbook.set_cell(sheet, f"{layout.remarks_column}{row}", remark)
+        wrote = wrote or answer is not None or remark is not None
+    return wrote
