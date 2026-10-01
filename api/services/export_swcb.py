@@ -53,8 +53,8 @@ ACTIVITY_ROWS = {"excavation": 33, "formPrep": 34, "pour": 35}
 ACTIVITY_COLUMNS = {"fromStation": "L", "toStation": "R", "remarks": "X"}
 
 # Inspection Matrix rows 40-46. Each column (base / sidewalk / curb) has a Y, N and N/A box (two merged cells each).
-# Which columns an item takes mirrors the frontend's MATRIX_ROWS (SWCBInspectionMatrix.jsx). Note the template's row
-# 42 also has Base boxes (only Curb is merged away), but the form doesn't ask Base there, so nothing goes in them.
+# Which columns an item takes mirrors the frontend's MATRIX_ROWS (SWCBInspectionMatrix.jsx) and the template's boxes:
+# row 42 has Base and Sidewalk boxes (Curb is merged away), row 43 only Base, row 45 a write-in box per column.
 MATRIX_ANSWER_CELLS = {
     "base": {"Y": "X", "N": "Z", "NA": "AB"},
     "sidewalk": {"Y": "AD", "N": "AF", "NA": "AH"},
@@ -65,7 +65,7 @@ ALL_COLUMNS = ("base", "sidewalk", "curb")
 MATRIX_ROWS = [  # (row, key, columns that take an answer, free text)
     (40, "subgradeCompacted", ALL_COLUMNS, False),
     (41, "compactionTestTaken", ALL_COLUMNS, False),
-    (42, "sidewalkFoundationPlaced", ("sidewalk",), False),
+    (42, "sidewalkFoundationPlaced", ("base", "sidewalk"), False),
     (43, "roadwayStoneBasePlaced", ("base",), False),
     (44, "curingCompoundApplied", ALL_COLUMNS, False),
     (45, "otherCuringMethods", ALL_COLUMNS, True),

@@ -822,10 +822,12 @@ class TestSwcbFront:
         boxes = ("X", "Z", "AB", "AD", "AF", "AH", "AJ", "AL", "AN")
         assert [sheet[f"{c}40"].value for c in boxes] == ["X", None, None, None, "X", None, None, None, "X"]
 
-    def test_sidewalk_foundation_row_stamps_only_sidewalk(self):
+    def test_sidewalk_foundation_row_stamps_base_and_sidewalk(self):
+        # The template's row 42 has Base and Sidewalk boxes; Curb is merged away, so a Curb answer is dropped
         lines = matrix(sidewalkFoundationPlaced={"base": "Y", "sidewalk": "N", "curb": "NA"})
         sheet = swcb_body(inspectionMatrix=lines)[1]["Conc Fr"]
-        assert [sheet[f"{c}42"].value for c in ("X", "Z", "AB", "AD", "AF", "AH", "AJ")] == [None, None, None, None, "X", None, None]
+        assert [sheet[f"{c}42"].value for c in ("X", "Z", "AB", "AD", "AF", "AH", "AJ")] == ["X", None, None, None, "X", None, None]
+        assert [sheet[c].value for c in OPERATION_CELLS] == ["X", "X", None, None]  # Base and Sidewalk ticked, not Curb
 
     def test_roadway_stone_base_row_stamps_only_base(self):
         lines = matrix(roadwayStoneBasePlaced={"base": "NA", "sidewalk": "Y", "curb": "Y"})
