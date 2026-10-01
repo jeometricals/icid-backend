@@ -13,10 +13,12 @@ Cell positions come from reading templates/report_forms.xlsx; see the constants 
 """
 
 import textwrap
-from datetime import date, time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
+from api.services.export_common import (
+    HeaderLayout, highlight_day, short_date, stamp_common_header, text_value,
+)
 from api.services.xlsx_template import WorkbookTemplate
 
 GEN_FRONT = "Gen Fr"
@@ -28,11 +30,17 @@ TEXT_OVERFLOW = " … (continued in ICID)"
 
 # ---- Gen Fr -----------------------------------------------------------------
 
-DAY_OF_WEEK_CELLS = ["AI5", "AJ5", "AK5", "AL5", "AM5", "AN5", "AO5"]  # S M T W T F S
-
-# Header cells that are formulas reading Contract Info in the template; the export writes the values in directly
-GEN_FRONT_PROJECT_CELLS = {"G8": "project_id", "P8": "registration_code", "I10": "project_description",
-                           "F12": "borough", "F14": "contractor"}
+GEN_FRONT_HEADER = HeaderLayout(
+    project_cells={"G8": "project_id", "P8": "registration_code", "I10": "project_description",
+                   "F12": "borough", "F14": "contractor"},
+    date="AI4", date_as_text=False,  # a merged cell formatted m/d/yy
+    day_of_week=("AI5", "AJ5", "AK5", "AL5", "AM5", "AN5", "AO5"),
+    ir_no="AH6", sheet_no="AH8", sheet_of="AM8",
+    work_time="AG10", inspector_time="AG12",
+    temp_low="AD13", temp_high="AK13",
+    weather_am="AD17", weather_pm="AK17", weather_labels=None,  # value boxes under separate "AM" / "PM" labels
+    inspector="H17",
+)
 
 DESCRIPTION_ROWS = range(22, 35)  # B22:AP22 … B34:AP34, size-14 ruled lines
 DESCRIPTION_LINE_CHARS = 60
@@ -85,7 +93,7 @@ EQUIPMENT_SLOTS = [("N", "V"), ("Y", "AG")]  # each row has two Model / Size + N
 
 REPORT_CONT_ROWS = range(21, 46)  # B21 … B45, size-10 ruled lines spanning B:AI
 REPORT_CONT_LINE_CHARS = 85
-REPORT_CONT_DAY_CELLS = ["I11", "J11", "K11", "L11", "M11", "N11", "O11"]  # S M T W T F S
+REPORT_CONT_DAY_CELLS = ("I11", "J11", "K11", "L11", "M11", "N11", "O11")  # S M T W T F S
 REPORT_CONT_PROJECT_CELLS = {"G14": "project_id", "P14": "registration_code", "I15": "project_description",
                              "F17": "borough"}
 
@@ -142,33 +150,6 @@ def _write_lines(workbook: WorkbookTemplate, sheet: str, rows: range, lines: lis
 
 # ---- Value formatting -------------------------------------------------------
 
-def _time_range(start: Optional[time], end: Optional[time]) -> Optional[str]:
-    """
-    Fill the template's "( Start ___ End ___ )" line.
-    Takes the start and end times (either may be None).
-    Returns the line with HH:MM for each known time, or None (a blank cell) when neither is known.
-    """
-    if start is None and end is None:
-        return None
-
-    def slot(value: Optional[time]) -> str:
-        return value.strftime("%H:%M") if value else "________"
-    return f"( Start {slot(start)} End {slot(end)} )"
-
-
-def _temperature(label: str, value: Optional[Decimal]) -> str:
-    """
-    Fill a Low / High temperature box, whose label shares the cell with the value.
-    Takes the label and the temperature (or None).
-    Returns e.g. "Low  45" (whole numbers without decimals), or just the label when unknown.
-    """
-    if value is None:
-        return label
-    number = Decimal(value)
-    shown = str(number.quantize(Decimal(1))) if number == number.to_integral_value() else str(number.normalize())
-    return f"{label}  {shown}"
-
-
 def _count(value: Any) -> Any:
     """
     Turn a headcount as typed (usually a string) into what the form's No. cell should show.
@@ -185,33 +166,8 @@ def _count(value: Any) -> Any:
     return int(number) if number == number.to_integral_value() else text
 
 
-def _text(value: Any) -> Optional[str]:
-    """
-    Normalise a free-text field for a cell.
-    Takes the value.
-    Returns the trimmed string, or None when blank or missing.
-    """
-    text = str(value).strip() if value is not None else ""
-    return text or None
 
 
-def _short_date(day: date) -> str:
-    """
-    Format a date the way Gen Fr's date cell shows it (m/d/yy), for cells that hold it as text.
-    Takes the date.
-    Returns e.g. "9/30/26".
-    """
-    return f"{day.month}/{day.day}/{day:%y}"
-
-
-def _highlight_day(workbook: WorkbookTemplate, sheet: str, cells: list[str], day: date) -> None:
-    """
-    Mark the report's day of the week among a form's S M T W T F S letters.
-    Takes the workbook, sheet, the seven letter cells (Sunday first) and the date.
-    Returns nothing.
-    """
-    cell = cells[(day.weekday() + 1) % 7]
-    workbook.set_style(sheet, cell, workbook.highlighted_style(workbook.cell_style(sheet, cell)))
 
 
 # ---- Gen Fr ------------------------------------------------------------------
@@ -219,26 +175,12 @@ def _highlight_day(workbook: WorkbookTemplate, sheet: str, cells: list[str], day
 def _stamp_front_header(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any],
                         inspector: Optional[str], page_number: Optional[int]) -> None:
     """
-    Write Gen Fr's header: project details (as values, not Contract Info formulas), date, day, times, temperatures,
-    weather, sheet number and inspector.
+    Write Gen Fr's header block (see stamp_common_header).
     Takes the workbook, IDR row, project details (with "contractor"), inspector name and the General's page number.
-    Returns nothing; I.R. No. stays blank (no source yet), and Sheet No. is blank for a composed General.
+    Returns nothing; Sheet No. is blank for a composed General, which isn't one of the IDR's numbered pages.
     """
-    for cell, field in GEN_FRONT_PROJECT_CELLS.items():
-        workbook.set_cell(GEN_FRONT, cell, project.get(field))
-    workbook.set_cell(GEN_FRONT, "AI4", idr["report_date"])
-    _highlight_day(workbook, GEN_FRONT, DAY_OF_WEEK_CELLS, idr["report_date"])
-    workbook.set_cell(GEN_FRONT, "AH6", None)
-    has_page = page_number is not None
-    workbook.set_cell(GEN_FRONT, "AH8", page_number if has_page else None)
-    workbook.set_cell(GEN_FRONT, "AM8", idr.get("total_pages") if has_page else None)
-    workbook.set_cell(GEN_FRONT, "AG10", _time_range(idr.get("work_start_time"), idr.get("work_end_time")))
-    workbook.set_cell(GEN_FRONT, "AG12", _time_range(idr.get("inspector_start_time"), idr.get("inspector_end_time")))
-    workbook.set_cell(GEN_FRONT, "AD13", _temperature("Low", idr.get("temp_low")))
-    workbook.set_cell(GEN_FRONT, "AK13", _temperature("High", idr.get("temp_high")))
-    workbook.set_cell(GEN_FRONT, "AD17", _text(idr.get("weather_am")))
-    workbook.set_cell(GEN_FRONT, "AK17", _text(idr.get("weather_pm")))
-    workbook.set_cell(GEN_FRONT, "H17", inspector)
+    stamp_common_header(workbook, GEN_FRONT, GEN_FRONT_HEADER, idr, project, project.get("contractor"),
+                        inspector, page_number)
 
 
 def pay_item_rows(pay_items: Any) -> list[dict[str, Optional[str]]]:
@@ -250,13 +192,13 @@ def pay_item_rows(pay_items: Any) -> list[dict[str, Optional[str]]]:
     items = [item for item in pay_items if isinstance(item, dict)] if isinstance(pay_items, list) else []
     rows = []
     for item in items:
-        quantity = " ".join(part for part in (_text(item.get("payQuantity")), _text(item.get("unit"))) if part)
+        quantity = " ".join(part for part in (text_value(item.get("payQuantity")), text_value(item.get("unit"))) if part)
         rows.append({
-            "itemNo": _text(item.get("itemNo")),
-            "budgetCode": _text(item.get("budgetCode")),
+            "itemNo": text_value(item.get("itemNo")),
+            "budgetCode": text_value(item.get("budgetCode")),
             "payQuantity": quantity or None,
             "quantityChk": None,
-            "description": _text(item.get("description")),
+            "description": text_value(item.get("description")),
         })
     capacity = len(PAY_ITEM_ROWS)
     if len(rows) > capacity:
@@ -379,7 +321,7 @@ def _stamp_workforce(workbook: WorkbookTemplate, data: dict[str, Any]) -> bool:
     placed = _overflow_label(placed, FREE_TRADE_ROWS, missing)
     for row, _, entry, needs_label in placed:
         if needs_label:
-            workbook.set_cell(GEN_BACK, f"{TRADE_LABEL_COLUMN}{row}", _text(entry.get("label")))
+            workbook.set_cell(GEN_BACK, f"{TRADE_LABEL_COLUMN}{row}", text_value(entry.get("label")))
         workbook.set_cell(GEN_BACK, f"{TRADE_COUNT_COLUMN}{row}", _count(entry.get("count")))
         wrote = True
     if missing:
@@ -399,7 +341,7 @@ def _stamp_equipment(workbook: WorkbookTemplate, data: dict[str, Any]) -> bool:
     wrote = False
     for key, row in EQUIPMENT_ROWS.items():
         entry = equipment.get(key) if isinstance(equipment.get(key), dict) else {}
-        model, number = _text(entry.get("model")), _count(entry.get("number"))
+        model, number = text_value(entry.get("model")), _count(entry.get("number"))
         workbook.set_cell(GEN_BACK, f"{model_column}{row}", model)
         workbook.set_cell(GEN_BACK, f"{number_column}{row}", number)
         wrote = wrote or model is not None or number is not None
@@ -408,8 +350,8 @@ def _stamp_equipment(workbook: WorkbookTemplate, data: dict[str, Any]) -> bool:
     placed, missing = _place_extras(extras, EQUIPMENT_EXTRA_ROWS, FREE_EQUIPMENT_ROWS, len(EQUIPMENT_SLOTS))
     placed = _overflow_label(placed, FREE_EQUIPMENT_ROWS, missing)
     for row, slot, entry, needs_label in placed:
-        label = _text(entry.get("label"))
-        model = _text(entry.get("model"))
+        label = text_value(entry.get("label"))
+        model = text_value(entry.get("model"))
         if needs_label:
             workbook.set_cell(GEN_BACK, f"{EQUIPMENT_LABEL_COLUMN}{row}", label)
         elif label and label.lower() not in EQUIPMENT_ROW_NAMES:
@@ -449,7 +391,7 @@ def _stamp_safety(workbook: WorkbookTemplate, data: dict[str, Any]) -> bool:
     wrote = False
     for key, row in SAFETY_ROWS.items():
         answer = _safety_answer(checks.get(key))
-        remark = _text(remarks.get(key))
+        remark = text_value(remarks.get(key))
         if answer == "NA":
             remark = f"N/A — {remark}" if remark else "N/A"
         workbook.set_cell(GEN_BACK, f"{SAFETY_YES_COLUMN}{row}", CHECK_MARK if answer == "Y" else None)
@@ -469,8 +411,8 @@ def _stamp_report_cont_header(workbook: WorkbookTemplate, idr: dict[str, Any], p
     Takes the workbook, IDR row, project details and inspector name.
     Returns nothing.
     """
-    workbook.set_cell(REPORT_CONT, "I10", _short_date(idr["report_date"]))
-    _highlight_day(workbook, REPORT_CONT, REPORT_CONT_DAY_CELLS, idr["report_date"])
+    workbook.set_cell(REPORT_CONT, "I10", short_date(idr["report_date"]))
+    highlight_day(workbook, REPORT_CONT, REPORT_CONT_DAY_CELLS, idr["report_date"])
     workbook.set_cell(REPORT_CONT, "U10", None)  # I.R. No. "__________"
     workbook.set_cell(REPORT_CONT, "AA10", "Sheet No.:")  # was "Sheet No.: ____ of ____"
     for cell, field in REPORT_CONT_PROJECT_CELLS.items():

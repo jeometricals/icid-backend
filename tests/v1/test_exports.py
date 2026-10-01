@@ -13,7 +13,7 @@ import openpyxl
 import pytest
 
 from api.queries.projects import get_project_contractor_name
-from api.services import export
+from api.services import export, export_swcb
 from api.services.export import generate_idr_export
 from api.services.export_general import (
     REPORT_CONT_LINE_CHARS, fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
@@ -653,6 +653,79 @@ class TestWorkbookTemplate:
         assert "xl/calcChain.xml" not in package.namelist()
         assert "calcChain" not in package.read("xl/_rels/workbook.xml.rels").decode()
         assert "calcChain" not in package.read("[Content_Types].xml").decode()
+
+
+# ---------------------------------------------------------------------------
+# export_swcb.render (not wired into the export yet): the Conc Fr header
+# ---------------------------------------------------------------------------
+
+def swcb_render_bytes(idr: dict = SUBMITTED_IDR) -> bytes:
+    """
+    Run export_swcb.render on a fresh template and serialize the result.
+    Takes the IDR row (the submitted one by default).
+    Returns the .xlsx bytes.
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_swcb.render(workbook, idr, PROJECT, "Benny Bowers Contracting Co.", inspector="Genghis Khan", page_number=2)
+    return workbook.to_bytes()
+
+
+@pytest.fixture(scope="module")
+def full_swcb() -> tuple[bytes, openpyxl.Workbook]:
+    """
+    The rendered SWCB workbook, fully loaded once for print-setup checks.
+    Takes nothing.
+    Returns (the bytes, the loaded workbook).
+    """
+    content = swcb_render_bytes()
+    return content, openpyxl.load_workbook(io.BytesIO(content))
+
+
+class TestSwcbHeader:
+    def test_header_fields_land_on_the_conc_fr_cells(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(swcb_render_bytes()), read_only=True)["Conc Fr"]
+        assert [sheet[c].value for c in ("G8", "P8", "I10", "F12", "F14", "H17")] == [
+            "HWS0023", "2024123457", "Installation of Curb, Sidewalk & Ped-Ramp <Queens>", "Queens",
+            "Benny Bowers Contracting Co.", "Genghis Khan",
+        ]
+        assert sheet["AI4"].value == "9/30/26"  # a General-formatted cell here, so the date goes in as text
+        assert sheet["AL5"].fill.fill_type == "solid"  # Wednesday
+        assert sheet["AH6"].value is None  # no I.R. No. in the data model yet
+        assert (sheet["AH8"].value, sheet["AM8"].value) == (2, 3)
+        assert sheet["AG10"].value == "( Start 07:00 End 15:30 )"
+        assert sheet["AG12"].value == "( Start 06:45 End ________ )"
+        assert (sheet["AD13"].value, sheet["AK13"].value) == ("Low  45", "High  62.5")
+
+    def test_weather_shares_its_box_with_the_am_pm_label(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(swcb_render_bytes()), read_only=True)["Conc Fr"]
+        assert (sheet["AD15"].value, sheet["AK15"].value) == ("AM\nCloudy", "PM\nRain")
+        assert sheet["AD15"].alignment.wrap_text is True
+        # Missing weather leaves just the box's label
+        idr = {**SUBMITTED_IDR, "weather_am": None}
+        assert openpyxl.load_workbook(io.BytesIO(swcb_render_bytes(idr)), read_only=True)["Conc Fr"]["AD15"].value == "AM"
+
+    def test_no_contract_info_formulas_left_on_conc_fr(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(swcb_render_bytes()), read_only=True)["Conc Fr"]
+        formulas = [c.coordinate for row in sheet.iter_rows() for c in row
+                    if isinstance(c.value, str) and c.value.startswith("=")]
+        assert formulas == []
+
+    def test_only_conc_fr_and_conc_bk_are_visible(self):
+        content = swcb_render_bytes()
+        assert visible_sheets(content) == ["Conc Fr", "Conc Bk"]
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True).active.title == "Conc Fr"
+
+    def test_both_pages_print_on_one_letter_page(self, full_swcb):
+        for name in ("Conc Fr", "Conc Bk"):
+            sheet = full_swcb[1][name]
+            assert sheet.page_setup.paperSize == 1 and sheet.page_setup.orientation == "portrait", name
+            assert sheet.sheet_properties.pageSetUpPr.fitToPage is True, name
+            assert (sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight) == (1, 1), name
+
+    def test_the_calculation_chain_is_dropped(self, full_swcb):
+        package = zipfile.ZipFile(io.BytesIO(full_swcb[0]))
+        assert "xl/calcChain.xml" not in package.namelist()
+        assert "calcChain" not in package.read("xl/_rels/workbook.xml.rels").decode()
 
 
 # ---------------------------------------------------------------------------
