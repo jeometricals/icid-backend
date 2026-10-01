@@ -184,3 +184,35 @@ CREATE TABLE icid.report_attachments (
 );
 
 CREATE INDEX idx_report_attachments_report_id ON icid.report_attachments(report_id);
+
+------------------------------------------------------------
+-- SPEC ITEM (shared NYCDOT pay-item catalog; migrations/011)
+------------------------------------------------------------
+CREATE TABLE icid.spec_items (
+    spec_item_id   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    item_no        TEXT NOT NULL,
+    description    TEXT NOT NULL,
+    spec_section   TEXT NOT NULL,
+    pay_unit       TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_spec_items_item_no UNIQUE (item_no)
+);
+
+------------------------------------------------------------
+-- CONTRACT ITEM (a project's Schedule of Bid Items; migrations/011)
+------------------------------------------------------------
+CREATE TABLE icid.contract_items (
+    contract_item_id  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    project_id        TEXT NOT NULL REFERENCES icid.projects(project_id) ON DELETE CASCADE,
+    spec_item_id      UUID NOT NULL REFERENCES icid.spec_items(spec_item_id),
+    budget_code       TEXT NOT NULL,
+    bid_quantity      NUMERIC(12,2) NOT NULL,
+    bid_unit_price    NUMERIC(12,2) NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_contract_items_project_spec_budget UNIQUE (project_id, spec_item_id, budget_code)
+);
+
+CREATE INDEX idx_contract_items_project ON icid.contract_items(project_id);
+CREATE INDEX idx_contract_items_spec_item ON icid.contract_items(spec_item_id);

@@ -47,6 +47,7 @@ every request to it.
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments` — list a report's attachments
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}/download-url` — short-lived signed URL
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment (Storage file, then record)
+- `GET /v1/contract_items/?project_id=` — a project's contract items, each joined to its spec item (`item_no`, `description`, `spec_section`, `pay_unit`); `[]` when none
 - `GET /debug/schema` — dev-only
 
 ## 3. Modularity rules
