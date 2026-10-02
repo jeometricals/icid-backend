@@ -14,7 +14,7 @@ from typing import Any, Optional
 from api.services.export_common import (
     CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
     WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, section, stamp_common_header, stamp_equipment,
-    stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, text_value, write_lines,
+    stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, text_value, tick_box, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -44,7 +44,6 @@ CONC_FRONT_TEXT = TextArea(rows=range(23, 28), column="B", line_chars=84)
 # The operation line (row 29): checkbox rectangles (transparent since the template cleanup) over these cells, an
 # 8 x 8 px box centred in each 16 x 17 px cell; a centred 6 pt "X" sits inside the outline.
 OPERATION_BOXES = {"curb": "E29", "sidewalk": "K29", "base": "S29", "structural": "Z29"}
-OPERATION_MARK_FONT_PT = 6
 SUBCONTRACTOR_CELL = "AJ29"  # AJ29:AP29, a short underlined blank
 
 # Detailed Activity: rows 33-35 (row 36 is a blank spare row), From L:Q, To R:W, Remarks X:AP
@@ -166,25 +165,13 @@ def operation_types(data: dict[str, Any]) -> dict[str, bool]:
     return ticked
 
 
-def _tick(workbook: WorkbookTemplate, sheet: str, cell: str, ticked: bool) -> None:
-    """
-    Tick (or clear) one of the drawn checkbox rectangles: a small centred "X" in the cell under it.
-    Takes the workbook, sheet name, the cell under the rectangle and whether to tick it.
-    Returns nothing.
-    """
-    workbook.set_cell(sheet, cell, CHECK_MARK if ticked else None)
-    if ticked:
-        workbook.set_font_size(sheet, cell, OPERATION_MARK_FONT_PT)
-        workbook.center_cell(sheet, cell)
-
-
 def mark_conc_mix_attached(workbook: WorkbookTemplate, back: str = CONC_BACK) -> None:
     """
     Tick a Conc Bk's "See attached Concrete Truck and Mixing Information" box.
     Takes the workbook (after render has stamped the page) and the back page (Conc Bk unless given).
     Returns nothing.
     """
-    _tick(workbook, back, CONC_MIX_ATTACHED_BOX, True)
+    tick_box(workbook, back, CONC_MIX_ATTACHED_BOX, True)
 
 
 def _stamp_operation(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
@@ -194,7 +181,7 @@ def _stamp_operation(workbook: WorkbookTemplate, front: str, data: dict[str, Any
     Returns nothing.
     """
     for operation, ticked in operation_types(data).items():
-        _tick(workbook, front, OPERATION_BOXES[operation], ticked)
+        tick_box(workbook, front, OPERATION_BOXES[operation], ticked)
     workbook.set_cell(front, SUBCONTRACTOR_CELL, text_value(data.get("subcontractor")))
     workbook.shrink_to_fit_cell(front, SUBCONTRACTOR_CELL)
 
@@ -256,7 +243,7 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
                      REPORT_CONT_TEXT if report_cont_available else None)
     write_lines(workbook, front, CONC_FRONT_TEXT.rows, flow.front, CONC_FRONT_TEXT.column)
     write_lines(workbook, back, CONC_BACK_TEXT.rows, flow.back, CONC_BACK_TEXT.column)
-    _tick(workbook, back, ATTACHED_PAGES_BOX, bool(flow.report_cont))
+    tick_box(workbook, back, ATTACHED_PAGES_BOX, bool(flow.report_cont))
 
     _stamp_operation(workbook, front, data)
     _stamp_activity(workbook, front, data)

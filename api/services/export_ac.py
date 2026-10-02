@@ -4,9 +4,13 @@ Stamps an IDR's Asphaltic Concrete (AC) report onto the DDC template's AC Fr / A
 AC Fr is the front: the header block, the paving contractor and temperatures, theoretical max density, the pavement
 course table, material usage for top and binder, Pay Items, the A/C requirements and tack coat. AC Bk is the back:
 remarks, work force and equipment, the MPT/safety checklist beside the delivery ticket log, and the signature block.
-AC Fr is stamped in full on its first page (pavement courses past the fourth and pay items past the tenth aren't
-printed yet); AC Bk isn't stamped yet. Both pages always print with an AC report (AC Bk carries the certification
-and the signature lines).
+Both pages are stamped in full on their first sheet: pavement courses past the fourth, pay items past the tenth and
+remarks past AC Bk's thirteen lines aren't continued yet, and delivery tickets past the tenth are counted in a note.
+Both pages always print with an AC report (AC Bk carries the certification and the signature lines, left blank:
+the inspector and RE sign).
+
+AC Bk is Conc Bk's back page sixteen rows lower (same column widths, same tables), with its own Y / N columns, no
+safety remarks column, and the delivery ticket log beside the safety list.
 
 Cell positions come from reading templates/report_forms.xlsx.
 """
@@ -14,8 +18,9 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
-    HeaderLayout, PayItemsLayout, SafetyLayout, object_rows, section, stamp_checklist, stamp_common_header,
-    stamp_pay_items, typed_value,
+    EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea, WorkforceLayout, fill_lines,
+    mark_truncated, object_rows, paragraphs, section, stamp_checklist, stamp_common_header, stamp_equipment,
+    stamp_pay_items, stamp_safety, stamp_workforce, tick_box, typed_value, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -93,6 +98,55 @@ REQUIREMENT_HEADING_ROW = 50
 # application method / type on Q61:AO61. "QUANTITY OF TACK COAT:" (B58) has no field in the report; its blank
 # (L58:S58) stays empty.
 TACK_COAT_CELLS = {"noOfGallons": "AA58", "gallonsPerSy": "AL58", "applicationMethod": "Q61"}
+
+# ---- AC Bk ------------------------------------------------------------------
+
+# Remarks: "Remarks:" at C3 and its subtitle at C4, then thirteen 11 pt ruled lines C5:AH5 ... C17:AH17, as wide as
+# Conc Bk's (75 characters a line). They take the comments; text past the thirteenth line is cut with a note.
+AC_BACK_TEXT = TextArea(rows=range(5, 18), column="C", line_chars=75)
+
+# Work Force (rows 21-33, No. in G:H): the frontend's five roles on rows 21-25; Teamsters, Surveyors and Masons are
+# pre-printed on 26-28 (an added trade of that name lands there), and 29-33 are blank rows for other added trades
+AC_BACK_WORKFORCE = WorkforceLayout(
+    role_rows={"superintendent": 21, "foremen": 22, "operators": 23, "laborers": 24, "flaggers": 25},
+    trade_rows={"teamsters": 26, "surveyors": 27, "masons": 28},
+    free_rows=(29, 30, 31, 32, 33),
+    label_column="B", count_column="G",
+)
+
+# Equipment (rows 21-33, Model / Size N:U + No. V:X, then a second pair Y:AF + AG:AI). Four of the frontend's standard
+# types have a row; Excavator doesn't, so it goes on the blank row 33 with its name written in, as on Conc Bk. Added
+# equipment of a pre-printed type (Crane, Paving Machine, AC Distributor, ...) lands on its own row.
+AC_BACK_EQUIPMENT_EXTRA_ROWS = {
+    "crane": 23, "paving machine": 24, "ac distributor": 25, "sweepers": 26, "trailers": 27,
+    "roller – static": 29, "roller - static": 29, "roller – dynamic": 30, "roller - dynamic": 30, "hand tamper": 32,
+}
+AC_BACK_EQUIPMENT = EquipmentLayout(
+    standard_rows={"frontEndLoader": 21, "backhoe": 22, "truckDump": 28, "compressor": 31},
+    extra_rows=AC_BACK_EQUIPMENT_EXTRA_ROWS,
+    row_names=frozenset(AC_BACK_EQUIPMENT_EXTRA_ROWS),  # every pre-printed row is its own type: no variant names
+    free_rows=(33,),
+    label_column="I",
+    slots=(("N", "V"), ("Y", "AG")),
+)
+
+# End of the Day MPT/Safety Check List: rows 36-45, Y in L:M and N in N:O. There is no remarks column (the delivery
+# ticket log takes the rest of the row), so safety remarks, and N/A answers, aren't printed on AC Bk.
+AC_BACK_SAFETY = SafetyLayout(
+    rows={"plasticBarrels": 36, "pedestrianBarricades": 37, "timberCurbs": 38, "timberBreakawayBarricades": 39,
+          "generalSafety": 40, "localEmergencyAccess": 41, "fencing": 42, "plates": 43, "arrowBoard": 44,
+          "siteCleaned": 45},
+    yes_column="L", no_column="N", remarks_column=None,
+)
+
+# Delivery ticket log, beside the safety list: rows 36-45, LOCATION P:AC, Ticket No. AD:AF, Temperature AG:AI.
+# Tickets past the tenth aren't printed; a note under the comments says how many.
+TICKET_ROWS = range(36, 46)
+TICKET_COLUMNS = {"location": "P", "ticketNo": "AD", "temperature": "AG"}
+MORE_TICKETS_NOTE = "[Note] {count} more delivery ticket{plural} — see ICID"
+
+# "Attached Pages for Additional Remarks and / or Sketches" (C48, a transparent rectangle, like Conc Bk's C52)
+ATTACHED_PAGES_BOX = "C48"
 
 
 def _centre_across(workbook: WorkbookTemplate, sheet: str, cells: list[str], value: Any) -> None:
@@ -181,12 +235,50 @@ def _stamp_tack_coat(workbook: WorkbookTemplate, front: str, data: dict[str, Any
         workbook.set_cell(front, cell, typed_value(tack_coat.get(field)))
 
 
+def _stamp_delivery_tickets(workbook: WorkbookTemplate, back: str, data: dict[str, Any]) -> int:
+    """
+    Fill the delivery ticket log's ten rows, one ticket a row, blanking the rest.
+    Takes the workbook, the back page and the report_data.
+    Returns how many tickets didn't fit.
+    """
+    tickets = object_rows(data, "deliveryTickets")
+    for index, row in enumerate(TICKET_ROWS):
+        ticket = tickets[index] if index < len(tickets) else {}
+        for field, column in TICKET_COLUMNS.items():
+            workbook.set_cell(back, f"{column}{row}", typed_value(ticket.get(field)))
+    return max(0, len(tickets) - len(TICKET_ROWS))
+
+
+def _stamp_remarks(workbook: WorkbookTemplate, back: str, comments: Any, more_tickets: int) -> None:
+    """
+    Write the comments on AC Bk's remarks lines, followed by a note when delivery tickets didn't all fit.
+    Takes the workbook, the back page, the comments and how many tickets didn't fit.
+    Returns nothing; text past the thirteenth line is cut with the "continued in ICID" note.
+    """
+    note = MORE_TICKETS_NOTE.format(count=more_tickets, plural="" if more_tickets == 1 else "s")
+    queue = paragraphs(comments) + ([note] if more_tickets else [])
+    lines = fill_lines(queue, len(AC_BACK_TEXT.rows), AC_BACK_TEXT.line_chars)
+    if queue:
+        lines = mark_truncated(lines, AC_BACK_TEXT.line_chars)
+    write_lines(workbook, back, AC_BACK_TEXT.rows, lines, AC_BACK_TEXT.column)
+
+
+def mark_attachments(workbook: WorkbookTemplate, back: str = AC_BACK) -> None:
+    """
+    Tick AC Bk's "Attached Pages for Additional Remarks and / or Sketches" box.
+    Takes the workbook (after render has stamped the page) and the back page (AC Bk unless given).
+    Returns nothing.
+    """
+    tick_box(workbook, back, ATTACHED_PAGES_BOX, True)
+
+
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
            report_data: Optional[dict[str, Any]] = None, fronts: Optional[list[str]] = None,
            back: str = AC_BACK) -> list[str]:
     """
-    Stamp an AC report onto its AC Fr / AC Bk pages (so far AC Fr; AC Bk is the template's, unfilled).
+    Stamp an AC report onto its AC Fr / AC Bk pages. The "Attached Pages" box is the caller's to tick (see
+    mark_attachments), as it knows the report's attachments.
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (None leaves Sheet No. blank), its report_data, its front pages (AC Fr unless given) and its back page (AC Bk
     unless given).
@@ -202,6 +294,12 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     stamp_pay_items(workbook, fronts[0], AC_FRONT_PAY_ITEMS, data.get("payItems"))
     _stamp_requirements(workbook, fronts[0], data)
     _stamp_tack_coat(workbook, fronts[0], data)
+
+    more_tickets = _stamp_delivery_tickets(workbook, back, data)
+    _stamp_remarks(workbook, back, data.get("comments"), more_tickets)
+    stamp_workforce(workbook, back, AC_BACK_WORKFORCE, data)
+    stamp_equipment(workbook, back, AC_BACK_EQUIPMENT, data)
+    stamp_safety(workbook, back, AC_BACK_SAFETY, data)
     pages = fronts + [back]
     for sheet in pages:
         workbook.fit_to_letter_page(sheet)

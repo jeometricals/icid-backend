@@ -2351,12 +2351,13 @@ class TestAcHeader:
             assert (setup.paperSize, setup.orientation, setup.fitToWidth, setup.fitToHeight) == (
                 1, "portrait", 1, 1), name
 
-    def test_ac_bk_is_left_as_the_template_has_it(self):
-        # No body stamping yet: AC Bk's cells are untouched (only its print setup changes)
-        part = f"xl/worksheets/{SHEET_PARTS['AC Bk']}"
-        cells = lambda xml: re.search(r"<sheetData>.*</sheetData>", xml, re.DOTALL).group(0)
-        rendered = zipfile.ZipFile(io.BytesIO(ac_render()[1])).read(part).decode()
-        assert cells(rendered) == cells(zipfile.ZipFile(TEMPLATE).read(part).decode())
+    def test_an_empty_report_leaves_ac_bk_blank_but_for_its_labels(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(ac_render()[1]), read_only=True)["AC Bk"]
+        assert [sheet[c].value for c in ("C5", "C17", "G21", "N21", "L36", "N36", "P36", "AD36", "AG36", "C48")] == [
+            None] * 10
+        assert [sheet[c].value for c in ("C3", "B21", "I22", "B36", "P35", "D48")] == [
+            "Remarks: ", "Superintendent", "Backhoe", "Plastic Barrels", "LOCATION",
+            "Attached Pages for Additional Remarks and / or Sketches"]
 
     def test_render_leaves_every_other_sheet_as_the_template_has_it(self):
         rendered = zipfile.ZipFile(io.BytesIO(ac_render()[1]))
@@ -2739,6 +2740,173 @@ class TestAcFrontComplete:
         sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]
         assert [sheet[c].value for c in ("B1", "L20", "AA23", "Y25", "B28", "H34", "B39", "W51", "AA57", "AA58")] == [
             "DRAFT - Not for Submission", "Tri-State Paving", "52", "150.2", "6.01", "12", "4.01 AAS", "X", "N/A", "40"]
+
+
+def ac_back(**report_data):
+    """
+    Render an AC report with the given report_data and open its AC Bk sheet.
+    Takes report_data fields as keyword arguments.
+    Returns the read-only AC Bk worksheet.
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_ac.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data=report_data)
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), read_only=True)["AC Bk"]
+
+
+def ticket(number: int, **fields) -> dict:
+    """
+    Build one delivery ticket row as the frontend saves it.
+    Takes the ticket's number (used in its values) and field overrides.
+    Returns the row.
+    """
+    return {"location": f"Main St lane {number}", "ticketNo": f"T{number:03d}", "temperature": "290", **fields}
+
+
+def ac_remarks(sheet) -> list:
+    """
+    Read AC Bk's thirteen remarks lines.
+    Takes the worksheet.
+    Returns C5 ... C17.
+    """
+    return [sheet[f"C{row}"].value for row in range(5, 18)]
+
+
+class TestAcBackRemarks:
+    def test_comments_fill_the_remarks_lines_left_aligned(self):
+        sheet = ac_back(comments="Paving started at 7:30.\n\nInspector from DOT visited.")
+        assert ac_remarks(sheet)[:3] == ["Paving started at 7:30.", "Inspector from DOT visited.", None]
+        assert sheet["C5"].alignment.horizontal == "left"
+        assert (sheet["C3"].value, sheet["C4"].value) == ("Remarks: ", "Comments, Visitors, Other Work, Etc.")
+
+    def test_long_comments_are_cut_on_the_thirteenth_line(self):
+        lines = ac_remarks(ac_back(comments=words(400)))
+        assert all(lines) and all(len(line) <= 75 for line in lines)
+        assert lines[12].endswith("… (continued in ICID)")
+
+
+class TestAcBackWorkforceAndEquipment:
+    def test_the_five_roles_land_on_rows_21_to_25(self):
+        sheet = ac_back(workforce={"superintendent": "1", "foremen": "2", "operators": "3", "laborers": "6",
+                                   "flaggers": "2"})
+        assert [sheet[f"G{row}"].value for row in range(21, 26)] == [1, 2, 3, 6, 2]
+
+    def test_a_singular_older_key_still_counts(self):
+        assert ac_back(workforce={"foreman": "2"})["G22"].value == 2
+
+    def test_added_trades_use_their_preprinted_rows_then_the_blank_ones(self):
+        trades = [{"label": "Teamsters", "count": "2"}, {"label": "Masons", "count": "1"},
+                  {"label": "Electricians", "count": "3"}]
+        sheet = ac_back(additionalWorkforce=trades)
+        assert (sheet["G26"].value, sheet["G28"].value) == (2, 1)
+        assert (sheet["B29"].value, sheet["G29"].value) == ("Electricians", 3)
+
+    def test_too_many_added_trades_end_with_a_count(self):
+        trades = [{"label": f"Trade {n}", "count": "1"} for n in range(1, 8)]  # 5 blank rows for 7 trades
+        sheet = ac_back(additionalWorkforce=trades)
+        assert [sheet[f"B{row}"].value for row in range(29, 34)] == [
+            "Trade 1", "Trade 2", "Trade 3", "Trade 4", "+3 more (see ICID)"]
+
+    def test_standard_equipment_lands_on_its_rows(self):
+        equipment = {"frontEndLoader": {"model": "CAT 950", "number": "1"},
+                     "backhoe": {"model": "JD 310", "number": "1"},
+                     "truckDump": {"model": "Mack", "number": "4"},
+                     "compressor": {"model": "185 CFM", "number": "1"}}
+        sheet = ac_back(equipment=equipment)
+        assert [(sheet[f"N{row}"].value, sheet[f"V{row}"].value) for row in (21, 22, 28, 31)] == [
+            ("CAT 950", 1), ("JD 310", 1), ("Mack", 4), ("185 CFM", 1)]
+
+    def test_excavator_has_no_row_so_it_takes_the_blank_one(self):
+        sheet = ac_back(equipment={"excavator": {"model": "PC200", "number": "1"}})
+        assert (sheet["I33"].value, sheet["N33"].value, sheet["V33"].value) == ("Excavator", "PC200", 1)
+
+    def test_added_paving_equipment_uses_its_preprinted_rows(self):
+        added = [{"label": "Paving Machine", "model": "Vogele 1900", "number": "1"},
+                 {"label": "Roller – Static", "model": "Hamm HD+", "number": "2"},
+                 {"label": "Sweepers", "model": "Elgin", "number": "1"}]
+        sheet = ac_back(additionalEquipment=added)
+        assert [(sheet[f"N{row}"].value, sheet[f"V{row}"].value) for row in (24, 29, 26)] == [
+            ("Vogele 1900", 1), ("Hamm HD+", 2), ("Elgin", 1)]
+
+    def test_too_much_added_equipment_ends_with_a_count(self):
+        added = [{"label": f"Thing {n}", "model": "M", "number": "1"} for n in range(1, 4)]  # one blank row
+        assert ac_back(additionalEquipment=added)["I33"].value == "+3 more (see ICID)"
+
+
+class TestAcBackSafety:
+    def test_y_and_n_use_ac_bks_own_columns(self):
+        sheet = ac_back(safetyChecks={"plasticBarrels": "Y", "siteCleaned": "N"})
+        assert (sheet["L36"].value, sheet["N36"].value) == ("X", None)
+        assert (sheet["L45"].value, sheet["N45"].value) == (None, "X")
+        assert sheet["B45"].value == "Site Cleaned and Secured"
+
+    def test_n_a_and_safety_remarks_have_nowhere_to_go(self):
+        sheet = ac_back(safetyChecks={"fencing": "NA", "plates": "Y"},
+                        safetyRemarks={"fencing": "Not needed", "plates": "Two plates on Main"})
+        assert (sheet["L42"].value, sheet["N42"].value) == (None, None)
+        assert (sheet["L43"].value, sheet["N43"].value) == ("X", None)
+        # The cells right of Y / N belong to the ticket log: no remark lands there
+        assert (sheet["P42"].value, sheet["P43"].value) == (None, None)
+
+
+class TestAcBackDeliveryTickets:
+    def test_tickets_fill_the_log_beside_the_safety_list(self):
+        sheet = ac_back(deliveryTickets=[ticket(1), ticket(2, temperature=285)])
+        assert [(sheet[f"P{r}"].value, sheet[f"AD{r}"].value, sheet[f"AG{r}"].value) for r in (36, 37, 38)] == [
+            ("Main St lane 1", "T001", "290"), ("Main St lane 2", "T002", 285), (None, None, None)]
+
+    def test_ten_tickets_fill_every_row_without_a_note(self):
+        sheet = ac_back(deliveryTickets=[ticket(n) for n in range(1, 11)], comments="Done.")
+        assert [sheet[f"AD{row}"].value for row in range(36, 46)] == [f"T{n:03d}" for n in range(1, 11)]
+        assert ac_remarks(sheet)[:2] == ["Done.", None]
+
+    def test_more_than_ten_tickets_are_counted_after_the_comments(self):
+        sheet = ac_back(deliveryTickets=[ticket(n) for n in range(1, 14)], comments="Done.")
+        assert sheet["AD45"].value == "T010"
+        assert ac_remarks(sheet)[:3] == ["Done.", "[Note] 3 more delivery tickets — see ICID", None]
+        assert ac_remarks(ac_back(deliveryTickets=[ticket(n) for n in range(1, 12)]))[0] == (
+            "[Note] 1 more delivery ticket — see ICID")
+
+    def test_malformed_tickets_are_skipped(self):
+        sheet = ac_back(deliveryTickets=["x", ticket(1), None])
+        assert (sheet["AD36"].value, sheet["AD37"].value) == ("T001", None)
+
+
+class TestAcAttachedPagesBox:
+    def test_ticked_when_the_ac_report_has_attachments(self):
+        ac = ac_row(page_number=2)
+        photo = attachment(1, ac["report_id"])
+        content = export_bytes(reports=[ac], attachments=[photo], files={photo["storage_path"]: image_bytes("JPEG")})
+        box = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Bk"]["C48"]
+        assert (box.value, box.font.sz, box.alignment.horizontal) == ("X", 6, "center")
+
+    def test_empty_without_attachments_or_with_only_another_reports(self):
+        assert openpyxl.load_workbook(io.BytesIO(export_bytes(reports=[ac_row()])), read_only=True)[
+            "AC Bk"]["C48"].value is None
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[ac_row(page_number=2), swcb_row(1, 3)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG")})
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Bk"]["C48"].value is None
+
+    def test_mark_attachments_ticks_the_box(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        export_ac.mark_attachments(workbook)
+        assert written(workbook)["AC Bk"]["C48"].value == "X"
+
+
+class TestAcComplete:
+    def test_a_full_ac_report_exports_both_pages(self):
+        report = ac_row(page_number=None, **FULL_SITE_CONDITIONS, pavementCourses=[course(1)], payItems=[pay_item(1)],
+                        acRequirements={"subgradeCompacted": {"value": "Y"}}, tackCoat={"noOfGallons": "40"},
+                        comments="Paved Main St.", workforce={"foremen": "1"},
+                        equipment={"compressor": {"model": "185", "number": "1"}},
+                        safetyChecks={"plates": "Y"}, deliveryTickets=[ticket(1)])
+        content = export_bytes(idr=DRAFT_IDR, reports=[report])
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        back = book["AC Bk"]
+        assert [back[c].value for c in ("B1", "C5", "G22", "N31", "L43", "AD36", "C55", "S55")] == [
+            "DRAFT - Not for Submission", "Paved Main St.", 1, "185", "X", "T001", None, None]  # signatures blank
+        assert (book["AC Fr"]["L20"].value, book["AC Fr"]["W51"].value) == ("Tri-State Paving", "X")
+        assert back["B51"].value.startswith("The above described work was incorporated")
 
 
 # ---------------------------------------------------------------------------

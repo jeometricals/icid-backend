@@ -16,6 +16,8 @@ from typing import Any, Optional
 from api.services.xlsx_template import WorkbookTemplate
 
 CHECK_MARK = "X"
+# A drawn checkbox rectangle (8-10 px, transparent since the template cleanup) is ticked with a small centred X
+BOX_MARK_FONT_PT = 6
 TEXT_OVERFLOW = " … (continued in ICID)"
 
 # A pay item's description gets at most two lines: at the template's 10 pt, then shrunk to 8 pt, then cut with "...".
@@ -471,7 +473,7 @@ class SafetyLayout:
     rows: dict[str, int]            # frontend safety checklist key -> row
     yes_column: str
     no_column: str
-    remarks_column: str
+    remarks_column: Optional[str]   # None where the form has no remarks column (AC Bk)
 
 
 def count_value(value: Any) -> Any:
@@ -606,6 +608,18 @@ def checklist_answer(value: Any) -> Optional[str]:
     return value if value in ("Y", "N", "NA") else None
 
 
+def tick_box(workbook: WorkbookTemplate, sheet: str, cell: str, ticked: bool) -> None:
+    """
+    Tick (or clear) one drawn checkbox rectangle: a small centred "X" in the cell under it.
+    Takes the workbook, sheet name, the cell under the rectangle and whether to tick it.
+    Returns nothing.
+    """
+    workbook.set_cell(sheet, cell, CHECK_MARK if ticked else None)
+    if ticked:
+        workbook.set_font_size(sheet, cell, BOX_MARK_FONT_PT)
+        workbook.center_cell(sheet, cell)
+
+
 def stamp_safety(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, data: dict[str, Any]) -> bool:
     """
     Write the MPT/safety checklist: an X under Y or N, and the remarks. The forms have no N/A column, so an N/A answer
@@ -621,7 +635,8 @@ def stamp_checklist(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout
                     answers: dict[str, tuple[Any, Any]]) -> bool:
     """
     Write a Y / N checklist: an X under Y or N, and the remarks. An N/A answer has no box of its own, so it leaves both
-    boxes empty and is written at the start of the remarks instead ("N/A", or "N/A — <remarks>").
+    boxes empty and is written at the start of the remarks instead ("N/A", or "N/A — <remarks>"). On a form with no
+    remarks column, remarks (and so N/A) aren't printed.
     Takes the workbook, sheet name, the checklist's layout and each row's (answer, remarks) by key.
     Returns whether any answer or remark was written.
     """
@@ -633,6 +648,9 @@ def stamp_checklist(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout
             remark = f"N/A — {remark}" if remark else "N/A"
         workbook.set_cell(sheet, f"{layout.yes_column}{row}", CHECK_MARK if answer == "Y" else None)
         workbook.set_cell(sheet, f"{layout.no_column}{row}", CHECK_MARK if answer == "N" else None)
+        if layout.remarks_column is None:
+            wrote = wrote or answer in ("Y", "N")
+            continue
         workbook.set_cell(sheet, f"{layout.remarks_column}{row}", remark)
         wrote = wrote or answer is not None or remark is not None
     return wrote

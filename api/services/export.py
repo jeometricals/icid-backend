@@ -293,9 +293,9 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     for report in (r for r in reports if id(r) in swcb_sheets or r is ac):
         page = _page_after_clones(report["page_number"], extras)
         if report is ac:
-            groups.append((report["report_id"], export_ac.render(
-                workbook, idr, project, project.get("contractor"), inspector=inspector, page_number=page,
-                report_data=report["report_data"])))
+            ac_pages = export_ac.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
+                                        page_number=page, report_data=report["report_data"])
+            groups.append((report["report_id"], ac_pages))
             continue
         fronts, back = swcb_sheets[id(report)]
         swcb_pages = export_swcb.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
@@ -317,6 +317,9 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     printed = [report_id for report_id, _ in segments if report_id is not None]
     unprinted = [r["report_id"] for r in reports if r.get("report_id") is not None and r["report_id"] not in printed]
     attachments = _load_attachments(reports)
+    # AC Bk's "Attached Pages" box: ticked when the AC report has attachment pages or continues on Report Cont
+    if ac is not None and (attachments.get(ac["report_id"]) or REPORT_CONT in ac_pages):
+        export_ac.mark_attachments(workbook)
     attachment_pages, closing = export_attachments.render(
         workbook, idr, project, inspector,
         [(report_id, attachments[report_id]) for report_id in printed + unprinted if report_id in attachments])
