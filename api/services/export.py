@@ -108,6 +108,27 @@ def _conc_mix_report(reports: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     return next((r for r in reports if r["report_type"] == "CONC_MIX"), None)
 
 
+def _extra_conc_mix_sheets(conc_mix: Optional[dict[str, Any]]) -> int:
+    """
+    Count the Conc Mix clones a CONC_MIX report needs for its trucks (sheets past the first).
+    Takes the CONC_MIX report row, or None.
+    Returns the number of extra sheets, 0 without a report.
+    """
+    return export_conc_mix.sheet_count(conc_mix["report_data"]) - 1 if conc_mix is not None else 0
+
+
+def _page_after_clones(page: Optional[int], conc_mix: Optional[dict[str, Any]], extra_sheets: int) -> Optional[int]:
+    """
+    Renumber a report's page around the Conc Mix clones: the database gives each report one page, and the clones take
+    the numbers right after the CONC_MIX report's, so every report numbered after it moves down by the clone count.
+    Takes the report's page number (None on a draft), the CONC_MIX report row (or None) and the clone count.
+    Returns the page number to print.
+    """
+    if page is None or conc_mix is None or conc_mix["page_number"] is None or page <= conc_mix["page_number"]:
+        return page
+    return page + extra_sheets
+
+
 def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) -> None:
     """
     Write the project details the forms' header formulas read (kept even though visible pages get the values directly).
@@ -129,8 +150,8 @@ def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) ->
 def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
     Build an IDR's .xlsx export from the report-forms template: the General's pages, then the SWCB report's, then the
-    Conc Mix page (whose box on Conc Bk is then ticked). A draft IDR's pages are each marked "DRAFT - Not for
-    Submission".
+    Conc Mix page and its clones (whose box on Conc Bk is then ticked). The clones are numbered after the CONC_MIX
+    report and counted in OF. A draft IDR's pages are each marked "DRAFT - Not for Submission".
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -146,6 +167,10 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     general_data, page_number = _general_for_export(idr_id)
     reports = _load_reports(idr_id)
     swcb, conc_mix = _swcb_report(reports), _conc_mix_report(reports)
+    extra_sheets = _extra_conc_mix_sheets(conc_mix)
+    if extra_sheets and idr.get("total_pages") is not None:
+        idr = {**idr, "total_pages": idr["total_pages"] + extra_sheets}  # each Conc Mix clone is a page of its own
+    page_number = _page_after_clones(page_number, conc_mix, extra_sheets)
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
     _stamp_contract_info(workbook, project)
@@ -155,7 +180,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     if swcb is not None:
         # The General comes first, so it keeps Report Cont if it needed it; the SWCB's long text is then cut instead
         swcb_pages = export_swcb.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
-                                        page_number=swcb["page_number"], report_data=swcb["report_data"],
+                                        page_number=_page_after_clones(swcb["page_number"], conc_mix, extra_sheets),
+                                        report_data=swcb["report_data"],
                                         report_cont_available=report_cont_owner is None)
         if REPORT_CONT in swcb_pages:
             report_cont_owner = export_swcb.CONC_BACK
@@ -166,7 +192,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     workbook.move_sheet(REPORT_CONT, after=report_cont_owner or GEN_BACK)
 
     if conc_mix is not None:
-        # Conc Mix sits between SWR Bk and HC Fr in the template; it prints last, after the page printed last so far
+        # Conc Mix sits between SWR Bk and HC Fr in the template; it prints last, after the page printed last so far,
+        # and render places any clones right after it
         workbook.move_sheet(export_conc_mix.CONC_MIX, after=pages[-1])
         pages += export_conc_mix.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
                                         page_number=conc_mix["page_number"], report_data=conc_mix["report_data"])

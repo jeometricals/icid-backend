@@ -3,7 +3,8 @@ Stamps an IDR's Concrete Truck & Mix Info (CONC_MIX) addendum onto the DDC templ
 
 Conc Mix is a single page: a compact header (project details, date, page number and inspector; no day of the week,
 times, temperatures or weather), Location of Use, Mixer Type, the Trucks table, Concrete Specifications, Material
-Usage and Remarks. The Trucks table holds 11 trucks; with more, the first 11 print and a note heads the Remarks.
+Usage and Remarks. The Trucks table holds 11 trucks; a report with more continues on clones of the page (Conc Mix 2,
+Conc Mix 3, ...), each a full copy of the form with the next 11 trucks.
 
 Cell positions come from reading templates/report_forms.xlsx.
 """
@@ -47,7 +48,6 @@ TRUCK_COLUMNS = {"truckOrTicketNo": "B", "loadSizeCy": "K", "endBatch": "N", "mi
                  "startDischTime": "T", "endDischTime": "W", "slump": "Z", "airContent": "AC", "concTemp": "AH",
                  "cylinderNumbers": "AK"}
 STICKER_CELLS = {"Y": "G", "N": "I"}
-MORE_TRUCKS_NOTE = "(additional trucks on continuation sheet — pending)"
 
 # Concrete Specifications. "Class of Concrete: ________________" is one text cell (B41:O41), so it's rewritten with
 # the value in place of the blank. Min / Max for Slump (row 43) and Air (row 44) are cells holding a single space.
@@ -65,53 +65,12 @@ MATERIAL_CELLS = {"batchReportNo": "W41", "noOfTickets": "W42", "firstTicketNo":
 # Remarks: six ruled 8 pt lines. The first shares row 49 with the "REMARKS:" label (C49:G49), so it starts at H49 and
 # runs to AO (539 px); the other five run C50:AO54 (619 px). Conc Fr's 10 pt lines hold 84 characters across 651 px,
 # so at 8 pt a pixel holds 84 x 10 / 8 / 651 = 0.16 characters: 86 on the first line, 99 on the rest.
+# The inspector's remarks print on the first sheet only. A sheet followed by another ends its remarks with
+# CONTINUED_NEXT; each later sheet's remarks hold just CONTINUED_FROM, naming the sheet before it.
 REMARKS_FIRST = TextArea(rows=range(49, 50), column="H", line_chars=86)
 REMARKS_REST = TextArea(rows=range(50, 55), column="C", line_chars=99)
-
-
-def _stamp_header(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any],
-                  contractor: Optional[str], inspector: Optional[str], page_number: Optional[int]) -> None:
-    """
-    Write Conc Mix's header: project details (as values, not Contract Info formulas), date, page number and inspector.
-    Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, and the report's page
-    number (None leaves PAGE / OF blank). Returns nothing; ATTACHMENT TO I.R. NO. stays blank.
-    """
-    for cell, field in CONC_MIX_PROJECT_CELLS.items():
-        workbook.set_cell(CONC_MIX, cell, contractor if field == "contractor" else project.get(field))
-    workbook.set_cell(CONC_MIX, CONC_MIX_DATE, short_date(idr["report_date"]))
-    has_page = page_number is not None
-    workbook.set_cell(CONC_MIX, CONC_MIX_SHEET_NO, page_number if has_page else None)
-    workbook.set_cell(CONC_MIX, CONC_MIX_SHEET_OF, idr.get("total_pages") if has_page else None)
-    workbook.set_cell(CONC_MIX, CONC_MIX_INSPECTOR, inspector)
-    workbook.set_cell(CONC_MIX, CONC_MIX_IR_NO, None)
-
-
-def _tick(workbook: WorkbookTemplate, box: tuple[str, ...], ticked: bool) -> None:
-    """
-    Tick (or clear) one drawn checkbox: a 7 pt "X" centred across the cells under it.
-    Takes the workbook, the cells the box covers (left to right) and whether to tick it.
-    Returns nothing.
-    """
-    workbook.set_cell(CONC_MIX, box[0], CHECK_MARK if ticked else None)
-    if ticked:
-        workbook.set_font_size(CONC_MIX, box[0], CHECK_MARK_FONT_PT)
-        workbook.center_across(CONC_MIX, list(box))
-
-
-def _stamp_location_and_mixer(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
-    """
-    Tick the Location of Use and Mixer Type boxes, and write the mixer type when it's Other.
-    Takes the workbook and the report_data.
-    Returns nothing.
-    """
-    location = section(data, "locationOfUse")
-    for key, box in LOCATION_BOXES.items():
-        _tick(workbook, box, location.get(key) is True)
-    mixer = section(data, "mixerType")
-    for kind, box in MIXER_BOXES.items():
-        _tick(workbook, box, mixer.get("type") == kind)
-    other = text_value(mixer.get("otherLabel")) if mixer.get("type") == "other" else None
-    workbook.set_cell(CONC_MIX, MIXER_OTHER_LABEL, other)
+CONTINUED_NEXT = "Continued on next page"
+CONTINUED_FROM = "(Continued from {sheet})"
 
 
 def truck_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -124,67 +83,154 @@ def truck_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     return [truck for truck in trucks if isinstance(truck, dict)] if isinstance(trucks, list) else []
 
 
-def _stamp_trucks(workbook: WorkbookTemplate, trucks: list[dict[str, Any]]) -> None:
+def sheet_count(report_data: Any) -> int:
+    """
+    Count the Conc Mix sheets a report prints on: one per 11 trucks, and always at least one.
+    Takes the report_data (anything that isn't an object counts as empty).
+    Returns the number of sheets.
+    """
+    trucks = truck_rows(report_data if isinstance(report_data, dict) else {})
+    return max(1, -(-len(trucks) // len(TRUCK_ROWS)))
+
+
+def sheet_name(index: int) -> str:
+    """
+    Name the Conc Mix sheet at a position among a report's sheets.
+    Takes the zero-based position.
+    Returns "Conc Mix" for the first, "Conc Mix 2", "Conc Mix 3", ... for its clones.
+    """
+    return CONC_MIX if index == 0 else f"{CONC_MIX} {index + 1}"
+
+
+def _stamp_header(workbook: WorkbookTemplate, sheet: str, idr: dict[str, Any], project: dict[str, Any],
+                  contractor: Optional[str], inspector: Optional[str], page_number: Optional[int]) -> None:
+    """
+    Write a Conc Mix sheet's header: project details (as values, not Contract Info formulas), date, page number and
+    inspector. Takes the workbook, the sheet, the IDR row (its total_pages fills OF), the project row, the contractor's
+    and inspector's names, and the sheet's page number (None leaves PAGE / OF blank).
+    Returns nothing; ATTACHMENT TO I.R. NO. stays blank.
+    """
+    for cell, field in CONC_MIX_PROJECT_CELLS.items():
+        workbook.set_cell(sheet, cell, contractor if field == "contractor" else project.get(field))
+    workbook.set_cell(sheet, CONC_MIX_DATE, short_date(idr["report_date"]))
+    has_page = page_number is not None
+    workbook.set_cell(sheet, CONC_MIX_SHEET_NO, page_number if has_page else None)
+    workbook.set_cell(sheet, CONC_MIX_SHEET_OF, idr.get("total_pages") if has_page else None)
+    workbook.set_cell(sheet, CONC_MIX_INSPECTOR, inspector)
+    workbook.set_cell(sheet, CONC_MIX_IR_NO, None)
+
+
+def _tick(workbook: WorkbookTemplate, sheet: str, box: tuple[str, ...], ticked: bool) -> None:
+    """
+    Tick (or clear) one drawn checkbox: a 7 pt "X" centred across the cells under it.
+    Takes the workbook, the sheet, the cells the box covers (left to right) and whether to tick it.
+    Returns nothing.
+    """
+    workbook.set_cell(sheet, box[0], CHECK_MARK if ticked else None)
+    if ticked:
+        workbook.set_font_size(sheet, box[0], CHECK_MARK_FONT_PT)
+        workbook.center_across(sheet, list(box))
+
+
+def _stamp_location_and_mixer(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any]) -> None:
+    """
+    Tick the Location of Use and Mixer Type boxes, and write the mixer type when it's Other.
+    Takes the workbook, the sheet and the report_data.
+    Returns nothing.
+    """
+    location = section(data, "locationOfUse")
+    for key, box in LOCATION_BOXES.items():
+        _tick(workbook, sheet, box, location.get(key) is True)
+    mixer = section(data, "mixerType")
+    for kind, box in MIXER_BOXES.items():
+        _tick(workbook, sheet, box, mixer.get("type") == kind)
+    other = text_value(mixer.get("otherLabel")) if mixer.get("type") == "other" else None
+    workbook.set_cell(sheet, MIXER_OTHER_LABEL, other)
+
+
+def _stamp_trucks(workbook: WorkbookTemplate, sheet: str, trucks: list[dict[str, Any]]) -> None:
     """
     Fill the Trucks table, one truck per row, and mark each one's inspection sticker.
-    Takes the workbook and the trucks to print (at most 11; rows past them stay blank, their Y / N letters kept).
+    Takes the workbook, the sheet and its trucks (at most 11; rows past them stay blank, their Y / N letters kept).
     Returns nothing.
     """
     for index, row in enumerate(TRUCK_ROWS):
         truck = trucks[index] if index < len(trucks) else {}
         for field, column in TRUCK_COLUMNS.items():
-            workbook.set_cell(CONC_MIX, f"{column}{row}", text_value(truck.get(field)))
+            workbook.set_cell(sheet, f"{column}{row}", text_value(truck.get(field)))
         sticker = truck.get("inspectionSticker")
         for answer, column in STICKER_CELLS.items():
-            workbook.set_cell(CONC_MIX, f"{column}{row}", CHECK_MARK if sticker == answer else answer)
+            workbook.set_cell(sheet, f"{column}{row}", CHECK_MARK if sticker == answer else answer)
 
 
-def _stamp_specs_and_materials(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
+def _stamp_specs_and_materials(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any]) -> None:
     """
     Write Concrete Specifications (class of concrete, slump and air ranges) and Material Usage.
-    Takes the workbook and the report_data.
+    Takes the workbook, the sheet and the report_data.
     Returns nothing.
     """
     specs = section(data, "concreteSpecs")
     concrete_class = text_value(specs.get("classOfConcrete")) or CLASS_OF_CONCRETE_BLANK
-    workbook.set_cell(CONC_MIX, CLASS_OF_CONCRETE, f"{CLASS_OF_CONCRETE_LABEL} {concrete_class}")
+    workbook.set_cell(sheet, CLASS_OF_CONCRETE, f"{CLASS_OF_CONCRETE_LABEL} {concrete_class}")
     for field, cell in SPEC_CELLS.items():
-        workbook.set_cell(CONC_MIX, cell, text_value(specs.get(field)))
+        workbook.set_cell(sheet, cell, text_value(specs.get(field)))
     materials = section(data, "materialUsage")
     for field, cell in MATERIAL_CELLS.items():
-        workbook.set_cell(CONC_MIX, cell, text_value(materials.get(field)))
+        workbook.set_cell(sheet, cell, text_value(materials.get(field)))
 
 
-def _stamp_remarks(workbook: WorkbookTemplate, remarks: Any, more_trucks: bool) -> None:
+def remarks_lines(text: list[str], continued: bool) -> tuple[list[str], list[str]]:
     """
-    Write the Remarks on their six lines, headed by the "additional trucks" note when the table overflowed.
-    Takes the workbook, the remarks text and whether some trucks didn't fit.
-    Returns nothing; text past the sixth line is cut with the "continued in ICID" note.
+    Lay a sheet's remarks out on its six lines, keeping the last one free for CONTINUED_NEXT when a sheet follows.
+    Takes the remarks' paragraphs and whether another Conc Mix sheet follows.
+    Returns (the first line's text, the other lines' text); text that doesn't fit is cut with "continued in ICID".
     """
-    queue = ([MORE_TRUCKS_NOTE] if more_trucks else []) + paragraphs(remarks)
+    queue = list(text)
     first = fill_lines(queue, len(REMARKS_FIRST.rows), REMARKS_FIRST.line_chars)
-    rest = fill_lines(queue, len(REMARKS_REST.rows), REMARKS_REST.line_chars)
+    rest = fill_lines(queue, len(REMARKS_REST.rows) - (1 if continued else 0), REMARKS_REST.line_chars)
     if queue:
         rest = mark_truncated(rest, REMARKS_REST.line_chars)
-    write_lines(workbook, CONC_MIX, REMARKS_FIRST.rows, first, REMARKS_FIRST.column)
-    write_lines(workbook, CONC_MIX, REMARKS_REST.rows, rest, REMARKS_REST.column)
+    if continued:
+        (rest if first else first).append(CONTINUED_NEXT)
+    return first, rest
+
+
+def _stamp_remarks(workbook: WorkbookTemplate, sheet: str, text: list[str], continued: bool) -> None:
+    """
+    Write a sheet's remarks on its six lines.
+    Takes the workbook, the sheet, the remarks' paragraphs and whether another Conc Mix sheet follows.
+    Returns nothing.
+    """
+    first, rest = remarks_lines(text, continued)
+    write_lines(workbook, sheet, REMARKS_FIRST.rows, first, REMARKS_FIRST.column)
+    write_lines(workbook, sheet, REMARKS_REST.rows, rest, REMARKS_REST.column)
 
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
            report_data: Optional[dict[str, Any]] = None) -> list[str]:
     """
-    Stamp a CONC_MIX report onto the Conc Mix page: header, boxes, trucks, specifications, material usage, remarks.
-    Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
-    (None leaves PAGE / OF blank) and its report_data (None stamps the header and an empty body).
-    Returns the sheets it used: Conc Mix, set to print on one Letter page; the caller decides which sheets show.
+    Stamp a CONC_MIX report onto Conc Mix, cloning the page (each clone placed after the one before) when its trucks
+    need more than one sheet. Every sheet gets the full form; the trucks are split 11 a sheet.
+    Takes the workbook, the IDR row (its total_pages fills OF), the project row, the contractor's and inspector's names,
+    the report's page number (its later sheets take the numbers after it; None leaves PAGE / OF blank) and its
+    report_data (None stamps the header and an empty body).
+    Returns the sheets it used, in order, each set to print on one Letter page; the caller decides which show.
     """
-    _stamp_header(workbook, idr, project, contractor, inspector, page_number)
     data = report_data if isinstance(report_data, dict) else {}
     trucks = truck_rows(data)
-    _stamp_location_and_mixer(workbook, data)
-    _stamp_trucks(workbook, trucks[: len(TRUCK_ROWS)])
-    _stamp_specs_and_materials(workbook, data)
-    _stamp_remarks(workbook, data.get("remarks"), len(trucks) > len(TRUCK_ROWS))
-    workbook.fit_to_letter_page(CONC_MIX)
-    return [CONC_MIX]
+    sheets = [sheet_name(index) for index in range(sheet_count(data))]
+    for previous, sheet in zip(sheets, sheets[1:]):
+        workbook.clone_sheet(CONC_MIX, sheet)  # cloned before any stamping, so each starts as the blank form
+        workbook.move_sheet(sheet, after=previous)
+
+    for index, sheet in enumerate(sheets):
+        page = page_number + index if page_number is not None else None
+        _stamp_header(workbook, sheet, idr, project, contractor, inspector, page)
+        _stamp_location_and_mixer(workbook, sheet, data)
+        _stamp_trucks(workbook, sheet, trucks[index * len(TRUCK_ROWS):(index + 1) * len(TRUCK_ROWS)])
+        _stamp_specs_and_materials(workbook, sheet, data)
+        text = paragraphs(data.get("remarks")) if index == 0 else [CONTINUED_FROM.format(sheet=sheets[index - 1])]
+        _stamp_remarks(workbook, sheet, text, continued=index < len(sheets) - 1)
+        workbook.fit_to_letter_page(sheet)
+    return sheets

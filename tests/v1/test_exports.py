@@ -1371,13 +1371,6 @@ class TestConcMixBody:
             ("X", "N"), ("Y", "X"), ("Y", "N"), ("Y", "N"),
         ]
 
-    def test_more_than_eleven_trucks_prints_eleven_and_notes_the_rest(self):
-        sheet = conc_mix_body(trucks=[truck(i) for i in range(1, 16)], remarks="Pour went well.")
-        assert [sheet[f"B{row}"].value for row in range(28, 39)] == [f"T-{i}" for i in range(1, 12)]
-        assert remarks_lines(sheet)[:2] == ["(additional trucks on continuation sheet — pending)", "Pour went well."]
-        # Eleven exactly fit, with no note
-        assert remarks_lines(conc_mix_body(trucks=[truck(i) for i in range(1, 12)]))[0] is None
-
     def test_class_of_concrete_replaces_the_blank(self):
         assert conc_mix_body(concreteSpecs={"classOfConcrete": "40"})["B41"].value == "Class of Concrete: 40"
         assert conc_mix_body()["B41"].value == "Class of Concrete: ________________"
@@ -1408,10 +1401,95 @@ class TestConcMixBody:
         assert len(lines[0]) <= 86 and all(len(line) <= 99 for line in lines[1:])
         assert lines[5].endswith("… (continued in ICID)")
 
-    def test_truck_note_stays_first_when_remarks_are_cut(self):
-        lines = remarks_lines(conc_mix_body(trucks=[truck(i) for i in range(1, 13)], remarks=words(200)))
-        assert lines[0] == "(additional trucks on continuation sheet — pending)"
-        assert lines[1].startswith("word") and lines[5].endswith("… (continued in ICID)")
+
+
+# ---------------------------------------------------------------------------
+# export_conc_mix.render: more than 11 trucks continue on clones of Conc Mix
+# ---------------------------------------------------------------------------
+
+def conc_mix_sheets(page_number: Optional[int] = None, **report_data) -> tuple[list[str], openpyxl.Workbook]:
+    """
+    Render a CONC_MIX report with the given report_data and open the result.
+    Takes the report's page number and report_data fields as keyword arguments.
+    Returns (the sheets render used, the read-only workbook).
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    pages = export_conc_mix.render(workbook, SUBMITTED_IDR, PROJECT, None, page_number=page_number,
+                                   report_data=report_data)
+    return pages, openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), read_only=True)
+
+
+def tickets(sheet) -> list:
+    """
+    Read the Truck or Ticket No column of a Conc Mix sheet's Trucks table.
+    Takes the worksheet.
+    Returns the eleven values, None where a row is empty.
+    """
+    return [sheet[f"B{row}"].value for row in range(28, 39)]
+
+
+class TestConcMixClones:
+    def test_eleven_trucks_or_none_need_just_the_one_sheet(self):
+        for count in (11, 0):
+            pages, book = conc_mix_sheets(trucks=[truck(i) for i in range(1, count + 1)], remarks="Done.")
+            assert pages == ["Conc Mix"] and "Conc Mix 2" not in book.sheetnames, count
+            assert remarks_lines(book["Conc Mix"]) == ["Done.", None, None, None, None, None], count
+        assert tickets(conc_mix_sheets()[1]["Conc Mix"]) == [None] * 11
+
+    def test_twelve_trucks_continue_on_a_second_sheet(self):
+        pages, book = conc_mix_sheets(trucks=[truck(i) for i in range(1, 13)], remarks="Pour went well.")
+        assert pages == ["Conc Mix", "Conc Mix 2"]
+        assert tickets(book["Conc Mix"]) == [f"T-{i}" for i in range(1, 12)]
+        assert tickets(book["Conc Mix 2"]) == ["T-12"] + [None] * 10
+        assert remarks_lines(book["Conc Mix"]) == ["Pour went well.", "Continued on next page", None, None, None, None]
+        # The second sheet is the last: it only says where it continues from
+        assert remarks_lines(book["Conc Mix 2"]) == ["(Continued from Conc Mix)", None, None, None, None, None]
+
+    def test_twenty_two_trucks_fill_two_sheets(self):
+        pages, book = conc_mix_sheets(trucks=[truck(i) for i in range(1, 23)])
+        assert pages == ["Conc Mix", "Conc Mix 2"]
+        assert tickets(book["Conc Mix 2"]) == [f"T-{i}" for i in range(12, 23)]
+        assert remarks_lines(book["Conc Mix 2"])[:2] == ["(Continued from Conc Mix)", None]
+
+    def test_twenty_three_trucks_take_three_sheets(self):
+        pages, book = conc_mix_sheets(trucks=[truck(i) for i in range(1, 24)])
+        assert pages == ["Conc Mix", "Conc Mix 2", "Conc Mix 3"]
+        assert tickets(book["Conc Mix 3"]) == ["T-23"] + [None] * 10
+        # No remarks: the first sheet's only line is the pointer onward
+        assert remarks_lines(book["Conc Mix"])[:2] == ["Continued on next page", None]
+        assert remarks_lines(book["Conc Mix 2"])[:3] == ["(Continued from Conc Mix)", "Continued on next page", None]
+        assert remarks_lines(book["Conc Mix 3"])[:2] == ["(Continued from Conc Mix 2)", None]
+
+    def test_every_sheet_carries_the_whole_form(self):
+        _, book = conc_mix_sheets(
+            trucks=[truck(i, inspectionSticker="N") for i in range(1, 13)],
+            locationOfUse={"curb": True, "structural": True}, mixerType={"type": "other", "otherLabel": "Mobile"},
+            concreteSpecs={"classOfConcrete": "40", "slumpMin": "3", "airMax": "7.5"},
+            materialUsage={"batchReportNo": "BR-77", "quantityWasted": "1.5"},
+        )
+        cells = ("F22", "N22", "X22", "AF22", "O25", "T25", "X25", "B41", "H43", "L44", "W41", "AL44", "I28",
+                 "G8", "AD8")
+        first, second = ([book[name][c].value for c in cells] for name in ("Conc Mix", "Conc Mix 2"))
+        assert first == second
+        assert first[:7] == ["X", None, None, "X", None, "X", "Mobile"]
+        assert book["Conc Mix 2"]["F22"].alignment.horizontal == "centerContinuous"
+
+    def test_the_inspectors_remarks_print_on_the_first_sheet_only(self):
+        _, book = conc_mix_sheets(trucks=[truck(i) for i in range(1, 13)], remarks=words(200))
+        first = remarks_lines(book["Conc Mix"])
+        assert first[0].startswith("word0") and first[4].endswith("… (continued in ICID)")
+        assert first[5] == "Continued on next page"
+        assert not any(line and "word" in line for line in remarks_lines(book["Conc Mix 2"]))
+
+    def test_each_sheet_takes_the_next_page_number(self):
+        _, book = conc_mix_sheets(page_number=3, trucks=[truck(i) for i in range(1, 24)])
+        numbers = [(book[n]["AD10"].value, book[n]["AJ10"].value) for n in ("Conc Mix", "Conc Mix 2", "Conc Mix 3")]
+        assert numbers == [(3, 3), (4, 3), (5, 3)]  # OF is the IDR's total_pages, which the dispatcher raises
+
+    def test_clones_follow_their_sheet_in_tab_order(self):
+        names = conc_mix_sheets(trucks=[truck(i) for i in range(1, 24)])[1].sheetnames
+        start = names.index("Conc Mix")
+        assert names[start:start + 3] == ["Conc Mix", "Conc Mix 2", "Conc Mix 3"]
 
 
 # ---------------------------------------------------------------------------
@@ -1495,6 +1573,37 @@ class TestConcMixExport:
         assert tab_order(general_owns) == (
             ["Gen Fr", "Gen Bk", "Report Cont", "Conc Fr", "Conc Bk", "Conc Mix"], "AC Fr")
         assert openpyxl.load_workbook(io.BytesIO(general_owns), read_only=True).active.title == "Gen Fr"
+
+    def test_clones_print_after_conc_bk_and_count_in_the_page_numbers(self):
+        content = export_bytes(reports=[swcb_report(description="x"),
+                                        conc_mix_report(page_number=3, trucks=[truck(i) for i in range(1, 24)])])
+        assert tab_order(content) == (
+            ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Conc Mix", "Conc Mix 2", "Conc Mix 3"], "AC Fr")
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        # total_pages 3 (General, SWCB, CONC_MIX) plus two clones
+        assert (book["Gen Fr"]["AH8"].value, book["Gen Fr"]["AM8"].value) == (1, 5)
+        assert (book["Conc Fr"]["AH8"].value, book["Conc Fr"]["AM8"].value) == (2, 5)
+        numbers = [(book[n]["AD10"].value, book[n]["AJ10"].value) for n in ("Conc Mix", "Conc Mix 2", "Conc Mix 3")]
+        assert numbers == [(3, 5), (4, 5), (5, 5)]
+        assert book["Conc Bk"]["Z37"].value == "X"
+
+    def test_a_report_numbered_after_the_conc_mix_moves_down_by_its_clones(self):
+        # The CONC_MIX hangs off the General (page 2), so the SWCB comes after it (page 3)
+        content = export_bytes(reports=[swcb_report(page_number=3, description="x"),
+                                        conc_mix_report(page_number=2, trucks=[truck(i) for i in range(1, 13)])])
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["Gen Fr"]["AH8"].value, book["Gen Fr"]["AM8"].value) == (1, 4)
+        assert [book[n]["AD10"].value for n in ("Conc Mix", "Conc Mix 2")] == [2, 3]
+        assert (book["Conc Fr"]["AH8"].value, book["Conc Fr"]["AM8"].value) == (4, 4)
+
+    def test_a_draft_marks_every_conc_mix_sheet_and_leaves_them_unnumbered(self):
+        trucks = [truck(i) for i in range(1, 13)]
+        content = export_bytes(idr=DRAFT_IDR, reports=[conc_mix_report(page_number=None, trucks=trucks)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Mix", "Conc Mix 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        for name in ("Conc Mix", "Conc Mix 2"):
+            assert book[name]["B1"].value == "DRAFT - Not for Submission", name
+            assert (book[name]["AD10"].value, book[name]["AJ10"].value) == (None, None), name
 
     def test_a_draft_marks_and_fits_the_conc_mix_page(self):
         content = export_bytes(idr=DRAFT_IDR, reports=[conc_mix_report(page_number=None)])
