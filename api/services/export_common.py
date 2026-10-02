@@ -104,6 +104,16 @@ def section(data: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def object_rows(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """
+    Read one list-valued section of report_data (a table's rows), tolerating a missing list or malformed rows.
+    Takes the report_data and the section's key.
+    Returns the rows that are objects, in the inspector's order.
+    """
+    rows = data.get(key)
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
 def typed_value(value: Any) -> Any:
     """
     Keep a value as the frontend saved it, for a cell: a number stays a number, text is trimmed.

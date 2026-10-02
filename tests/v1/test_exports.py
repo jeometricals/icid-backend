@@ -2503,6 +2503,134 @@ class TestAcSiteConditions:
             3, 2.5, Decimal("1.25"), "7", None, None, None, "True"]
 
 
+PAVEMENT_COLUMNS = ("B", "G", "K", "N", "Q", "T", "W", "AA", "AE", "AI", "AM")
+
+
+def course(number: int, **fields) -> dict:
+    """
+    Build one pavement course row as the frontend saves it, every field filled.
+    Takes the course's number (used in its values) and field overrides.
+    Returns the row.
+    """
+    return {"itemNo": f"6.{number:02d}", "mixType": "Top", "stationFrom": f"{number}+00", "stationTo": f"{number}+50",
+            "lane": "N1", "length": "50", "width": "12", "course": "Top", "designDepth": "1.5", "area": "66.7",
+            "weight": f"{number}.5", **fields}
+
+
+def course_row(sheet, row: int) -> list:
+    """
+    Read one row of AC Fr's pavement course table.
+    Takes the worksheet and the row.
+    Returns the eleven values, left to right.
+    """
+    return [sheet[f"{column}{row}"].value for column in PAVEMENT_COLUMNS]
+
+
+def ac_front_full(**report_data) -> openpyxl.Workbook:
+    """
+    Render an AC report and fully load the result, for checks read-only mode can't make (row heights).
+    Takes report_data fields as keyword arguments.
+    Returns the workbook.
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_ac.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data=report_data)
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))
+
+
+WORDS = lambda count: " ".join(["asphalt"] * count)  # 8 characters a word with its space
+
+
+class TestAcPavementCourses:
+    def test_one_course_fills_row_28(self):
+        sheet = ac_front(pavementCourses=[course(1)])
+        assert course_row(sheet, 28) == ["6.01", "Top", "1+00", "1+50", "N1", "50", "12", "Top", "1.5", "66.7", "1.5"]
+        assert course_row(sheet, 29) == [None] * 11
+
+    def test_two_courses_fill_rows_28_and_29(self):
+        sheet = ac_front(pavementCourses=[course(1), course(2, lane="S1")])
+        assert [course_row(sheet, row)[0] for row in (28, 29, 30, 31)] == ["6.01", "6.02", None, None]
+        assert course_row(sheet, 29)[4] == "S1"
+
+    def test_four_courses_fill_the_table(self):
+        sheet = ac_front(pavementCourses=[course(n) for n in (1, 2, 3, 4)])
+        assert [course_row(sheet, row)[0] for row in (28, 29, 30, 31)] == ["6.01", "6.02", "6.03", "6.04"]
+        assert [course_row(sheet, row)[10] for row in (28, 29, 30, 31)] == ["1.5", "2.5", "3.5", "4.5"]
+
+    def test_a_fifth_course_isnt_printed_yet(self):
+        sheet = ac_front(pavementCourses=[course(n) for n in (1, 2, 3, 4, 5)])
+        assert [course_row(sheet, row)[0] for row in (28, 29, 30, 31)] == ["6.01", "6.02", "6.03", "6.04"]
+        assert sheet["B32"].value is None  # the gap row under the table stays empty
+
+    def test_numbers_stay_numbers_and_the_header_stays(self):
+        sheet = ac_front(pavementCourses=[course(1, length=120, area=None, itemNo=" 6.01 "), "not a row"])
+        assert course_row(sheet, 28)[:6] == ["6.01", "Top", "1+00", "1+50", "N1", 120]
+        assert course_row(sheet, 28)[9] is None
+        assert course_row(sheet, 29) == [None] * 11  # a malformed row is skipped
+        assert (sheet["K27"].value, sheet["N27"].value) == ("From", "To")
+
+
+class TestAcMaterialUsage:
+    def test_top_and_binder_values_sit_right_of_their_equals_signs(self):
+        top = {"noOfTickets": "12", "firstTicketNo": "4401", "lastTicketNo": "4412", "qtyReceived": "240.5",
+               "qtyUsed": "236", "qtyWasted": "4.5"}
+        binder = {"noOfTickets": 6, "firstTicketNo": "5101", "lastTicketNo": "5106", "qtyReceived": 120,
+                  "qtyUsed": 118.5, "qtyWasted": 1.5}
+        sheet = ac_front(materialUsageTop=top, materialUsageBinder=binder)
+        assert [sheet[c].value for c in ("H34", "H35", "H36", "S34", "S35", "S36")] == [
+            "12", "4401", "4412", "240.5", "236", "4.5"]
+        assert [sheet[c].value for c in ("AB34", "AB35", "AB36", "AM34", "AM35", "AM36")] == [
+            6, "5101", "5106", 120, 118.5, 1.5]
+
+    def test_blank_or_malformed_usage_leaves_the_cells_empty(self):
+        cells = ("H34", "H35", "H36", "S34", "S35", "S36", "AB34", "AB35", "AB36", "AM34", "AM35", "AM36")
+        for data in ({}, {"materialUsageTop": {"noOfTickets": " "}, "materialUsageBinder": "x"}):
+            sheet = ac_front(**data)
+            assert [sheet[c].value for c in cells] == [None] * 12, data
+        assert ac_front()["G34"].value == "="
+
+
+class TestAcPayItems:
+    def test_items_use_conc_frs_columns_with_the_unit_in_pay_quantity(self):
+        sheet = ac_front(payItems=[pay_item(1, quantityChk="RM"), pay_item(2)])
+        assert [sheet[f"{c}39"].value for c in ("B", "F", "K", "P", "U")] == [
+            "4.01 AAS", "12345", "312.50 S.F.", None, "Sidewalk 1"]
+        assert (sheet["B40"].value, sheet["B41"].value) == ("4.02 AAS", None)
+
+    def test_a_short_description_keeps_one_10_pt_line(self):
+        book = ac_front_full(payItems=[pay_item(1, description=WORDS(5))])  # 39 characters
+        cell = book["AC Fr"]["U39"]
+        assert (cell.value, cell.font.sz, book["AC Fr"].row_dimensions[39].height) == (WORDS(5), 10, 15)
+
+    def test_a_longer_description_takes_two_10_pt_lines(self):
+        book = ac_front_full(payItems=[pay_item(1, description=WORDS(7))])  # 55 characters: two lines of 46
+        cell = book["AC Fr"]["U39"]
+        assert (cell.value, cell.font.sz, cell.alignment.wrap_text) == (WORDS(7), 10, True)
+        assert book["AC Fr"].row_dimensions[39].height == 25.5
+
+    def test_a_description_too_long_for_10_pt_shrinks_to_8(self):
+        book = ac_front_full(payItems=[pay_item(1, description=WORDS(12))])  # 3 lines at 46, 2 at 55
+        cell = book["AC Fr"]["U39"]
+        assert (cell.value, cell.font.sz, book["AC Fr"].row_dimensions[39].height) == (WORDS(12), 8, 22.5)
+
+    def test_a_description_too_long_for_8_pt_is_cut(self):
+        book = ac_front_full(payItems=[pay_item(1, description=WORDS(30))])
+        cell = book["AC Fr"]["U39"]
+        assert cell.value.endswith("...") and cell.font.sz == 8 and len(cell.value) <= 2 * 55
+
+    def test_past_ten_items_the_rest_arent_printed_yet(self):
+        sheet = ac_front(payItems=pay_items(13))
+        assert item_numbers(sheet, range(39, 49)) == [f"4.{n:02d} AAS" for n in range(1, 11)]
+        assert sheet["U48"].value == "Sidewalk 10"  # no "continued" note on the last row yet
+
+    def test_an_exported_ac_report_carries_its_body_and_draft_marker(self):
+        content = export_bytes(idr=DRAFT_IDR, reports=[ac_row(
+            page_number=None, pavementCourses=[course(1)], materialUsageTop={"noOfTickets": "12"},
+            payItems=[pay_item(1)])])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]
+        assert (sheet["B1"].value, sheet["B28"].value, sheet["H34"].value, sheet["B39"].value) == (
+            "DRAFT - Not for Submission", "6.01", "12", "4.01 AAS")
+
+
 # ---------------------------------------------------------------------------
 # Draft exports: "DRAFT - Not for Submission" across the top of every printed page
 # ---------------------------------------------------------------------------

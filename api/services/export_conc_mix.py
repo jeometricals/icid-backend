@@ -12,8 +12,8 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
-    CHECK_MARK, TextArea, allocate_copies, fill_lines, mark_truncated, paragraphs, section, short_date, text_value,
-    write_lines,
+    CHECK_MARK, TextArea, allocate_copies, fill_lines, mark_truncated, object_rows, paragraphs, section, short_date,
+    text_value, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -81,8 +81,7 @@ def truck_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     Takes the report_data.
     Returns the trucks (each a dict), in the inspector's order.
     """
-    trucks = data.get("trucks")
-    return [truck for truck in trucks if isinstance(truck, dict)] if isinstance(trucks, list) else []
+    return object_rows(data, "trucks")
 
 
 def sheet_count(report_data: Any) -> int:

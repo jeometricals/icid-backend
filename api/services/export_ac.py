@@ -4,15 +4,18 @@ Stamps an IDR's Asphaltic Concrete (AC) report onto the DDC template's AC Fr / A
 AC Fr is the front: the header block, the paving contractor and temperatures, theoretical max density, the pavement
 course table, material usage for top and binder, Pay Items, the A/C requirements and tack coat. AC Bk is the back:
 remarks, work force and equipment, the MPT/safety checklist beside the delivery ticket log, and the signature block.
-So far the header, the paving contractor, temperatures and theoretical max density are stamped; both pages always
-print with an AC report (AC Bk carries the certification and the signature lines).
+So far AC Fr is stamped down to its Pay Items (header, paving contractor, temperatures, theoretical max density,
+the first four pavement courses, material usage and the first ten pay items); both pages always print with an AC
+report (AC Bk carries the certification and the signature lines).
 
 Cell positions come from reading templates/report_forms.xlsx.
 """
 
 from typing import Any, Optional
 
-from api.services.export_common import HeaderLayout, section, stamp_common_header, typed_value
+from api.services.export_common import (
+    HeaderLayout, PayItemsLayout, object_rows, section, stamp_common_header, stamp_pay_items, typed_value,
+)
 from api.services.xlsx_template import WorkbookTemplate
 
 AC_FRONT = "AC Fr"
@@ -49,6 +52,29 @@ MAX_DENSITY_CELLS = {
     "binder": ["AH25", "AI25", "AJ25", "AK25", "AL25", "AM25", "AN25", "AO25", "AP25"],
 }
 
+# Pavement course table: header rows 26-27 (From / To under Station on 27), then four data rows, one merged area per
+# column, 8 pt centred. Courses past the fourth aren't printed yet (G6 continues them on copies of AC Fr).
+PAVEMENT_ROWS = range(28, 32)
+PAVEMENT_COLUMNS = {"itemNo": "B", "mixType": "G", "stationFrom": "K", "stationTo": "N", "lane": "Q", "length": "T",
+                    "width": "W", "course": "AA", "designDepth": "AE", "area": "AI", "weight": "AM"}
+
+# Material usage, TOP on the left half and BINDER on the right: each value sits right of its "=" (H, S / AB, AM)
+MATERIAL_CELLS = {
+    "materialUsageTop": {"noOfTickets": "H34", "firstTicketNo": "H35", "lastTicketNo": "H36",
+                         "qtyReceived": "S34", "qtyUsed": "S35", "qtyWasted": "S36"},
+    "materialUsageBinder": {"noOfTickets": "AB34", "firstTicketNo": "AB35", "lastTicketNo": "AB36",
+                            "qtyReceived": "AM34", "qtyUsed": "AM35", "qtyWasted": "AM36"},
+}
+
+# Pay Items: rows 39-48 under the header at row 38 (15 pt rows), in Conc Fr's columns. AC Fr's column widths are
+# Conc Fr's, so the Description cell U:AP keeps Conc Fr's budget of 46 / 55 characters a line at 10 / 8 pt. Items past
+# the tenth aren't printed yet (G6 continues them on copies of AC Fr).
+AC_FRONT_PAY_ITEMS = PayItemsLayout(
+    rows=range(39, 49),
+    columns={"itemNo": "B", "budgetCode": "F", "payQuantity": "K", "quantityChk": "P", "description": "U"},
+    line_chars_10pt=46, line_chars_8pt=55,
+)
+
 
 def _centre_across(workbook: WorkbookTemplate, sheet: str, cells: list[str], value: Any) -> None:
     """
@@ -79,13 +105,37 @@ def _stamp_site_conditions(workbook: WorkbookTemplate, front: str, data: dict[st
         _centre_across(workbook, front, cells, typed_value(density.get(field)))
 
 
+def _stamp_pavement_courses(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+    """
+    Fill the pavement course table's four rows, one course a row, blanking the rest.
+    Takes the workbook, the front page and the report_data (courses past the fourth are left out).
+    Returns nothing.
+    """
+    courses = object_rows(data, "pavementCourses")
+    for index, row in enumerate(PAVEMENT_ROWS):
+        course = courses[index] if index < len(courses) else {}
+        for field, column in PAVEMENT_COLUMNS.items():
+            workbook.set_cell(front, f"{column}{row}", typed_value(course.get(field)))
+
+
+def _stamp_material_usage(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+    """
+    Write material usage for the top and binder courses: tickets and quantities received, used and wasted.
+    Takes the workbook, the front page and the report_data.
+    Returns nothing.
+    """
+    for key, cells in MATERIAL_CELLS.items():
+        usage = section(data, key)
+        for field, cell in cells.items():
+            workbook.set_cell(front, cell, typed_value(usage.get(field)))
+
+
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
            report_data: Optional[dict[str, Any]] = None, fronts: Optional[list[str]] = None,
            back: str = AC_BACK) -> list[str]:
     """
-    Stamp an AC report onto its AC Fr / AC Bk pages (so far the header, paving contractor, temperatures and max
-    density).
+    Stamp an AC report onto its AC Fr / AC Bk pages (so far AC Fr down to its Pay Items).
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (None leaves Sheet No. blank), its report_data, its front pages (AC Fr unless given) and its back page (AC Bk
     unless given).
@@ -96,6 +146,9 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     data = report_data if isinstance(report_data, dict) else {}
     stamp_common_header(workbook, fronts[0], AC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
     _stamp_site_conditions(workbook, fronts[0], data)
+    _stamp_pavement_courses(workbook, fronts[0], data)
+    _stamp_material_usage(workbook, fronts[0], data)
+    stamp_pay_items(workbook, fronts[0], AC_FRONT_PAY_ITEMS, data.get("payItems"))
     pages = fronts + [back]
     for sheet in pages:
         workbook.fit_to_letter_page(sheet)
