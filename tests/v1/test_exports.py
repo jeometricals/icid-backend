@@ -1496,15 +1496,35 @@ class TestConcMixClones:
 # generate_idr_export with a CONC_MIX report (the dispatcher)
 # ---------------------------------------------------------------------------
 
-def conc_mix_report(page_number: int = 3, is_addendum: bool = True, **report_data) -> dict:
+GENERAL_ROW = {"report_id": UUID("4e5f6071-8293-4a41-b5c6-d7e8f9a0b1c2"), "report_type": "GEN", "is_addendum": False,
+               "parent_report_id": None, "page_number": 1, "report_data": {}}
+SWCB_PARENT = object()  # conc_mix_report's default parent: the SWCB report
+
+
+def conc_mix_report(page_number: Optional[int] = 3, is_addendum: bool = True, parent=SWCB_PARENT,
+                    **report_data) -> dict:
     """
-    Build the CONC_MIX addendum row list_reports_for_idr returns (its parent is the SWCB report).
-    Takes its page number, its addendum flag and report_data fields as keyword arguments.
+    Build the CONC_MIX addendum row list_reports_for_idr returns.
+    Takes its page number, its addendum flag, its parent report's id (the SWCB report's unless given; None for none)
+    and report_data fields as keyword arguments.
     Returns the row.
     """
+    parent_id = swcb_report()["report_id"] if parent is SWCB_PARENT else parent
     return {"report_id": UUID("2c3d4e5f-6071-4829-93a4-b5c6d7e8f9a0"), "report_type": "CONC_MIX",
-            "is_addendum": is_addendum, "parent_report_id": swcb_report()["report_id"], "page_number": page_number,
+            "is_addendum": is_addendum, "parent_report_id": parent_id, "page_number": page_number,
             "report_data": report_data}
+
+
+def print_order_page_numbers(content: bytes) -> list:
+    """
+    Read each visible sheet's PAGE number in print order.
+    Takes the .xlsx bytes.
+    Returns one value per visible sheet: AH8 on Gen Fr / Conc Fr, AD10 on Conc Mix sheets, None on the others.
+    """
+    book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+    cells = {"Gen Fr": "AH8", "Conc Fr": "AH8"}
+    return [book[name][cells.get(name, "AD10")].value if name in cells or name.startswith("Conc Mix") else None
+            for name in visible_sheets(content)]
 
 
 def tab_order(content: bytes) -> tuple[list[str], str]:
@@ -1588,13 +1608,47 @@ class TestConcMixExport:
         assert book["Conc Bk"]["Z37"].value == "X"
 
     def test_a_report_numbered_after_the_conc_mix_moves_down_by_its_clones(self):
-        # The CONC_MIX hangs off the General (page 2), so the SWCB comes after it (page 3)
-        content = export_bytes(reports=[swcb_report(page_number=3, description="x"),
-                                        conc_mix_report(page_number=2, trucks=[truck(i) for i in range(1, 13)])])
+        # The CONC_MIX hangs off the General (page 2), so the SWCB comes after it (page 3) and prints after it too
+        content = export_bytes(reports=[GENERAL_ROW, swcb_report(page_number=3, description="x"),
+                                        conc_mix_report(page_number=2, parent=GENERAL_ROW["report_id"],
+                                                        trucks=[truck(i) for i in range(1, 13)])])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Mix", "Conc Mix 2", "Conc Fr", "Conc Bk"]
+        assert print_order_page_numbers(content) == [1, None, 2, 3, 4, None]
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
-        assert (book["Gen Fr"]["AH8"].value, book["Gen Fr"]["AM8"].value) == (1, 4)
-        assert [book[n]["AD10"].value for n in ("Conc Mix", "Conc Mix 2")] == [2, 3]
-        assert (book["Conc Fr"]["AH8"].value, book["Conc Fr"]["AM8"].value) == (4, 4)
+        assert (book["Gen Fr"]["AM8"].value, book["Conc Mix 2"]["AJ10"].value, book["Conc Fr"]["AM8"].value) == (4,) * 3
+
+    def test_a_generals_conc_mix_follows_its_report_cont(self):
+        content = export_bytes(general=general_with(description=words(600)),
+                               reports=[GENERAL_ROW, swcb_report(page_number=3, description="x"),
+                                        conc_mix_report(page_number=2, parent=GENERAL_ROW["report_id"])])
+        assert tab_order(content) == (["Gen Fr", "Gen Bk", "Report Cont", "Conc Mix", "Conc Fr", "Conc Bk"], "AC Fr")
+
+    def test_a_generals_conc_mix_clones_stay_together_before_the_swcb(self):
+        content = export_bytes(reports=[GENERAL_ROW, swcb_report(page_number=3, description="x"),
+                                        conc_mix_report(page_number=2, parent=GENERAL_ROW["report_id"],
+                                                        trucks=[truck(i) for i in range(1, 24)])])
+        assert tab_order(content) == (
+            ["Gen Fr", "Gen Bk", "Conc Mix", "Conc Mix 2", "Conc Mix 3", "Conc Fr", "Conc Bk"], "AC Fr")
+        assert print_order_page_numbers(content) == [1, None, 2, 3, 4, 5, None]
+        # Conc Bk still points to the mixing information, whichever report it hangs off
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Bk"]["Z37"].value == "X"
+
+    def test_a_conc_mix_without_an_exported_parent_prints_at_the_end(self):
+        ac_report = {"report_id": UUID("5f607182-93a4-4b52-c6d7-e8f9a0b1c2d3"), "report_type": "AC",
+                     "is_addendum": False, "parent_report_id": None, "page_number": 2, "report_data": {}}
+        for parent in (None, ac_report["report_id"]):  # a direct-API row with no parent; an AC report's addendum
+            content = export_bytes(reports=[GENERAL_ROW, ac_report, swcb_report(page_number=4, description="x"),
+                                            conc_mix_report(page_number=3, parent=parent)])
+            assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Conc Mix"], parent
+
+    def test_a_draft_marks_a_generals_conc_mix_sheets_where_they_print(self):
+        content = export_bytes(idr=DRAFT_IDR, reports=[
+            {**GENERAL_ROW, "page_number": None}, swcb_report(page_number=None, description="x"),
+            conc_mix_report(page_number=None, parent=GENERAL_ROW["report_id"], trucks=[truck(i) for i in range(1, 13)]),
+        ])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Mix", "Conc Mix 2", "Conc Fr", "Conc Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[n]["B1"].value for n in ("Conc Mix", "Conc Mix 2")] == ["DRAFT - Not for Submission"] * 2
 
     def test_a_draft_marks_every_conc_mix_sheet_and_leaves_them_unnumbered(self):
         trucks = [truck(i) for i in range(1, 13)]

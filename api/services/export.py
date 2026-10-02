@@ -129,6 +129,26 @@ def _page_after_clones(page: Optional[int], conc_mix: Optional[dict[str, Any]], 
     return page + extra_sheets
 
 
+def _conc_mix_anchor(conc_mix: dict[str, Any], reports: list[dict[str, Any]], swcb: Optional[dict[str, Any]],
+                     pages: list[str], report_cont_owner: Optional[str]) -> str:
+    """
+    Find the sheet the Conc Mix pages print right after: the last page of the report they're an addendum to.
+    Takes the CONC_MIX report row, the IDR's reports, the exported SWCB report (or None), the pages so far in print
+    order, and the back page whose report continues on Report Cont (or None).
+    Returns Gen Bk for a General parent, Conc Bk for the exported SWCB, or Report Cont instead when that parent
+    continues there. Any other parent (an AC report, which isn't exported yet), or none, puts them at the end.
+    """
+    parent_id = conc_mix.get("parent_report_id")
+    parent = next((r for r in reports if parent_id is not None and r.get("report_id") == parent_id), None)
+    if parent is not None and parent["report_type"] == "GEN" and not parent["is_addendum"]:
+        back = GEN_BACK
+    elif parent is not None and swcb is not None and parent["report_id"] == swcb.get("report_id"):
+        back = export_swcb.CONC_BACK
+    else:
+        return pages[-1]
+    return REPORT_CONT if report_cont_owner == back else back
+
+
 def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) -> None:
     """
     Write the project details the forms' header formulas read (kept even though visible pages get the values directly).
@@ -192,9 +212,10 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     workbook.move_sheet(REPORT_CONT, after=report_cont_owner or GEN_BACK)
 
     if conc_mix is not None:
-        # Conc Mix sits between SWR Bk and HC Fr in the template; it prints last, after the page printed last so far,
-        # and render places any clones right after it
-        workbook.move_sheet(export_conc_mix.CONC_MIX, after=pages[-1])
+        # Conc Mix sits between SWR Bk and HC Fr in the template; it moves to follow its parent report, and render
+        # places any clones right after it
+        anchor = _conc_mix_anchor(conc_mix, reports, swcb, pages, report_cont_owner)
+        workbook.move_sheet(export_conc_mix.CONC_MIX, after=anchor)
         pages += export_conc_mix.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
                                         page_number=conc_mix["page_number"], report_data=conc_mix["report_data"])
         if swcb is not None:
