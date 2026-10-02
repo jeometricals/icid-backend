@@ -52,7 +52,7 @@ every request to it.
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments` — list a report's uploaded attachments (pending ones left out)
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}/download-url` — short-lived signed URL; 404 while pending
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment, pending or uploaded (Storage file, then record); draft only
-- `GET /v1/idrs/{idr_id}/export` — an IDR as an .xlsx on the DDC report-forms template (a draft's pages are marked "DRAFT - Not for Submission")
+- `GET /v1/idrs/{idr_id}/export` — an IDR as an .xlsx on the DDC report-forms template (a draft's pages are marked "DRAFT - Not for Submission"), stored in the `idr-exports` bucket; returns `{download_url, filename}`, the URL valid 10 minutes
 - `GET /v1/contract_items/?project_id=` — a project's contract items, each joined to its spec item (`item_no`, `description`, `spec_section`, `pay_unit`); `[]` when none
 - `GET /debug/schema` — dev-only
 

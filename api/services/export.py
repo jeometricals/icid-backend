@@ -7,11 +7,14 @@ Concrete Truck & Mix Info report). Pages that hold nothing stay hidden, so the f
 IDR exports too, with "DRAFT - Not for Submission" across the top of every page it prints.
 """
 
+import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
+from api.core.config import EXPORT_BUCKET_NAME, EXPORT_URL_EXPIRY_SECONDS
 from api.queries.idr_reports import get_general_report, list_non_general_main_reports, list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
@@ -25,10 +28,16 @@ from api.services.export_common import (
 )
 from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, stamp_general
 from api.services.xlsx_template import WorkbookTemplate
+from api.storage.client import create_signed_url, upload_file
+
+logger = logging.getLogger(__name__)
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "report_forms.xlsx"
 
 CONTRACT_INFO = "Contract Info"
+
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+STORAGE_UNAVAILABLE = "Storage is temporarily unavailable, so the export couldn't be saved. Try again."
 
 
 class ExportError(Exception):
@@ -43,12 +52,24 @@ class ExportDataError(ExportError):
     """The IDR's project or reports could not be loaded."""
 
 
+class ExportStorageError(ExportError):
+    """Storage refused or failed to store the export or to sign its download URL."""
+
+
 @dataclass
 class IdrExport:
     """A generated export: the file name to offer and the .xlsx bytes."""
 
     filename: str
     content: bytes
+
+
+@dataclass
+class PublishedExport:
+    """A stored export: a short-lived URL that downloads it, and the file name it downloads as."""
+
+    download_url: str
+    filename: str
 
 
 def _inspector_name(user: Optional[dict[str, Any]]) -> Optional[str]:
@@ -299,3 +320,32 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
         filename=f"IDR_{idr_id}_{idr['report_date'].isoformat()}.xlsx",
         content=workbook.to_bytes(),
     )
+
+
+def export_storage_path(idr_id: UUID, filename: str, at: datetime) -> str:
+    """
+    Build the object path an export is stored at; the timestamp makes every export a new object.
+    Takes the IDR uuid, the export's file name and when it was made (UTC).
+    Returns "{idr_id}/{YYYYMMDD_HHMMSS}_{filename}".
+    """
+    return f"{idr_id}/{at:%Y%m%d_%H%M%S}_{filename}"
+
+
+def publish_idr_export(idr_id: UUID, now: Optional[datetime] = None) -> PublishedExport:
+    """
+    Build an IDR's export, store it in the exports bucket and sign a download URL for it (EXPORT_URL_EXPIRY_SECONDS),
+    so the browser fetches the file from Storage rather than through this function. Stored exports are kept: there
+    is no cleanup yet.
+    Takes the IDR uuid and the time to stamp the object path with (now, UTC, unless given).
+    Returns a PublishedExport; raises IdrNotFoundError, ExportDataError or ExportStorageError.
+    """
+    export = generate_idr_export(idr_id)
+    path = export_storage_path(idr_id, export.filename, now or datetime.now(timezone.utc))
+    try:
+        upload_file(EXPORT_BUCKET_NAME, path, export.content, XLSX_MEDIA_TYPE)
+        url = create_signed_url(path, EXPORT_URL_EXPIRY_SECONDS, export.filename, bucket=EXPORT_BUCKET_NAME)
+    except Exception as exc:  # noqa: BLE001 - any Storage failure is reported the same way
+        logger.error("Storage could not store or sign export %s: %s", path, exc)
+        raise ExportStorageError("Storage is temporarily unavailable, so the export couldn't be saved. Try again.") \
+            from exc
+    return PublishedExport(download_url=url, filename=export.filename)

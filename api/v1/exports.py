@@ -1,40 +1,35 @@
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
 
+from api.schemas.export import ExportLink
 from api.services.export import (
     ExportDataError,
     ExportError,
+    ExportStorageError,
     IdrNotFoundError,
-    generate_idr_export,
+    publish_idr_export,
 )
 
 router = APIRouter(prefix="/v1/idrs", tags=["Export"])
 
-XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-# HTTP status for each export failure
+# HTTP status for each export failure (Storage failing is a bad gateway, as for attachments)
 ERROR_STATUS = {
     IdrNotFoundError: 404,
     ExportDataError: 500,
+    ExportStorageError: 502,
 }
 
 
-@router.get("/{idr_id}/export", response_class=Response)
-def export_idr(idr_id: UUID) -> Response:
+@router.get("/{idr_id}/export", response_model=ExportLink)
+def export_idr(idr_id: UUID) -> ExportLink:
     """
-    Download an IDR as an .xlsx file on the DDC report-forms template (a draft's pages are marked as a draft).
-    Takes the IDR uuid as a path parameter.
-    Returns the file as an attachment; raises 404 (no such IDR) and 500.
+    Export an IDR as an .xlsx file on the DDC report-forms template (a draft's pages are marked as a draft), stored
+    in the exports bucket. Takes the IDR uuid as a path parameter.
+    Returns {download_url, filename}, the URL valid for 10 minutes; raises 404 (no such IDR), 500 and 502 (Storage).
     """
     try:
-        export = generate_idr_export(idr_id)
+        published = publish_idr_export(idr_id)
     except ExportError as exc:
         raise HTTPException(status_code=ERROR_STATUS.get(type(exc), 500), detail=str(exc))
-
-    return Response(
-        content=export.content,
-        media_type=XLSX_MEDIA_TYPE,
-        headers={"Content-Disposition": f'attachment; filename="{export.filename}"'},
-    )
+    return ExportLink(download_url=published.download_url, filename=published.filename)

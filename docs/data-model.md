@@ -205,6 +205,13 @@ rows (and its addenda's), and the backend removes the matching Storage files sep
 best-effort basis. A file whose removal fails is left orphaned in the bucket; nothing points
 at it.
 
+### Export files (Storage bucket `idr-exports`)
+
+Not a table. `GET /v1/idrs/{idr_id}/export` builds the IDR's `.xlsx`, uploads it to the private
+bucket `idr-exports` at `{idr_id}/{YYYYMMDD_HHMMSS}_{file name}` (UTC; every export is a new object)
+and returns a signed download URL valid for 10 minutes. Only the backend reaches the bucket
+(service key). Nothing removes old exports yet.
+
 ### spec_items
 
 The standard NYCDOT pay-item catalog, shared by every project. Added in migration 011.
@@ -347,6 +354,7 @@ content as TEXT, linked to a report and a form template).
 | 009 | `009_attachment_metadata_and_pending.sql` | A2a | Added `report_attachments.attachment_name` and `attachment_description` (TEXT NOT NULL, each with a not-blank / max-length CHECK) and `is_uploaded` (BOOLEAN NOT NULL DEFAULT false), each with a column `COMMENT`. Re-asserted `chk_report_attachments_size`. Required the table to be empty, since the new text columns have no default. |
 | 010 | `010_drop_storage_path_unique.sql` | A2a | Dropped `report_attachments_storage_path_key`, the UNIQUE on `storage_path` from 008, which 009 had meant to drop but didn't. |
 | 011 | `011_spec_items_and_contract_items.sql` | F2 | Created `spec_items` (UNIQUE `item_no`) and `contract_items` (FK to `projects` with ON DELETE CASCADE, FK to `spec_items`, UNIQUE `(project_id, spec_item_id, budget_code)`) and the two `contract_items` indexes. |
+| 012 | `012_idr_exports_bucket.sql` | D6a | Created the private Storage bucket `idr-exports` (50 MB per file; `.xlsx` and PDF only). No `icid` table changes. |
 
 Where each current column came from:
 

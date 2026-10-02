@@ -9,6 +9,12 @@
 3.1) Start API: `uvicorn api.index:app --reload`
 4) Open docs: http://localhost:8000/docs
 
+## Supabase Storage setup (one-time)
+Two private buckets, created by hand (the backend never creates buckets):
+- `report-attachments`: report attachments (migration 008's notes).
+- `idr-exports`: exported IDRs. Run `migrations/012_idr_exports_bucket.sql` in the Supabase SQL editor, or in the
+  dashboard: Storage -> New bucket -> `idr-exports`, Public off. Old exports are never deleted yet.
+
 ## Notes
 - Async SQLAlchemy 2.0 + asyncpg
 - Tenants & Clients modeled; extend with Projects, Reports, Workflow next

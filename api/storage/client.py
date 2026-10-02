@@ -35,13 +35,13 @@ def _download_client() -> Client:
                          ClientOptions(storage_client_timeout=DOWNLOAD_TIMEOUT_SECONDS))
 
 
-def _bucket():
+def _bucket(bucket: str = STORAGE_BUCKET_NAME):
     """
-    Give the Storage API for the attachments bucket.
-    Takes nothing; the bucket name comes from STORAGE_BUCKET_NAME.
+    Give the Storage API for one bucket.
+    Takes the bucket name (the attachments bucket, STORAGE_BUCKET_NAME, unless given).
     Returns the bucket's file API.
     """
-    return get_client().storage.from_(STORAGE_BUCKET_NAME)
+    return get_client().storage.from_(bucket)
 
 
 def create_signed_upload_url(path: str) -> str:
@@ -67,17 +67,27 @@ def remove_files(paths: list[str]) -> None:
         _bucket().remove(paths)
 
 
-def create_signed_url(path: str, expires_in: int, download_name: str) -> str:
+def create_signed_url(path: str, expires_in: int, download_name: str, bucket: str = STORAGE_BUCKET_NAME) -> str:
     """
     Make a time-limited URL for one object that downloads it under the given file name.
-    Takes the object path, the lifetime in seconds and the name the browser should save it as.
+    Takes the object path, the lifetime in seconds, the name the browser should save it as and the bucket (the
+    attachments bucket unless given).
     Returns the signed URL, or raises RuntimeError if Storage returned none.
     """
-    result = _bucket().create_signed_url(path, expires_in, {"download": download_name})
+    result = _bucket(bucket).create_signed_url(path, expires_in, {"download": download_name})
     url = result.get("signedURL")
     if not url:
         raise RuntimeError(f"Storage returned no signed URL for {path}")
     return url
+
+
+def upload_file(bucket: str, path: str, data: bytes, content_type: str) -> None:
+    """
+    Store bytes as one object, server-side, replacing any object already at that path.
+    Takes the bucket, the object path, the bytes and their MIME type.
+    Returns nothing; raises the Storage client's error on failure.
+    """
+    _bucket(bucket).upload(path, data, {"content-type": content_type, "upsert": "true"})
 
 
 def download_file(path: str) -> bytes:

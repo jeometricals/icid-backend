@@ -2314,31 +2314,73 @@ class TestProjectContractorQuery:
 # GET /v1/idrs/{idr_id}/export
 # ---------------------------------------------------------------------------
 
+SIGNED_EXPORT_URL = "https://example.supabase.co/storage/v1/object/sign/idr-exports/x?token=t"
+EXPORT_FILENAME = f"IDR_{IDR_ID}_2026-09-30.xlsx"
+
+
+@contextmanager
+def stored_export(upload_error: Optional[Exception] = None, sign_error: Optional[Exception] = None):
+    """
+    Patch the exports bucket: uploads succeed (or raise upload_error) and signing returns SIGNED_EXPORT_URL (or raises).
+    Takes the errors to raise, if any.
+    Yields (the upload mock, the signing mock).
+    """
+    with (
+        patch.object(export, "upload_file", side_effect=upload_error) as upload,
+        patch.object(export, "create_signed_url", return_value=SIGNED_EXPORT_URL, side_effect=sign_error) as sign,
+    ):
+        yield upload, sign
+
+
 class TestExportEndpoint:
     url = f"/v1/idrs/{IDR_ID}/export"
 
-    def test_submitted_idr_downloads_as_xlsx(self, client):
-        with patched_export():
+    def test_returns_a_download_url_and_the_file_name(self, client):
+        with patched_export(), stored_export():
             response = client.get(self.url)
         assert response.status_code == 200
-        assert response.headers["content-type"] == export_media_type()
-        assert response.headers["content-disposition"] == f'attachment; filename="IDR_{IDR_ID}_2026-09-30.xlsx"'
-        workbook = openpyxl.load_workbook(io.BytesIO(response.content), read_only=True)
-        assert workbook["Contract Info"]["C2"].value == "HWS0023"
+        assert response.json() == {"download_url": SIGNED_EXPORT_URL, "filename": EXPORT_FILENAME}
 
-    def test_draft_idr_downloads_too(self, client):
-        with patched_export(idr=DRAFT_IDR):
-            response = client.get(self.url)
-        assert response.status_code == 200
-        assert openpyxl.load_workbook(io.BytesIO(response.content), read_only=True)["Gen Fr"]["B1"].value == DRAFT_MARKER
+    def test_the_xlsx_is_uploaded_to_the_exports_bucket(self, client):
+        with patched_export(), stored_export() as (upload, sign):
+            client.get(self.url)
+        bucket, path, content, content_type = upload.call_args.args
+        assert (bucket, content_type) == ("idr-exports", export_media_type())
+        assert re.fullmatch(rf"{IDR_ID}/\d{{8}}_\d{{6}}_{re.escape(EXPORT_FILENAME)}", path)
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Contract Info"]["C2"].value == "HWS0023"
+        # The URL is signed for that object, for 10 minutes, downloading under the export's name
+        assert sign.call_args.args == (path, 600, EXPORT_FILENAME)
+        assert sign.call_args.kwargs == {"bucket": "idr-exports"}
 
-    def test_unknown_idr_is_404(self, client):
-        with patched_export(idr=None):
+    def test_the_path_is_stamped_with_the_export_time(self):
+        at = datetime(2026, 10, 2, 14, 5, 9)
+        assert export.export_storage_path(IDR_ID, "IDR.xlsx", at) == f"{IDR_ID}/20261002_140509_IDR.xlsx"
+        with patched_export(), stored_export() as (upload, _):
+            export.publish_idr_export(IDR_ID, now=at)
+        assert upload.call_args.args[1] == f"{IDR_ID}/20261002_140509_{EXPORT_FILENAME}"
+
+    def test_a_draft_is_exported_too(self, client):
+        with patched_export(idr=DRAFT_IDR), stored_export() as (upload, _):
+            assert client.get(self.url).status_code == 200
+        content = upload.call_args.args[2]
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]["B1"].value == DRAFT_MARKER
+
+    def test_unknown_idr_is_404_and_nothing_is_stored(self, client):
+        with patched_export(idr=None), stored_export() as (upload, _):
             assert client.get(self.url).status_code == 404
+        upload.assert_not_called()
 
     def test_missing_project_is_500(self, client):
-        with patched_export(project=None):
+        with patched_export(project=None), stored_export():
             assert client.get(self.url).status_code == 500
+
+    def test_storage_failing_is_502_with_a_readable_message(self, client):
+        for errors in ({"upload_error": RuntimeError("bucket not found")},
+                       {"sign_error": RuntimeError("no signed URL")}):
+            with patched_export(), stored_export(**errors):
+                response = client.get(self.url)
+            assert response.status_code == 502, errors
+            assert response.json() == {"detail": export.STORAGE_UNAVAILABLE}
 
 
 def export_media_type() -> str:
