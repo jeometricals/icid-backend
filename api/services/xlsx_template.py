@@ -320,6 +320,24 @@ class WorkbookTemplate:
         style = self._alignment_style("center-h", self.cell_style(sheet, coordinate), "horizontal", "center")
         self.set_style(sheet, coordinate, self._alignment_style("center-v", style, "vertical", "center"))
 
+    def merge_cells(self, sheet: str, reference: str) -> None:
+        """
+        Merge a range of cells into one area, as Excel's Merge Cells does (the top-left cell keeps the value).
+        Takes the sheet name and the range, e.g. 'AA51:AP51'.
+        Returns nothing; raises ValueError if the sheet already has that exact merge.
+        """
+        xml = self._sheet(sheet)
+        if f'<mergeCell ref="{reference}"/>' in xml:
+            raise ValueError(f"{sheet}!{reference} is already merged")
+        block = re.search(r'<mergeCells count="(\d+)">', xml)
+        if block:
+            start = f'<mergeCells count="{int(block.group(1)) + 1}">'
+            xml = xml[: block.start()] + start + f'<mergeCell ref="{reference}"/>' + xml[block.end():]
+        else:
+            at = xml.index("</sheetData>") + len("</sheetData>")
+            xml = xml[:at] + f'<mergeCells count="1"><mergeCell ref="{reference}"/></mergeCells>' + xml[at:]
+        self._write(self._sheet_paths[sheet], xml)
+
     def center_across(self, sheet: str, coordinates: list[str]) -> None:
         """
         Centre the first cell's text across a run of adjacent cells without merging them (Excel's "Center Across

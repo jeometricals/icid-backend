@@ -593,9 +593,9 @@ def stamp_equipment(workbook: WorkbookTemplate, sheet: str, layout: EquipmentLay
     return wrote
 
 
-def _safety_answer(value: Any) -> Optional[str]:
+def checklist_answer(value: Any) -> Optional[str]:
     """
-    Normalise a safety checklist answer, including older reports' booleans.
+    Normalise a checklist answer (safety checklist, A/C requirements), including older reports' booleans.
     Takes the saved value.
     Returns 'Y', 'N', 'NA', or None when unanswered.
     """
@@ -613,12 +613,22 @@ def stamp_safety(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, d
     Takes the workbook, sheet name, the checklist's layout and the report_data.
     Returns whether any answer or remark was written.
     """
-    checks = data.get("safetyChecks") if isinstance(data.get("safetyChecks"), dict) else {}
-    remarks = data.get("safetyRemarks") if isinstance(data.get("safetyRemarks"), dict) else {}
+    checks, remarks = section(data, "safetyChecks"), section(data, "safetyRemarks")
+    return stamp_checklist(workbook, sheet, layout, {key: (checks.get(key), remarks.get(key)) for key in layout.rows})
+
+
+def stamp_checklist(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout,
+                    answers: dict[str, tuple[Any, Any]]) -> bool:
+    """
+    Write a Y / N checklist: an X under Y or N, and the remarks. An N/A answer has no box of its own, so it leaves both
+    boxes empty and is written at the start of the remarks instead ("N/A", or "N/A — <remarks>").
+    Takes the workbook, sheet name, the checklist's layout and each row's (answer, remarks) by key.
+    Returns whether any answer or remark was written.
+    """
     wrote = False
     for key, row in layout.rows.items():
-        answer = _safety_answer(checks.get(key))
-        remark = text_value(remarks.get(key))
+        saved_answer, saved_remark = answers.get(key, (None, None))
+        answer, remark = checklist_answer(saved_answer), text_value(saved_remark)
         if answer == "NA":
             remark = f"N/A — {remark}" if remark else "N/A"
         workbook.set_cell(sheet, f"{layout.yes_column}{row}", CHECK_MARK if answer == "Y" else None)

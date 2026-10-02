@@ -2631,6 +2631,116 @@ class TestAcPayItems:
             "DRAFT - Not for Submission", "6.01", "12", "4.01 AAS")
 
 
+REQUIREMENT_KEYS = ["subgradeCompacted", "roadwayCleanDry", "acRollerPerSpec", "densityTestsTaken",
+                    "spotCheckAcDepth", "tackCoatPerSpec", "tackCoatOnEdges"]
+
+
+def requirement_row(sheet, row: int) -> tuple:
+    """
+    Read one requirement row's answer boxes on AC Fr.
+    Takes the worksheet and the row.
+    Returns (the Y box W, the N box Y, the Remarks box AA).
+    """
+    return sheet[f"W{row}"].value, sheet[f"Y{row}"].value, sheet[f"AA{row}"].value
+
+
+def one_requirement(value, remarks="", key="subgradeCompacted") -> tuple:
+    """
+    Render an AC report answering one requirement and read its row.
+    Takes the answer, its remarks and the requirement's key.
+    Returns the row's (Y, N, Remarks) values.
+    """
+    sheet = ac_front(acRequirements={key: {"value": value, "remarks": remarks}})
+    return requirement_row(sheet, 51 + REQUIREMENT_KEYS.index(key))
+
+
+class TestAcRequirements:
+    def test_the_answer_boxes_are_laid_out_beside_the_labels(self):
+        sheet = ac_front_full()["AC Fr"]
+        assert [sheet[c].value for c in ("W50", "Y50", "AA50", "G50")] == ["Y", "N", "REMARKS", "REQUIREMENTS:"]
+        merged = {str(r) for r in sheet.merged_cells.ranges}
+        for row in range(50, 58):
+            assert {f"W{row}:X{row}", f"Y{row}:Z{row}", f"AA{row}:AP{row}"} <= merged, row
+        assert "B51:V51" in merged  # the labels keep their own boxes
+
+    def test_y_and_n_put_an_x_in_their_box(self):
+        assert one_requirement("Y") == ("X", None, None)
+        assert one_requirement("N") == (None, "X", None)
+
+    def test_n_a_opens_the_remarks(self):
+        assert one_requirement("NA", "Not part of today's work") == (None, None, "N/A — Not part of today's work")
+        assert one_requirement("NA") == (None, None, "N/A")
+
+    def test_remarks_print_with_or_without_an_answer(self):
+        assert one_requirement("", "Rain delayed testing") == (None, None, "Rain delayed testing")
+        assert one_requirement("Y", " 3 cores taken ") == ("X", None, "3 cores taken")
+        assert one_requirement("") == (None, None, None)
+
+    def test_each_requirement_has_its_own_row(self):
+        answers = {key: {"value": "Y" if index % 2 else "N", "remarks": key}
+                   for index, key in enumerate(REQUIREMENT_KEYS)}
+        sheet = ac_front(acRequirements=answers)
+        rows = [requirement_row(sheet, row) for row in range(51, 58)]
+        assert [remark for _, _, remark in rows] == REQUIREMENT_KEYS
+        assert [(y, n) for y, n, _ in rows] == [(None, "X"), ("X", None)] * 3 + [(None, "X")]
+        assert sheet["B57"].value == "TACK COAT APPLIED ON ALL EDGES OF HARDWARE"
+
+    def test_remarks_are_left_aligned_and_shrink_to_fit(self):
+        cell = ac_front(acRequirements={"densityTestsTaken": {"value": "Y", "remarks": WORDS(20)}})["AA54"]
+        assert (cell.value, cell.alignment.horizontal, cell.alignment.shrink_to_fit) == (WORDS(20), "left", True)
+
+    def test_malformed_answers_leave_the_boxes_empty(self):
+        for requirements in ("x", {"subgradeCompacted": "Y"}, {"subgradeCompacted": {"value": "maybe"}}):
+            sheet = ac_front(acRequirements=requirements)
+            assert requirement_row(sheet, 51) == (None, None, None), requirements
+            assert sheet["W50"].value == "Y"  # the layout is there all the same
+
+    def test_an_older_boolean_answer_reads_as_y_or_n(self):
+        assert one_requirement(True) == ("X", None, None)
+        assert one_requirement(False) == (None, "X", None)
+
+
+class TestAcTackCoat:
+    def test_gallons_rate_and_method_fill_their_cells(self):
+        sheet = ac_front(tackCoat={"noOfGallons": "40", "gallonsPerSy": 0.05, "applicationMethod": "Spray bar, SS-1h"})
+        assert [sheet[c].value for c in ("AA58", "AL58", "Q61")] == ["40", 0.05, "Spray bar, SS-1h"]
+        assert (sheet["B58"].value, sheet["L58"].value) == ("QUANTITY OF TACK COAT:", None)  # no field for it
+
+    def test_blank_tack_coat_leaves_the_cells_empty(self):
+        for data in ({}, {"tackCoat": {"noOfGallons": " ", "gallonsPerSy": "", "applicationMethod": None}},
+                     {"tackCoat": "x"}):
+            assert [ac_front(**data)[c].value for c in ("AA58", "AL58", "Q61")] == [None] * 3, data
+
+
+class TestMergeCells:
+    def test_merging_adds_the_range_once(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.merge_cells("Gen Fr", "B60:F60")
+        assert "B60:F60" in {str(r) for r in openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))["Gen Fr"]
+                             .merged_cells.ranges}
+        with pytest.raises(ValueError, match="already merged"):
+            workbook.merge_cells("Gen Fr", "B60:F60")
+
+    def test_the_merge_count_stays_right(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        before = int(re.search(r'<mergeCells count="(\d+)">', workbook._sheet("AC Fr")).group(1))
+        workbook.merge_cells("AC Fr", "W60:X60")
+        xml = workbook._sheet("AC Fr")
+        assert int(re.search(r'<mergeCells count="(\d+)">', xml).group(1)) == before + 1 == xml.count("<mergeCell ")
+
+
+class TestAcFrontComplete:
+    def test_a_full_ac_report_exports_every_front_section(self):
+        report = ac_row(page_number=None, **FULL_SITE_CONDITIONS, pavementCourses=[course(1)],
+                        materialUsageTop={"noOfTickets": "12"}, payItems=[pay_item(1)],
+                        acRequirements={"subgradeCompacted": {"value": "Y"}, "tackCoatOnEdges": {"value": "NA"}},
+                        tackCoat={"noOfGallons": "40"})
+        content = export_bytes(idr=DRAFT_IDR, reports=[report])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]
+        assert [sheet[c].value for c in ("B1", "L20", "AA23", "Y25", "B28", "H34", "B39", "W51", "AA57", "AA58")] == [
+            "DRAFT - Not for Submission", "Tri-State Paving", "52", "150.2", "6.01", "12", "4.01 AAS", "X", "N/A", "40"]
+
+
 # ---------------------------------------------------------------------------
 # Draft exports: "DRAFT - Not for Submission" across the top of every printed page
 # ---------------------------------------------------------------------------
