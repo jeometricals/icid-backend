@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 from uuid import UUID
 
@@ -13,7 +14,7 @@ import openpyxl
 import pytest
 
 from api.queries.projects import get_project_contractor_name
-from api.services import export, export_swcb
+from api.services import export, export_conc_mix, export_swcb
 from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
@@ -1099,6 +1100,62 @@ class TestSwcbExport:
 
 
 # ---------------------------------------------------------------------------
+# export_conc_mix.render (not wired into the export yet): the Conc Mix header
+# ---------------------------------------------------------------------------
+
+def conc_mix_render(idr: dict = SUBMITTED_IDR, page_number: Optional[int] = 3) -> tuple[list[str], bytes]:
+    """
+    Run export_conc_mix.render on a fresh template and serialize the result.
+    Takes the IDR row and the report's page number (None for an unnumbered draft page).
+    Returns (the pages render returned, the .xlsx bytes).
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    pages = export_conc_mix.render(workbook, idr, PROJECT, "Benny Bowers Contracting Co.", inspector="Genghis Khan",
+                                   page_number=page_number)
+    return pages, workbook.to_bytes()
+
+
+class TestConcMixHeader:
+    def test_header_fields_land_on_the_conc_mix_cells(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(conc_mix_render()[1]), read_only=True)["Conc Mix"]
+        assert [sheet[c].value for c in ("G8", "P8", "I10", "F12", "F14", "H17")] == [
+            "HWS0023", "2024123457", "Installation of Curb, Sidewalk & Ped-Ramp <Queens>", "Queens",
+            "Benny Bowers Contracting Co.", "Genghis Khan",
+        ]
+        assert sheet["AD8"].value == "9/30/26"  # a General-formatted cell, so the date goes in as text
+        assert (sheet["AD10"].value, sheet["AJ10"].value) == (3, 3)
+        # Without a page number (a draft) PAGE / OF stay blank
+        draft = openpyxl.load_workbook(io.BytesIO(conc_mix_render(DRAFT_IDR, None)[1]), read_only=True)["Conc Mix"]
+        assert (draft["AD10"].value, draft["AJ10"].value) == (None, None)
+
+    def test_attachment_to_ir_no_stays_blank(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(conc_mix_render()[1]), read_only=True)["Conc Mix"]
+        assert sheet["AJ17"].value is None
+        assert sheet["Y17"].value == "ATTACHMENT TO I.R. NO.:"  # the label stays
+
+    def test_no_contract_info_formulas_left_on_conc_mix(self):
+        # Read the XML: Material Usage's "=" labels (V41:V44, AK41:AK44) are text openpyxl can't tell from formulas
+        part = f"xl/worksheets/{SHEET_PARTS['Conc Mix']}"
+        assert zipfile.ZipFile(TEMPLATE).read(part).decode().count("<f>") == 5  # G8, P8, I10, F12, F14
+        assert "<f>" not in zipfile.ZipFile(io.BytesIO(conc_mix_render()[1])).read(part).decode()
+
+    def test_render_returns_the_conc_mix_page_set_to_one_letter_page(self):
+        pages, content = conc_mix_render()
+        assert pages == ["Conc Mix"]
+        sheet = openpyxl.load_workbook(io.BytesIO(content))["Conc Mix"]
+        assert sheet.page_setup.paperSize == 1 and sheet.page_setup.orientation == "portrait"
+        assert (sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight) == (1, 1)
+
+    def test_render_leaves_every_other_sheet_as_the_template_has_it(self):
+        rendered = zipfile.ZipFile(io.BytesIO(conc_mix_render()[1]))
+        template = zipfile.ZipFile(TEMPLATE)
+        others = [n for n in template.namelist()
+                  if n.startswith("xl/worksheets/sheet") and n != f"xl/worksheets/{SHEET_PARTS['Conc Mix']}"]
+        assert len(others) == 37
+        assert [n for n in others if rendered.read(n) != template.read(n)] == []
+
+
+# ---------------------------------------------------------------------------
 # Draft exports: "DRAFT - Not for Submission" across the top of every printed page
 # ---------------------------------------------------------------------------
 
@@ -1141,7 +1198,7 @@ class TestDraftExport:
 
 # Worksheet part for each export sheet in the template package
 SHEET_PARTS = {"Gen Fr": "sheet4.xml", "Gen Bk": "sheet5.xml", "Report Cont": "sheet3.xml",
-               "Conc Fr": "sheet19.xml", "Conc Bk": "sheet20.xml"}
+               "Conc Fr": "sheet19.xml", "Conc Bk": "sheet20.xml", "Conc Mix": "sheet8.xml"}
 
 
 # ---------------------------------------------------------------------------
