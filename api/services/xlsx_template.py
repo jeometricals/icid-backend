@@ -23,6 +23,9 @@ EXCEL_EPOCH = date(1899, 12, 30)
 
 LETTER_PAPER = "1"
 
+# DrawingML lengths are in English Metric Units: 9525 to a pixel at 96 dpi
+EMU_PER_PIXEL = 9525
+
 _COLUMN = re.compile(r"[A-Z]+")
 
 # Characters XML 1.0 doesn't allow in text (control characters other than tab, newline, carriage return)
@@ -606,6 +609,68 @@ class WorkbookTemplate:
 
         self._sheet_paths[new_name] = new_part
         self._sheet_order.append(new_name)
+
+    def _drawing_part(self, sheet: str) -> str:
+        """
+        Find the drawing part a sheet shows (its logos and shapes).
+        Takes the sheet name.
+        Returns the drawing's part name; raises ValueError for a sheet without one.
+        """
+        sheet_part = self._sheet_paths[sheet]
+        rels = self._parts.get(self._rels_part(sheet_part), b"").decode("utf-8")
+        target = re.search(r'Type="[^"]*/drawing" Target="([^"]+)"', rels) or re.search(
+            r'Target="([^"]+)" [^>]*Type="[^"]*/drawing"', rels)
+        if target is None:
+            raise ValueError(f"{sheet} has no drawing to add a picture to")
+        return posixpath.normpath(posixpath.join(posixpath.dirname(sheet_part), target.group(1)))
+
+    def add_picture(self, sheet: str, image: bytes, extension: str, coordinate: str, width_px: int, height_px: int,
+                    offset_x_px: int = 0, offset_y_px: int = 0, description: str = "") -> None:
+        """
+        Place an image on a sheet at a fixed size (a one-cell anchor: it doesn't stretch with rows or columns), in the
+        sheet's existing drawing, with the image stored as a new media part.
+        Takes the sheet, the image bytes, its file extension ("png" or "jpeg"), the cell its top-left corner sits in,
+        its width and height in pixels (the caller keeps the aspect ratio), the corner's offset into that cell in
+        pixels (each less than the cell's size) and alt text.
+        Returns nothing; raises ValueError for a sheet without a drawing.
+        """
+        drawing = self._drawing_part(sheet)
+        media = self._next_part("xl/media", "image", extension)
+        self._add_part(media, image)
+        types = self._text("[Content_Types].xml")
+        if f'<Default Extension="{extension}"' not in types:
+            default = f'<Default Extension="{extension}" ContentType="image/{extension}"/>'
+            self._write("[Content_Types].xml", re.sub(r"(<Types\b[^>]*>)", r"\1" + default, types, count=1))
+
+        rels_part = self._rels_part(drawing)
+        rels = self._parts.get(rels_part, b"").decode("utf-8") or (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships '
+            'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
+        rel_id = f"rId{max((int(n) for n in re.findall(r'Id=.rId(\d+).', rels)), default=0) + 1}"
+        relationship = (f'<Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        f'relationships/image" Target="{posixpath.relpath(media, posixpath.dirname(drawing))}"/>')
+        rels = rels.replace("</Relationships>", relationship + "</Relationships>")
+        if rels_part in self._parts:
+            self._write(rels_part, rels)
+        else:
+            self._add_part(rels_part, rels.encode("utf-8"))
+
+        xml = self._text(drawing)
+        shape_id = max((int(n) for n in re.findall(r'<xdr:cNvPr id="(\d+)"', xml)), default=0) + 1
+        column, row = _column_number(coordinate) - 1, _row_number(coordinate) - 1
+        cx, cy = width_px * EMU_PER_PIXEL, height_px * EMU_PER_PIXEL
+        alt = escape(description, {'"': "&quot;"})
+        anchor = (
+            f"<xdr:oneCellAnchor><xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>{offset_x_px * EMU_PER_PIXEL}"
+            f"</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>{offset_y_px * EMU_PER_PIXEL}</xdr:rowOff></xdr:from>"
+            f'<xdr:ext cx="{cx}" cy="{cy}"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{shape_id}" '
+            f'name="Picture {shape_id}" descr="{alt}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>'
+            f'</xdr:nvPicPr><xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+            f'relationships" r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>'
+            f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/>'
+            f"</a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>"
+        )
+        self._write(drawing, xml.replace("</xdr:wsDr>", anchor + "</xdr:wsDr>"))
 
     def _drop_calc_chain(self) -> None:
         """

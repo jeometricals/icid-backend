@@ -51,6 +51,18 @@ class TextArea:
 
 
 @dataclass(frozen=True)
+class ContinuationHeader:
+    """Where a continuation form's header fields go (Report Cont, Sketch Cont): no times, weather or contractor."""
+
+    project_cells: dict[str, str]   # cell -> project field; formulas reading Contract Info there are replaced
+    date: str                       # General-formatted: the date goes in as m/d/yy text
+    day_of_week: tuple[str, ...]    # S M T W T F S, Sunday first
+    ir_no: str                      # "__________", cleared
+    sheet_no: str                   # "Sheet No.: ____ of ____", left as its label
+    inspector: str
+
+
+@dataclass(frozen=True)
 class HeaderLayout:
     """Where one form's header fields go. Cells are each merged area's top-left cell."""
 
@@ -604,9 +616,11 @@ def stamp_safety(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, d
 # that can't has its back page's last line cut instead.
 
 REPORT_CONT = "Report Cont"
-REPORT_CONT_DAY_CELLS = ("I11", "J11", "K11", "L11", "M11", "N11", "O11")  # S M T W T F S
-REPORT_CONT_PROJECT_CELLS = {"G14": "project_id", "P14": "registration_code", "I15": "project_description",
-                             "F17": "borough"}
+REPORT_CONT_HEADER = ContinuationHeader(
+    project_cells={"G14": "project_id", "P14": "registration_code", "I15": "project_description", "F17": "borough"},
+    date="I10", day_of_week=("I11", "J11", "K11", "L11", "M11", "N11", "O11"), ir_no="U10", sheet_no="AA10",
+    inspector="H19",
+)
 
 REPORT_CONT_TEXT = TextArea(rows=range(21, 46), column="B", line_chars=85)  # B21 … B45, 10 pt lines spanning B:AI
 
@@ -652,6 +666,24 @@ def flow_text(description: Any, comments: Any, front: TextArea, back: TextArea,
     return TextFlow(front_lines, back_lines, cont_lines, past_front, past_back)
 
 
+def stamp_continuation_header(workbook: WorkbookTemplate, sheet: str, layout: ContinuationHeader,
+                              idr: dict[str, Any], project: dict[str, Any], inspector: Optional[str]) -> None:
+    """
+    Write a continuation form's header: project details as values (not Contract Info formulas), the date as m/d/yy
+    text, the day of the week, and the inspector; I.R. No. is cleared and "Sheet No.: ____ of ____" keeps only its
+    label (these pages aren't numbered).
+    Takes the workbook, the sheet, its header layout, the IDR row, the project row and the inspector's name.
+    Returns nothing.
+    """
+    workbook.set_cell(sheet, layout.date, short_date(idr["report_date"]))
+    highlight_day(workbook, sheet, layout.day_of_week, idr["report_date"])
+    workbook.set_cell(sheet, layout.ir_no, None)
+    workbook.set_cell(sheet, layout.sheet_no, "Sheet No.:")
+    for cell, field in layout.project_cells.items():
+        workbook.set_cell(sheet, cell, project.get(field))
+    workbook.set_cell(sheet, layout.inspector, inspector)
+
+
 def stamp_report_cont(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any],
                       inspector: Optional[str], lines: list[str]) -> None:
     """
@@ -660,13 +692,7 @@ def stamp_report_cont(workbook: WorkbookTemplate, idr: dict[str, Any], project: 
     Takes the workbook, IDR row, project details, inspector name and the lines.
     Returns nothing.
     """
-    workbook.set_cell(REPORT_CONT, "I10", short_date(idr["report_date"]))
-    highlight_day(workbook, REPORT_CONT, REPORT_CONT_DAY_CELLS, idr["report_date"])
-    workbook.set_cell(REPORT_CONT, "U10", None)  # I.R. No. "__________"
-    workbook.set_cell(REPORT_CONT, "AA10", "Sheet No.:")  # was "Sheet No.: ____ of ____"
-    for cell, field in REPORT_CONT_PROJECT_CELLS.items():
-        workbook.set_cell(REPORT_CONT, cell, project.get(field))
-    workbook.set_cell(REPORT_CONT, "H19", inspector)
+    stamp_continuation_header(workbook, REPORT_CONT, REPORT_CONT_HEADER, idr, project, inspector)
     write_lines(workbook, REPORT_CONT, REPORT_CONT_TEXT.rows, lines, REPORT_CONT_TEXT.column)
 
 

@@ -15,9 +15,10 @@ from uuid import UUID
 from api.queries.idr_reports import get_general_report, list_non_general_main_reports, list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
+from api.queries.report_attachments import list_uploaded_attachments_for_reports
 from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
-from api.services import export_conc_mix, export_swcb
+from api.services import export_attachments, export_conc_mix, export_swcb
 from api.services.auto_general import build_auto_general_data
 from api.services.export_common import (
     REPORT_CONT, allocate_copies, pay_item_page_count, section, stamp_draft_marker,
@@ -155,25 +156,45 @@ def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], s
     return _Sheets(general_fronts, swcb_sheets, conc_mix_sheets)
 
 
-def _print_order(groups: list[tuple[Optional[UUID], list[str]]], conc_mixes: list[dict[str, Any]],
-                 conc_mix_sheets: list[list[str]]) -> list[str]:
+def _segments(groups: list[tuple[Optional[UUID], list[str]]], conc_mixes: list[dict[str, Any]],
+              conc_mix_sheets: list[list[str]]) -> list[tuple[Optional[UUID], list[str]]]:
     """
-    Put the pages in print order: each main report's pages, then its CONC_MIX addendums' sheets.
+    Put the printed reports in print order: each main report, then its CONC_MIX addendums.
     Takes the main reports' groups in page order ((report id, its pages, including Report Cont when it continues
     there); the id is None for a General composed for the export), the CONC_MIX reports and each one's sheets.
-    Returns the pages in order. A CONC_MIX whose parent isn't printed (an AC report, not exported yet), or that has
-    none, comes last.
+    Returns (report id, its pages) for each, in order. A CONC_MIX whose parent isn't printed (an AC report, not
+    exported yet), or that has none, comes last.
     """
     printed = {report_id for report_id, _ in groups if report_id is not None}
-    children: dict[UUID, list[str]] = {}
-    orphans: list[str] = []
+    children: dict[UUID, list[tuple[UUID, list[str]]]] = {}
+    orphans: list[tuple[Optional[UUID], list[str]]] = []
     for report, sheets in zip(conc_mixes, conc_mix_sheets):
         parent = report.get("parent_report_id")
+        segment = (report.get("report_id"), sheets)
         if parent in printed:
-            children.setdefault(parent, []).extend(sheets)
+            children.setdefault(parent, []).append(segment)
         else:
-            orphans.extend(sheets)
-    return [page for report_id, pages in groups for page in pages + children.get(report_id, [])] + orphans
+            orphans.append(segment)
+    ordered = [segment for group in groups for segment in [group] + children.get(group[0], [])]
+    return ordered + orphans
+
+
+def _load_attachments(reports: list[dict[str, Any]]) -> dict[UUID, list[dict[str, Any]]]:
+    """
+    Load the uploaded attachments of every report in the IDR, in one query (pending uploads are left out).
+    Takes the IDR's reports.
+    Returns {report id: its attachments, oldest upload first}; raises ExportDataError if they can't load.
+    """
+    report_ids = [r["report_id"] for r in reports if r.get("report_id") is not None]
+    if not report_ids:
+        return {}
+    rows = list_uploaded_attachments_for_reports(report_ids)
+    if rows is None:
+        raise ExportDataError("Failed to load report attachments")
+    by_report: dict[UUID, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_report.setdefault(row["report_id"], []).append(row)
+    return by_report
 
 
 def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) -> None:
@@ -199,8 +220,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     Build an IDR's .xlsx export from the report-forms template: the General's pages, then each SWCB report's (on Conc
     Fr / Conc Bk and clones of them), each report followed by its CONC_MIX addendums' Conc Mix sheets; an SWCB's
     Conc Bk ticks its "See attached" box when it has one. Pay items past a front page's table continue on copies of
-    it, right after it. A report's extra sheets are numbered after it and counted in OF. A draft IDR's pages are each
-    marked "DRAFT - Not for Submission".
+    it, right after it. A report's extra sheets are numbered after it and counted in OF. Each report's attachments
+    follow its last page, one unnumbered page each. A draft IDR's pages are each marked "DRAFT - Not for Submission".
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -250,9 +271,21 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
                                page_number=_page_after_clones(conc_mix["page_number"], extras),
                                report_data=conc_mix["report_data"], sheets=names)
 
+    # Attachments print after their report's last page; a report that isn't printed (AC, CONC_CYL, ...) has its
+    # attachments at the end, followed by the page counting photos past the cap
+    segments = _segments(groups, conc_mixes, sheets.conc_mixes)
+    printed = [report_id for report_id, _ in segments if report_id is not None]
+    unprinted = [r["report_id"] for r in reports if r.get("report_id") is not None and r["report_id"] not in printed]
+    attachments = _load_attachments(reports)
+    attachment_pages, closing = export_attachments.render(
+        workbook, idr, project, inspector,
+        [(report_id, attachments[report_id]) for report_id in printed + unprinted if report_id in attachments])
+    pages = [page for report_id, pages in segments for page in pages + attachment_pages.get(report_id, [])]
+    pages += [page for report_id in unprinted for page in attachment_pages.get(report_id, [])] + closing
+
     # Visible sheets print in tab order, so each page moves right after the one before it (Report Cont from near the
-    # front, Conc Mix from between SWR Bk and HC Fr); the first, Gen Fr, is the tab the file opens on
-    pages = _print_order(groups, conc_mixes, sheets.conc_mixes)
+    # front, Conc Mix from between SWR Bk and HC Fr, attachment pages from the end); the first, Gen Fr, is the tab the
+    # file opens on
     for previous, page in zip(pages, pages[1:]):
         workbook.move_sheet(page, after=previous)
 

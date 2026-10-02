@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from supabase import Client, create_client
+from supabase import Client, ClientOptions, create_client
 
 from api.core.config import STORAGE_BUCKET_NAME, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
 
@@ -15,6 +15,24 @@ def get_client() -> Client:
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set to use attachments.")
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+
+# Each Storage request a download makes gives up after this long (the export fetches photos server-side)
+DOWNLOAD_TIMEOUT_SECONDS = 10
+
+
+@lru_cache(maxsize=1)
+def _download_client() -> Client:
+    """
+    Create a second Supabase client once per process for downloads, whose Storage requests time out after
+    DOWNLOAD_TIMEOUT_SECONDS (the main client keeps the library's default).
+    Takes nothing; reads the same settings as get_client.
+    Returns the client, or raises RuntimeError if a setting is missing.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set to use attachments.")
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
+                         ClientOptions(storage_client_timeout=DOWNLOAD_TIMEOUT_SECONDS))
 
 
 def _bucket():
@@ -60,3 +78,12 @@ def create_signed_url(path: str, expires_in: int, download_name: str) -> str:
     if not url:
         raise RuntimeError(f"Storage returned no signed URL for {path}")
     return url
+
+
+def download_file(path: str) -> bytes:
+    """
+    Fetch one object's bytes from the attachments bucket, server-side (no signed URL).
+    Takes the object path.
+    Returns the file's bytes; raises the Storage client's error, or a timeout, when it can't be fetched.
+    """
+    return _download_client().storage.from_(STORAGE_BUCKET_NAME).download(path)

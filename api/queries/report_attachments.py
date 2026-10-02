@@ -72,6 +72,21 @@ def list_attachments_for_report(report_id: UUID) -> Optional[list[dict[str, Any]
     return run_query(sql, (report_id,))
 
 
+def list_uploaded_attachments_for_reports(report_ids: list[UUID]) -> Optional[list[dict[str, Any]]]:
+    """
+    List the uploaded attachments of several reports at once (pending rows left out), for the IDR export.
+    Takes the report uuids.
+    Returns attachment dicts ordered by report, then oldest upload first; empty when none, or None on failure.
+    """
+    sql = f"""
+        SELECT {ATTACHMENT_COLUMNS}
+        FROM icid.report_attachments
+        WHERE report_id = ANY(%s) AND is_uploaded
+        ORDER BY report_id, uploaded_at, attachment_id;
+    """
+    return run_query(sql, (list(report_ids),))
+
+
 def get_attachment(report_id: UUID, attachment_id: UUID) -> Optional[dict[str, Any]]:
     """
     Fetch one attachment, pending or uploaded, only if it belongs to the given report.

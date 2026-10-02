@@ -14,7 +14,8 @@ import openpyxl
 import pytest
 
 from api.queries.projects import get_project_contractor_name
-from api.services import export, export_conc_mix, export_swcb
+from api.queries.report_attachments import list_uploaded_attachments_for_reports
+from api.services import export, export_attachments, export_conc_mix, export_swcb
 from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, truncate_to_lines,
@@ -99,20 +100,33 @@ GENERAL = {
 
 @contextmanager
 def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers Contracting Co.", user=USER,
-                   general=GENERAL, main_reports=None, reports=None):
+                   general=GENERAL, main_reports=None, reports=None, attachments=None, files=None):
     """
-    Patch the queries generate_idr_export reads, so it runs without a database.
-    Takes the IDR, project, contractor name, user, General report (or None), non-General main reports, and all the
-    IDR's reports (where the SWCB report is found).
+    Patch the queries generate_idr_export reads, and Storage, so it runs without a database or a bucket.
+    Takes the IDR, project, contractor name, user, General report (or None), non-General main reports, all the
+    IDR's reports (where the SWCB report is found), their uploaded attachment rows and {storage path: file bytes}
+    (a path that's missing, or maps to an exception, fails its download).
     Yields a dict of the mocks.
     """
-    with patch.object(export, "get_idr_by_id", return_value=idr) as gi, \
-         patch.object(export, "get_project_by_id", return_value=project) as gp, \
-         patch.object(export, "get_project_contractor_name", return_value=contractor) as gc, \
-         patch.object(export, "get_user_by_id", return_value=user) as gu, \
-         patch.object(export, "get_general_report", return_value=general) as gg, \
-         patch.object(export, "list_non_general_main_reports", return_value=main_reports or []) as lm,          patch.object(export, "list_reports_for_idr", return_value=reports or []) as lr:
-        yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm, "reports": lr}
+    def download(path):
+        result = (files or {}).get(path, FileNotFoundError(path))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    with (
+        patch.object(export, "get_idr_by_id", return_value=idr) as gi,
+        patch.object(export, "get_project_by_id", return_value=project) as gp,
+        patch.object(export, "get_project_contractor_name", return_value=contractor) as gc,
+        patch.object(export, "get_user_by_id", return_value=user) as gu,
+        patch.object(export, "get_general_report", return_value=general) as gg,
+        patch.object(export, "list_non_general_main_reports", return_value=main_reports or []) as lm,
+        patch.object(export, "list_reports_for_idr", return_value=reports or []) as lr,
+        patch.object(export, "list_uploaded_attachments_for_reports", return_value=attachments or []) as la,
+        patch.object(export_attachments, "download_file", side_effect=download) as df,
+    ):
+        yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm, "reports": lr,
+               "attachments": la, "download": df}
 
 
 def exported_workbook(**overrides) -> openpyxl.Workbook:
@@ -1964,6 +1978,217 @@ class TestPayItemOverflow:
         with pytest.raises(ValueError, match="need 2 front pages, got 1"):
             export_swcb.render(WorkbookTemplate(TEMPLATE), SUBMITTED_IDR, PROJECT, None, fronts=["Conc Fr"],
                                report_data={"payItems": pay_items(13)})
+
+
+# ---------------------------------------------------------------------------
+# Report attachments: one page each, after their report's last page
+# ---------------------------------------------------------------------------
+
+def image_bytes(image_format: str, size: tuple[int, int] = (40, 30), orientation: Optional[int] = None) -> bytes:
+    """
+    Make an image file in memory.
+    Takes the Pillow format name (JPEG, PNG, WEBP, HEIF), its size and an optional EXIF orientation.
+    Returns the file's bytes.
+    """
+    from PIL import Image
+    image = Image.new("RGB", size, "red")
+    buffer = io.BytesIO()
+    if orientation is None:
+        image.save(buffer, image_format)
+    else:
+        exif = Image.Exif()
+        exif[0x0112] = orientation
+        image.save(buffer, image_format, exif=exif)
+    return buffer.getvalue()
+
+
+def attachment(number: int, report_id: UUID, file_type: str = "image/jpeg", **fields) -> dict:
+    """
+    Build an uploaded attachment row as the export query returns it.
+    Takes its number (for distinct ids, names and paths), its report's id, its MIME type and field overrides.
+    Returns the row.
+    """
+    return {"attachment_id": UUID(int=0xA700 + number), "report_id": report_id, "file_name": f"photo_{number}.jpg",
+            "file_type": file_type, "file_size_bytes": 1000, "storage_path": f"{report_id}/{number}_photo.jpg",
+            "uploaded_by": REPORTER, "uploaded_at": datetime(2026, 9, 30, 9, number % 60),
+            "attachment_name": f"Photo {number}", "attachment_description": f"What photo {number} shows.",
+            "is_uploaded": True, **fields}
+
+
+def pictures(content: bytes, sheet: str) -> list[dict]:
+    """
+    Read the pictures this export added to a sheet, through the package's relationships.
+    Takes the .xlsx bytes and the sheet name.
+    Returns each added picture's anchor cell (zero-based column and row), offsets and size in pixels, and its image's
+    format and pixel size.
+    """
+    from PIL import Image
+    package = zipfile.ZipFile(io.BytesIO(content))
+    workbook = package.read("xl/workbook.xml").decode()
+    rel_id = re.search(rf'<sheet name="{sheet}"[^>]*r:id="(rId\d+)"', workbook).group(1)
+    target = re.search(rf'Id="{rel_id}"[^>]*Target="([^"]+)"', package.read("xl/_rels/workbook.xml.rels").decode())
+    part = "xl/" + target.group(1)
+    sheet_rels = package.read(part.replace("worksheets/", "worksheets/_rels/") + ".rels").decode()
+    drawing = "xl/drawings/" + re.search(r'Target="\.\./drawings/([^"]+)"', sheet_rels).group(1)
+    media = dict(re.findall(r'Id="(rId\d+)"[^>]*Target="\.\./media/([^"]+)"',
+                            package.read(drawing.replace("drawings/", "drawings/_rels/") + ".rels").decode()))
+    found = []
+    for anchor in re.findall(r"<xdr:oneCellAnchor>.*?</xdr:oneCellAnchor>", package.read(drawing).decode()):
+        numbers = [int(n) for n in re.findall(r"<xdr:(?:col|colOff|row|rowOff)>(\d+)<", anchor)]
+        cx, cy = (int(n) for n in re.search(r'<xdr:ext cx="(\d+)" cy="(\d+)"', anchor).groups())
+        image = Image.open(io.BytesIO(package.read("xl/media/" + media[re.search(r'r:embed="(rId\d+)"', anchor)
+                                                                         .group(1)])))
+        found.append({"col": numbers[0], "col_off": numbers[1] // 9525, "row": numbers[2],
+                      "row_off": numbers[3] // 9525, "width": cx // 9525, "height": cy // 9525,
+                      "format": image.format, "size": image.size})
+    return found
+
+
+PDF_TYPE = "application/pdf"
+
+
+class TestAttachmentsExport:
+    def test_a_photo_gets_a_page_after_its_report(self):
+        photo = attachment(1, GENERAL_ROW["report_id"])
+        content = export_bytes(reports=[GENERAL_ROW], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG")})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Attachments 1"]
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]
+        assert (sheet["B21"].value, sheet["B22"].value) == ("Photo 1", "What photo 1 shows.")
+        assert sheet["B21"].font.b is True
+        # 40 x 30 fills the 646 x 561 px area's width (646 x 484), centred down it: 38 px = 2 rows + 4 px from B26
+        assert pictures(content, "Attachments 1") == [{"col": 1, "col_off": 0, "row": 27, "row_off": 4,
+                                                       "width": 646, "height": 484, "format": "JPEG",
+                                                       "size": (40, 30)}]
+
+    def test_each_photo_gets_its_own_page_in_upload_order(self):
+        rows = [attachment(n, SWCB_1) for n in (1, 2, 3)]
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows,
+                               files={r["storage_path"]: image_bytes("PNG") for r in rows})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk",
+                                           "Attachments 1", "Attachments 2", "Attachments 3"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[f"Attachments {n}"]["B21"].value for n in (1, 2, 3)] == ["Photo 1", "Photo 2", "Photo 3"]
+
+    def test_attachments_follow_their_own_reports(self):
+        rows = [attachment(1, GENERAL_ROW["report_id"]), attachment(2, SWCB_1), attachment(3, UUID(int=0xC301))]
+        reports = [GENERAL_ROW, swcb_row(1, 2), conc_mix_row(1, SWCB_1, 3), swcb_row(2, 4)]
+        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 4}, reports=reports, attachments=rows,
+                               files={r["storage_path"]: image_bytes("JPEG") for r in rows})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Attachments 1", "Conc Fr", "Conc Bk",
+                                           "Attachments 2", "Conc Mix", "Attachments 3", "Conc Fr 2", "Conc Bk 2"]
+        # Attachment pages carry no page number, and the reports' numbering is unchanged
+        assert print_order_page_numbers(content) == [1, None, None, 2, None, None, 3, None, 4, None]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert book["Attachments 1"]["AA19"].value == "Sheet No.:"
+        assert (book["Gen Fr"]["AH8"].value, book["Gen Fr"]["AM8"].value) == (1, 4)
+
+    def test_a_pdf_is_named_on_its_page_and_never_fetched(self):
+        pdf = attachment(1, SWCB_1, "application/pdf", file_name="mix_ticket.pdf", attachment_name="Batch ticket")
+        with patched_export(reports=[swcb_row(1, 2)], attachments=[pdf]) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        mocks["download"].assert_not_called()
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]
+        assert (sheet["B21"].value, sheet["B26"].value) == (
+            "PDF: Batch ticket", "File: mix_ticket.pdf (a PDF: open it in ICID)")
+        assert pictures(content, "Attachments 1") == []
+
+    def test_heic_is_converted_to_jpeg_and_webp_to_png(self):
+        rows = [attachment(1, SWCB_1, "image/heic"), attachment(2, SWCB_1, "image/webp")]
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows,
+                               files={rows[0]["storage_path"]: image_bytes("HEIF"),
+                                      rows[1]["storage_path"]: image_bytes("WEBP")})
+        assert [p["format"] for n in (1, 2) for p in pictures(content, f"Attachments {n}")] == ["JPEG", "PNG"]
+
+    def test_a_large_photo_is_shrunk_to_1600_px(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG", (4000, 3000))})
+        assert pictures(content, "Attachments 1")[0]["size"] == (1600, 1200)
+
+    def test_a_sideways_phone_photo_is_stood_upright(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG", (40, 30), orientation=6)})
+        placed = pictures(content, "Attachments 1")[0]
+        assert placed["size"] == (30, 40) and (placed["width"], placed["height"]) == (421, 561)  # fits the height
+
+    def test_a_photo_that_cant_be_fetched_gets_a_placeholder_and_frees_its_place(self, monkeypatch):
+        monkeypatch.setattr(export_attachments, "MAX_PHOTOS", 2)
+        rows = [attachment(n, SWCB_1) for n in (1, 2, 3)]
+        files = {rows[0]["storage_path"]: TimeoutError("read timed out"),
+                 rows[1]["storage_path"]: image_bytes("JPEG"), rows[2]["storage_path"]: image_bytes("JPEG")}
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows, files=files)
+        assert visible_sheets(content)[-3:] == ["Attachments 1", "Attachments 2", "Attachments 3"]  # no closing page
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["Attachments 1"]["B21"].value, book["Attachments 1"]["B26"].value) == (
+            "Attachment unavailable: Photo 1", "File: photo_1.jpg (couldn't be fetched for this export)")
+        assert [len(pictures(content, f"Attachments {n}")) for n in (1, 2, 3)] == [0, 1, 1]
+
+    def test_photos_past_the_cap_are_counted_on_a_closing_page(self):
+        rows = [attachment(n, SWCB_1) for n in range(1, 52)]
+        photo = image_bytes("PNG", (8, 6))
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows + [attachment(52, SWCB_1, PDF_TYPE)],
+                               files={r["storage_path"]: photo for r in rows})
+        shown = visible_sheets(content)
+        # 50 photos, the PDF (not capped) on its own page, then the count
+        assert shown[4:] == [f"Attachments {n}" for n in range(1, 53)]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert book["Attachments 51"]["B21"].value == "PDF: Photo 52"
+        assert book["Attachments 52"]["B21"].value == "1 more attachment in ICID"
+        assert export_attachments.more_attachments_note(3) == "3 more attachments in ICID"
+
+    def test_without_attachments_nothing_is_added_or_fetched(self):
+        with patched_export(reports=[swcb_row(1, 2)]) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        mocks["download"].assert_not_called()
+        assert not any(name.startswith("Attachments") for name in openpyxl.load_workbook(
+            io.BytesIO(content), read_only=True).sheetnames)
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk"]
+
+    def test_a_draft_marks_every_attachment_page(self):
+        rows = [attachment(1, SWCB_1), attachment(2, SWCB_1, PDF_TYPE)]
+        content = export_bytes(idr=DRAFT_IDR, reports=[swcb_row(1, None)], attachments=rows,
+                               files={rows[0]["storage_path"]: image_bytes("JPEG")})
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[f"Attachments {n}"]["B1"].value for n in (1, 2)] == ["DRAFT - Not for Submission"] * 2
+
+    def test_the_caption_header_and_a_long_description(self):
+        photo = attachment(1, SWCB_1, attachment_description=words(200), attachment_name="N" * 120)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG")})
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]
+        assert sheet["B21"].value == "N" * 82 + "..."
+        lines = [sheet[f"B{row}"].value for row in range(22, 26)]
+        assert lines[0].startswith("word0") and lines[3].endswith("… (continued in ICID)")
+        assert [sheet[c].value for c in ("G12", "I13", "F15", "H17", "I19", "U19")] == [
+            "HWS0023", "Installation of Curb, Sidewalk & Ped-Ramp <Queens>", "Queens", "Genghis Khan", "9/30/26", None]
+
+    def test_mixed_types_in_one_report(self):
+        rows = [attachment(1, SWCB_1), attachment(2, SWCB_1, PDF_TYPE), attachment(3, SWCB_1, "image/heic")]
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows,
+                               files={rows[0]["storage_path"]: image_bytes("JPEG"),
+                                      rows[2]["storage_path"]: image_bytes("HEIF")})
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[f"Attachments {n}"]["B21"].value for n in (1, 2, 3)] == ["Photo 1", "PDF: Photo 2", "Photo 3"]
+        assert [len(pictures(content, f"Attachments {n}")) for n in (1, 2, 3)] == [1, 0, 1]
+
+    def test_an_unprinted_reports_attachments_come_last(self):
+        ac_report = {"report_id": UUID(int=0xAC01), "report_type": "AC", "is_addendum": False,
+                     "parent_report_id": None, "page_number": 3, "report_data": {}}
+        rows = [attachment(1, SWCB_1), attachment(2, ac_report["report_id"])]
+        content = export_bytes(reports=[swcb_row(1, 2), ac_report], attachments=rows,
+                               files={r["storage_path"]: image_bytes("JPEG") for r in rows})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Attachments 1",
+                                           "Attachments 2"]
+
+    def test_the_export_query_leaves_pending_uploads_out(self):
+        with patch("api.queries.report_attachments.run_query", return_value=[]) as run:
+            assert list_uploaded_attachments_for_reports([SWCB_1, SWCB_2]) == []
+        sql, params = run.call_args.args
+        assert "WHERE report_id = ANY(%s) AND is_uploaded" in sql
+        assert "ORDER BY report_id, uploaded_at, attachment_id" in sql
+        assert params == ([SWCB_1, SWCB_2],)
 
 
 # ---------------------------------------------------------------------------
