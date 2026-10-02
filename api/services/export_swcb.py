@@ -122,7 +122,7 @@ CONC_BACK_SAFETY = SafetyLayout(
 CONC_BACK_TEXT = TextArea(rows=range(20, 35), column="C", line_chars=75)
 ATTACHED_PAGES_BOX = "C52"
 # "See attached Concrete Truck and Mixing Information" (Z37, also a transparent rectangle): ticked by the dispatcher
-# when the IDR's export includes a Conc Mix page
+# when this SWCB report has a CONC_MIX addendum
 CONC_MIX_ATTACHED_BOX = "Z37"
 
 
@@ -178,45 +178,45 @@ def _tick(workbook: WorkbookTemplate, sheet: str, cell: str, ticked: bool) -> No
         workbook.center_cell(sheet, cell)
 
 
-def mark_conc_mix_attached(workbook: WorkbookTemplate) -> None:
+def mark_conc_mix_attached(workbook: WorkbookTemplate, back: str = CONC_BACK) -> None:
     """
-    Tick Conc Bk's "See attached Concrete Truck and Mixing Information" box.
-    Takes the workbook (after render has stamped Conc Bk).
+    Tick a Conc Bk's "See attached Concrete Truck and Mixing Information" box.
+    Takes the workbook (after render has stamped the page) and the back page (Conc Bk unless given).
     Returns nothing.
     """
-    _tick(workbook, CONC_BACK, CONC_MIX_ATTACHED_BOX, True)
+    _tick(workbook, back, CONC_MIX_ATTACHED_BOX, True)
 
 
-def _stamp_operation(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
+def _stamp_operation(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
     """
     Tick the operation boxes and write the subcontractor.
-    Takes the workbook and the report_data.
+    Takes the workbook, the front page and the report_data.
     Returns nothing.
     """
     for operation, ticked in operation_types(data).items():
-        _tick(workbook, CONC_FRONT, OPERATION_BOXES[operation], ticked)
-    workbook.set_cell(CONC_FRONT, SUBCONTRACTOR_CELL, text_value(data.get("subcontractor")))
-    workbook.shrink_to_fit_cell(CONC_FRONT, SUBCONTRACTOR_CELL)
+        _tick(workbook, front, OPERATION_BOXES[operation], ticked)
+    workbook.set_cell(front, SUBCONTRACTOR_CELL, text_value(data.get("subcontractor")))
+    workbook.shrink_to_fit_cell(front, SUBCONTRACTOR_CELL)
 
 
-def _stamp_activity(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
+def _stamp_activity(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
     """
     Write the Detailed Activity rows (Excavation, Form / Prep, Pour): from and to station, and remarks.
-    Takes the workbook and the report_data.
+    Takes the workbook, the front page and the report_data.
     Returns nothing.
     """
     activity = section(data, "activity")
     for key, row in ACTIVITY_ROWS.items():
         entry = activity.get(key) if isinstance(activity.get(key), dict) else {}
         for field, column in ACTIVITY_COLUMNS.items():
-            workbook.set_cell(CONC_FRONT, f"{column}{row}", text_value(entry.get(field)))
-        workbook.shrink_to_fit_cell(CONC_FRONT, f"{ACTIVITY_COLUMNS['remarks']}{row}")
+            workbook.set_cell(front, f"{column}{row}", text_value(entry.get(field)))
+        workbook.shrink_to_fit_cell(front, f"{ACTIVITY_COLUMNS['remarks']}{row}")
 
 
-def _stamp_matrix(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
+def _stamp_matrix(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
     """
     Write the Inspection Matrix: an X in the Y, N or N/A box of each answered column, and the write-in text.
-    Takes the workbook and the report_data.
+    Takes the workbook, the front page and the report_data.
     Returns nothing.
     """
     answers = matrix_answers(data)
@@ -225,42 +225,44 @@ def _stamp_matrix(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
             value = answers[key][column]
             if is_text:
                 cell = f"{MATRIX_TEXT_CELLS[column]}{row}"
-                workbook.set_cell(CONC_FRONT, cell, value)
-                workbook.shrink_to_fit_cell(CONC_FRONT, cell)
+                workbook.set_cell(front, cell, value)
+                workbook.shrink_to_fit_cell(front, cell)
                 continue
             for option, letter in MATRIX_ANSWER_CELLS[column].items():
-                workbook.set_cell(CONC_FRONT, f"{letter}{row}", CHECK_MARK if value == option else None)
+                workbook.set_cell(front, f"{letter}{row}", CHECK_MARK if value == option else None)
 
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
-           report_data: Optional[dict[str, Any]] = None, report_cont_available: bool = True) -> list[str]:
+           report_data: Optional[dict[str, Any]] = None, report_cont_available: bool = True,
+           front: str = CONC_FRONT, back: str = CONC_BACK) -> list[str]:
     """
-    Stamp an SWCB report onto Conc Fr / Conc Bk, and onto Report Cont when its text runs past Conc Bk's Remarks.
+    Stamp an SWCB report onto a Conc Fr / Conc Bk pair, and onto Report Cont when its text runs past the Remarks.
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (None leaves Sheet No. blank), its report_data (None stamps the header only), and whether Report Cont is free
-    (False when another report in the export already continues onto it; the Remarks are then cut with a note).
-    Returns the sheets it used, in print order: Conc Fr, Conc Bk, and Report Cont when used; each is set to print on
+    (False when another report in the export already continues onto it; the Remarks are then cut with a note), and
+    the front and back pages to use (Conc Fr / Conc Bk unless given: a clone pair for an IDR's later SWCB reports).
+    Returns the sheets it used, in print order: front, back, and Report Cont when used; each is set to print on
     one Letter page, and the caller decides which sheets the workbook shows.
     """
-    stamp_common_header(workbook, CONC_FRONT, CONC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
+    stamp_common_header(workbook, front, CONC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
     data = report_data if isinstance(report_data, dict) else {}
 
     flow = flow_text(data.get("description"), data.get("comments"), CONC_FRONT_TEXT, CONC_BACK_TEXT,
                      REPORT_CONT_TEXT if report_cont_available else None)
-    write_lines(workbook, CONC_FRONT, CONC_FRONT_TEXT.rows, flow.front, CONC_FRONT_TEXT.column)
-    write_lines(workbook, CONC_BACK, CONC_BACK_TEXT.rows, flow.back, CONC_BACK_TEXT.column)
-    _tick(workbook, CONC_BACK, ATTACHED_PAGES_BOX, bool(flow.report_cont))
+    write_lines(workbook, front, CONC_FRONT_TEXT.rows, flow.front, CONC_FRONT_TEXT.column)
+    write_lines(workbook, back, CONC_BACK_TEXT.rows, flow.back, CONC_BACK_TEXT.column)
+    _tick(workbook, back, ATTACHED_PAGES_BOX, bool(flow.report_cont))
 
-    _stamp_operation(workbook, data)
-    _stamp_activity(workbook, data)
-    _stamp_matrix(workbook, data)
-    stamp_pay_items(workbook, CONC_FRONT, CONC_FRONT_PAY_ITEMS, data.get("payItems"))
-    stamp_workforce(workbook, CONC_BACK, CONC_BACK_WORKFORCE, data)
-    stamp_equipment(workbook, CONC_BACK, CONC_BACK_EQUIPMENT, data)
-    stamp_safety(workbook, CONC_BACK, CONC_BACK_SAFETY, data)
+    _stamp_operation(workbook, front, data)
+    _stamp_activity(workbook, front, data)
+    _stamp_matrix(workbook, front, data)
+    stamp_pay_items(workbook, front, CONC_FRONT_PAY_ITEMS, data.get("payItems"))
+    stamp_workforce(workbook, back, CONC_BACK_WORKFORCE, data)
+    stamp_equipment(workbook, back, CONC_BACK_EQUIPMENT, data)
+    stamp_safety(workbook, back, CONC_BACK_SAFETY, data)
 
-    pages = [CONC_FRONT, CONC_BACK]
+    pages = [front, back]
     if flow.report_cont:
         stamp_report_cont(workbook, idr, project, inspector, flow.report_cont)
         pages.append(REPORT_CONT)

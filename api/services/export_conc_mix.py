@@ -66,11 +66,12 @@ MATERIAL_CELLS = {"batchReportNo": "W41", "noOfTickets": "W42", "firstTicketNo":
 # runs to AO (539 px); the other five run C50:AO54 (619 px). Conc Fr's 10 pt lines hold 84 characters across 651 px,
 # so at 8 pt a pixel holds 84 x 10 / 8 / 651 = 0.16 characters: 86 on the first line, 99 on the rest.
 # The inspector's remarks print on the first sheet only. A sheet followed by another ends its remarks with
-# CONTINUED_NEXT; each later sheet's remarks hold just CONTINUED_FROM, naming the sheet before it.
+# CONTINUED_NEXT; each later sheet's remarks hold just CONTINUED_FROM (no sheet name or page number: tab names aren't
+# printed, and a draft's pages aren't numbered).
 REMARKS_FIRST = TextArea(rows=range(49, 50), column="H", line_chars=86)
 REMARKS_REST = TextArea(rows=range(50, 55), column="C", line_chars=99)
 CONTINUED_NEXT = "Continued on next page"
-CONTINUED_FROM = "(Continued from {sheet})"
+CONTINUED_FROM = "(Continued from previous page)"
 
 
 def truck_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -95,11 +96,28 @@ def sheet_count(report_data: Any) -> int:
 
 def sheet_name(index: int) -> str:
     """
-    Name the Conc Mix sheet at a position among a report's sheets.
+    Name the Conc Mix sheet at a position among all the IDR's Conc Mix sheets (numbered across its CONC_MIX reports).
     Takes the zero-based position.
-    Returns "Conc Mix" for the first, "Conc Mix 2", "Conc Mix 3", ... for its clones.
+    Returns "Conc Mix" for the first (the template's own), "Conc Mix 2", "Conc Mix 3", ... for clones.
     """
     return CONC_MIX if index == 0 else f"{CONC_MIX} {index + 1}"
+
+
+def allocate_sheets(workbook: WorkbookTemplate, report_data: Any, first_index: int = 0) -> list[str]:
+    """
+    Provide the sheets one CONC_MIX report prints on, cloning the blank Conc Mix for every one past the template's
+    own, each placed after the one before. Call it before anything is stamped on Conc Mix, so clones start blank.
+    Takes the workbook, the report_data (its trucks decide the count) and the position of the report's first sheet
+    among the IDR's Conc Mix sheets (0 for the first report).
+    Returns the report's sheet names, in order.
+    """
+    sheets = [sheet_name(first_index + offset) for offset in range(sheet_count(report_data))]
+    for previous, sheet in zip([None] + sheets, sheets):
+        if sheet != CONC_MIX:
+            workbook.clone_sheet(CONC_MIX, sheet)
+            if previous is not None:
+                workbook.move_sheet(sheet, after=previous)
+    return sheets
 
 
 def _stamp_header(workbook: WorkbookTemplate, sheet: str, idr: dict[str, Any], project: dict[str, Any],
@@ -208,21 +226,21 @@ def _stamp_remarks(workbook: WorkbookTemplate, sheet: str, text: list[str], cont
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
-           report_data: Optional[dict[str, Any]] = None) -> list[str]:
+           report_data: Optional[dict[str, Any]] = None, sheets: Optional[list[str]] = None) -> list[str]:
     """
-    Stamp a CONC_MIX report onto Conc Mix, cloning the page (each clone placed after the one before) when its trucks
-    need more than one sheet. Every sheet gets the full form; the trucks are split 11 a sheet.
+    Stamp a CONC_MIX report onto its Conc Mix sheets: the full form on every one, the trucks split 11 a sheet.
     Takes the workbook, the IDR row (its total_pages fills OF), the project row, the contractor's and inspector's names,
-    the report's page number (its later sheets take the numbers after it; None leaves PAGE / OF blank) and its
-    report_data (None stamps the header and an empty body).
+    the report's page number (its later sheets take the numbers after it; None leaves PAGE / OF blank), its
+    report_data (None stamps the header and an empty body) and the sheets to use, from allocate_sheets (None
+    allocates them here, starting at Conc Mix, for an IDR's only CONC_MIX report).
     Returns the sheets it used, in order, each set to print on one Letter page; the caller decides which show.
+    Raises ValueError if the sheets given don't match the count the trucks need.
     """
     data = report_data if isinstance(report_data, dict) else {}
     trucks = truck_rows(data)
-    sheets = [sheet_name(index) for index in range(sheet_count(data))]
-    for previous, sheet in zip(sheets, sheets[1:]):
-        workbook.clone_sheet(CONC_MIX, sheet)  # cloned before any stamping, so each starts as the blank form
-        workbook.move_sheet(sheet, after=previous)
+    sheets = sheets if sheets is not None else allocate_sheets(workbook, data)
+    if len(sheets) != sheet_count(data):
+        raise ValueError(f"{len(trucks)} trucks need {sheet_count(data)} Conc Mix sheets, got {len(sheets)}")
 
     for index, sheet in enumerate(sheets):
         page = page_number + index if page_number is not None else None
@@ -230,7 +248,7 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
         _stamp_location_and_mixer(workbook, sheet, data)
         _stamp_trucks(workbook, sheet, trucks[index * len(TRUCK_ROWS):(index + 1) * len(TRUCK_ROWS)])
         _stamp_specs_and_materials(workbook, sheet, data)
-        text = paragraphs(data.get("remarks")) if index == 0 else [CONTINUED_FROM.format(sheet=sheets[index - 1])]
+        text = paragraphs(data.get("remarks")) if index == 0 else [CONTINUED_FROM]
         _stamp_remarks(workbook, sheet, text, continued=index < len(sheets) - 1)
         workbook.fit_to_letter_page(sheet)
     return sheets
