@@ -32,6 +32,10 @@ CHECKBOX_DRAWINGS = {
     "xl/drawings/drawing11.xml": ["Z37", "C52"],
 }
 
+# Conc Mix drawing -> cells under its checkboxes, which are four-line groups with no fill (the cleanup leaves them)
+CONC_MIX_DRAWING = "xl/drawings/drawing5.xml"
+CONC_MIX_CHECKBOXES = ["F22", "N22", "X22", "AF22", "O25", "T25"]  # Curb, Sidewalk, Conc Base, Structural, Ready Mix, Other
+
 
 def cell_position(coordinate: str) -> tuple[int, int]:
     """
@@ -184,6 +188,17 @@ class TestTemplate:
                 fill, outline = re.search(r"<xdr:spPr\b[^>]*>(.*?)</xdr:spPr>", shape, re.DOTALL).group(1).split("<a:ln", 1)
                 assert "<a:noFill/>" in fill and "<a:solidFill>" not in fill, cell
                 assert '<a:srgbClr val="000000"/>' in outline, cell
+
+    def test_conc_mix_checkboxes_have_no_fill_to_hide_a_stamped_x(self):
+        xml = zipfile.ZipFile(TEMPLATE).read(CONC_MIX_DRAWING).decode()
+        for cell in CONC_MIX_CHECKBOXES:
+            column, row = cell_position(cell)
+            anchor = re.search(rf"<xdr:twoCellAnchor\b[^>]*><xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>\d+"
+                               rf"</xdr:colOff><xdr:row>{row}</xdr:row>.*?</xdr:twoCellAnchor>", xml, re.DOTALL).group(0)
+            properties = re.findall(r"<xdr:(?:grpSpPr|spPr)\b[^>]*>(.*?)</xdr:(?:grpSpPr|spPr)>", anchor, re.DOTALL)
+            assert properties, cell
+            # Each shape's own fill comes before its outline; the group and its lines must carry none
+            assert all("<a:solidFill>" not in p.split("<a:ln", 1)[0] for p in properties), cell
 
 
 # ---------------------------------------------------------------------------
