@@ -6,6 +6,7 @@ the DDC report forms means their logos, checkbox rectangles and ruled lines. Edi
 in place keeps everything else in the package byte-for-byte.
 """
 
+import posixpath
 import re
 import zipfile
 from datetime import date
@@ -480,6 +481,131 @@ class WorkbookTemplate:
                           lambda m: f'{m.group(1)}{new_index[int(m.group(2))]}"', workbook)
         self._write("xl/workbook.xml", workbook)
         self._sheet_order = new_order
+
+    def _add_part(self, part: str, content: bytes) -> None:
+        """
+        Add a new part to the package, after the existing ones.
+        Takes the part name and its bytes.
+        Returns nothing.
+        """
+        self._parts[part] = content
+        info = zipfile.ZipInfo(part)
+        info.compress_type = zipfile.ZIP_DEFLATED
+        self._infos.append(info)
+
+    def _next_part(self, folder: str, stem: str, extension: str) -> str:
+        """
+        Pick the next free numbered part name, e.g. xl/drawings/drawing23.xml after drawing22.xml.
+        Takes the folder, the name's stem and its extension.
+        Returns the part name one above the highest number in use.
+        """
+        pattern = re.compile(rf"{re.escape(folder)}/{re.escape(stem)}(\d+)\.{re.escape(extension)}")
+        numbers = [int(m.group(1)) for part in self._parts if (m := pattern.fullmatch(part))]
+        return f"{folder}/{stem}{max(numbers, default=0) + 1}.{extension}"
+
+    def _copy_content_type(self, source: str, copy: str) -> None:
+        """
+        Register a copied part under its source's content-type override, when the source has one.
+        Takes the source part name and the copy's part name.
+        Returns nothing; parts typed by their extension (a Default entry) need nothing.
+        """
+        types = self._text("[Content_Types].xml")
+        override = re.search(rf'<Override PartName="/{re.escape(source)}"[^>]*/>', types)
+        if override:
+            added = override.group(0).replace(f'"/{source}"', f'"/{copy}"')
+            self._write("[Content_Types].xml", types.replace("</Types>", added + "</Types>"))
+
+    @staticmethod
+    def _rels_part(part: str) -> str:
+        """
+        Name the relationships part that belongs to a part.
+        Takes the part name, e.g. 'xl/worksheets/sheet8.xml'.
+        Returns e.g. 'xl/worksheets/_rels/sheet8.xml.rels'.
+        """
+        folder, name = posixpath.split(part)
+        return f"{folder}/_rels/{name}.rels"
+
+    def _clone_sheet_rels(self, source_part: str, new_part: str) -> None:
+        """
+        Give a cloned worksheet its own copies of the source's drawing (with the drawing's relationships) and printer
+        settings. Takes the source and clone worksheet part names.
+        Returns nothing; raises ValueError for a relationship type cloning doesn't handle (comments, tables, ...).
+        """
+        source_rels = self._rels_part(source_part)
+        if source_rels not in self._parts:
+            return
+        rels = self._text(source_rels)
+        folder = posixpath.dirname(source_part)
+        for relationship in re.findall(r"<Relationship [^>]*/>", rels):
+            kind = re.search(r'Type="[^"]*/(\w+)"', relationship).group(1)
+            target = re.search(r'Target="([^"]+)"', relationship).group(1)
+            target_part = posixpath.normpath(posixpath.join(folder, target))
+            if kind == "drawing":
+                copy = self._next_part("xl/drawings", "drawing", "xml")
+                if self._rels_part(target_part) in self._parts:  # its images stay shared: the stamping never edits them
+                    self._add_part(self._rels_part(copy), self._parts[self._rels_part(target_part)])
+            elif kind == "printerSettings":
+                copy = self._next_part("xl/printerSettings", "printerSettings", "bin")
+            else:
+                raise ValueError(f"can't clone a sheet with a {kind} relationship")
+            self._add_part(copy, self._parts[target_part])
+            self._copy_content_type(target_part, copy)
+            new_target = posixpath.relpath(copy, folder)
+            rels = rels.replace(relationship, relationship.replace(f'Target="{target}"', f'Target="{new_target}"'))
+        self._add_part(self._rels_part(new_part), rels.encode("utf-8"))
+
+    def _cloned_names(self, workbook: str, source: str, new_name: str) -> list[str]:
+        """
+        Copy the defined names scoped to a sheet (print area, print titles) for its clone, before the clone is added.
+        Takes the workbook XML, the source sheet name and the clone's name (it takes the next tab position).
+        Returns the copied <definedName> elements, scoped to the clone and referring to it instead of the source.
+        """
+        source_index, new_index = self._sheet_order.index(source), len(self._sheet_order)
+        # A reference is 'Sheet Name'! (apostrophes doubled), or bare Sheet!; the copy always uses the quoted form
+        reference = re.compile(rf"(?:'{re.escape(escape(source.replace(chr(39), chr(39) * 2)))}'|"
+                               rf"(?<![\w.']){re.escape(escape(source))})!")
+        new_reference = escape(f"'{new_name.replace(chr(39), chr(39) * 2)}'!")
+        names = re.findall(rf'<definedName\b[^>]*?\slocalSheetId="{source_index}"[^>]*>.*?</definedName>', workbook)
+        copies = []
+        for name in names:
+            start_tag = re.match(r"<definedName\b[^>]*>", name).group(0)
+            body = reference.sub(lambda _: new_reference, name[len(start_tag):])
+            copies.append(_set_attribute(start_tag, "localSheetId", str(new_index)) + body)
+        return copies
+
+    def clone_sheet(self, source: str, new_name: str) -> None:
+        """
+        Clone one sheet with its own drawing and scoped names (print area, print titles), as the last tab, visible.
+        Takes the source sheet name and the new sheet name (must not already exist).
+        Returns nothing; raises ValueError if new_name is taken or source doesn't exist.
+        """
+        if source not in self._sheet_paths:
+            raise ValueError(f"no sheet named {source!r}")
+        if new_name in self._sheet_paths:
+            raise ValueError(f"a sheet named {new_name!r} already exists")
+        source_part = self._sheet_paths[source]
+        new_part = self._next_part("xl/worksheets", "sheet", "xml")
+        self._add_part(new_part, self._parts[source_part])
+        self._copy_content_type(source_part, new_part)
+        self._clone_sheet_rels(source_part, new_part)
+
+        rels = self._text("xl/_rels/workbook.xml.rels")
+        rel_id = f"rId{max(int(n) for n in re.findall(r'Id=.rId(\d+).', rels)) + 1}"
+        relationship = (f'<Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        f'relationships/worksheet" Target="{new_part.removeprefix("xl/")}"/>')
+        self._write("xl/_rels/workbook.xml.rels", rels.replace("</Relationships>", relationship + "</Relationships>"))
+
+        workbook = self._text("xl/workbook.xml")
+        sheet_id = max(int(n) for n in re.findall(r'<sheet [^>]*?sheetId="(\d+)"', workbook)) + 1
+        name_attr = escape(new_name, {'"': "&quot;"})
+        sheet_tag = f'<sheet name="{name_attr}" sheetId="{sheet_id}" r:id="{rel_id}"/>'
+        workbook = workbook.replace("</sheets>", sheet_tag + "</sheets>")
+        workbook = workbook.replace("</definedNames>", "".join(self._cloned_names(workbook, source, new_name))
+                                    + "</definedNames>")
+        self._write("xl/workbook.xml", workbook)
+
+        self._sheet_paths[new_name] = new_part
+        self._sheet_order.append(new_name)
 
     def _drop_calc_chain(self) -> None:
         """
