@@ -104,6 +104,17 @@ def section(data: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def typed_value(value: Any) -> Any:
+    """
+    Keep a value as the frontend saved it, for a cell: a number stays a number, text is trimmed.
+    Takes the value.
+    Returns the int / float, the trimmed text, or None when blank or missing.
+    """
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        return value
+    return text_value(value)
+
+
 def short_date(day: date) -> str:
     """
     Format a date the way the forms' date-formatted cells show it (m/d/yy), for cells that hold it as text.

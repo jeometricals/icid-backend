@@ -20,7 +20,7 @@ from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, truncate_to_lines,
 )
-from api.services.export_common import DRAFT_MARKER, REPORT_CONT_TEXT
+from api.services.export_common import DRAFT_MARKER, REPORT_CONT_TEXT, typed_value
 from api.services.export_general import GEN_FRONT_PAY_ITEMS
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -2427,6 +2427,80 @@ class TestAcExport:
         assert sheet["B22"].value == "Sidewalk, Curb, Concrete Base: Poured curb."
         assert "Asphaltic" not in " ".join(str(sheet[f"B{row}"].value or "") for row in range(22, 35))
         assert [sheet[f"B{row}"].value for row in (39, 40)] == ["4.01 AAS", None]
+
+
+FULL_SITE_CONDITIONS = {
+    "pavingContractor": {"pavingContractorName": "Tri-State Paving", "subcontractor": "Ace Milling",
+                         "riceNo": "2.456"},
+    "temperature": {"surfaceStart": "52", "surfaceFinish": "61", "ambientStart": "48", "ambientFinish": "58"},
+    "maxDensity": {"top": "150.2", "binder": "148.7"},
+}
+
+
+def ac_front(**report_data):
+    """
+    Render an AC report with the given report_data and open its AC Fr sheet.
+    Takes report_data fields as keyword arguments.
+    Returns the read-only AC Fr worksheet.
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_ac.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data=report_data)
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), read_only=True)["AC Fr"]
+
+
+class TestAcSiteConditions:
+    def test_paving_contractor_name_is_centred_across_the_subcontractor_span(self):
+        sheet = ac_front(pavingContractor={"pavingContractorName": "  Tri-State Paving "})
+        assert sheet["L20"].value == "Tri-State Paving"
+        # Row 20 has no box or line of its own: centred across L20:X20, the Subcontractor box's span below
+        assert [sheet[c].alignment.horizontal for c in ("L20", "X20")] == ["centerContinuous"] * 2
+        assert sheet["B20"].value == "Name of Paving Contractor:"
+
+    def test_subcontractor_and_rice_no(self):
+        sheet = ac_front(pavingContractor={"subcontractor": "Ace Milling", "riceNo": "2.456"})
+        assert (sheet["L21"].value, sheet["L22"].value) == ("Ace Milling", "2.456")
+        assert sheet["L23"].value == "(Contractor to Supply)"  # the note under Rice No. stays
+
+    def test_surface_and_ambient_temperatures_fill_their_boxes(self):
+        sheet = ac_front(temperature=FULL_SITE_CONDITIONS["temperature"])
+        assert [sheet[c].value for c in ("AA23", "AE23", "AI23", "AM23")] == ["52", "61", "48", "58"]
+        assert sheet["AA22"].value == "START"
+
+    def test_max_density_is_centred_after_each_label(self):
+        sheet = ac_front(maxDensity={"top": "150.2", "binder": "148.7"})
+        assert (sheet["Y25"].value, sheet["AH25"].value) == ("150.2", "148.7")
+        assert [sheet[c].alignment.horizontal for c in ("Y25", "AD25", "AH25", "AP25")] == ["centerContinuous"] * 4
+        assert (sheet["W25"].value, sheet["AE25"].value) == ("TOP:", "BINDER:")
+
+    def test_numbers_saved_as_numbers_stay_numbers(self):
+        sheet = ac_front(pavingContractor={"riceNo": 2.456}, temperature={"surfaceStart": 285},
+                         maxDensity={"top": 150.2, "binder": 148})
+        assert [sheet[c].value for c in ("L22", "AA23", "Y25", "AH25")] == [2.456, 285, 150.2, 148]
+        assert all(isinstance(sheet[c].value, (int, float)) for c in ("L22", "AA23", "Y25", "AH25"))
+
+    def test_blank_missing_or_malformed_fields_leave_the_cells_empty(self):
+        cells = ("L20", "L21", "L22", "AA23", "AE23", "AI23", "AM23", "Y25", "AH25")
+        for data in ({}, {"pavingContractor": {"pavingContractorName": "  ", "riceNo": ""},
+                          "temperature": {"surfaceStart": None}, "maxDensity": {"top": "", "binder": "   "}},
+                     {"pavingContractor": "x", "temperature": [], "maxDensity": 3}):
+            sheet = ac_front(**data)
+            assert [sheet[c].value for c in cells] == [None] * 9, data
+        assert ac_front()["L20"].alignment.horizontal == "center"  # a blank name leaves the template's style
+
+    def test_an_exported_ac_report_carries_all_nine_fields(self):
+        content = export_bytes(reports=[ac_row(page_number=2, **FULL_SITE_CONDITIONS)])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]
+        assert [sheet[c].value for c in ("L20", "L21", "L22", "AA23", "AE23", "AI23", "AM23", "Y25", "AH25")] == [
+            "Tri-State Paving", "Ace Milling", "2.456", "52", "61", "48", "58", "150.2", "148.7"]
+
+    def test_a_draft_still_gets_its_marker(self):
+        content = export_bytes(idr=DRAFT_IDR, reports=[ac_row(page_number=None, **FULL_SITE_CONDITIONS)])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]
+        assert (sheet["B1"].value, sheet["L20"].value) == ("DRAFT - Not for Submission", "Tri-State Paving")
+
+    def test_typed_value_keeps_numbers_and_trims_text(self):
+        assert [typed_value(v) for v in (3, 2.5, Decimal("1.25"), " 7 ", "", "  ", None, True)] == [
+            3, 2.5, Decimal("1.25"), "7", None, None, None, "True"]
 
 
 # ---------------------------------------------------------------------------
