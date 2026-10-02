@@ -12,7 +12,8 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
-    CHECK_MARK, TextArea, fill_lines, mark_truncated, paragraphs, section, short_date, text_value, write_lines,
+    CHECK_MARK, TextArea, allocate_copies, fill_lines, mark_truncated, paragraphs, section, short_date, text_value,
+    write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -94,29 +95,18 @@ def sheet_count(report_data: Any) -> int:
     return max(1, -(-len(trucks) // len(TRUCK_ROWS)))
 
 
-def sheet_name(index: int) -> str:
-    """
-    Name the Conc Mix sheet at a position among all the IDR's Conc Mix sheets (numbered across its CONC_MIX reports).
-    Takes the zero-based position.
-    Returns "Conc Mix" for the first (the template's own), "Conc Mix 2", "Conc Mix 3", ... for clones.
-    """
-    return CONC_MIX if index == 0 else f"{CONC_MIX} {index + 1}"
-
-
 def allocate_sheets(workbook: WorkbookTemplate, report_data: Any, first_index: int = 0) -> list[str]:
     """
-    Provide the sheets one CONC_MIX report prints on, cloning the blank Conc Mix for every one past the template's
-    own, each placed after the one before. Call it before anything is stamped on Conc Mix, so clones start blank.
+    Provide the sheets one CONC_MIX report prints on (Conc Mix, Conc Mix 2, ... numbered across the IDR's CONC_MIX
+    reports), cloning the blank Conc Mix for each past the template's own and placing each after the one before.
+    Call it before anything is stamped on Conc Mix, so clones start blank.
     Takes the workbook, the report_data (its trucks decide the count) and the position of the report's first sheet
     among the IDR's Conc Mix sheets (0 for the first report).
     Returns the report's sheet names, in order.
     """
-    sheets = [sheet_name(first_index + offset) for offset in range(sheet_count(report_data))]
-    for previous, sheet in zip([None] + sheets, sheets):
-        if sheet != CONC_MIX:
-            workbook.clone_sheet(CONC_MIX, sheet)
-            if previous is not None:
-                workbook.move_sheet(sheet, after=previous)
+    sheets = allocate_copies(workbook, CONC_MIX, sheet_count(report_data), first_index)
+    for previous, sheet in zip(sheets, sheets[1:]):
+        workbook.move_sheet(sheet, after=previous)
     return sheets
 
 

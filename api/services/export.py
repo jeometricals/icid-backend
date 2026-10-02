@@ -19,8 +19,10 @@ from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
 from api.services import export_conc_mix, export_swcb
 from api.services.auto_general import build_auto_general_data
-from api.services.export_common import REPORT_CONT, stamp_draft_marker
-from api.services.export_general import stamp_general
+from api.services.export_common import (
+    REPORT_CONT, allocate_copies, pay_item_page_count, section, stamp_draft_marker,
+)
+from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, stamp_general
 from api.services.xlsx_template import WorkbookTemplate
 
 TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "report_forms.xlsx"
@@ -106,56 +108,51 @@ def _conc_mix_reports(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [r for r in reports if r["report_type"] == "CONC_MIX"]
 
 
-def _extra_sheets(conc_mix: dict[str, Any]) -> int:
+def _page_after_clones(page: Optional[int], extras: list[tuple[Optional[int], int]]) -> Optional[int]:
     """
-    Count the Conc Mix sheets a CONC_MIX report needs past its first (one per 11 trucks).
-    Takes the CONC_MIX report row.
-    Returns the number of extra sheets.
-    """
-    return export_conc_mix.sheet_count(conc_mix["report_data"]) - 1
-
-
-def _page_after_clones(page: Optional[int], conc_mixes: list[dict[str, Any]]) -> Optional[int]:
-    """
-    Renumber a report's page around the Conc Mix clones: the database gives each report one page, and a CONC_MIX
-    report's extra sheets take the numbers right after its own, so every page after it moves down by that many.
-    Takes the report's page number (None on a draft) and the IDR's CONC_MIX reports.
-    Returns the page number to print: the page plus the extra sheets of every CONC_MIX numbered before it.
+    Renumber a report's page around the extra sheets reports print on (pay-item overflow fronts, Conc Mix clones): the
+    database gives each report one page, and a report's extra sheets take the numbers right after its own, so every
+    page after it moves down by that many.
+    Takes the report's page number (None on a draft) and each report's (page number, extra sheet count).
+    Returns the page number to print: the page plus the extra sheets of every report numbered before it.
     """
     if page is None:
         return None
-    return page + sum(_extra_sheets(r) for r in conc_mixes if r["page_number"] is not None and r["page_number"] < page)
+    return page + sum(extra for start, extra in extras if start is not None and start < page)
 
 
-def _swcb_sheets(index: int) -> tuple[str, str]:
-    """
-    Name the Conc Fr / Conc Bk pair an SWCB report prints on.
-    Takes its zero-based position among the IDR's SWCB reports.
-    Returns the template's own pair for the first, ("Conc Fr 2", "Conc Bk 2"), ... for the clones after it.
-    """
-    if index == 0:
-        return export_swcb.CONC_FRONT, export_swcb.CONC_BACK
-    return f"{export_swcb.CONC_FRONT} {index + 1}", f"{export_swcb.CONC_BACK} {index + 1}"
+@dataclass
+class _Sheets:
+    """The sheets each report prints on, allocated before anything is stamped."""
+
+    general_fronts: list[str]
+    swcbs: list[tuple[list[str], str]]  # each SWCB's (front pages, back page)
+    conc_mixes: list[list[str]]
 
 
-def _allocate_sheets(workbook: WorkbookTemplate, swcbs: list[dict[str, Any]],
-                     conc_mixes: list[dict[str, Any]]) -> tuple[list[tuple[str, str]], list[list[str]]]:
+def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], swcbs: list[dict[str, Any]],
+                     conc_mixes: list[dict[str, Any]]) -> _Sheets:
     """
-    Provide every SWCB and CONC_MIX report its sheets before anything is stamped, cloning the blank forms as needed.
-    Conc Mix sheets are numbered across the whole IDR (Conc Mix, Conc Mix 2, ...) whichever report they belong to.
-    Takes the workbook and the SWCB and CONC_MIX reports, in page order.
-    Returns (each SWCB's (front, back) pair, each CONC_MIX's sheet names), in the reports' order.
+    Provide every report its sheets before anything is stamped, cloning the blank forms as needed. Copies are numbered
+    across the whole IDR per form: Gen Fr 2, ... for the General's pay-item overflow; Conc Fr 2, ... for later SWCB
+    reports and pay-item overflow alike, in page order; Conc Bk 2, ... one per later SWCB; Conc Mix 2, ... for later
+    CONC_MIX reports and truck overflow.
+    Takes the workbook, the General's report_data and the SWCB and CONC_MIX reports, in page order.
+    Returns the sheet names for each report.
     """
-    pairs = [_swcb_sheets(index) for index in range(len(swcbs))]
-    for front, back in pairs[1:]:
-        workbook.clone_sheet(export_swcb.CONC_FRONT, front)
-        workbook.clone_sheet(export_swcb.CONC_BACK, back)
-    conc_mix_sheets: list[list[str]] = []
-    used = 0
+    general_fronts = allocate_copies(workbook, GEN_FRONT,
+                                     pay_item_page_count(general_data.get("payItems"), GEN_FRONT_PAY_ITEMS))
+    swcb_sheets, fronts_used = [], 0
+    for index, report in enumerate(swcbs):
+        count = pay_item_page_count(section(report, "report_data").get("payItems"), export_swcb.CONC_FRONT_PAY_ITEMS)
+        fronts = allocate_copies(workbook, export_swcb.CONC_FRONT, count, fronts_used)
+        swcb_sheets.append((fronts, allocate_copies(workbook, export_swcb.CONC_BACK, 1, index)[0]))
+        fronts_used += count
+    conc_mix_sheets, mix_used = [], 0
     for report in conc_mixes:
-        conc_mix_sheets.append(export_conc_mix.allocate_sheets(workbook, report["report_data"], first_index=used))
-        used += len(conc_mix_sheets[-1])
-    return pairs, conc_mix_sheets
+        conc_mix_sheets.append(export_conc_mix.allocate_sheets(workbook, report["report_data"], first_index=mix_used))
+        mix_used += len(conc_mix_sheets[-1])
+    return _Sheets(general_fronts, swcb_sheets, conc_mix_sheets)
 
 
 def _print_order(groups: list[tuple[Optional[UUID], list[str]]], conc_mixes: list[dict[str, Any]],
@@ -201,8 +198,9 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
     Build an IDR's .xlsx export from the report-forms template: the General's pages, then each SWCB report's (on Conc
     Fr / Conc Bk and clones of them), each report followed by its CONC_MIX addendums' Conc Mix sheets; an SWCB's
-    Conc Bk ticks its "See attached" box when it has one. Extra Conc Mix sheets are numbered after their report and
-    counted in OF. A draft IDR's pages are each marked "DRAFT - Not for Submission".
+    Conc Bk ticks its "See attached" box when it has one. Pay items past a front page's table continue on copies of
+    it, right after it. A report's extra sheets are numbered after it and counted in OF. A draft IDR's pages are each
+    marked "DRAFT - Not for Submission".
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -218,38 +216,43 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     general_data, page_number = _general_for_export(idr_id)
     reports = _load_reports(idr_id)
     swcbs, conc_mixes = _swcb_reports(reports), _conc_mix_reports(reports)
-    extra_sheets = sum(_extra_sheets(r) for r in conc_mixes)
-    if extra_sheets and idr.get("total_pages") is not None:
-        idr = {**idr, "total_pages": idr["total_pages"] + extra_sheets}  # each Conc Mix clone is a page of its own
     general_id = next((r["report_id"] for r in reports if r["report_type"] == "GEN" and not r["is_addendum"]), None)
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
-    swcb_sheets, conc_mix_sheets = _allocate_sheets(workbook, swcbs, conc_mixes)
+    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes)
+    # Each report's sheets past its first are pages of their own: they take the numbers after it and count in OF
+    extras = [(page_number, len(sheets.general_fronts) - 1)]
+    extras += [(r["page_number"], len(fronts) - 1) for r, (fronts, _) in zip(swcbs, sheets.swcbs)]
+    extras += [(r["page_number"], len(names) - 1) for r, names in zip(conc_mixes, sheets.conc_mixes)]
+    extra_pages = sum(extra for start, extra in extras if start is not None)
+    if extra_pages and idr.get("total_pages") is not None:
+        idr = {**idr, "total_pages": idr["total_pages"] + extra_pages}
+
     _stamp_contract_info(workbook, project)
     general_pages = stamp_general(workbook, idr, project, inspector, general_data,
-                                  _page_after_clones(page_number, conc_mixes))
+                                  _page_after_clones(page_number, extras), fronts=sheets.general_fronts)
     groups = [(general_id, general_pages)]
     report_cont_used = REPORT_CONT in general_pages
 
     # Reports stamp in page order, so the first to need Report Cont keeps it; later ones have their long text cut
-    for swcb, (front, back) in zip(swcbs, swcb_sheets):
+    for swcb, (fronts, back) in zip(swcbs, sheets.swcbs):
         swcb_pages = export_swcb.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
-                                        page_number=_page_after_clones(swcb["page_number"], conc_mixes),
+                                        page_number=_page_after_clones(swcb["page_number"], extras),
                                         report_data=swcb["report_data"], report_cont_available=not report_cont_used,
-                                        front=front, back=back)
+                                        fronts=fronts, back=back)
         report_cont_used = report_cont_used or REPORT_CONT in swcb_pages
         groups.append((swcb["report_id"], swcb_pages))
         if any(r.get("parent_report_id") == swcb["report_id"] for r in conc_mixes):
             export_swcb.mark_conc_mix_attached(workbook, back)
 
-    for conc_mix, sheets in zip(conc_mixes, conc_mix_sheets):
+    for conc_mix, names in zip(conc_mixes, sheets.conc_mixes):
         export_conc_mix.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
-                               page_number=_page_after_clones(conc_mix["page_number"], conc_mixes),
-                               report_data=conc_mix["report_data"], sheets=sheets)
+                               page_number=_page_after_clones(conc_mix["page_number"], extras),
+                               report_data=conc_mix["report_data"], sheets=names)
 
     # Visible sheets print in tab order, so each page moves right after the one before it (Report Cont from near the
     # front, Conc Mix from between SWR Bk and HC Fr); the first, Gen Fr, is the tab the file opens on
-    pages = _print_order(groups, conc_mixes, conc_mix_sheets)
+    pages = _print_order(groups, conc_mixes, sheets.conc_mixes)
     for previous, page in zip(pages, pages[1:]):
         workbook.move_sheet(page, after=previous)
 

@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 from api.services.export_common import (
     CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
-    WorkforceLayout, flow_text, section, stamp_common_header, stamp_equipment, stamp_pay_items, stamp_report_cont,
-    stamp_safety, stamp_workforce, text_value, write_lines,
+    WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, section, stamp_common_header, stamp_equipment,
+    stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, text_value, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -235,18 +235,22 @@ def _stamp_matrix(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
            report_data: Optional[dict[str, Any]] = None, report_cont_available: bool = True,
-           front: str = CONC_FRONT, back: str = CONC_BACK) -> list[str]:
+           fronts: Optional[list[str]] = None, back: str = CONC_BACK) -> list[str]:
     """
     Stamp an SWCB report onto a Conc Fr / Conc Bk pair, and onto Report Cont when its text runs past the Remarks.
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (None leaves Sheet No. blank), its report_data (None stamps the header only), and whether Report Cont is free
     (False when another report in the export already continues onto it; the Remarks are then cut with a note), and
-    the front and back pages to use (Conc Fr / Conc Bk unless given: a clone pair for an IDR's later SWCB reports).
-    Returns the sheets it used, in print order: front, back, and Report Cont when used; each is set to print on
+    its front pages (Conc Fr and, for pay items past the table, copies of it; None clones them here) and its back
+    page (Conc Bk unless given). Overflow fronts get only a header and pay items.
+    Returns the sheets it used, in print order: the fronts, the back, and Report Cont when used; each is set to print on
     one Letter page, and the caller decides which sheets the workbook shows.
     """
-    stamp_common_header(workbook, front, CONC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
     data = report_data if isinstance(report_data, dict) else {}
+    fronts = fronts or allocate_copies(workbook, CONC_FRONT, pay_item_page_count(data.get("payItems"),
+                                                                                 CONC_FRONT_PAY_ITEMS))
+    front = fronts[0]
+    stamp_common_header(workbook, front, CONC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
 
     flow = flow_text(data.get("description"), data.get("comments"), CONC_FRONT_TEXT, CONC_BACK_TEXT,
                      REPORT_CONT_TEXT if report_cont_available else None)
@@ -257,12 +261,13 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     _stamp_operation(workbook, front, data)
     _stamp_activity(workbook, front, data)
     _stamp_matrix(workbook, front, data)
-    stamp_pay_items(workbook, front, CONC_FRONT_PAY_ITEMS, data.get("payItems"))
+    stamp_pay_item_pages(workbook, fronts, CONC_FRONT_HEADER, CONC_FRONT_PAY_ITEMS, CONC_FRONT_TEXT, idr, project,
+                         contractor, inspector, page_number, data.get("payItems"))
     stamp_workforce(workbook, back, CONC_BACK_WORKFORCE, data)
     stamp_equipment(workbook, back, CONC_BACK_EQUIPMENT, data)
     stamp_safety(workbook, back, CONC_BACK_SAFETY, data)
 
-    pages = [front, back]
+    pages = fronts + [back]
     if flow.report_cont:
         stamp_report_cont(workbook, idr, project, inspector, flow.report_cont)
         pages.append(REPORT_CONT)

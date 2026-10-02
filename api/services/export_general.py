@@ -16,8 +16,8 @@ from typing import Any, Optional
 
 from api.services.export_common import (
     CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout,
-    TextArea, WorkforceLayout, flow_text, stamp_common_header, stamp_equipment, stamp_pay_items,
-    stamp_report_cont, stamp_safety, stamp_workforce, write_lines,
+    TextArea, WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, stamp_common_header, stamp_equipment,
+    stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -97,16 +97,21 @@ def _stamp_front_header(workbook: WorkbookTemplate, idr: dict[str, Any], project
 # ---- The General ------------------------------------------------------------
 
 def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], inspector: Optional[str],
-                  general_data: dict[str, Any], page_number: Optional[int]) -> list[str]:
+                  general_data: dict[str, Any], page_number: Optional[int],
+                  fronts: Optional[list[str]] = None) -> list[str]:
     """
-    Stamp the General onto Gen Fr, Gen Bk and (for long text) Report Cont.
-    Takes the workbook, IDR row, project details (with "contractor"), inspector name, the General's report_data
-    and its page number (None for a composed General).
-    Returns the sheets to print, in order: Gen Fr and Gen Bk always (Gen Bk carries the certification and the
+    Stamp the General onto Gen Fr (and copies of it for pay items past its table), Gen Bk and, for long text,
+    Report Cont.
+    Takes the workbook, IDR row, project details (with "contractor"), inspector name, the General's report_data,
+    its page number (None for a composed General) and its front pages (Gen Fr, Gen Fr 2, ...; None clones them here).
+    Returns the sheets to print, in order: the fronts and Gen Bk always (Gen Bk carries the certification and the
     signature lines even when nothing else is on it), then Report Cont when the text continues onto it.
     """
+    pay_items = general_data.get("payItems")
+    fronts = fronts or allocate_copies(workbook, GEN_FRONT, pay_item_page_count(pay_items, GEN_FRONT_PAY_ITEMS))
     _stamp_front_header(workbook, idr, project, inspector, page_number)
-    stamp_pay_items(workbook, GEN_FRONT, GEN_FRONT_PAY_ITEMS, general_data.get("payItems"))
+    stamp_pay_item_pages(workbook, fronts, GEN_FRONT_HEADER, GEN_FRONT_PAY_ITEMS, GEN_FRONT_TEXT, idr, project,
+                         project.get("contractor"), inspector, page_number, pay_items)
 
     # The General is stamped first, so Report Cont is always free for it
     flow = flow_text(general_data.get("description"), general_data.get("comments"),
@@ -120,7 +125,7 @@ def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict
     stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, general_data)
     stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, general_data)
 
-    sheets = [GEN_FRONT, GEN_BACK]
+    sheets = fronts + [GEN_BACK]
     if flow.report_cont:
         stamp_report_cont(workbook, idr, project, inspector, flow.report_cont)
         sheets.append(REPORT_CONT)

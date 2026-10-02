@@ -26,6 +26,10 @@ PAY_DESCRIPTION_MAX_LINES = 2
 PAY_DESCRIPTION_TRUNCATE_SUFFIX = "..."
 LINE_HEIGHT = {10: 12.75, 8: 11.25}  # points per line of Arial at that size (Excel's default row heights)
 
+# A report with more pay items than its table holds continues on copies of its front page
+PAY_ITEMS_CONTINUED_NEXT = "Pay items continued on next page"
+PAY_ITEMS_CONTINUED_FROM = "Pay items continued from previous page"
+
 
 @dataclass(frozen=True)
 class PayItemsLayout:
@@ -35,6 +39,15 @@ class PayItemsLayout:
     columns: dict[str, str]  # itemNo, budgetCode, payQuantity, quantityChk, description -> column letter
     line_chars_10pt: int
     line_chars_8pt: int
+
+
+@dataclass(frozen=True)
+class TextArea:
+    """A block of ruled lines: its rows, the column the text goes in, and the characters a line holds."""
+
+    rows: range
+    column: str
+    line_chars: int
 
 
 @dataclass(frozen=True)
@@ -222,15 +235,24 @@ def write_lines(workbook: WorkbookTemplate, sheet: str, rows: range, lines: list
 
 # ---- Pay items --------------------------------------------------------------
 
-def pay_item_rows(pay_items: Any, capacity: int) -> list[dict[str, Optional[str]]]:
+def _pay_item_list(pay_items: Any) -> list[dict[str, Any]]:
+    """
+    Read a report's payItems, tolerating a missing list or malformed entries.
+    Takes the saved payItems (anything that isn't a list counts as none).
+    Returns the pay items that are objects, in the inspector's order.
+    """
+    return [item for item in pay_items if isinstance(item, dict)] if isinstance(pay_items, list) else []
+
+
+def pay_item_rows(pay_items: Any, capacity: int, continued: bool = False) -> list[dict[str, Optional[str]]]:
     """
     Lay pay items out for a form's table: the unit folded into Pay Quantity, Quantity Chk left for the RE.
-    Takes the report's payItems (anything that isn't a list counts as none) and the table's row count.
-    Returns at most one dict per table row; when there are more items than rows, the last row says how many more.
+    Takes the sheet's payItems (anything that isn't a list counts as none), the table's row count, and whether the
+    items continue on another sheet (the last row then says so instead of holding an item).
+    Returns at most one dict per table row.
     """
-    items = [item for item in pay_items if isinstance(item, dict)] if isinstance(pay_items, list) else []
     rows = []
-    for item in items:
+    for item in _pay_item_list(pay_items)[: capacity - 1 if continued else capacity]:
         quantity = " ".join(part for part in (text_value(item.get("payQuantity")), text_value(item.get("unit"))) if part)
         rows.append({
             "itemNo": text_value(item.get("itemNo")),
@@ -239,11 +261,25 @@ def pay_item_rows(pay_items: Any, capacity: int) -> list[dict[str, Optional[str]
             "quantityChk": None,
             "description": text_value(item.get("description")),
         })
-    if len(rows) > capacity:
-        more = len(rows) - (capacity - 1)
-        rows = rows[: capacity - 1] + [{"itemNo": None, "budgetCode": None, "payQuantity": None, "quantityChk": None,
-                                        "description": f"… {more} more items in ICID"}]
+    if continued:
+        rows.append({"itemNo": None, "budgetCode": None, "payQuantity": None, "quantityChk": None,
+                     "description": PAY_ITEMS_CONTINUED_NEXT})
     return rows
+
+
+def pay_item_slices(pay_items: Any, capacity: int) -> list[list[dict[str, Any]]]:
+    """
+    Split a report's pay items across its front pages: every page but the last keeps its table's last row for the
+    "continued on next page" note, so holds one item fewer; the last uses every row.
+    Takes the report's payItems and the table's row count.
+    Returns one list of items per page, always at least one (empty when there are no items).
+    """
+    items = _pay_item_list(pay_items)
+    slices = []
+    while len(items) > capacity:
+        slices.append(items[: capacity - 1])
+        items = items[capacity - 1:]
+    return slices + [items]
 
 
 def truncate_to_lines(text: str, width: int, max_lines: int, suffix: str) -> str:
@@ -281,14 +317,16 @@ def fit_pay_description(description: str, layout: PayItemsLayout) -> tuple[str, 
     return text, PAY_DESCRIPTION_MAX_LINES, PAY_DESCRIPTION_SHRINK_FONT_PT
 
 
-def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayout, pay_items: Any) -> None:
+def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayout, pay_items: Any,
+                    continued: bool = False) -> None:
     """
     Write the pay items into a form's table, blanking unused rows. Descriptions wrap, and a row whose description
     needs two lines gets a row tall enough for them (lines x the font's line height).
-    Takes the workbook, sheet name, the table's layout and the report's payItems.
+    Takes the workbook, sheet name, the table's layout, the sheet's payItems (no more than fit) and whether they
+    continue on another sheet (the last row then says "Pay items continued on next page").
     Returns nothing.
     """
-    rows = pay_item_rows(pay_items, len(layout.rows))
+    rows = pay_item_rows(pay_items, len(layout.rows), continued)
     for index, row in enumerate(layout.rows):
         values = rows[index] if index < len(rows) else {}
         for field, column in layout.columns.items():
@@ -303,6 +341,61 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
                 workbook.set_font_size(sheet, cell, font_size)
             if lines > 1:
                 workbook.set_row_height(sheet, row, lines * LINE_HEIGHT[font_size])
+
+
+def pay_item_page_count(pay_items: Any, layout: PayItemsLayout) -> int:
+    """
+    Count the front pages a report's pay items need (see pay_item_slices).
+    Takes the report's payItems and the form's pay-item layout.
+    Returns the number of pages, at least one.
+    """
+    return len(pay_item_slices(pay_items, len(layout.rows)))
+
+
+def copy_names(base: str, count: int, first_index: int = 0) -> list[str]:
+    """
+    Name a run of copies of a template sheet, numbered across the IDR: the template's own sheet, then "<base> 2", ...
+    Takes the template sheet's name, how many sheets and the run's first position (0 for the template's own sheet).
+    Returns the names, in order.
+    """
+    return [base if index == 0 else f"{base} {index + 1}" for index in range(first_index, first_index + count)]
+
+
+def allocate_copies(workbook: WorkbookTemplate, base: str, count: int, first_index: int = 0) -> list[str]:
+    """
+    Provide a run of a template sheet's copies (a report's front pages, its Conc Mix sheets, ...), cloning the blank
+    template sheet for each name past its own. Call it before anything is stamped on the template sheet.
+    Takes the workbook, the template sheet's name, how many sheets and the run's first position (see copy_names).
+    Returns the sheet names, in order.
+    """
+    names = copy_names(base, count, first_index)
+    for name in names:
+        if name != base:
+            workbook.clone_sheet(base, name)
+    return names
+
+
+def stamp_pay_item_pages(workbook: WorkbookTemplate, fronts: list[str], header: HeaderLayout, layout: PayItemsLayout,
+                         text: TextArea, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
+                         inspector: Optional[str], page_number: Optional[int], pay_items: Any) -> None:
+    """
+    Write a report's pay items across its front pages, and give each overflow page its header (the next page number
+    on from the report's) and "Pay items continued from previous page" on its first text line. The caller stamps
+    the first page's header and text; overflow pages' other sections stay blank.
+    Takes the workbook, the front pages, the form's header, pay-item and text layouts, the IDR row, the project row,
+    the contractor's and inspector's names, the report's page number (None leaves Sheet No. blank) and its payItems.
+    Returns nothing; raises ValueError when the pages given don't match what the items need.
+    """
+    slices = pay_item_slices(pay_items, len(layout.rows))
+    if len(fronts) != len(slices):
+        count = len(_pay_item_list(pay_items))
+        raise ValueError(f"{count} pay items need {len(slices)} front pages, got {len(fronts)}")
+    for index, (sheet, items) in enumerate(zip(fronts, slices)):
+        stamp_pay_items(workbook, sheet, layout, items, continued=index < len(fronts) - 1)
+        if index:
+            page = page_number + index if page_number is not None else None
+            stamp_common_header(workbook, sheet, header, idr, project, contractor, inspector, page)
+            write_lines(workbook, sheet, text.rows, [PAY_ITEMS_CONTINUED_FROM], text.column)
 
 
 # ---- Back pages: work force, equipment, MPT/safety checklist ----------------
@@ -514,16 +607,6 @@ REPORT_CONT = "Report Cont"
 REPORT_CONT_DAY_CELLS = ("I11", "J11", "K11", "L11", "M11", "N11", "O11")  # S M T W T F S
 REPORT_CONT_PROJECT_CELLS = {"G14": "project_id", "P14": "registration_code", "I15": "project_description",
                              "F17": "borough"}
-
-
-@dataclass(frozen=True)
-class TextArea:
-    """A block of ruled lines: its rows, the column the text goes in, and the characters a line holds."""
-
-    rows: range
-    column: str
-    line_chars: int
-
 
 REPORT_CONT_TEXT = TextArea(rows=range(21, 46), column="B", line_chars=85)  # B21 … B45, 10 pt lines spanning B:AI
 

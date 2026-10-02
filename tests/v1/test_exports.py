@@ -17,7 +17,7 @@ from api.queries.projects import get_project_contractor_name
 from api.services import export, export_conc_mix, export_swcb
 from api.services.export import generate_idr_export
 from api.services.export_common import (
-    fill_lines, fit_pay_description, paragraphs, pay_item_rows, truncate_to_lines,
+    fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, truncate_to_lines,
 )
 from api.services.export_common import DRAFT_MARKER, REPORT_CONT_TEXT
 from api.services.export_general import GEN_FRONT_PAY_ITEMS
@@ -355,12 +355,15 @@ class TestPayItems:
         assert sheet["N39"].value == "312.50"
         assert sheet["N40"].value == "S.F."
 
-    def test_more_items_than_rows_end_with_a_count(self):
+    def test_more_items_than_rows_continue_on_the_next_page(self):
         general = general_with(payItems=[pay_item(n) for n in range(14)])
-        sheet = exported_workbook(general=general)["Gen Fr"]
+        book = exported_workbook(general=general)
+        sheet = book["Gen Fr"]
         assert sheet["B49"].value == "4.10 AAS"  # 11 items fit, then the note on the 12th row
         assert [sheet[f"{c}50"].value for c in "BGNS"] == [None] * 4
-        assert sheet["X50"].value == "… 3 more items in ICID"
+        assert sheet["X50"].value == "Pay items continued on next page"
+        assert [book["Gen Fr 2"][f"B{row}"].value for row in (39, 40, 41, 42)] == [
+            "4.11 AAS", "4.12 AAS", "4.13 AAS", None]
 
     def test_non_list_pay_items_are_none(self):
         assert pay_item_rows(None, 12) == [] and pay_item_rows({"a": 1}, 12) == [] and pay_item_rows(["x"], 12) == []
@@ -1521,13 +1524,13 @@ def print_order_page_numbers(content: bytes) -> list:
     """
     Read each visible sheet's PAGE number in print order.
     Takes the .xlsx bytes.
-    Returns one value per visible sheet: AH8 on Gen Fr / Conc Fr (and its clones), AD10 on Conc Mix sheets, None on
+    Returns one value per visible sheet: AH8 on Gen Fr / Conc Fr (and their copies), AD10 on Conc Mix sheets, None on
     the others.
     """
     book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
 
     def page(name: str):
-        if name == "Gen Fr" or name.startswith("Conc Fr"):
+        if name.startswith(("Gen Fr", "Conc Fr")):
             return book[name]["AH8"].value
         return book[name]["AD10"].value if name.startswith("Conc Mix") else None
     return [page(name) for name in visible_sheets(content)]
@@ -1805,7 +1808,7 @@ class TestSeveralReportsRender:
         workbook = WorkbookTemplate(TEMPLATE)
         workbook.clone_sheet("Conc Fr", "Conc Fr 2")
         workbook.clone_sheet("Conc Bk", "Conc Bk 2")
-        pages = export_swcb.render(workbook, SUBMITTED_IDR, PROJECT, None, page_number=3, front="Conc Fr 2",
+        pages = export_swcb.render(workbook, SUBMITTED_IDR, PROJECT, None, page_number=3, fronts=["Conc Fr 2"],
                                    back="Conc Bk 2", report_data={"description": "Clone.", "comments": "Back."})
         assert pages == ["Conc Fr 2", "Conc Bk 2"]
         book = written(workbook)
@@ -1834,6 +1837,133 @@ class TestSeveralReportsRender:
         with pytest.raises(ValueError, match="need 2 Conc Mix sheets"):
             export_conc_mix.render(workbook, SUBMITTED_IDR, PROJECT, None, sheets=["Conc Mix"],
                                    report_data={"trucks": [truck(i) for i in range(12)]})
+
+
+# ---------------------------------------------------------------------------
+# Pay items past a front page's table continue on copies of it
+# ---------------------------------------------------------------------------
+
+def pay_items(count: int) -> list[dict]:
+    """
+    Build a report's pay items, numbered from 1.
+    Takes how many.
+    Returns the list.
+    """
+    return [pay_item(n) for n in range(1, count + 1)]
+
+
+def item_numbers(sheet, rows: range) -> list:
+    """
+    Read the Item No. column of a pay-items table.
+    Takes the worksheet and the table's rows.
+    Returns each row's Item No.
+    """
+    return [sheet[f"B{row}"].value for row in rows]
+
+
+GEN_PAY_ROWS, CONC_PAY_ROWS = range(39, 51), range(49, 61)
+CONTINUED_FROM_PREVIOUS = "Pay items continued from previous page"
+
+
+class TestPayItemOverflow:
+    def test_items_split_eleven_a_page_and_the_last_page_uses_every_row(self):
+        sizes = {count: [len(s) for s in pay_item_slices(pay_items(count), 12)] for count in (0, 11, 12, 13, 23, 25)}
+        assert sizes == {0: [0], 11: [11], 12: [12], 13: [11, 2], 23: [11, 12], 25: [11, 11, 3]}
+
+    def test_up_to_twelve_items_need_no_extra_page(self):
+        for count in (0, 11, 12):
+            content = export_bytes(general=general_with(payItems=pay_items(count)))
+            assert visible_sheets(content) == ["Gen Fr", "Gen Bk"], count
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]
+        assert sheet["B50"].value == "4.12 AAS"  # the twelfth item takes the last row: no note needed
+
+    def test_a_general_with_25_items_prints_three_fronts(self):
+        content = export_bytes(general=general_with(payItems=pay_items(25)))
+        assert visible_sheets(content) == ["Gen Fr", "Gen Fr 2", "Gen Fr 3", "Gen Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert item_numbers(book["Gen Fr"], GEN_PAY_ROWS)[:11] == [f"4.{n:02d} AAS" for n in range(1, 12)]
+        assert item_numbers(book["Gen Fr 2"], GEN_PAY_ROWS)[:11] == [f"4.{n:02d} AAS" for n in range(12, 23)]
+        assert item_numbers(book["Gen Fr 3"], GEN_PAY_ROWS) == ["4.23 AAS", "4.24 AAS", "4.25 AAS"] + [None] * 9
+        assert [book[n]["X50"].value for n in ("Gen Fr", "Gen Fr 2", "Gen Fr 3")] == [
+            "Pay items continued on next page", "Pay items continued on next page", None]
+        assert [book[n]["B22"].value for n in ("Gen Fr 2", "Gen Fr 3")] == [CONTINUED_FROM_PREVIOUS] * 2
+
+    def test_an_overflow_front_has_its_header_and_pay_items_only(self):
+        general = general_with(payItems=pay_items(13), description="Poured curb.")
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(general=general)), read_only=True)
+        overflow = book["Gen Fr 2"]
+        assert [overflow[c].value for c in ("G8", "F14", "H17", "AH8", "AM8")] == [
+            "HWS0023", "Benny Bowers Contracting Co.", "Genghis Khan", 2, 4]
+        assert book["Gen Fr"]["B22"].value == "Poured curb."
+        assert [overflow[f"B{row}"].value for row in range(23, 35)] == [None] * 12  # only the note on B22
+        assert overflow["AC36"].value is None
+
+    def test_an_swcb_with_20_items_continues_on_conc_fr_2_before_its_back(self):
+        content = export_bytes(reports=[swcb_row(1, 2, description="Curb.", structural=True, payItems=pay_items(20),
+                                                 inspectionMatrix={"subgradeCompacted": {"base": "Y"}})])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Fr 2", "Conc Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert item_numbers(book["Conc Fr 2"], CONC_PAY_ROWS)[:10] == [f"4.{n:02d} AAS" for n in range(12, 21)] + [None]
+        assert book["Conc Fr"]["U60"].value == "Pay items continued on next page"
+        overflow = book["Conc Fr 2"]
+        assert (overflow["B23"].value, overflow["AH8"].value, overflow["AM8"].value) == (CONTINUED_FROM_PREVIOUS, 3, 4)
+        assert (book["Conc Fr"]["Z29"].value, book["Conc Fr"]["X40"].value) == ("X", "X")
+        assert (overflow["Z29"].value, overflow["X40"].value) == (None, None)  # operation and matrix stay blank
+
+    def test_overflow_fronts_number_across_swcb_reports(self):
+        content = export_bytes(reports=[swcb_row(1, 2, description="First.", payItems=pay_items(20)),
+                                        swcb_row(2, 3, description="Second.", payItems=pay_items(20))])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Fr 2", "Conc Bk",
+                                           "Conc Fr 3", "Conc Fr 4", "Conc Bk 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[n]["B23"].value for n in ("Conc Fr", "Conc Fr 2", "Conc Fr 3", "Conc Fr 4")] == [
+            "First.", CONTINUED_FROM_PREVIOUS, "Second.", CONTINUED_FROM_PREVIOUS]
+        assert print_order_page_numbers(content) == [1, None, 2, 3, None, 4, 5, None]
+
+    def test_the_generals_overflow_and_report_cont_keep_their_order(self):
+        content = export_bytes(general=general_with(payItems=pay_items(13), description=words(600)))
+        assert visible_sheets(content) == ["Gen Fr", "Gen Fr 2", "Gen Bk", "Report Cont"]
+
+    def test_general_and_swcb_overflow_both_count_in_the_page_numbers(self):
+        content = export_bytes(general=general_with(payItems=pay_items(13)),
+                               reports=[swcb_row(1, 2, payItems=pay_items(13))])
+        assert print_order_page_numbers(content) == [1, 2, None, 3, 4, None]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert {book[n]["AM8"].value for n in ("Gen Fr", "Gen Fr 2", "Conc Fr", "Conc Fr 2")} == {5}  # 3 + 2 extra
+
+    def test_a_generals_conc_mix_follows_its_whole_group(self):
+        content = export_bytes(general=general_with(payItems=pay_items(13)), reports=[
+            GENERAL_ROW, conc_mix_row(1, GENERAL_ROW["report_id"], 2), swcb_row(1, 3)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Fr 2", "Gen Bk", "Conc Mix", "Conc Fr", "Conc Bk"]
+        assert print_order_page_numbers(content) == [1, 2, None, 3, 4, None]
+
+    def test_z37_still_ticks_on_an_overflowing_swcb(self):
+        content = export_bytes(reports=[swcb_row(1, 2, payItems=pay_items(13)), conc_mix_row(1, SWCB_1, 3)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Fr 2", "Conc Bk", "Conc Mix"]
+        assert z37_ticks(content, ("Conc Bk",)) == ["X"]
+
+    def test_a_draft_marks_every_overflow_front(self):
+        content = export_bytes(idr=DRAFT_IDR, general={**general_with(payItems=pay_items(13)), "page_number": None},
+                               reports=[swcb_row(1, None, payItems=pay_items(13))])
+        shown = visible_sheets(content)
+        assert shown == ["Gen Fr", "Gen Fr 2", "Gen Bk", "Conc Fr", "Conc Fr 2", "Conc Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[n]["B1"].value for n in shown] == ["DRAFT - Not for Submission"] * len(shown)
+        assert print_order_page_numbers(content) == [None] * len(shown)
+
+    def test_a_composed_generals_overflow_is_unnumbered_and_not_counted(self):
+        swcb = swcb_row(1, 1, payItems=pay_items(13))
+        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 1}, general=None, main_reports=[swcb],
+                               reports=[swcb])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Fr 2", "Gen Bk", "Conc Fr", "Conc Fr 2", "Conc Bk"]
+        assert print_order_page_numbers(content) == [None, None, None, 1, 2, None]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert book["Conc Fr 2"]["AM8"].value == 2  # the SWCB's extra page counts; the composed General's don't
+
+    def test_render_refuses_fronts_that_dont_fit_the_items(self):
+        with pytest.raises(ValueError, match="need 2 front pages, got 1"):
+            export_swcb.render(WorkbookTemplate(TEMPLATE), SUBMITTED_IDR, PROJECT, None, fronts=["Conc Fr"],
+                               report_data={"payItems": pay_items(13)})
 
 
 # ---------------------------------------------------------------------------
