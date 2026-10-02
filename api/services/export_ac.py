@@ -4,10 +4,13 @@ Stamps an IDR's Asphaltic Concrete (AC) report onto the DDC template's AC Fr / A
 AC Fr is the front: the header block, the paving contractor and temperatures, theoretical max density, the pavement
 course table, material usage for top and binder, Pay Items, the A/C requirements and tack coat. AC Bk is the back:
 remarks, work force and equipment, the MPT/safety checklist beside the delivery ticket log, and the signature block.
-Both pages are stamped in full on their first sheet: pavement courses past the fourth, pay items past the tenth and
-remarks past AC Bk's thirteen lines aren't continued yet, and delivery tickets past the tenth are counted in a note.
-Both pages always print with an AC report (AC Bk carries the certification and the signature lines, left blank:
-the inspector and RE sign).
+Courses past the fourth and pay items past the tenth continue on copies of AC Fr (AC Fr 2, AC Fr 3, ...): front
+sheet N carries courses 4N-3 to 4N and its own slice of the pay items, so every "continued" note points to the
+sheet that really follows. A sheet with courses repeats the whole front (header, site conditions, material usage,
+requirements, tack coat); one past the last course carries just the header and pay items. AC Bk's remarks (the
+comments, a note on delivery tickets that didn't fit, and the safety remarks the page has no column for) continue
+on Report Cont when it's free. Both pages always print with an AC report (AC Bk carries the certification and the
+signature lines, left blank: the inspector and RE sign).
 
 AC Bk is Conc Bk's back page sixteen rows lower (same column widths, same tables), with its own Y / N columns, no
 safety remarks column, and the delivery ticket log beside the safety list.
@@ -18,9 +21,10 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
-    EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea, WorkforceLayout, fill_lines,
-    mark_truncated, object_rows, paragraphs, section, stamp_checklist, stamp_common_header, stamp_equipment,
-    stamp_pay_items, stamp_safety, stamp_workforce, tick_box, typed_value, write_lines,
+    REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
+    WorkforceLayout, allocate_copies, checklist_answer, fill_lines, mark_truncated, object_rows, paragraphs,
+    pay_item_page_count, pay_item_slices, section, stamp_checklist, stamp_common_header, stamp_equipment,
+    stamp_pay_items, stamp_report_cont, stamp_safety, stamp_workforce, text_value, tick_box, typed_value, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -59,7 +63,7 @@ MAX_DENSITY_CELLS = {
 }
 
 # Pavement course table: header rows 26-27 (From / To under Station on 27), then four data rows, one merged area per
-# column, 8 pt centred. Courses past the fourth aren't printed yet (G6 continues them on copies of AC Fr).
+# column, 8 pt centred. Courses past the fourth continue on the next AC Fr sheet.
 PAVEMENT_ROWS = range(28, 32)
 PAVEMENT_COLUMNS = {"itemNo": "B", "mixType": "G", "stationFrom": "K", "stationTo": "N", "lane": "Q", "length": "T",
                     "width": "W", "course": "AA", "designDepth": "AE", "area": "AI", "weight": "AM"}
@@ -74,7 +78,7 @@ MATERIAL_CELLS = {
 
 # Pay Items: rows 39-48 under the header at row 38 (15 pt rows), in Conc Fr's columns. AC Fr's column widths are
 # Conc Fr's, so the Description cell U:AP keeps Conc Fr's budget of 46 / 55 characters a line at 10 / 8 pt. Items past
-# the tenth aren't printed yet (G6 continues them on copies of AC Fr).
+# the tenth continue on the next AC Fr sheet (the last row then says so).
 AC_FRONT_PAY_ITEMS = PayItemsLayout(
     rows=range(39, 49),
     columns={"itemNo": "B", "budgetCode": "F", "payQuantity": "K", "quantityChk": "P", "description": "U"},
@@ -99,10 +103,20 @@ REQUIREMENT_HEADING_ROW = 50
 # (L58:S58) stays empty.
 TACK_COAT_CELLS = {"noOfGallons": "AA58", "gallonsPerSy": "AL58", "applicationMethod": "Q61"}
 
+# Continuation notes on AC Fr's copies, in the narrow gap rows: "Continued from previous page" on row 24 (above
+# THEORETICAL MAX DENSITY) on every sheet after the first, and on row 32 (the strip under the pavement table) a
+# pointer onward when courses continue. Sheet names don't print, so the notes say "previous" / "next" page.
+CONTINUED_FROM_CELL = "B24"
+CONTINUED_FROM_NOTE = "Continued from previous page"
+COURSES_CONTINUED_CELL = "B32"
+COURSES_CONTINUED_NOTE = "Pavement courses continued on next page"
+NOTE_FONT_PT = 7
+
 # ---- AC Bk ------------------------------------------------------------------
 
 # Remarks: "Remarks:" at C3 and its subtitle at C4, then thirteen 11 pt ruled lines C5:AH5 ... C17:AH17, as wide as
-# Conc Bk's (75 characters a line). They take the comments; text past the thirteenth line is cut with a note.
+# Conc Bk's (75 characters a line). They take the comments, a note on delivery tickets that didn't fit and the safety
+# remarks; what doesn't fit continues on Report Cont when it's free, and is otherwise cut with a note.
 AC_BACK_TEXT = TextArea(rows=range(5, 18), column="C", line_chars=75)
 
 # Work Force (rows 21-33, No. in G:H): the frontend's five roles on rows 21-25; Teamsters, Surveyors and Masons are
@@ -131,13 +145,21 @@ AC_BACK_EQUIPMENT = EquipmentLayout(
 )
 
 # End of the Day MPT/Safety Check List: rows 36-45, Y in L:M and N in N:O. There is no remarks column (the delivery
-# ticket log takes the rest of the row), so safety remarks, and N/A answers, aren't printed on AC Bk.
+# ticket log takes the rest of the row), so safety remarks and N/A answers go to the end of the remarks instead,
+# under SAFETY_REMARKS_HEADING, each named by its row's label.
 AC_BACK_SAFETY = SafetyLayout(
     rows={"plasticBarrels": 36, "pedestrianBarricades": 37, "timberCurbs": 38, "timberBreakawayBarricades": 39,
           "generalSafety": 40, "localEmergencyAccess": 41, "fencing": 42, "plates": 43, "arrowBoard": 44,
           "siteCleaned": 45},
     yes_column="L", no_column="N", remarks_column=None,
 )
+SAFETY_LABELS = {
+    "plasticBarrels": "Plastic Barrels", "pedestrianBarricades": "Pedestrian Barricades", "timberCurbs": "Timber Curbs",
+    "timberBreakawayBarricades": "Timber/Breakaway Barricades", "generalSafety": "General Safety Conditions",
+    "localEmergencyAccess": "Local and Emergency Access", "fencing": "Fencing", "plates": "Plates",
+    "arrowBoard": "Arrow Board", "siteCleaned": "Site Cleaned and Secured",
+}
+SAFETY_REMARKS_HEADING = "Safety check list remarks:"
 
 # Delivery ticket log, beside the safety list: rows 36-45, LOCATION P:AC, Ticket No. AD:AF, Temperature AG:AI.
 # Tickets past the tenth aren't printed; a note under the comments says how many.
@@ -178,13 +200,24 @@ def _stamp_site_conditions(workbook: WorkbookTemplate, front: str, data: dict[st
         _centre_across(workbook, front, cells, typed_value(density.get(field)))
 
 
-def _stamp_pavement_courses(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def front_count(report_data: Any) -> int:
+    """
+    Count the AC Fr sheets a report prints on: enough for its pavement courses (four a sheet) and for its pay items
+    (ten on the last sheet, nine and a "continued" row on the others), and always at least one.
+    Takes the report_data (anything that isn't an object counts as empty).
+    Returns the number of sheets.
+    """
+    data = report_data if isinstance(report_data, dict) else {}
+    course_sheets = -(-len(object_rows(data, "pavementCourses")) // len(PAVEMENT_ROWS))
+    return max(1, course_sheets, pay_item_page_count(data.get("payItems"), AC_FRONT_PAY_ITEMS))
+
+
+def _stamp_pavement_courses(workbook: WorkbookTemplate, front: str, courses: list[dict[str, Any]]) -> None:
     """
     Fill the pavement course table's four rows, one course a row, blanking the rest.
-    Takes the workbook, the front page and the report_data (courses past the fourth are left out).
+    Takes the workbook, the front page and this sheet's courses (at most four).
     Returns nothing.
     """
-    courses = object_rows(data, "pavementCourses")
     for index, row in enumerate(PAVEMENT_ROWS):
         course = courses[index] if index < len(courses) else {}
         for field, column in PAVEMENT_COLUMNS.items():
@@ -249,18 +282,56 @@ def _stamp_delivery_tickets(workbook: WorkbookTemplate, back: str, data: dict[st
     return max(0, len(tickets) - len(TICKET_ROWS))
 
 
-def _stamp_remarks(workbook: WorkbookTemplate, back: str, comments: Any, more_tickets: int) -> None:
+def safety_remarks(data: dict[str, Any]) -> list[str]:
     """
-    Write the comments on AC Bk's remarks lines, followed by a note when delivery tickets didn't all fit.
-    Takes the workbook, the back page, the comments and how many tickets didn't fit.
-    Returns nothing; text past the thirteenth line is cut with the "continued in ICID" note.
+    List the safety checklist's remarks and N/A answers, which AC Bk has no column for, to print with the remarks.
+    Takes the report_data.
+    Returns a heading and one "<item>: <remarks>" line per item ("N/A" or "N/A — <remarks>" for N/A), or [] if none.
     """
-    note = MORE_TICKETS_NOTE.format(count=more_tickets, plural="" if more_tickets == 1 else "s")
-    queue = paragraphs(comments) + ([note] if more_tickets else [])
+    checks, remarks = section(data, "safetyChecks"), section(data, "safetyRemarks")
+    lines = []
+    for key, label in SAFETY_LABELS.items():
+        answer, remark = checklist_answer(checks.get(key)), text_value(remarks.get(key))
+        if answer == "NA":
+            remark = f"N/A — {remark}" if remark else "N/A"
+        if remark:
+            lines.append(f"{label}: {remark}")
+    return [SAFETY_REMARKS_HEADING] + lines if lines else []
+
+
+def _stamp_remarks(workbook: WorkbookTemplate, back: str, idr: dict[str, Any], project: dict[str, Any],
+                   inspector: Optional[str], queue: list[str], report_cont_available: bool) -> bool:
+    """
+    Write the remarks on AC Bk's lines, continuing on Report Cont when they don't fit and it's free.
+    Takes the workbook, the back page, the IDR row, the project row, the inspector's name, the remarks' paragraphs
+    and whether Report Cont is free.
+    Returns whether the remarks continued on Report Cont; text that still doesn't fit is cut with the
+    "continued in ICID" note.
+    """
+    queue = list(queue)
     lines = fill_lines(queue, len(AC_BACK_TEXT.rows), AC_BACK_TEXT.line_chars)
-    if queue:
+    continued: list[str] = []
+    if queue and report_cont_available:
+        continued = fill_lines(queue, len(REPORT_CONT_TEXT.rows), REPORT_CONT_TEXT.line_chars)
+        if queue:
+            continued = mark_truncated(continued, REPORT_CONT_TEXT.line_chars)
+    elif queue:
         lines = mark_truncated(lines, AC_BACK_TEXT.line_chars)
     write_lines(workbook, back, AC_BACK_TEXT.rows, lines, AC_BACK_TEXT.column)
+    if continued:
+        stamp_report_cont(workbook, idr, project, inspector, continued)
+    return bool(continued)
+
+
+def _write_note(workbook: WorkbookTemplate, sheet: str, cell: str, note: str) -> None:
+    """
+    Write a small continuation note, left-aligned, in one of AC Fr's narrow gap rows.
+    Takes the workbook, the sheet, the cell and the note.
+    Returns nothing.
+    """
+    workbook.set_cell(sheet, cell, note)
+    workbook.set_font_size(sheet, cell, NOTE_FONT_PT)
+    workbook.align_left(sheet, cell)
 
 
 def mark_attachments(workbook: WorkbookTemplate, back: str = AC_BACK) -> None:
@@ -274,33 +345,53 @@ def mark_attachments(workbook: WorkbookTemplate, back: str = AC_BACK) -> None:
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
-           report_data: Optional[dict[str, Any]] = None, fronts: Optional[list[str]] = None,
-           back: str = AC_BACK) -> list[str]:
+           report_data: Optional[dict[str, Any]] = None, report_cont_available: bool = True,
+           fronts: Optional[list[str]] = None, back: str = AC_BACK) -> list[str]:
     """
-    Stamp an AC report onto its AC Fr / AC Bk pages. The "Attached Pages" box is the caller's to tick (see
-    mark_attachments), as it knows the report's attachments.
+    Stamp an AC report onto its AC Fr sheets, AC Bk and, when its remarks run long, Report Cont. The "Attached Pages"
+    box is the caller's to tick (see mark_attachments), as it knows the report's attachments.
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
-    (None leaves Sheet No. blank), its report_data, its front pages (AC Fr unless given) and its back page (AC Bk
+    (its later fronts take the numbers after it; None leaves Sheet No. blank), its report_data, whether Report Cont
+    is free (False when another report in the export already continues onto it; the remarks are then cut with a
+    note), its front pages (AC Fr and its copies, front_count of them; None clones them here) and its back page (AC Bk
     unless given).
-    Returns the sheets it used, in print order: the fronts, then the back; each is set to print on one Letter page,
-    and the caller decides which sheets the workbook shows.
+    Returns the sheets it used, in print order: the fronts, the back, and Report Cont when used; each is set to print
+    on one Letter page, and the caller decides which sheets the workbook shows. Raises ValueError if the fronts given
+    don't match front_count.
     """
-    fronts = fronts or [AC_FRONT]
     data = report_data if isinstance(report_data, dict) else {}
-    stamp_common_header(workbook, fronts[0], AC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
-    _stamp_site_conditions(workbook, fronts[0], data)
-    _stamp_pavement_courses(workbook, fronts[0], data)
-    _stamp_material_usage(workbook, fronts[0], data)
-    stamp_pay_items(workbook, fronts[0], AC_FRONT_PAY_ITEMS, data.get("payItems"))
-    _stamp_requirements(workbook, fronts[0], data)
-    _stamp_tack_coat(workbook, fronts[0], data)
+    fronts = fronts or allocate_copies(workbook, AC_FRONT, front_count(data))
+    if len(fronts) != front_count(data):
+        raise ValueError(f"this AC report needs {front_count(data)} AC Fr sheets, got {len(fronts)}")
+    courses = object_rows(data, "pavementCourses")
+    course_sheets = max(1, -(-len(courses) // len(PAVEMENT_ROWS)))  # the first sheet prints the table even when empty
+    pay_slices = pay_item_slices(data.get("payItems"), len(AC_FRONT_PAY_ITEMS.rows))
+    per_sheet = len(PAVEMENT_ROWS)
+    for index, front in enumerate(fronts):
+        page = page_number + index if page_number is not None else None
+        stamp_common_header(workbook, front, AC_FRONT_HEADER, idr, project, contractor, inspector, page)
+        if index < course_sheets:
+            _stamp_site_conditions(workbook, front, data)
+            _stamp_pavement_courses(workbook, front, courses[index * per_sheet:(index + 1) * per_sheet])
+            _stamp_material_usage(workbook, front, data)
+            _stamp_requirements(workbook, front, data)
+            _stamp_tack_coat(workbook, front, data)
+        if index < len(pay_slices):
+            stamp_pay_items(workbook, front, AC_FRONT_PAY_ITEMS, pay_slices[index],
+                            continued=index < len(pay_slices) - 1)
+        if index:
+            _write_note(workbook, front, CONTINUED_FROM_CELL, CONTINUED_FROM_NOTE)
+        if index < course_sheets - 1:
+            _write_note(workbook, front, COURSES_CONTINUED_CELL, COURSES_CONTINUED_NOTE)
 
     more_tickets = _stamp_delivery_tickets(workbook, back, data)
-    _stamp_remarks(workbook, back, data.get("comments"), more_tickets)
+    note = MORE_TICKETS_NOTE.format(count=more_tickets, plural="" if more_tickets == 1 else "s")
+    queue = paragraphs(data.get("comments")) + ([note] if more_tickets else []) + safety_remarks(data)
+    continued = _stamp_remarks(workbook, back, idr, project, inspector, queue, report_cont_available)
     stamp_workforce(workbook, back, AC_BACK_WORKFORCE, data)
     stamp_equipment(workbook, back, AC_BACK_EQUIPMENT, data)
     stamp_safety(workbook, back, AC_BACK_SAFETY, data)
-    pages = fronts + [back]
+    pages = fronts + [back] + ([REPORT_CONT] if continued else [])
     for sheet in pages:
         workbook.fit_to_letter_page(sheet)
     return pages

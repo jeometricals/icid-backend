@@ -160,16 +160,18 @@ class _Sheets:
     general_fronts: list[str]
     swcbs: list[tuple[list[str], str]]  # each SWCB's (front pages, back page)
     conc_mixes: list[list[str]]
+    ac_fronts: list[str]                # the AC report's AC Fr sheets (empty without one)
 
 
 def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], swcbs: list[dict[str, Any]],
-                     conc_mixes: list[dict[str, Any]]) -> _Sheets:
+                     conc_mixes: list[dict[str, Any]], ac: Optional[dict[str, Any]]) -> _Sheets:
     """
     Provide every report its sheets before anything is stamped, cloning the blank forms as needed. Copies are numbered
     across the whole IDR per form: Gen Fr 2, ... for the General's pay-item overflow; Conc Fr 2, ... for later SWCB
     reports and pay-item overflow alike, in page order; Conc Bk 2, ... one per later SWCB; Conc Mix 2, ... for later
-    CONC_MIX reports and truck overflow.
-    Takes the workbook, the General's report_data and the SWCB and CONC_MIX reports, in page order.
+    CONC_MIX reports and truck overflow; AC Fr 2, ... for the AC report's pavement-course and pay-item overflow.
+    Takes the workbook, the General's report_data, the SWCB and CONC_MIX reports, in page order, and the AC report
+    (or None).
     Returns the sheet names for each report.
     """
     general_fronts = allocate_copies(workbook, GEN_FRONT,
@@ -184,7 +186,8 @@ def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], s
     for report in conc_mixes:
         conc_mix_sheets.append(export_conc_mix.allocate_sheets(workbook, report["report_data"], first_index=mix_used))
         mix_used += len(conc_mix_sheets[-1])
-    return _Sheets(general_fronts, swcb_sheets, conc_mix_sheets)
+    ac_fronts = allocate_copies(workbook, export_ac.AC_FRONT, export_ac.front_count(ac["report_data"])) if ac else []
+    return _Sheets(general_fronts, swcb_sheets, conc_mix_sheets, ac_fronts)
 
 
 def _segments(groups: list[tuple[Optional[UUID], list[str]]], conc_mixes: list[dict[str, Any]],
@@ -272,11 +275,13 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     general_id = next((r["report_id"] for r in reports if r["report_type"] == "GEN" and not r["is_addendum"]), None)
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
-    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes)
+    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes, ac)
     # Each report's sheets past its first are pages of their own: they take the numbers after it and count in OF
     extras = [(page_number, len(sheets.general_fronts) - 1)]
     extras += [(r["page_number"], len(fronts) - 1) for r, (fronts, _) in zip(swcbs, sheets.swcbs)]
     extras += [(r["page_number"], len(names) - 1) for r, names in zip(conc_mixes, sheets.conc_mixes)]
+    if ac is not None:
+        extras.append((ac["page_number"], len(sheets.ac_fronts) - 1))
     extra_pages = sum(extra for start, extra in extras if start is not None)
     if extra_pages and idr.get("total_pages") is not None:
         idr = {**idr, "total_pages": idr["total_pages"] + extra_pages}
@@ -294,7 +299,9 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
         page = _page_after_clones(report["page_number"], extras)
         if report is ac:
             ac_pages = export_ac.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
-                                        page_number=page, report_data=report["report_data"])
+                                        page_number=page, report_data=report["report_data"],
+                                        report_cont_available=not report_cont_used, fronts=sheets.ac_fronts)
+            report_cont_used = report_cont_used or REPORT_CONT in ac_pages
             groups.append((report["report_id"], ac_pages))
             continue
         fronts, back = swcb_sheets[id(report)]

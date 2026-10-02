@@ -2557,10 +2557,10 @@ class TestAcPavementCourses:
         assert [course_row(sheet, row)[0] for row in (28, 29, 30, 31)] == ["6.01", "6.02", "6.03", "6.04"]
         assert [course_row(sheet, row)[10] for row in (28, 29, 30, 31)] == ["1.5", "2.5", "3.5", "4.5"]
 
-    def test_a_fifth_course_isnt_printed_yet(self):
+    def test_a_fifth_course_moves_to_the_next_sheet(self):
         sheet = ac_front(pavementCourses=[course(n) for n in (1, 2, 3, 4, 5)])
         assert [course_row(sheet, row)[0] for row in (28, 29, 30, 31)] == ["6.01", "6.02", "6.03", "6.04"]
-        assert sheet["B32"].value is None  # the gap row under the table stays empty
+        assert sheet["B32"].value == "Pavement courses continued on next page"
 
     def test_numbers_stay_numbers_and_the_header_stays(self):
         sheet = ac_front(pavementCourses=[course(1, length=120, area=None, itemNo=" 6.01 "), "not a row"])
@@ -2618,10 +2618,12 @@ class TestAcPayItems:
         cell = book["AC Fr"]["U39"]
         assert cell.value.endswith("...") and cell.font.sz == 8 and len(cell.value) <= 2 * 55
 
-    def test_past_ten_items_the_rest_arent_printed_yet(self):
-        sheet = ac_front(payItems=pay_items(13))
+    def test_ten_items_fill_the_table_and_more_continue(self):
+        sheet = ac_front(payItems=pay_items(10))
         assert item_numbers(sheet, range(39, 49)) == [f"4.{n:02d} AAS" for n in range(1, 11)]
-        assert sheet["U48"].value == "Sidewalk 10"  # no "continued" note on the last row yet
+        sheet = ac_front(payItems=pay_items(13))
+        assert item_numbers(sheet, range(39, 48)) == [f"4.{n:02d} AAS" for n in range(1, 10)]
+        assert (sheet["B48"].value, sheet["U48"].value) == (None, "Pay items continued on next page")
 
     def test_an_exported_ac_report_carries_its_body_and_draft_marker(self):
         content = export_bytes(idr=DRAFT_IDR, reports=[ac_row(
@@ -2778,8 +2780,12 @@ class TestAcBackRemarks:
         assert sheet["C5"].alignment.horizontal == "left"
         assert (sheet["C3"].value, sheet["C4"].value) == ("Remarks: ", "Comments, Visitors, Other Work, Etc.")
 
-    def test_long_comments_are_cut_on_the_thirteenth_line(self):
-        lines = ac_remarks(ac_back(comments=words(400)))
+    def test_long_comments_are_cut_when_report_cont_is_taken(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        pages = export_ac.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data={"comments": words(400)},
+                                 report_cont_available=False)
+        lines = ac_remarks(written(workbook)["AC Bk"])
+        assert pages == ["AC Fr", "AC Bk"]
         assert all(lines) and all(len(line) <= 75 for line in lines)
         assert lines[12].endswith("… (continued in ICID)")
 
@@ -2907,6 +2913,176 @@ class TestAcComplete:
             "DRAFT - Not for Submission", "Paved Main St.", 1, "185", "X", "T001", None, None]  # signatures blank
         assert (book["AC Fr"]["L20"].value, book["AC Fr"]["W51"].value) == ("Tri-State Paving", "X")
         assert back["B51"].value.startswith("The above described work was incorporated")
+
+
+def ac_sheets(report_cont_available: bool = True, **report_data) -> tuple[list[str], openpyxl.Workbook]:
+    """
+    Render an AC report (cloning its AC Fr sheets itself) and open the result.
+    Takes whether Report Cont is free and report_data fields as keyword arguments.
+    Returns (the pages render used, the read-only workbook).
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    pages = export_ac.render(workbook, SUBMITTED_IDR, PROJECT, None, page_number=2, report_data=report_data,
+                             report_cont_available=report_cont_available)
+    return pages, openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), read_only=True)
+
+
+def first_courses(book, sheets: tuple[str, ...]) -> list[list]:
+    """
+    Read each AC Fr sheet's four pavement-course Item Nos.
+    Takes the workbook and the sheet names.
+    Returns one list of four values per sheet.
+    """
+    return [[book[name][f"B{row}"].value for row in range(28, 32)] for name in sheets]
+
+
+LONG = words(600)  # past AC Bk's 13 lines, and past Report Cont's too
+
+
+class TestAcOverflow:
+    def test_front_count_covers_courses_and_pay_items(self):
+        courses = {n: export_ac.front_count({"pavementCourses": [course(i) for i in range(n)]})
+                   for n in (0, 1, 4, 5, 8, 9, 20)}
+        assert courses == {0: 1, 1: 1, 4: 1, 5: 2, 8: 2, 9: 3, 20: 5}
+        items = {n: export_ac.front_count({"payItems": pay_items(n)}) for n in (10, 11, 20, 21)}
+        assert items == {10: 1, 11: 2, 20: 3, 21: 3}
+        assert export_ac.front_count({"pavementCourses": [course(i) for i in range(9)], "payItems": pay_items(11)}) == 3
+
+    def test_five_courses_take_a_second_sheet(self):
+        pages, book = ac_sheets(pavementCourses=[course(n) for n in range(1, 6)])
+        assert pages == ["AC Fr", "AC Fr 2", "AC Bk"]
+        assert first_courses(book, ("AC Fr", "AC Fr 2")) == [
+            ["6.01", "6.02", "6.03", "6.04"], ["6.05", None, None, None]]
+        assert (book["AC Fr"]["B24"].value, book["AC Fr"]["B32"].value) == (
+            None, "Pavement courses continued on next page")
+        assert (book["AC Fr 2"]["B24"].value, book["AC Fr 2"]["B32"].value) == ("Continued from previous page", None)
+        assert book["AC Fr 2"]["B24"].font.sz == 7
+
+    def test_a_middle_sheet_points_both_ways(self):
+        pages, book = ac_sheets(pavementCourses=[course(n) for n in range(1, 10)])
+        assert pages == ["AC Fr", "AC Fr 2", "AC Fr 3", "AC Bk"]
+        assert [(book[n]["B24"].value, book[n]["B32"].value) for n in ("AC Fr", "AC Fr 2", "AC Fr 3")] == [
+            (None, "Pavement courses continued on next page"),
+            ("Continued from previous page", "Pavement courses continued on next page"),
+            ("Continued from previous page", None)]
+        assert first_courses(book, ("AC Fr 3",)) == [["6.09", None, None, None]]
+
+    def test_twenty_courses_take_five_sheets(self):
+        pages, book = ac_sheets(pavementCourses=[course(n) for n in range(1, 21)])
+        assert pages == ["AC Fr", "AC Fr 2", "AC Fr 3", "AC Fr 4", "AC Fr 5", "AC Bk"]
+        assert first_courses(book, ("AC Fr 5",)) == [["6.17", "6.18", "6.19", "6.20"]]
+
+    def test_every_sheet_with_courses_repeats_the_whole_front(self):
+        _, book = ac_sheets(**FULL_SITE_CONDITIONS, pavementCourses=[course(n) for n in range(1, 6)],
+                            materialUsageTop={"noOfTickets": "12"}, tackCoat={"noOfGallons": "40"},
+                            acRequirements={"subgradeCompacted": {"value": "Y"}})
+        second = book["AC Fr 2"]
+        assert [second[c].value for c in ("G8", "AH8", "AM8", "L20", "AA23", "Y25", "H34", "W50", "W51", "AA58")] == [
+            "HWS0023", 3, 3, "Tri-State Paving", "52", "150.2", "12", "Y", "X", "40"]
+        assert book["AC Fr"]["AH8"].value == 2  # the report's own number; its next sheet takes the next one
+
+    def test_pay_items_continue_on_a_header_only_sheet(self):
+        pages, book = ac_sheets(**FULL_SITE_CONDITIONS, payItems=pay_items(13),
+                                acRequirements={"subgradeCompacted": {"value": "Y"}})
+        assert pages == ["AC Fr", "AC Fr 2", "AC Bk"]
+        second = book["AC Fr 2"]
+        assert item_numbers(second, range(39, 49)) == ["4.10 AAS", "4.11 AAS", "4.12 AAS", "4.13 AAS"] + [None] * 6
+        assert (second["G8"].value, second["AH8"].value, second["B24"].value) == (
+            "HWS0023", 3, "Continued from previous page")
+        # Past the last course: header and pay items only
+        assert [second[c].value for c in ("L20", "AA23", "B28", "W50", "W51", "AA58")] == [None] * 6
+        assert second["B32"].value is None
+
+    def test_twenty_one_items_take_three_sheets(self):
+        pages, book = ac_sheets(payItems=pay_items(21))
+        assert pages == ["AC Fr", "AC Fr 2", "AC Fr 3", "AC Bk"]
+        assert [book[n]["U48"].value for n in ("AC Fr", "AC Fr 2")] == ["Pay items continued on next page"] * 2
+        assert item_numbers(book["AC Fr 3"], range(39, 42)) == ["4.19 AAS", "4.20 AAS", "4.21 AAS"]
+
+    def test_the_description_cascade_works_on_a_continuation_sheet(self):
+        items = pay_items(10) + [pay_item(11, description=WORDS(7))]
+        workbook = WorkbookTemplate(TEMPLATE)
+        export_ac.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data={"payItems": items})
+        book = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))
+        cell = book["AC Fr 2"]["U40"]  # item 10 on row 39, item 11 on row 40
+        assert (cell.value, cell.font.sz, book["AC Fr 2"].row_dimensions[40].height) == (WORDS(7), 10, 25.5)
+
+    def test_courses_and_pay_items_share_the_sheets(self):
+        pages, book = ac_sheets(pavementCourses=[course(n) for n in range(1, 10)], payItems=pay_items(13))
+        assert pages == ["AC Fr", "AC Fr 2", "AC Fr 3", "AC Bk"]
+        assert first_courses(book, ("AC Fr", "AC Fr 2", "AC Fr 3")) == [
+            ["6.01", "6.02", "6.03", "6.04"], ["6.05", "6.06", "6.07", "6.08"], ["6.09", None, None, None]]
+        assert [book[n]["B39"].value for n in ("AC Fr", "AC Fr 2", "AC Fr 3")] == ["4.01 AAS", "4.10 AAS", None]
+        assert [book[n]["U48"].value for n in ("AC Fr", "AC Fr 2")] == ["Pay items continued on next page", None]
+
+    def test_render_refuses_fronts_that_dont_fit(self):
+        with pytest.raises(ValueError, match="needs 2 AC Fr sheets, got 1"):
+            export_ac.render(WorkbookTemplate(TEMPLATE), SUBMITTED_IDR, PROJECT, None, fronts=["AC Fr"],
+                             report_data={"pavementCourses": [course(n) for n in range(5)]})
+
+    def test_the_dispatcher_numbers_the_ac_sheets_and_shifts_what_follows(self):
+        ac = ac_row(page_number=2, pavementCourses=[course(n) for n in range(9)])
+        content = export_bytes(reports=[GENERAL_ROW, ac, swcb_row(1, 3)])
+        assert tab_order(content) == (["Gen Fr", "Gen Bk", "AC Fr", "AC Fr 2", "AC Fr 3", "AC Bk", "Conc Fr",
+                                       "Conc Bk"], "AC Fr")
+        assert print_order_page_numbers(content) == [1, None, 2, 3, 4, None, 5, None]
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Fr"]["AM8"].value == 5  # 3 + 2
+
+
+class TestAcRemarksCascade:
+    def test_long_remarks_continue_on_report_cont(self):
+        content = export_bytes(reports=[ac_row(page_number=2, comments=LONG)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Report Cont"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert ac_remarks(book["AC Bk"])[12] is not None and "continued" not in ac_remarks(book["AC Bk"])[12]
+        assert book["Report Cont"]["B21"].value.startswith("word")
+        assert book["AC Bk"]["C48"].value == "X"  # its remarks continue on another page
+
+    def test_the_ticket_note_and_safety_remarks_follow_the_comments(self):
+        sheet = ac_back(comments="Paved Main St.", deliveryTickets=[ticket(n) for n in range(1, 12)],
+                        safetyChecks={"fencing": "NA", "plates": "Y"},
+                        safetyRemarks={"fencing": "Not needed", "plates": "Two plates on Main"})
+        assert ac_remarks(sheet)[:6] == [
+            "Paved Main St.", "[Note] 1 more delivery ticket — see ICID", "Safety check list remarks:",
+            "Fencing: N/A — Not needed", "Plates: Two plates on Main", None]
+
+    def test_an_n_a_answer_without_remarks_is_still_listed(self):
+        assert ac_remarks(ac_back(safetyChecks={"arrowBoard": "NA"}))[:3] == [
+            "Safety check list remarks:", "Arrow Board: N/A", None]
+        assert export_ac.safety_remarks({"safetyChecks": {"plates": "Y"}}) == []
+
+    def test_the_general_keeps_report_cont_and_the_ac_remarks_are_cut(self):
+        content = export_bytes(general=general_with(description=words(600)),
+                               reports=[GENERAL_ROW, ac_row(page_number=2, comments=LONG)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Report Cont", "AC Fr", "AC Bk"]
+        back = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Bk"]
+        assert ac_remarks(back)[12].endswith("… (continued in ICID)")
+        assert back["C48"].value is None
+
+    def test_an_ac_report_before_an_swcb_takes_report_cont(self):
+        content = export_bytes(reports=[ac_row(page_number=2, comments=LONG),
+                                        swcb_row(1, 3, description=words(600))])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Report Cont", "Conc Fr", "Conc Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert book["Conc Bk"]["C34"].value.endswith("… (continued in ICID)")
+        assert (book["AC Bk"]["C48"].value, book["Conc Bk"]["C52"].value) == ("X", None)
+
+    def test_an_swcb_before_the_ac_report_takes_report_cont(self):
+        content = export_bytes(reports=[swcb_row(1, 2, description=words(600)),
+                                        ac_row(page_number=3, comments=LONG)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Report Cont", "AC Fr", "AC Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert ac_remarks(book["AC Bk"])[12].endswith("… (continued in ICID)")
+        assert (book["Conc Bk"]["C52"].value, book["AC Bk"]["C48"].value) == ("X", None)
+
+    def test_a_draft_marks_every_ac_sheet_and_report_cont(self):
+        content = export_bytes(idr=DRAFT_IDR, general={**GENERAL, "page_number": None}, reports=[ac_row(
+            page_number=None, comments=LONG, pavementCourses=[course(n) for n in range(5)], payItems=pay_items(11))])
+        shown = visible_sheets(content)
+        assert shown == ["Gen Fr", "Gen Bk", "AC Fr", "AC Fr 2", "AC Bk", "Report Cont"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[n]["B1"].value for n in shown] == ["DRAFT - Not for Submission"] * len(shown)
+        assert print_order_page_numbers(content) == [None] * len(shown)
 
 
 # ---------------------------------------------------------------------------
