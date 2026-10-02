@@ -1466,7 +1466,7 @@ class TestBuildAutoGeneralData:
     def test_unit_carried_through_from_multiple_consistent_reports(self, caplog):
         children = [
             _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
-            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF"), _pay("6.01", "B", "3", unit="TON")]}),
+            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF"), _pay("6.01", "B", "3", unit="TON")]}),
         ]
         with caplog.at_level(logging.WARNING, logger="api.services.auto_general"):
             items = build_auto_general_data(children)["payItems"]
@@ -1479,7 +1479,7 @@ class TestBuildAutoGeneralData:
     def test_missing_or_empty_unit_becomes_empty_string(self):
         children = [
             _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
-            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit=""), _pay("6.01", "B", "3", unit=None)]}),
+            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit=""), _pay("6.01", "B", "3", unit=None)]}),
         ]
         items = build_auto_general_data(children)["payItems"]
         assert [i["unit"] for i in items] == ["", ""]
@@ -1488,14 +1488,14 @@ class TestBuildAutoGeneralData:
         # An older child without a unit does not blank out a later child's unit.
         children = [
             _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
-            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF")]}),
+            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF")]}),
         ]
         assert build_auto_general_data(children)["payItems"][0]["unit"] == "SF"
 
     def test_conflicting_units_first_wins_and_warns(self, caplog):
         children = [
             _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
-            _child("AC", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SY")]}),
+            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SY")]}),
         ]
         with caplog.at_level(logging.WARNING, logger="api.services.auto_general"):
             item = build_auto_general_data(children)["payItems"][0]
@@ -1514,6 +1514,19 @@ class TestBuildAutoGeneralData:
             _child("CONC", {"safetyChecks": {"fencing": True}, "equipment": {"backhoe": {"model": "X"}}}),
         ]
         assert set(build_auto_general_data(children).keys()) == {"description", "payItems"}
+
+    def test_ac_stays_out_of_the_merge(self):
+        # AC prints on its own AC Fr / AC Bk, pay items included, so neither its description nor its items repeat here
+        children = [
+            _child("SWCB", {"description": "Poured curb.", "payItems": [_pay("4.13", "B", "10", unit="SF")]}),
+            _child("AC", {"description": "Paved the lane.", "payItems": [_pay("6.01", "B", "3", unit="TON")]}),
+        ]
+        data = build_auto_general_data(children)
+        assert data["description"] == f"Sidewalk, Curb, Concrete Base: Poured curb.\n\n{DESCRIPTION_FOOTER}"
+        assert [item["itemNo"] for item in data["payItems"]] == ["4.13"]
+        # Only AC: just the footer, and no items
+        assert build_auto_general_data([_child("AC", {"payItems": [_pay("6.01", "B", "3")]})]) == {
+            "description": DESCRIPTION_FOOTER, "payItems": []}
 
 
 @contextmanager
@@ -1557,6 +1570,17 @@ class TestRegenerateAutoGeneral:
         assert "description" in m["create"].call_args.args[1]
         m["update"].assert_not_called()
         m["delete"].assert_not_called()
+
+    def test_ac_counts_toward_the_threshold_but_stays_out_of_the_merge(self, client):
+        children = [
+            _child("SWCB", {"description": "Poured curb."}),
+            _child("AC", {"description": "Paved the lane.", "payItems": [_pay("6.01", "B", "3", unit="TON")]}),
+        ]
+        with patched_service(idr=IDR_ACTIVE, general=None, main_reports=children) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_called_once()  # two contributing reports, AC one of them
+        assert m["create"].call_args.args[1] == {
+            "description": f"Sidewalk, Curb, Concrete Base: Poured curb.\n\n{DESCRIPTION_FOOTER}", "payItems": []}
 
     def test_swcb_contributes_to_auto_general_with_its_label(self, client):
         children = [

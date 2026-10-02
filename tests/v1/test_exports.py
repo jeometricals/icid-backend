@@ -15,7 +15,7 @@ import pytest
 
 from api.queries.projects import get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
-from api.services import export, export_attachments, export_conc_mix, export_swcb
+from api.services import export, export_ac, export_attachments, export_conc_mix, export_swcb
 from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, truncate_to_lines,
@@ -1576,13 +1576,13 @@ def print_order_page_numbers(content: bytes) -> list:
     """
     Read each visible sheet's PAGE number in print order.
     Takes the .xlsx bytes.
-    Returns one value per visible sheet: AH8 on Gen Fr / Conc Fr (and their copies), AD10 on Conc Mix sheets, None on
+    Returns one value per visible sheet: AH8 on Gen Fr / Conc Fr / AC Fr (and copies), AD10 on Conc Mix sheets, None on
     the others.
     """
     book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
 
     def page(name: str):
-        if name.startswith(("Gen Fr", "Conc Fr")):
+        if name.startswith(("Gen Fr", "Conc Fr", "AC Fr")):
             return book[name]["AH8"].value
         return book[name]["AD10"].value if name.startswith("Conc Mix") else None
     return [page(name) for name in visible_sheets(content)]
@@ -1696,10 +1696,10 @@ class TestConcMixExport:
         assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Bk"]["Z37"].value is None
 
     def test_a_conc_mix_without_an_exported_parent_prints_at_the_end(self):
-        ac_report = {"report_id": UUID("5f607182-93a4-4b52-c6d7-e8f9a0b1c2d3"), "report_type": "AC",
-                     "is_addendum": False, "parent_report_id": None, "page_number": 2, "report_data": {}}
-        for parent in (None, ac_report["report_id"]):  # a direct-API row with no parent; an AC report's addendum
-            content = export_bytes(reports=[GENERAL_ROW, ac_report, swcb_report(page_number=4, description="x"),
+        sewer = {"report_id": UUID("5f607182-93a4-4b52-c6d7-e8f9a0b1c2d3"), "report_type": "SWR",
+                 "is_addendum": False, "parent_report_id": None, "page_number": 2, "report_data": {}}
+        for parent in (None, sewer["report_id"]):  # a direct-API row with no parent; a Sewer report's addendum
+            content = export_bytes(reports=[GENERAL_ROW, sewer, swcb_report(page_number=4, description="x"),
                                             conc_mix_report(page_number=3, parent=parent)])
             assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Conc Mix"], parent
 
@@ -2267,10 +2267,10 @@ class TestAttachmentsExport:
         assert [len(pictures(content, f"Attachments {n}")) for n in (1, 2, 3)] == [1, 0, 1]
 
     def test_an_unprinted_reports_attachments_come_last(self):
-        ac_report = {"report_id": UUID(int=0xAC01), "report_type": "AC", "is_addendum": False,
-                     "parent_report_id": None, "page_number": 3, "report_data": {}}
-        rows = [attachment(1, SWCB_1), attachment(2, ac_report["report_id"])]
-        content = export_bytes(reports=[swcb_row(1, 2), ac_report], attachments=rows,
+        sewer = {"report_id": UUID(int=0x5E01), "report_type": "SWR", "is_addendum": False,
+                 "parent_report_id": None, "page_number": 3, "report_data": {}}
+        rows = [attachment(1, SWCB_1), attachment(2, sewer["report_id"])]
+        content = export_bytes(reports=[swcb_row(1, 2), sewer], attachments=rows,
                                files={r["storage_path"]: image_bytes("JPEG") for r in rows})
         assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Attachments 1",
                                            "Attachments 2"]
@@ -2282,6 +2282,151 @@ class TestAttachmentsExport:
         assert "WHERE report_id = ANY(%s) AND is_uploaded" in sql
         assert "ORDER BY report_id, uploaded_at, attachment_id" in sql
         assert params == ([SWCB_1, SWCB_2],)
+
+
+# ---------------------------------------------------------------------------
+# export_ac.render and the dispatcher: an AC report on AC Fr / AC Bk (header only so far)
+# ---------------------------------------------------------------------------
+
+def ac_row(number: int = 1, page_number: Optional[int] = 2, **report_data) -> dict:
+    """
+    Build an AC report row as list_reports_for_idr returns it.
+    Takes its number (for a distinct id), its page number and report_data fields as keyword arguments.
+    Returns the row.
+    """
+    return {"report_id": UUID(int=0xAC00 + number), "report_type": "AC", "is_addendum": False,
+            "parent_report_id": None, "page_number": page_number, "report_data": report_data}
+
+
+def ac_render(idr: dict = SUBMITTED_IDR, page_number: Optional[int] = 2) -> tuple[list[str], bytes]:
+    """
+    Run export_ac.render on a fresh template and serialize the result.
+    Takes the IDR row and the report's page number.
+    Returns (the pages render returned, the .xlsx bytes).
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    pages = export_ac.render(workbook, idr, PROJECT, "Benny Bowers Contracting Co.", inspector="Genghis Khan",
+                             page_number=page_number, report_data={})
+    return pages, workbook.to_bytes()
+
+
+class TestAcHeader:
+    def test_project_details_and_inspector_land_on_ac_fr(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(ac_render()[1]), read_only=True)["AC Fr"]
+        assert [sheet[c].value for c in ("G8", "P8", "I10", "F12", "F14", "H17")] == [
+            "HWS0023", "2024123457", "Installation of Curb, Sidewalk & Ped-Ramp <Queens>", "Queens",
+            "Benny Bowers Contracting Co.", "Genghis Khan",
+        ]
+
+    def test_date_day_and_sheet_number(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(ac_render()[1]), read_only=True)["AC Fr"]
+        assert sheet["AI4"].value == "9/30/26"  # General-formatted, so text
+        assert sheet["AL5"].fill.fill_type == "solid"  # Wednesday
+        assert sheet["AH6"].value is None  # no I.R. No. in the data model yet
+        assert (sheet["AH8"].value, sheet["AM8"].value) == (2, 3)
+
+    def test_times_temperatures_and_weather(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(ac_render()[1]), read_only=True)["AC Fr"]
+        assert sheet["AG10"].value == "( Start 07:00 End 15:30 )"
+        assert sheet["AG12"].value == "( Start 06:45 End ________ )"
+        assert (sheet["AD13"].value, sheet["AK13"].value) == ("Low  45", "High  62.5")
+        assert (sheet["AD15"].value, sheet["AK15"].value) == ("AM\nCloudy", "PM\nRain")
+        assert sheet["AD15"].alignment.wrap_text is True
+
+    def test_no_contract_info_formulas_left_on_ac_fr(self):
+        part = f"xl/worksheets/{SHEET_PARTS['AC Fr']}"
+        assert zipfile.ZipFile(TEMPLATE).read(part).decode().count("<f>") == 5  # G8, P8, I10, F12, F14
+        assert "<f>" not in zipfile.ZipFile(io.BytesIO(ac_render()[1])).read(part).decode()
+
+    def test_a_draft_leaves_the_sheet_number_blank(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(ac_render(DRAFT_IDR, None)[1]), read_only=True)["AC Fr"]
+        assert (sheet["AH8"].value, sheet["AM8"].value) == (None, None)
+
+    def test_render_returns_both_pages_set_to_one_letter_page(self):
+        pages, content = ac_render()
+        assert pages == ["AC Fr", "AC Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        for name in pages:
+            setup = book[name].page_setup
+            assert (setup.paperSize, setup.orientation, setup.fitToWidth, setup.fitToHeight) == (
+                1, "portrait", 1, 1), name
+
+    def test_ac_bk_is_left_as_the_template_has_it(self):
+        # No body stamping yet: AC Bk's cells are untouched (only its print setup changes)
+        part = f"xl/worksheets/{SHEET_PARTS['AC Bk']}"
+        cells = lambda xml: re.search(r"<sheetData>.*</sheetData>", xml, re.DOTALL).group(0)
+        rendered = zipfile.ZipFile(io.BytesIO(ac_render()[1])).read(part).decode()
+        assert cells(rendered) == cells(zipfile.ZipFile(TEMPLATE).read(part).decode())
+
+    def test_render_leaves_every_other_sheet_as_the_template_has_it(self):
+        rendered = zipfile.ZipFile(io.BytesIO(ac_render()[1]))
+        template = zipfile.ZipFile(TEMPLATE)
+        ours = {f"xl/worksheets/{SHEET_PARTS[name]}" for name in ("AC Fr", "AC Bk")}
+        others = [n for n in template.namelist() if n.startswith("xl/worksheets/sheet") and n not in ours]
+        assert [n for n in others if rendered.read(n) != template.read(n)] == []
+
+
+class TestAcExport:
+    def test_an_ac_report_prints_ac_fr_and_ac_bk(self):
+        content = export_bytes(reports=[ac_row(page_number=2)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk"]
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]
+        assert (sheet["H17"].value, sheet["AH8"].value, sheet["AM8"].value) == ("Genghis Khan", 2, 3)
+
+    def test_without_an_ac_report_both_pages_stay_hidden(self):
+        visible = visible_sheets(export_bytes(reports=[swcb_row(1, 2)]))
+        assert "AC Fr" not in visible and "AC Bk" not in visible
+
+    def test_an_ac_addendum_row_isnt_printed_as_an_ac_report(self):
+        assert "AC Fr" not in visible_sheets(export_bytes(reports=[{**ac_row(), "is_addendum": True}]))
+
+    def test_a_draft_marks_both_pages(self):
+        content = export_bytes(idr=DRAFT_IDR, reports=[ac_row(page_number=None)])
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[n]["B1"].value for n in ("AC Fr", "AC Bk")] == ["DRAFT - Not for Submission"] * 2
+        assert (book["AC Fr"]["AH8"].value, book["AC Fr"]["AM8"].value) == (None, None)
+
+    def test_ac_prints_between_the_general_and_an_swcb_numbered_after_it(self):
+        content = export_bytes(reports=[GENERAL_ROW, ac_row(page_number=2), swcb_row(1, 3)])
+        assert tab_order(content) == (["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Conc Fr", "Conc Bk"], "AC Fr")
+        assert print_order_page_numbers(content) == [1, None, 2, None, 3, None]
+
+    def test_ac_prints_after_an_swcb_numbered_before_it(self):
+        content = export_bytes(reports=[swcb_row(1, 2), ac_row(page_number=3)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "AC Fr", "AC Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["Conc Fr"]["AH8"].value, book["AC Fr"]["AH8"].value) == (2, 3)
+
+    def test_general_ac_swcb_and_conc_mix_print_in_their_slots(self):
+        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 4}, reports=[
+            GENERAL_ROW, ac_row(page_number=2), swcb_row(1, 3), conc_mix_row(1, SWCB_1, 4, trucks=12)])
+        assert tab_order(content) == (
+            ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Conc Fr", "Conc Bk", "Conc Mix", "Conc Mix 2"], "AC Fr")
+        # The CONC_MIX's second sheet takes page 5 and counts in OF; AC keeps its own number
+        assert print_order_page_numbers(content) == [1, None, 2, None, 3, None, 4, 5]
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]["AM8"].value == 5
+
+    def test_an_ac_reports_conc_mix_and_attachments_follow_it(self):
+        ac = ac_row(page_number=2)
+        photo = attachment(1, ac["report_id"])
+        content = export_bytes(reports=[ac, conc_mix_row(1, ac["report_id"], 3), swcb_row(1, 4)],
+                               attachments=[photo], files={photo["storage_path"]: image_bytes("JPEG")})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Attachments 1", "Conc Mix",
+                                           "Conc Fr", "Conc Bk"]
+
+    def test_only_the_first_ac_report_prints(self):
+        content = export_bytes(reports=[ac_row(1, 2), ac_row(2, 3)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk"]
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]["AH8"].value == 2
+
+    def test_a_composed_general_leaves_ac_out_of_its_description_and_pay_items(self):
+        swcb = swcb_row(1, 1, description="Poured curb.", payItems=[pay_item(1)])
+        ac = ac_row(page_number=2, payItems=[pay_item(2)])
+        content = export_bytes(general=None, main_reports=[swcb, ac], reports=[swcb, ac])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]
+        assert sheet["B22"].value == "Sidewalk, Curb, Concrete Base: Poured curb."
+        assert "Asphaltic" not in " ".join(str(sheet[f"B{row}"].value or "") for row in range(22, 35))
+        assert [sheet[f"B{row}"].value for row in (39, 40)] == ["4.01 AAS", None]
 
 
 # ---------------------------------------------------------------------------
@@ -2327,7 +2472,8 @@ class TestDraftExport:
 
 # Worksheet part for each export sheet in the template package
 SHEET_PARTS = {"Gen Fr": "sheet4.xml", "Gen Bk": "sheet5.xml", "Report Cont": "sheet3.xml",
-               "Conc Fr": "sheet19.xml", "Conc Bk": "sheet20.xml", "Conc Mix": "sheet8.xml"}
+               "Conc Fr": "sheet19.xml", "Conc Bk": "sheet20.xml", "Conc Mix": "sheet8.xml",
+               "AC Fr": "sheet17.xml", "AC Bk": "sheet18.xml"}
 
 
 # ---------------------------------------------------------------------------

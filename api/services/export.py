@@ -21,7 +21,7 @@ from api.queries.projects import get_project_by_id, get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
 from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
-from api.services import export_attachments, export_conc_mix, export_swcb
+from api.services import export_ac, export_attachments, export_conc_mix, export_swcb
 from api.services.auto_general import build_auto_general_data
 from api.services.export_common import (
     REPORT_CONT, allocate_copies, pay_item_page_count, section, stamp_draft_marker,
@@ -121,6 +121,16 @@ def _swcb_reports(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [r for r in reports if r["report_type"] == "SWCB" and not r["is_addendum"]]
 
 
+def _ac_report(reports: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """
+    Find the IDR's Asphaltic Concrete report to print on AC Fr / AC Bk.
+    Takes the IDR's reports, in page order.
+    Returns the first non-addendum AC report, or None. A second AC report isn't exported yet (the template has one
+    AC Fr / AC Bk pair, and AC isn't cloned the way SWCB is).
+    """
+    return next((r for r in reports if r["report_type"] == "AC" and not r["is_addendum"]), None)
+
+
 def _conc_mix_reports(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Find the IDR's Concrete Truck & Mix Info reports, each printed on one or more Conc Mix sheets.
@@ -183,7 +193,7 @@ def _segments(groups: list[tuple[Optional[UUID], list[str]]], conc_mixes: list[d
     Put the printed reports in print order: each main report, then its CONC_MIX addendums.
     Takes the main reports' groups in page order ((report id, its pages, including Report Cont when it continues
     there); the id is None for a General composed for the export), the CONC_MIX reports and each one's sheets.
-    Returns (report id, its pages) for each, in order. A CONC_MIX whose parent isn't printed (an AC report, not
+    Returns (report id, its pages) for each, in order. A CONC_MIX whose parent isn't printed (a report type not
     exported yet), or that has none, comes last.
     """
     printed = {report_id for report_id, _ in groups if report_id is not None}
@@ -239,10 +249,11 @@ def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) ->
 def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
     Build an IDR's .xlsx export from the report-forms template: the General's pages, then each SWCB report's (on Conc
-    Fr / Conc Bk and clones of them), each report followed by its CONC_MIX addendums' Conc Mix sheets; an SWCB's
-    Conc Bk ticks its "See attached" box when it has one. Pay items past a front page's table continue on copies of
-    it, right after it. A report's extra sheets are numbered after it and counted in OF. Each report's attachments
-    follow its last page, one unnumbered page each. A draft IDR's pages are each marked "DRAFT - Not for Submission".
+    Fr / Conc Bk and clones of them) and the AC report's (AC Fr / AC Bk), in page order, each report followed by its
+    CONC_MIX addendums' Conc Mix sheets; an SWCB's Conc Bk ticks its "See attached" box when it has one. Pay items past
+    a front page's table continue on copies of it, right after it. A report's extra sheets are numbered after it and
+    counted in OF. Each report's attachments follow its last page, one unnumbered page each. A draft IDR's pages are
+    each marked "DRAFT - Not for Submission".
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -257,7 +268,7 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     inspector = _inspector_name(get_user_by_id(idr["reporter_uuid"]))
     general_data, page_number = _general_for_export(idr_id)
     reports = _load_reports(idr_id)
-    swcbs, conc_mixes = _swcb_reports(reports), _conc_mix_reports(reports)
+    swcbs, conc_mixes, ac = _swcb_reports(reports), _conc_mix_reports(reports), _ac_report(reports)
     general_id = next((r["report_id"] for r in reports if r["report_type"] == "GEN" and not r["is_addendum"]), None)
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
@@ -276,15 +287,23 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     groups = [(general_id, general_pages)]
     report_cont_used = REPORT_CONT in general_pages
 
-    # Reports stamp in page order, so the first to need Report Cont keeps it; later ones have their long text cut
-    for swcb, (fronts, back) in zip(swcbs, sheets.swcbs):
+    # The printed main reports stamp in page order, so their groups print in that order and the first to need
+    # Report Cont keeps it; later ones have their long text cut
+    swcb_sheets = {id(swcb): pair for swcb, pair in zip(swcbs, sheets.swcbs)}
+    for report in (r for r in reports if id(r) in swcb_sheets or r is ac):
+        page = _page_after_clones(report["page_number"], extras)
+        if report is ac:
+            groups.append((report["report_id"], export_ac.render(
+                workbook, idr, project, project.get("contractor"), inspector=inspector, page_number=page,
+                report_data=report["report_data"])))
+            continue
+        fronts, back = swcb_sheets[id(report)]
         swcb_pages = export_swcb.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
-                                        page_number=_page_after_clones(swcb["page_number"], extras),
-                                        report_data=swcb["report_data"], report_cont_available=not report_cont_used,
-                                        fronts=fronts, back=back)
+                                        page_number=page, report_data=report["report_data"],
+                                        report_cont_available=not report_cont_used, fronts=fronts, back=back)
         report_cont_used = report_cont_used or REPORT_CONT in swcb_pages
-        groups.append((swcb["report_id"], swcb_pages))
-        if any(r.get("parent_report_id") == swcb["report_id"] for r in conc_mixes):
+        groups.append((report["report_id"], swcb_pages))
+        if any(r.get("parent_report_id") == report["report_id"] for r in conc_mixes):
             export_swcb.mark_conc_mix_attached(workbook, back)
 
     for conc_mix, names in zip(conc_mixes, sheets.conc_mixes):
@@ -292,7 +311,7 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
                                page_number=_page_after_clones(conc_mix["page_number"], extras),
                                report_data=conc_mix["report_data"], sheets=names)
 
-    # Attachments print after their report's last page; a report that isn't printed (AC, CONC_CYL, ...) has its
+    # Attachments print after their report's last page; a report that isn't printed (SWR, CONC_CYL, ...) has its
     # attachments at the end, followed by the page counting photos past the cap
     segments = _segments(groups, conc_mixes, sheets.conc_mixes)
     printed = [report_id for report_id, _ in segments if report_id is not None]

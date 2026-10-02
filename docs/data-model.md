@@ -334,6 +334,10 @@ the General:
 | 2 or more contributing reports, no General, dismissed | Nothing |
 | Fewer than 2 contributing reports, auto-General exists | Deletes it |
 
+AC reports count as contributing (toward the 2), but their description and pay items stay out of
+the merge (`MERGE_EXCLUDED_TYPES`): the export prints them on AC Fr / AC Bk. An auto-General already
+stored keeps its old content until the next regeneration.
+
 ## Migration history
 
 Migrations live in `migrations/` and are run by hand in the Supabase SQL editor. Each one wraps

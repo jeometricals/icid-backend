@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # reports; below it, an existing auto-General is removed.
 AUTO_GENERAL_MIN_REPORTS = 2
 
+# Contributing types whose description and pay items stay out of the auto-General: the IDR export prints them on
+# their own sheets (AC Fr carries its pay items). They still count toward AUTO_GENERAL_MIN_REPORTS.
+MERGE_EXCLUDED_TYPES = frozenset({ReportType.AC.value})
+
 # Always closes an auto-generated description: even a full summary is only a
 # summary, so it points back to the source reports. Auto-Generals only — a
 # manual General's description is the inspector's, untouched.
@@ -130,13 +134,15 @@ def _aggregate_pay_items(children: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def build_auto_general_data(children: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Build the auto-General's report_data from the contributing (non-addendum, non-General) children.
+    Build the auto-General's report_data from the contributing (non-addendum, non-General) children, leaving the
+    MERGE_EXCLUDED_TYPES out of the merge (they still count toward AUTO_GENERAL_MIN_REPORTS).
     Takes the contributing report rows in creation order.
     Returns a dict with exactly the aggregated fields (description and payItems); no other keys, since regeneration full-replaces report_data and an auto-General is read-only.
     """
+    merged = [child for child in children if child["report_type"] not in MERGE_EXCLUDED_TYPES]
     return {
-        "description": _aggregate_description(children),
-        "payItems": _aggregate_pay_items(children),
+        "description": _aggregate_description(merged),
+        "payItems": _aggregate_pay_items(merged),
     }
 
 
