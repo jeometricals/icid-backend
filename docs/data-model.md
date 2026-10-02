@@ -273,7 +273,7 @@ in the frontend dropdown.
 | `WM_1` | Water Main (Sheet 1) | |
 | `WM_2` | Water Main (Sheet 2) | ✓ |
 | `WM_3` | Water Main (Sheet 3) | ✓ |
-| `AC` | Asphalt Concrete | |
+| `AC` | Asphaltic Concrete | |
 | `CONC` | Concrete (Structures) | |
 | `BOX` | Box Sewer | |
 | `PILE` | Pile Driving | |

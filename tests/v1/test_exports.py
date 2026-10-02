@@ -34,9 +34,30 @@ CHECKBOX_DRAWINGS = {
     "xl/drawings/drawing11.xml": ["Z37", "C52"],
 }
 
+# AC Fr's drawing, which loses the five collapsed rectangles in its top row, and AC Bk's, whose "Attached Pages" box
+# is opened like Conc Fr / Conc Bk's
+AC_FR_DRAWING = "xl/drawings/drawing8.xml"
+AC_FR_DELETED_SHAPES = ["Rectangle 1", "Rectangle 2", "Rectangle 3", "Rectangle 4", "Rectangle 5"]
+AC_BK_DRAWING = "xl/drawings/drawing9.xml"
+AC_BK_ATTACHED_PAGES_BOX = "C48"
+CLEANED_DRAWINGS = {*CHECKBOX_DRAWINGS, AC_FR_DRAWING, AC_BK_DRAWING}
+
 # Conc Mix drawing -> cells under its checkboxes, which are four-line groups with no fill (the cleanup leaves them)
 CONC_MIX_DRAWING = "xl/drawings/drawing5.xml"
 CONC_MIX_CHECKBOXES = ["F22", "N22", "X22", "AF22", "O25", "T25"]  # Curb, Sidewalk, Conc Base, Structural, Ready Mix, Other
+
+
+def checkbox_fill_and_outline(drawing_xml: str, cell: str) -> tuple[str, str]:
+    """
+    Read a checkbox rectangle's own fill and its outline, from the shape anchored on a cell.
+    Takes the drawing XML and the cell.
+    Returns (the shape properties before its outline, the outline onwards, without its opening "<a:ln").
+    """
+    column, row = cell_position(cell)
+    shape = re.search(rf"<xdr:twoCellAnchor\b[^>]*><xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>\d+"
+                      rf"</xdr:colOff><xdr:row>{row}</xdr:row>.*?</xdr:twoCellAnchor>", drawing_xml, re.DOTALL).group(0)
+    fill, outline = re.search(r"<xdr:spPr\b[^>]*>(.*?)</xdr:spPr>", shape, re.DOTALL).group(1).split("<a:ln", 1)
+    return fill, outline
 
 
 def cell_position(coordinate: str) -> tuple[int, int]:
@@ -185,24 +206,41 @@ class TestTemplate:
         assert drawing_parts(TEMPLATE.read_bytes()) == drawing_parts(SOURCE_TEMPLATE.read_bytes())
         source, cleaned = zipfile.ZipFile(SOURCE_TEMPLATE), zipfile.ZipFile(TEMPLATE)
         for name in source.namelist():
-            if name.startswith("xl/media/") or (name.startswith("xl/drawings/") and name not in CHECKBOX_DRAWINGS):
+            if name.startswith("xl/media/") or (name.startswith("xl/drawings/") and name not in CLEANED_DRAWINGS):
                 assert cleaned.read(name) == source.read(name), name
-        # The Conc Fr / Conc Bk drawings only lose their checkboxes' fill: every shape is still there
-        for name in CHECKBOX_DRAWINGS:
-            anchors = lambda package: re.findall(r'<xdr:cNvPr id="\d+" name="[^"]+"', package.read(name).decode())
-            assert anchors(cleaned) == anchors(source), name
+        # The cleaned drawings only lose their checkboxes' fill, and AC Fr its collapsed rectangles: every other
+        # shape is still there
+        names = lambda package, part: re.findall(r'<xdr:cNvPr id="\d+" name="([^"]+)"', package.read(part).decode())
+        for part in CLEANED_DRAWINGS:
+            kept = [n for n in names(source, part) if part != AC_FR_DRAWING or n not in AC_FR_DELETED_SHAPES]
+            assert names(cleaned, part) == kept, part
 
     def test_conc_checkboxes_are_transparent_with_their_outlines(self):
         cleaned = zipfile.ZipFile(TEMPLATE)
         for drawing, cells in CHECKBOX_DRAWINGS.items():
             xml = cleaned.read(drawing).decode()
             for cell in cells:
-                column, row = cell_position(cell)
-                shape = re.search(rf"<xdr:twoCellAnchor\b[^>]*><xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>\d+"
-                                  rf"</xdr:colOff><xdr:row>{row}</xdr:row>.*?</xdr:twoCellAnchor>", xml, re.DOTALL).group(0)
-                fill, outline = re.search(r"<xdr:spPr\b[^>]*>(.*?)</xdr:spPr>", shape, re.DOTALL).group(1).split("<a:ln", 1)
+                fill, outline = checkbox_fill_and_outline(xml, cell)
                 assert "<a:noFill/>" in fill and "<a:solidFill>" not in fill, cell
                 assert '<a:srgbClr val="000000"/>' in outline, cell
+
+    def test_ac_bk_attached_pages_box_is_transparent_with_its_outline(self):
+        xml = zipfile.ZipFile(TEMPLATE).read(AC_BK_DRAWING).decode()
+        fill, outline = checkbox_fill_and_outline(xml, AC_BK_ATTACHED_PAGES_BOX)
+        assert "<a:noFill/>" in fill and "<a:solidFill>" not in fill
+        assert '<a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/>' in "<a:ln" + outline  # thin black, as before
+        source = zipfile.ZipFile(SOURCE_TEMPLATE).read(AC_BK_DRAWING).decode()
+        assert '<a:srgbClr val="FFFFFF"/>' in checkbox_fill_and_outline(source, AC_BK_ATTACHED_PAGES_BOX)[0]
+
+    def test_ac_fr_has_no_shapes_in_its_top_row(self):
+        # Row 1 is the strip "DRAFT - Not for Submission" goes across; the five rectangles there were collapsed
+        anchored_rows = lambda xml: [int(r) for r in re.findall(r"<xdr:from><xdr:col>\d+</xdr:col><xdr:colOff>\d+"
+                                                                r"</xdr:colOff><xdr:row>(\d+)</xdr:row>", xml)]
+        source = zipfile.ZipFile(SOURCE_TEMPLATE).read(AC_FR_DRAWING).decode()
+        cleaned = zipfile.ZipFile(TEMPLATE).read(AC_FR_DRAWING).decode()
+        assert anchored_rows(source).count(0) == 5
+        assert 0 not in anchored_rows(cleaned)
+        assert cleaned.count("<xdr:pic>") == source.count("<xdr:pic>") == 2  # the banner and the logo stay
 
     def test_conc_mix_checkboxes_have_no_fill_to_hide_a_stamped_x(self):
         xml = zipfile.ZipFile(TEMPLATE).read(CONC_MIX_DRAWING).decode()
