@@ -315,6 +315,19 @@ class WorkbookTemplate:
         style = self._alignment_style("center-h", self.cell_style(sheet, coordinate), "horizontal", "center")
         self.set_style(sheet, coordinate, self._alignment_style("center-v", style, "vertical", "center"))
 
+    def center_across(self, sheet: str, coordinates: list[str]) -> None:
+        """
+        Centre the first cell's text across a run of adjacent cells without merging them (Excel's "Center Across
+        Selection"), and vertically. Takes the sheet name and the run's cell references, left to right.
+        Returns nothing; the cells after the first are emptied, as the text only spans empty cells.
+        """
+        for coordinate in coordinates[1:]:
+            self.set_cell(sheet, coordinate, None)
+        for coordinate in coordinates:
+            style = self.cell_style(sheet, coordinate)
+            style = self._alignment_style("across-h", style, "horizontal", "centerContinuous")
+            self.set_style(sheet, coordinate, self._alignment_style("center-v", style, "vertical", "center"))
+
     def shrink_to_fit_cell(self, sheet: str, coordinate: str) -> None:
         """
         Let one cell shrink its text to fit on its line (Excel's "Shrink to fit"), keeping the rest of its style.

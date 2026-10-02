@@ -69,6 +69,16 @@ def text_value(value: Any) -> Optional[str]:
     return text or None
 
 
+def section(data: dict[str, Any], key: str) -> dict[str, Any]:
+    """
+    Read one object-valued section of report_data, tolerating a missing or malformed one.
+    Takes the report_data and the section's key.
+    Returns the section, or {} when it isn't an object.
+    """
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def short_date(day: date) -> str:
     """
     Format a date the way the forms' date-formatted cells show it (m/d/yy), for cells that hold it as text.

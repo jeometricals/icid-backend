@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 from api.services.export_common import (
     CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
-    WorkforceLayout, flow_text, stamp_common_header, stamp_equipment, stamp_pay_items, stamp_report_cont, stamp_safety,
-    stamp_workforce, text_value, write_lines,
+    WorkforceLayout, flow_text, section, stamp_common_header, stamp_equipment, stamp_pay_items, stamp_report_cont,
+    stamp_safety, stamp_workforce, text_value, write_lines,
 )
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -123,16 +123,6 @@ CONC_BACK_TEXT = TextArea(rows=range(20, 35), column="C", line_chars=75)
 ATTACHED_PAGES_BOX = "C52"
 
 
-def _section(data: dict[str, Any], key: str) -> dict[str, Any]:
-    """
-    Read one object-valued section of report_data, tolerating a missing or malformed one.
-    Takes the report_data and the section's key.
-    Returns the section, or {} when it isn't an object.
-    """
-    value = data.get(key)
-    return value if isinstance(value, dict) else {}
-
-
 def _answer(value: Any) -> Optional[str]:
     """
     Normalise one Inspection Matrix answer.
@@ -149,7 +139,7 @@ def matrix_answers(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
     Takes the report_data.
     Returns {item key: {column: 'Y' | 'N' | 'NA' | None, or text | None for the text item}}.
     """
-    matrix = _section(data, "inspectionMatrix")
+    matrix = section(data, "inspectionMatrix")
     answers = {}
     for _, key, columns, is_text in MATRIX_ROWS:
         line = matrix.get(key) if isinstance(matrix.get(key), dict) else {}
@@ -203,7 +193,7 @@ def _stamp_activity(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:
     Takes the workbook and the report_data.
     Returns nothing.
     """
-    activity = _section(data, "activity")
+    activity = section(data, "activity")
     for key, row in ACTIVITY_ROWS.items():
         entry = activity.get(key) if isinstance(activity.get(key), dict) else {}
         for field, column in ACTIVITY_COLUMNS.items():

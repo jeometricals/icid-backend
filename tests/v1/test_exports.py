@@ -1156,6 +1156,126 @@ class TestConcMixHeader:
 
 
 # ---------------------------------------------------------------------------
+# export_conc_mix.render: the Conc Mix body
+# ---------------------------------------------------------------------------
+
+def conc_mix_body(**report_data):
+    """
+    Render a CONC_MIX report with the given report_data and open its Conc Mix sheet.
+    Takes report_data fields as keyword arguments.
+    Returns the read-only Conc Mix worksheet.
+    """
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_conc_mix.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data=report_data)
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), read_only=True)["Conc Mix"]
+
+
+def truck(number: int, **fields) -> dict:
+    """
+    Build one Trucks-table row as the frontend saves it, every field filled.
+    Takes the truck's number (used in its values) and any fields to override.
+    Returns the row.
+    """
+    return {"truckOrTicketNo": f"T-{number}", "inspectionSticker": "Y", "loadSizeCy": "10", "endBatch": f"B-{number}",
+            "mixingRevs": "70", "startDischTime": "07:30", "endDischTime": "07:50", "slump": "4.5",
+            "airContent": "6", "concTemp": "68", "cylinderNumbers": f"C{number}A-C{number}D", **fields}
+
+
+REMARKS_LINES = [("H", 49)] + [("C", row) for row in range(50, 55)]
+
+
+def remarks_lines(sheet) -> list:
+    """
+    Read Conc Mix's six Remarks lines.
+    Takes the worksheet.
+    Returns the six values (H49, then C50 … C54).
+    """
+    return [sheet[f"{column}{row}"].value for column, row in REMARKS_LINES]
+
+
+class TestConcMixBody:
+    def test_each_location_of_use_ticks_its_box(self):
+        boxes = {"curb": ("F22", "G22"), "sidewalk": ("N22", "O22"), "concreteBase": ("X22", "Y22"),
+                 "structural": ("AF22", "AG22")}
+        for key, (cell, partner) in boxes.items():
+            sheet = conc_mix_body(locationOfUse={**{k: False for k in boxes}, key: True})
+            assert [c for c, _ in boxes.values() if sheet[c].value == "X"] == [cell], key
+            assert sheet[cell].font.sz == 7, key
+            # Centred across the box's two cells (the box straddles the line between them), not merged
+            assert [sheet[c].alignment.horizontal for c in (cell, partner)] == ["centerContinuous"] * 2, key
+            assert sheet[cell].alignment.vertical == "center", key
+
+    def test_ready_mix_ticks_only_its_box(self):
+        sheet = conc_mix_body(mixerType={"type": "readyMix", "otherLabel": "ignored"})
+        assert (sheet["O25"].value, sheet["T25"].value, sheet["X25"].value) == ("X", None, None)
+        assert sheet["P25"].alignment.horizontal == "centerContinuous"
+
+    def test_other_mixer_ticks_its_box_and_writes_the_type(self):
+        sheet = conc_mix_body(mixerType={"type": "other", "otherLabel": " Site batch plant "})
+        assert (sheet["O25"].value, sheet["T25"].value, sheet["X25"].value) == (None, "X", "Site batch plant")
+        assert sheet["T25"].alignment.horizontal == "centerContinuous"  # Other's box sits inside T25 alone
+
+    def test_trucks_fill_their_rows(self):
+        sheet = conc_mix_body(trucks=[truck(1), truck(2), truck(3)])
+        columns = ("B", "K", "N", "Q", "T", "W", "Z", "AC", "AH", "AK")
+        for number, row in ((1, 28), (2, 29), (3, 30)):
+            assert [sheet[f"{c}{row}"].value for c in columns] == [
+                f"T-{number}", "10", f"B-{number}", "70", "07:30", "07:50", "4.5", "6", "68", f"C{number}A-C{number}D",
+            ]
+        assert [sheet[f"{c}31"].value for c in columns] == [None] * 10
+        assert (sheet["G31"].value, sheet["I31"].value) == ("Y", "N")  # an empty row keeps its letters
+
+    def test_inspection_sticker_replaces_the_answers_letter(self):
+        stickers = ["Y", "N", "NA", None]
+        sheet = conc_mix_body(trucks=[truck(i, inspectionSticker=s) for i, s in enumerate(stickers)])
+        assert [(sheet[f"G{row}"].value, sheet[f"I{row}"].value) for row in range(28, 32)] == [
+            ("X", "N"), ("Y", "X"), ("Y", "N"), ("Y", "N"),
+        ]
+
+    def test_more_than_eleven_trucks_prints_eleven_and_notes_the_rest(self):
+        sheet = conc_mix_body(trucks=[truck(i) for i in range(1, 16)], remarks="Pour went well.")
+        assert [sheet[f"B{row}"].value for row in range(28, 39)] == [f"T-{i}" for i in range(1, 12)]
+        assert remarks_lines(sheet)[:2] == ["(additional trucks on continuation sheet — pending)", "Pour went well."]
+        # Eleven exactly fit, with no note
+        assert remarks_lines(conc_mix_body(trucks=[truck(i) for i in range(1, 12)]))[0] is None
+
+    def test_class_of_concrete_replaces_the_blank(self):
+        assert conc_mix_body(concreteSpecs={"classOfConcrete": "40"})["B41"].value == "Class of Concrete: 40"
+        assert conc_mix_body()["B41"].value == "Class of Concrete: ________________"
+
+    def test_slump_and_air_ranges(self):
+        sheet = conc_mix_body(concreteSpecs={"slumpMin": "3", "slumpMax": "5", "airMin": "5.5", "airMax": "7.5"})
+        assert [sheet[c].value for c in ("H43", "L43", "H44", "L44")] == ["3", "5", "5.5", "7.5"]
+        assert (sheet["H45"].value, sheet["L45"].value) == (" ", " ")  # the unlabelled spare row is left alone
+
+    def test_material_usage(self):
+        sheet = conc_mix_body(materialUsage={
+            "batchReportNo": "BR-77", "noOfTickets": "4", "firstTicketNo": "1001", "lastTicketNo": "1004",
+            "quantityDispatched": "40", "quantityReceived": "40", "quantityUsed": "38.5", "quantityWasted": "1.5",
+        })
+        assert [sheet[f"W{row}"].value for row in range(41, 45)] == ["BR-77", "4", "1001", "1004"]
+        assert [sheet[f"AL{row}"].value for row in range(41, 45)] == ["40", "40", "38.5", "1.5"]
+
+    def test_remarks_paragraphs_fill_the_lines_left_aligned(self):
+        sheet = conc_mix_body(remarks="Truck 2 held 10 minutes.\n\nCylinders cast on site.\nForms checked.")
+        assert remarks_lines(sheet) == [
+            "Truck 2 held 10 minutes.", "Cylinders cast on site.", "Forms checked.", None, None, None,
+        ]
+        assert [sheet[f"{c}{r}"].alignment.horizontal for c, r in REMARKS_LINES[:3]] == ["left"] * 3
+
+    def test_long_remarks_are_cut_on_the_sixth_line(self):
+        lines = remarks_lines(conc_mix_body(remarks=words(200)))
+        assert all(lines)
+        assert len(lines[0]) <= 86 and all(len(line) <= 99 for line in lines[1:])
+        assert lines[5].endswith("… (continued in ICID)")
+
+    def test_truck_note_stays_first_when_remarks_are_cut(self):
+        lines = remarks_lines(conc_mix_body(trucks=[truck(i) for i in range(1, 13)], remarks=words(200)))
+        assert lines[0] == "(additional trucks on continuation sheet — pending)"
+        assert lines[1].startswith("word") and lines[5].endswith("… (continued in ICID)")
+
+
+# ---------------------------------------------------------------------------
 # Draft exports: "DRAFT - Not for Submission" across the top of every printed page
 # ---------------------------------------------------------------------------
 
