@@ -121,6 +121,9 @@ CONC_BACK_SAFETY = SafetyLayout(
 # is ticked when the text continues on Report Cont. Signatures (rows 55-60) stay blank: the inspector and RE sign.
 CONC_BACK_TEXT = TextArea(rows=range(20, 35), column="C", line_chars=75)
 ATTACHED_PAGES_BOX = "C52"
+# "See attached Concrete Truck and Mixing Information" (Z37, also a transparent rectangle): ticked by the dispatcher
+# when the IDR's export includes a Conc Mix page
+CONC_MIX_ATTACHED_BOX = "Z37"
 
 
 def _answer(value: Any) -> Optional[str]:
@@ -173,6 +176,15 @@ def _tick(workbook: WorkbookTemplate, sheet: str, cell: str, ticked: bool) -> No
     if ticked:
         workbook.set_font_size(sheet, cell, OPERATION_MARK_FONT_PT)
         workbook.center_cell(sheet, cell)
+
+
+def mark_conc_mix_attached(workbook: WorkbookTemplate) -> None:
+    """
+    Tick Conc Bk's "See attached Concrete Truck and Mixing Information" box.
+    Takes the workbook (after render has stamped Conc Bk).
+    Returns nothing.
+    """
+    _tick(workbook, CONC_BACK, CONC_MIX_ATTACHED_BOX, True)
 
 
 def _stamp_operation(workbook: WorkbookTemplate, data: dict[str, Any]) -> None:

@@ -1276,6 +1276,97 @@ class TestConcMixBody:
 
 
 # ---------------------------------------------------------------------------
+# generate_idr_export with a CONC_MIX report (the dispatcher)
+# ---------------------------------------------------------------------------
+
+def conc_mix_report(page_number: int = 3, is_addendum: bool = True, **report_data) -> dict:
+    """
+    Build the CONC_MIX addendum row list_reports_for_idr returns (its parent is the SWCB report).
+    Takes its page number, its addendum flag and report_data fields as keyword arguments.
+    Returns the row.
+    """
+    return {"report_id": UUID("2c3d4e5f-6071-4829-93a4-b5c6d7e8f9a0"), "report_type": "CONC_MIX",
+            "is_addendum": is_addendum, "parent_report_id": swcb_report()["report_id"], "page_number": page_number,
+            "report_data": report_data}
+
+
+def tab_order(content: bytes) -> tuple[list[str], str]:
+    """
+    Read the visible sheets in tab (print) order, and which sheet AC Fr's print area is scoped to.
+    Takes the .xlsx bytes.
+    Returns (the visible sheets, the name of the sheet AC Fr's print area is scoped to).
+    """
+    names = openpyxl.load_workbook(io.BytesIO(content), read_only=True).sheetnames
+    xml = zipfile.ZipFile(io.BytesIO(content)).read("xl/workbook.xml").decode()
+    return visible_sheets(content), names[int(re.search(r'localSheetId="(\d+)"', xml).group(1))]
+
+
+class TestConcMixExport:
+    def test_a_conc_mix_report_is_exported_on_conc_mix(self):
+        content = export_bytes(reports=[conc_mix_report(trucks=[truck(1)], remarks="Pour went well.")])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Mix"]
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Mix"]
+        assert (sheet["B28"].value, sheet["H49"].value) == ("T-1", "Pour went well.")
+
+    def test_the_header_gets_the_inspector_contractor_and_the_reports_own_page_number(self):
+        sheet = openpyxl.load_workbook(io.BytesIO(export_bytes(reports=[conc_mix_report(page_number=3)])),
+                                       read_only=True)["Conc Mix"]
+        assert (sheet["H17"].value, sheet["F14"].value) == ("Genghis Khan", "Benny Bowers Contracting Co.")
+        assert (sheet["AD10"].value, sheet["AJ10"].value) == (3, 3)
+
+    def test_conc_bk_ticks_see_attached_mixing_info_with_an_swcb_report(self):
+        content = export_bytes(reports=[swcb_report(description="Poured curb."), conc_mix_report()])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Conc Mix"]
+        box = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Bk"]["Z37"]
+        assert (box.value, box.font.sz, box.alignment.horizontal) == ("X", 6, "center")
+
+    def test_without_a_conc_mix_report_the_box_stays_empty(self):
+        content = export_bytes(reports=[swcb_report(description="Poured curb.")])
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Bk"]["Z37"].value is None
+        assert "Conc Mix" not in visible_sheets(content)
+
+    def test_without_an_swcb_report_conc_bk_stays_hidden_and_unticked(self):
+        content = export_bytes(reports=[conc_mix_report()])
+        assert "Conc Bk" not in visible_sheets(content)
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Bk"]["Z37"].value is None
+
+    def test_only_the_first_conc_mix_report_is_exported(self):
+        second = {**conc_mix_report(page_number=4, remarks="Second pour."),
+                  "report_id": UUID("3d4e5f60-7182-4930-a4b5-c6d7e8f9a0b1")}
+        content = export_bytes(reports=[conc_mix_report(remarks="First pour."), second])
+        assert visible_sheets(content).count("Conc Mix") == 1
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Mix"]
+        assert (sheet["H49"].value, sheet["AD10"].value) == ("First pour.", 3)
+
+    def test_a_conc_mix_report_not_flagged_as_an_addendum_still_exports(self):
+        content = export_bytes(reports=[conc_mix_report(is_addendum=False, remarks="Direct API row.")])
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Mix"]["H49"].value == "Direct API row."
+
+    def test_conc_mix_prints_last_and_print_areas_stay_on_their_sheets(self):
+        assert tab_order(export_bytes(reports=[swcb_report(description="x"), conc_mix_report()])) == (
+            ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Conc Mix"], "AC Fr")
+        assert tab_order(export_bytes(general=general_with(description=words(600)), reports=[conc_mix_report()])) == (
+            ["Gen Fr", "Gen Bk", "Report Cont", "Conc Mix"], "AC Fr")
+
+    def test_conc_mix_follows_report_cont_whichever_report_continues_there(self):
+        swcb_owns = export_bytes(reports=[swcb_report(description=words(600)), conc_mix_report()])
+        assert tab_order(swcb_owns) == (["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Report Cont", "Conc Mix"], "AC Fr")
+        general_owns = export_bytes(general=general_with(description=words(600)),
+                                    reports=[swcb_report(description="x"), conc_mix_report()])
+        assert tab_order(general_owns) == (
+            ["Gen Fr", "Gen Bk", "Report Cont", "Conc Fr", "Conc Bk", "Conc Mix"], "AC Fr")
+        assert openpyxl.load_workbook(io.BytesIO(general_owns), read_only=True).active.title == "Gen Fr"
+
+    def test_a_draft_marks_and_fits_the_conc_mix_page(self):
+        content = export_bytes(idr=DRAFT_IDR, reports=[conc_mix_report(page_number=None)])
+        workbook = openpyxl.load_workbook(io.BytesIO(content))
+        sheet = workbook["Conc Mix"]
+        assert sheet["B1"].value == "DRAFT - Not for Submission"
+        assert (sheet["AD10"].value, sheet["AJ10"].value) == (None, None)
+        assert (sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight) == (1, 1)
+
+
+# ---------------------------------------------------------------------------
 # Draft exports: "DRAFT - Not for Submission" across the top of every printed page
 # ---------------------------------------------------------------------------
 
