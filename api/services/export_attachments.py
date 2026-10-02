@@ -2,9 +2,9 @@
 Prints an IDR's report attachments on copies of the template's Sketch Cont page ("Attachments 1", "Attachments 2", ...).
 
 Each attachment gets a page of its own under the continuation header: its name as a title and its description beneath,
-then, for a photo, the photo fitted to the sketch grid. A PDF can't be drawn on a page, so its page names the file; a
-photo that can't be fetched or read gets a page saying so. At most MAX_PHOTOS photos print per export; any past that
-are counted on one closing page.
+then, for a photo, the photo fitted to the sketch grid. A PDF can't be drawn on a page, so its page shows a "no preview"
+box and names the file; a photo that can't be fetched or read gets a page saying so. At most MAX_PHOTOS photos print
+per export; any past that are counted on one closing page.
 
 Photos are fetched from Storage on a few threads at once, then shrunk (and HEIC / WebP converted) with Pillow so the
 workbook stays a reasonable size.
@@ -57,12 +57,41 @@ SKETCH_CONT_HEADER = ContinuationHeader(
 # (10 pt across B:AI, 85 characters a line, as on Report Cont), and the rest of the grid the photo. Every column is
 # 19 px and every grid row 17 px, so the photo area B26:AI58 is 34 x 19 = 646 px wide and 33 x 17 = 561 px tall.
 TITLE_CELL = "B21"
-TITLE_CHARS = 85
-CAPTION = TextArea(rows=range(22, 26), column="B", line_chars=85)
 PHOTO_COLUMN, PHOTO_ROW = "B", 26
 COLUMN_PX, ROW_PX = 19, 17
 PHOTO_AREA_PX = (34 * COLUMN_PX, 33 * ROW_PX)
-NOTE_CELL = "B26"  # a PDF's or a missing photo's file name, where the photo would go
+NOTE_CELL = "B26"  # why a photo is missing, where it would go
+
+
+@dataclass(frozen=True)
+class CaptionStyle:
+    """How a page's title (B21) and description (B22:B25) are set: font sizes, characters a line, row heights."""
+
+    title_pt: Optional[float]           # None keeps the template's 10 pt
+    title_chars: int
+    title_row_pt: Optional[float]       # None keeps the template's row height
+    description: TextArea
+    description_pt: Optional[float]
+    description_row_pt: Optional[float]
+
+
+# Photo pages keep the template's 10 pt; a PDF page has room to spare, so its title and description are larger, on
+# taller rows (Arial's line height: 16 pt needs about 21 pt, 12 pt about 15.75). 12 pt holds 85 x 10 / 12 = 70
+# characters across B:AI, and 16 pt 85 x 10 / 16 = 53, so the description keeps its four lines.
+PHOTO_CAPTION = CaptionStyle(title_pt=None, title_chars=85, title_row_pt=None,
+                             description=TextArea(rows=range(22, 26), column="B", line_chars=85),
+                             description_pt=None, description_row_pt=None)
+PDF_CAPTION = CaptionStyle(title_pt=16, title_chars=53, title_row_pt=21,
+                           description=TextArea(rows=range(22, 26), column="B", line_chars=70),
+                           description_pt=12, description_row_pt=15.75)
+
+# A PDF's page: a white box over the photo area (hiding the grid) with a thin grey outline and the note centred in it,
+# and the file's name on the grid row below it (B59)
+PDF_NOTE = "No preview available in this export — see ICID for the full file"
+PDF_NOTE_PT = 14
+GREY = "808080"
+FILE_CELL = "B59"
+FILE_PT = 10
 
 
 @dataclass
@@ -153,31 +182,55 @@ def _place_photo(workbook: WorkbookTemplate, sheet: str, photo: Photo, descripti
 
 
 def _new_page(workbook: WorkbookTemplate, number: int, idr: dict[str, Any], project: dict[str, Any],
-              inspector: Optional[str], title: str, description: Any) -> str:
+              inspector: Optional[str], title: str, description: Any, style: CaptionStyle = PHOTO_CAPTION) -> str:
     """
     Make the next attachment page: a copy of the blank Sketch Cont with its header, a bold title and the description.
     Takes the workbook, the page's number (Attachments <number>), the IDR row, the project row, the inspector's
-    name, the title and the description (cut with "continued in ICID" past four lines).
+    name, the title, the description (cut with "continued in ICID" past four lines) and how they're set.
     Returns the page's sheet name.
     """
     sheet = f"{ATTACHMENTS} {number}"
     workbook.clone_sheet(SKETCH_CONT, sheet)
     stamp_continuation_header(workbook, sheet, SKETCH_CONT_HEADER, idr, project, inspector)
-    shown = title if len(title) <= TITLE_CHARS else title[: TITLE_CHARS - 3].rstrip() + "..."
-    workbook.set_cell(sheet, TITLE_CELL, shown)
-    workbook.set_style(sheet, TITLE_CELL, workbook.font_style(workbook.cell_style(sheet, TITLE_CELL), bold=True))
+    chars = style.title_chars
+    workbook.set_cell(sheet, TITLE_CELL, title if len(title) <= chars else title[: chars - 3].rstrip() + "...")
+    workbook.set_style(sheet, TITLE_CELL, workbook.font_style(workbook.cell_style(sheet, TITLE_CELL),
+                                                              points=style.title_pt, bold=True))
     workbook.align_left(sheet, TITLE_CELL)
+    if style.title_row_pt:
+        workbook.set_row_height(sheet, int(TITLE_CELL[1:]), style.title_row_pt)
+
+    area = style.description
     queue = paragraphs(description)
-    lines = fill_lines(queue, len(CAPTION.rows), CAPTION.line_chars)
+    lines = fill_lines(queue, len(area.rows), area.line_chars)
     if queue:
-        lines = mark_truncated(lines, CAPTION.line_chars)
-    write_lines(workbook, sheet, CAPTION.rows, lines, CAPTION.column)
+        lines = mark_truncated(lines, area.line_chars)
+    write_lines(workbook, sheet, area.rows, lines, area.column)
+    for row in area.rows:
+        if style.description_pt:
+            workbook.set_font_size(sheet, f"{area.column}{row}", style.description_pt)
+        if style.description_row_pt:
+            workbook.set_row_height(sheet, row, style.description_row_pt)
     return sheet
+
+
+def _stamp_pdf_placeholder(workbook: WorkbookTemplate, sheet: str, file_name: str) -> None:
+    """
+    Fill a PDF's page where a photo would go: the "no preview" box, and the file's name in grey below it.
+    Takes the workbook, the sheet and the PDF's file name.
+    Returns nothing.
+    """
+    width, height = PHOTO_AREA_PX
+    workbook.add_text_box(sheet, PDF_NOTE, f"{PHOTO_COLUMN}{PHOTO_ROW}", width, height, PDF_NOTE_PT, GREY, GREY)
+    workbook.set_cell(sheet, FILE_CELL, f"File: {file_name}")
+    workbook.set_style(sheet, FILE_CELL, workbook.font_style(workbook.cell_style(sheet, FILE_CELL), points=FILE_PT,
+                                                             rgb=f"FF{GREY}"))
+    workbook.align_left(sheet, FILE_CELL)
 
 
 def _write_note(workbook: WorkbookTemplate, sheet: str, note: str) -> None:
     """
-    Write a one-line note where the photo would go (a PDF's file name, or why a photo is missing).
+    Write a one-line note where the photo would go (why a photo is missing).
     Takes the workbook, the sheet and the note.
     Returns nothing.
     """
@@ -198,8 +251,8 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
            attachments: list[tuple[UUID, list[dict[str, Any]]]]) -> tuple[dict[UUID, list[str]], list[str]]:
     """
     Print the IDR's attachments, one page each, numbered Attachments 1, 2, ... in the order given: photos fitted to
-    the page, PDFs and unavailable photos as notes naming the file, and, when more than MAX_PHOTOS photos arrived,
-    a closing page counting the ones left out.
+    the page, PDFs as a "no preview" box naming the file, unavailable photos as a note naming the file, and, when
+    more than MAX_PHOTOS photos arrived, a closing page counting the ones left out.
     Takes the workbook, the IDR row, the project row, the inspector's name and each report's uploaded attachments,
     reports in print order (each report's in upload order).
     Returns ({report id: its attachment pages, in order}, the closing page as a one-item list, or empty); each page
@@ -218,11 +271,12 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
             name = text_value(attachment["attachment_name"]) or attachment["file_name"]
             title = f"PDF: {name}" if is_pdf else name if photo else f"Attachment unavailable: {name}"
             number += 1
-            sheet = _new_page(workbook, number, idr, project, inspector, title, attachment["attachment_description"])
+            sheet = _new_page(workbook, number, idr, project, inspector, title, attachment["attachment_description"],
+                              PDF_CAPTION if is_pdf else PHOTO_CAPTION)
             if photo is not None:
                 _place_photo(workbook, sheet, photo, name)
             elif is_pdf:
-                _write_note(workbook, sheet, f"File: {attachment['file_name']} (a PDF: open it in ICID)")
+                _stamp_pdf_placeholder(workbook, sheet, attachment["file_name"])
             else:
                 _write_note(workbook, sheet, f"File: {attachment['file_name']} (couldn't be fetched for this export)")
             workbook.fit_to_letter_page(sheet)

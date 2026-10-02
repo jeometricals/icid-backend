@@ -25,6 +25,7 @@ LETTER_PAPER = "1"
 
 # DrawingML lengths are in English Metric Units: 9525 to a pixel at 96 dpi
 EMU_PER_PIXEL = 9525
+THIN_LINE_EMU = 9525  # a 0.75 pt outline, Excel's "thin"
 
 _COLUMN = re.compile(r"[A-Z]+")
 
@@ -655,20 +656,51 @@ class WorkbookTemplate:
         else:
             self._add_part(rels_part, rels.encode("utf-8"))
 
+        alt = escape(description, {'"': "&quot;"})
+        cx, cy = width_px * EMU_PER_PIXEL, height_px * EMU_PER_PIXEL
+        self._add_anchored(drawing, coordinate, cx, cy, offset_x_px, offset_y_px, lambda shape_id: (
+            f'<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{shape_id}" name="Picture {shape_id}" descr="{alt}"/>'
+            f'<xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip '
+            f'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="{rel_id}"/>'
+            f'<a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x="0" y="0"/>'
+            f'<a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+            f"</xdr:pic>"))
+
+    def add_text_box(self, sheet: str, text: str, coordinate: str, width_px: int, height_px: int, points: float,
+                     rgb: str, line_rgb: str) -> None:
+        """
+        Place a white text box with a thin outline on a sheet, its text centred both ways (it covers the cells
+        under it, grid lines included). A one-cell anchor, so its size is fixed in pixels.
+        Takes the sheet, the text, the cell its top-left corner sits in, its width and height in pixels, the text's
+        size in points and colour (RGB hex like "808080"), and the outline's colour.
+        Returns nothing; raises ValueError for a sheet without a drawing.
+        """
+        cx, cy = width_px * EMU_PER_PIXEL, height_px * EMU_PER_PIXEL
+        self._add_anchored(self._drawing_part(sheet), coordinate, cx, cy, 0, 0, lambda shape_id: (
+            f'<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{shape_id}" name="Text Box {shape_id}"/>'
+            f'<xdr:cNvSpPr txBox="1"/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="0" y="0"/>'
+            f'<a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+            f'<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="{THIN_LINE_EMU}"><a:solidFill>'
+            f'<a:srgbClr val="{line_rgb}"/></a:solidFill></a:ln></xdr:spPr><xdr:txBody>'
+            f'<a:bodyPr wrap="square" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r>'
+            f'<a:rPr lang="en-US" sz="{round(points * 100)}"><a:solidFill><a:srgbClr val="{rgb}"/></a:solidFill>'
+            f'<a:latin typeface="Arial"/></a:rPr><a:t>{escape(text)}</a:t></a:r></a:p></xdr:txBody></xdr:sp>'))
+
+    def _add_anchored(self, drawing: str, coordinate: str, cx: int, cy: int, offset_x_px: int, offset_y_px: int,
+                      element: Callable[[int], str]) -> None:
+        """
+        Add one drawing object (a picture or a shape) to a drawing part, on a one-cell anchor.
+        Takes the drawing part, the cell its top-left corner sits in, its size in EMU, the corner's offset into that
+        cell in pixels, and a function giving the object's XML for its shape id (one above the drawing's highest).
+        Returns nothing.
+        """
         xml = self._text(drawing)
         shape_id = max((int(n) for n in re.findall(r'<xdr:cNvPr id="(\d+)"', xml)), default=0) + 1
         column, row = _column_number(coordinate) - 1, _row_number(coordinate) - 1
-        cx, cy = width_px * EMU_PER_PIXEL, height_px * EMU_PER_PIXEL
-        alt = escape(description, {'"': "&quot;"})
         anchor = (
             f"<xdr:oneCellAnchor><xdr:from><xdr:col>{column}</xdr:col><xdr:colOff>{offset_x_px * EMU_PER_PIXEL}"
             f"</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>{offset_y_px * EMU_PER_PIXEL}</xdr:rowOff></xdr:from>"
-            f'<xdr:ext cx="{cx}" cy="{cy}"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{shape_id}" '
-            f'name="Picture {shape_id}" descr="{alt}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>'
-            f'</xdr:nvPicPr><xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
-            f'relationships" r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>'
-            f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/>'
-            f"</a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>"
+            f'<xdr:ext cx="{cx}" cy="{cy}"/>{element(shape_id)}<xdr:clientData/></xdr:oneCellAnchor>'
         )
         self._write(drawing, xml.replace("</xdr:wsDr>", anchor + "</xdr:wsDr>"))
 

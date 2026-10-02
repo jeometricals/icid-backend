@@ -2015,14 +2015,12 @@ def attachment(number: int, report_id: UUID, file_type: str = "image/jpeg", **fi
             "is_uploaded": True, **fields}
 
 
-def pictures(content: bytes, sheet: str) -> list[dict]:
+def added_anchors(content: bytes, sheet: str) -> tuple[zipfile.ZipFile, str, list[str]]:
     """
-    Read the pictures this export added to a sheet, through the package's relationships.
+    Find the one-cell anchors (pictures, text boxes) this export added to a sheet's drawing.
     Takes the .xlsx bytes and the sheet name.
-    Returns each added picture's anchor cell (zero-based column and row), offsets and size in pixels, and its image's
-    format and pixel size.
+    Returns (the package, the drawing part's name, each anchor's XML).
     """
-    from PIL import Image
     package = zipfile.ZipFile(io.BytesIO(content))
     workbook = package.read("xl/workbook.xml").decode()
     rel_id = re.search(rf'<sheet name="{sheet}"[^>]*r:id="(rId\d+)"', workbook).group(1)
@@ -2030,17 +2028,54 @@ def pictures(content: bytes, sheet: str) -> list[dict]:
     part = "xl/" + target.group(1)
     sheet_rels = package.read(part.replace("worksheets/", "worksheets/_rels/") + ".rels").decode()
     drawing = "xl/drawings/" + re.search(r'Target="\.\./drawings/([^"]+)"', sheet_rels).group(1)
+    return package, drawing, re.findall(r"<xdr:oneCellAnchor>.*?</xdr:oneCellAnchor>", package.read(drawing).decode())
+
+
+def anchor_box(anchor: str) -> dict:
+    """
+    Read where a one-cell anchor sits and how big it is.
+    Takes the anchor's XML.
+    Returns its zero-based column and row, its offsets into that cell and its size, in pixels.
+    """
+    numbers = [int(n) for n in re.findall(r"<xdr:(?:col|colOff|row|rowOff)>(\d+)<", anchor)]
+    cx, cy = (int(n) for n in re.search(r'<xdr:ext cx="(\d+)" cy="(\d+)"', anchor).groups())
+    return {"col": numbers[0], "col_off": numbers[1] // 9525, "row": numbers[2], "row_off": numbers[3] // 9525,
+            "width": cx // 9525, "height": cy // 9525}
+
+
+def pictures(content: bytes, sheet: str) -> list[dict]:
+    """
+    Read the pictures this export added to a sheet, through the package's relationships.
+    Takes the .xlsx bytes and the sheet name.
+    Returns each added picture's anchor (see anchor_box) and its image's format and pixel size.
+    """
+    from PIL import Image
+    package, drawing, anchors = added_anchors(content, sheet)
     media = dict(re.findall(r'Id="(rId\d+)"[^>]*Target="\.\./media/([^"]+)"',
                             package.read(drawing.replace("drawings/", "drawings/_rels/") + ".rels").decode()))
     found = []
-    for anchor in re.findall(r"<xdr:oneCellAnchor>.*?</xdr:oneCellAnchor>", package.read(drawing).decode()):
-        numbers = [int(n) for n in re.findall(r"<xdr:(?:col|colOff|row|rowOff)>(\d+)<", anchor)]
-        cx, cy = (int(n) for n in re.search(r'<xdr:ext cx="(\d+)" cy="(\d+)"', anchor).groups())
+    for anchor in (a for a in anchors if "<xdr:pic>" in a):
         image = Image.open(io.BytesIO(package.read("xl/media/" + media[re.search(r'r:embed="(rId\d+)"', anchor)
                                                                          .group(1)])))
-        found.append({"col": numbers[0], "col_off": numbers[1] // 9525, "row": numbers[2],
-                      "row_off": numbers[3] // 9525, "width": cx // 9525, "height": cy // 9525,
-                      "format": image.format, "size": image.size})
+        found.append({**anchor_box(anchor), "format": image.format, "size": image.size})
+    return found
+
+
+def text_boxes(content: bytes, sheet: str) -> list[dict]:
+    """
+    Read the text boxes this export added to a sheet.
+    Takes the .xlsx bytes and the sheet name.
+    Returns each one's anchor (see anchor_box), text, font size, text colour, fill, outline width and colour.
+    """
+    found = []
+    for anchor in (a for a in added_anchors(content, sheet)[2] if 'txBox="1"' in a):
+        line = re.search(r'<a:ln w="(\d+)"><a:solidFill><a:srgbClr val="(\w+)"', anchor)
+        found.append({**anchor_box(anchor), "text": re.search(r"<a:t>(.*?)</a:t>", anchor).group(1),
+                      "size_pt": int(re.search(r'<a:rPr [^>]*sz="(\d+)"', anchor).group(1)) / 100,
+                      "color": re.search(r'<a:rPr .*?<a:srgbClr val="(\w+)"', anchor).group(1),
+                      "fill": re.search(r'</a:prstGeom><a:solidFill><a:srgbClr val="(\w+)"', anchor).group(1),
+                      "outline": (int(line.group(1)), line.group(2)),
+                      "centred": 'anchor="ctr"' in anchor and 'algn="ctr"' in anchor})
     return found
 
 
@@ -2088,10 +2123,30 @@ class TestAttachmentsExport:
         with patched_export(reports=[swcb_row(1, 2)], attachments=[pdf]) as mocks:
             content = generate_idr_export(IDR_ID).content
         mocks["download"].assert_not_called()
-        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]
-        assert (sheet["B21"].value, sheet["B26"].value) == (
-            "PDF: Batch ticket", "File: mix_ticket.pdf (a PDF: open it in ICID)")
+        sheet = openpyxl.load_workbook(io.BytesIO(content))["Attachments 1"]
+        assert (sheet["B21"].value, sheet["B21"].font.sz, sheet["B21"].font.b) == ("PDF: Batch ticket", 16, True)
+        assert (sheet["B22"].value, sheet["B22"].font.sz) == ("What photo 1 shows.", 12)
+        assert (sheet.row_dimensions[21].height, sheet.row_dimensions[22].height) == (21, 15.75)  # room for them
+        assert (sheet["B59"].value, sheet["B59"].font.sz, sheet["B59"].font.color.rgb) == (
+            "File: mix_ticket.pdf", 10, "FF808080")
+        assert sheet["B26"].value is None
         assert pictures(content, "Attachments 1") == []
+
+    def test_a_pdfs_page_has_a_no_preview_box_over_the_photo_area(self):
+        pdf = attachment(1, SWCB_1, "application/pdf", file_name="mix_ticket.pdf")
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[pdf])
+        assert text_boxes(content, "Attachments 1") == [{
+            "col": 1, "col_off": 0, "row": 25, "row_off": 0, "width": 646, "height": 561,  # B26:AI58
+            "text": "No preview available in this export — see ICID for the full file", "size_pt": 14,
+            "color": "808080", "fill": "FFFFFF", "outline": (9525, "808080"), "centred": True,
+        }]
+        # A photo's page has its photo there, no box, and keeps the template's 10 pt caption
+        photo = attachment(2, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG")})
+        assert text_boxes(content, "Attachments 1") == [] and len(pictures(content, "Attachments 1")) == 1
+        sheet = openpyxl.load_workbook(io.BytesIO(content))["Attachments 1"]
+        assert (sheet["B21"].font.sz, sheet["B22"].font.sz) == (10, 10)
 
     def test_heic_is_converted_to_jpeg_and_webp_to_png(self):
         rows = [attachment(1, SWCB_1, "image/heic"), attachment(2, SWCB_1, "image/webp")]
