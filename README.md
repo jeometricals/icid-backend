@@ -3,7 +3,8 @@
 
 ## Run (dev)
 1) Create Postgres locally and set `DATABASE_URL` in `.env` or environment.
-2) Install deps: `pip install -r requirements.txt`
+2) Install deps: `pip install -r requirements.txt` (includes Pillow and pillow-heif, which the IDR export uses to shrink
+   attachment photos and convert HEIC / WebP; about 45 MB unzipped on Linux)
 3) Start API: `uvicorn app.main:app --reload`
 3.05) Start API: `uvicorn main:app --reload`
 3.1) Start API: `uvicorn api.index:app --reload`

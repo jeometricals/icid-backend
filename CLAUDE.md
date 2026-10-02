@@ -17,17 +17,17 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`users.py`, `projects.py`, `idrs.py`, `attachments.py`, `contract_items.py`, `debug.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`, `debug.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage (`auto_general.py`, `attachments.py`). Endpoints call it; it never builds SQL. |
-| `api/core/` | App-wide configuration — env loading, `DATABASE_URL`. No business logic. |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/core/` | App-wide configuration — env loading: `DATABASE_URL`, and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. |
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
-| `docs/` | `data-model.md`: developer reference for the tables, the auto-General and the migration history. |
+| `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). |
 | `scripts/` | One-off local utilities (seeding, ad-hoc SQL). Not imported by the app. |
 
@@ -117,7 +117,7 @@ Not rules — current state, documented so nobody mistakes these for the intende
 
 - `api/v1/debug.py` exposes the live `icid` schema and is **dev-only**. Delete before
   production. It has no test coverage.
-- Endpoints exist for `users`, `projects`, `idrs` (with attachments) and `contract_items` (read-only;
+- Endpoints exist for `users`, `projects`, `idrs` (with attachments and the .xlsx export) and `contract_items` (read-only;
   the catalog is seeded, with no write endpoint yet). `api/schemas/` also defines models for
   clients, form templates and the join tables — those schemas run
   ahead of the endpoints and may not match `schema.sql` exactly. Verify against `schema.sql`

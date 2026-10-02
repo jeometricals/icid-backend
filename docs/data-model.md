@@ -205,6 +205,9 @@ rows (and its addenda's), and the backend removes the matching Storage files sep
 best-effort basis. A file whose removal fails is left orphaned in the bucket; nothing points
 at it.
 
+Known polish item: in the IDR export, the "Attachment unavailable" page (a photo the export couldn't
+fetch or read) still uses a small 10 pt note, unlike the PDF page's larger title and "no preview" box.
+
 ### Export files (Storage bucket `idr-exports`)
 
 Not a table. `GET /v1/idrs/{idr_id}/export` builds the IDR's `.xlsx`, uploads it to the private
