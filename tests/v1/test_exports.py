@@ -2415,10 +2415,11 @@ class TestAcExport:
         assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Attachments 1", "Conc Mix",
                                            "Conc Fr", "Conc Bk"]
 
-    def test_only_the_first_ac_report_prints(self):
+    def test_every_ac_report_prints(self):
         content = export_bytes(reports=[ac_row(1, 2), ac_row(2, 3)])
-        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk"]
-        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr"]["AH8"].value == 2
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "AC Fr 2", "AC Bk 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["AC Fr"]["AH8"].value, book["AC Fr 2"]["AH8"].value) == (2, 3)
 
     def test_a_composed_general_leaves_ac_out_of_its_description_and_pay_items(self):
         swcb = swcb_row(1, 1, description="Poured curb.", payItems=[pay_item(1)])
@@ -3083,6 +3084,120 @@ class TestAcRemarksCascade:
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
         assert [book[n]["B1"].value for n in shown] == ["DRAFT - Not for Submission"] * len(shown)
         assert print_order_page_numbers(content) == [None] * len(shown)
+
+
+def named_ac(number: int, page_number: Optional[int], name: str, **report_data) -> dict:
+    """
+    Build an AC report row whose paving contractor names it, so its sheets can be told apart.
+    Takes its number, its page number, the contractor's name and other report_data fields.
+    Returns the row.
+    """
+    paving = {"pavingContractorName": name}
+    return ac_row(number, page_number, pavingContractor=paving, **report_data)
+
+
+class TestMultiAcExport:
+    def test_two_ac_reports_each_get_ac_fr_and_ac_bk(self):
+        content = export_bytes(reports=[named_ac(1, 2, "First Paving", comments="First."),
+                                        named_ac(2, 3, "Second Paving", comments="Second.")])
+        assert tab_order(content) == (["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "AC Fr 2", "AC Bk 2"], "AC Fr")
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["AC Fr"]["L20"].value, book["AC Fr 2"]["L20"].value) == ("First Paving", "Second Paving")
+        assert (book["AC Bk"]["C5"].value, book["AC Bk 2"]["C5"].value) == ("First.", "Second.")
+        assert print_order_page_numbers(content) == [1, None, 2, None, 3, None]
+
+    def test_the_first_reports_overflow_comes_before_the_second_report(self):
+        content = export_bytes(reports=[named_ac(1, 2, "First", pavementCourses=[course(n) for n in range(9)]),
+                                        named_ac(2, 3, "Second")])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Fr 2", "AC Fr 3", "AC Bk", "AC Fr 4",
+                                           "AC Bk 2"]
+        assert print_order_page_numbers(content) == [1, None, 2, 3, 4, None, 5, None]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["AC Fr 3"]["L20"].value, book["AC Fr 4"]["L20"].value) == ("First", "Second")
+        assert {book[n]["AM8"].value for n in ("Gen Fr", "AC Fr", "AC Fr 4")} == {5}  # 3 pages + 2 clones
+
+    def test_the_second_reports_overflow_follows_its_own_front(self):
+        content = export_bytes(reports=[named_ac(1, 2, "First"),
+                                        named_ac(2, 3, "Second", pavementCourses=[course(n) for n in range(5)])])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "AC Fr 2", "AC Fr 3", "AC Bk 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["AC Fr 2"]["B32"].value, book["AC Fr 3"]["B24"].value) == (
+            "Pavement courses continued on next page", "Continued from previous page")
+        assert book["AC Fr"]["B32"].value is None
+
+    def test_the_first_ac_report_keeps_report_cont_and_the_second_is_cut(self):
+        content = export_bytes(reports=[ac_row(1, 2, comments=LONG), ac_row(2, 3, comments=LONG)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Report Cont", "AC Fr 2", "AC Bk 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert ac_remarks(book["AC Bk 2"])[12].endswith("… (continued in ICID)")
+        assert (book["AC Bk"]["C48"].value, book["AC Bk 2"]["C48"].value) == ("X", None)
+
+    def test_the_general_keeps_report_cont_over_both_ac_reports(self):
+        content = export_bytes(general=general_with(description=words(600)),
+                               reports=[ac_row(1, 2, comments=LONG), ac_row(2, 3, comments=LONG)])
+        assert visible_sheets(content)[:3] == ["Gen Fr", "Gen Bk", "Report Cont"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert all(ac_remarks(book[n])[12].endswith("… (continued in ICID)") for n in ("AC Bk", "AC Bk 2"))
+
+    def test_an_swcb_between_two_ac_reports_can_take_report_cont(self):
+        content = export_bytes(reports=[ac_row(1, 2, comments="Short."), swcb_row(1, 3, description=words(600)),
+                                        ac_row(2, 4, comments=LONG)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Conc Fr", "Conc Bk", "Report Cont",
+                                           "AC Fr 2", "AC Bk 2"]
+        assert ac_remarks(openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Bk 2"])[12].endswith(
+            "… (continued in ICID)")
+
+    def test_each_ac_reports_conc_mix_follows_it(self):
+        first, second = ac_row(1, 2), ac_row(2, 4)
+        content = export_bytes(reports=[first, conc_mix_row(1, first["report_id"], 3, remarks="First's."),
+                                        second, conc_mix_row(2, second["report_id"], 5, remarks="Second's.")])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Conc Mix", "AC Fr 2", "AC Bk 2",
+                                           "Conc Mix 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["Conc Mix"]["H49"].value, book["Conc Mix 2"]["H49"].value) == ("First's.", "Second's.")
+
+    def test_each_ac_reports_attachments_follow_its_own_back_page(self):
+        first, second = ac_row(1, 2), ac_row(2, 3)
+        photos = [attachment(1, first["report_id"]), attachment(2, second["report_id"])]
+        content = export_bytes(reports=[first, second], attachments=photos,
+                               files={p["storage_path"]: image_bytes("JPEG") for p in photos})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "AC Fr", "AC Bk", "Attachments 1", "AC Fr 2", "AC Bk 2",
+                                           "Attachments 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["AC Bk"]["C48"].value, book["AC Bk 2"]["C48"].value) == ("X", "X")
+
+    def test_c48_ticks_only_on_the_ac_bk_whose_report_has_attachments(self):
+        first, second = ac_row(1, 2), ac_row(2, 3)
+        photo = attachment(1, second["report_id"])
+        content = export_bytes(reports=[first, second], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG")})
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert (book["AC Bk"]["C48"].value, book["AC Bk 2"]["C48"].value) == (None, "X")
+
+    def test_a_mixed_idr_prints_and_numbers_in_page_order(self):
+        reports = [GENERAL_ROW, named_ac(1, 2, "First", pavementCourses=[course(n) for n in range(5)]),
+                   swcb_row(1, 3, payItems=pay_items(13)), conc_mix_row(1, SWCB_1, 4),
+                   named_ac(2, 5, "Second")]
+        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 5}, reports=reports)
+        assert tab_order(content) == (["Gen Fr", "Gen Bk", "AC Fr", "AC Fr 2", "AC Bk", "Conc Fr", "Conc Fr 2",
+                                       "Conc Bk", "Conc Mix", "AC Fr 3", "AC Bk 2"], "AC Fr")
+        assert print_order_page_numbers(content) == [1, None, 2, 3, None, 4, 5, None, 6, 7, None]
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["AC Fr 3"]["AM8"].value == 7  # 5 + 2
+
+    def test_a_draft_marks_every_ac_sheet(self):
+        content = export_bytes(idr=DRAFT_IDR, general={**GENERAL, "page_number": None}, reports=[
+            ac_row(1, None, pavementCourses=[course(n) for n in range(5)], comments=LONG), ac_row(2, None)])
+        shown = visible_sheets(content)
+        assert shown == ["Gen Fr", "Gen Bk", "AC Fr", "AC Fr 2", "AC Bk", "Report Cont", "AC Fr 3", "AC Bk 2"]
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[n]["B1"].value for n in shown] == ["DRAFT - Not for Submission"] * len(shown)
+
+    def test_mark_attachments_ticks_the_back_it_is_given(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.clone_sheet("AC Bk", "AC Bk 2")
+        export_ac.mark_attachments(workbook, "AC Bk 2")
+        book = written(workbook)
+        assert (book["AC Bk"]["C48"].value, book["AC Bk 2"]["C48"].value) == (None, "X")
 
 
 # ---------------------------------------------------------------------------
