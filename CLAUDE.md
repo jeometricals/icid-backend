@@ -25,7 +25,7 @@ every request to it.
 | `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on a submitted IDR's pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the signature), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
-| `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the auth users (the admin account and the legacy demo user) and `seed_test_project.sql` the Test Project (`DEMO01`). |
+| `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). |
@@ -104,6 +104,12 @@ Any change must follow these.
   `user: UserOut = Depends(current_user)` and reads `user.uuid`: the user never comes from a query parameter or a
   request body (`reporter_uuid` and `uploaded_by` are set from the session). `/status`, `/v1/auth/login`,
   `/v1/auth/demo` and `/v1/auth/logout` stay public.
+  - Emails are stored as entered, matched without regard to case at sign-in, and unique the same way
+    (`idx_users_email_lower`, migration 016). An upsert on email is `ON CONFLICT (lower(email))`.
+  - User `327d3ed2-a3d6-4235-9408-7fe721b12bed` in the live database is Genghis Khan, a seeded inspector, and
+    the id the frontend sent for everyone before sign-in existed. H0 mistook the row for a placeholder and
+    renamed it `legacy-demo@icid.local`; his email (`KhanG@magnoleng.pc`) has been put back, and
+    `seed_auth_users.sql` no longer touches the row except to undo that rename. He has no password.
   - **No admin bypass, no ownership checks (yet).** `role == "admin"` changes nothing: an admin lists only the
     projects assigned to them in `project_users`, like anyone else, and `current_admin` is applied nowhere. Any
     signed-in user can read, edit, submit or export any IDR by id, and list IDRs for any reporter
@@ -201,10 +207,6 @@ Not rules — current state, documented so nobody mistakes these for the intende
   have to find them. `POST /v1/auth/demo` is also unthrottled apart from the 200-user ceiling.
 - No multi-statement transactions: `run_query` runs one statement per connection. Work that must be atomic is
   written as one statement (data-modifying CTEs), as the demo user's insert and delete are.
-- `uq_users_email` is case-sensitive on the stored value, while sign-in looks emails up without regard to case.
-  `Reza@icid.local` and `reza@icid.local` could coexist as separate rows, and login would pick the oldest. Fix in
-  the next schema migration slice: drop `uq_users_email` and add
-  `UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email))`. Low priority.
 - Four overlapping READMEs exist (`README.md`, `README_01.md`, `README-db.md`,
   `README-api.md`) with conflicting run instructions. The one that works is
   `uvicorn api.index:app --reload`.

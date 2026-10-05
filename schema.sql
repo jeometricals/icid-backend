@@ -45,12 +45,12 @@ CREATE TABLE icid.users (
     signature_set_at TIMESTAMPTZ,
     CONSTRAINT fk_users_client
         FOREIGN KEY (client_id) REFERENCES icid.clients(client_id),
-    CONSTRAINT uq_users_email UNIQUE (email),
     CONSTRAINT chk_users_signature_type CHECK (signature_type IN ('drawn', 'uploaded'))
 );
 
 CREATE INDEX idx_users_uuid ON icid.users(uuid);
-CREATE INDEX idx_users_email ON icid.users(email);
+-- One account per email, whatever its capitals; also serves sign-in's lookup by lower(email)
+CREATE UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email));
 CREATE INDEX idx_users_is_demo ON icid.users(is_demo) WHERE is_demo = true;
 
 ------------------------------------------------------------

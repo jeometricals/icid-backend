@@ -65,7 +65,7 @@ People who sign in: inspectors, CCLs, engineers.
 | Column | Type | Notes |
 |---|---|---|
 | `uuid` | UUID PK | `uuid_generate_v4()`. The API calls it `user_id`. |
-| `email` | TEXT NOT NULL | UNIQUE (`uq_users_email`) |
+| `email` | TEXT NOT NULL | Stored as entered; unique without regard to case (`idx_users_email_lower` on `lower(email)`), which is also how sign-in looks it up |
 | `first_name`, `last_name` | TEXT | |
 | `phone_number` | TEXT | |
 | `client_id` | TEXT NOT NULL | FK → `clients.client_id` (the user's employer) |
@@ -387,13 +387,15 @@ content as TEXT, linked to a report and a form template).
 | 014 | `014_demo_cleanup.sql` | H3 | Created the function `icid.cleanup_abandoned_demo_users()` (SECURITY DEFINER, EXECUTE revoked from PUBLIC): deletes demo users older than 24 hours with their attachments, reports, IDRs and project assignments, and returns how many. No table changes; scheduling it is a separate, manual step. |
 | 015 | `015_signatures.sql` | I0 | Added `users.signature_path`, `signature_type` (CHECK `drawn` / `uploaded`) and `signature_set_at`, and `idrs.inspector_signature_path` and `inspector_signed_at`. All nullable. |
 | 015b | `015b_signatures_bucket.sql` | I0 | Created the private Storage bucket `signatures` (500 KB per file; PNG only). No `icid` table changes. |
+| 016 | `016_users_email_lower.sql` | Housekeeping | Created the unique index `idx_users_email_lower` on `lower(email)`; dropped `uq_users_email` (case-sensitive, from 013) and the baseline's plain `idx_users_email`. |
 
 Where each current column came from:
 
 | Table | Columns | Added in |
 |---|---|---|
 | `clients`, `users`, `projects`, `project_users`, `project_clients`, `form_templates` | all | Baseline |
-| `users` | `password_hash`, `role`, `is_demo`, `uq_users_email`, `idx_users_is_demo` (index) | 013 |
+| `users` | `password_hash`, `role`, `is_demo`, `idx_users_is_demo` (index) | 013 |
+| `users` | `idx_users_email_lower` (unique index; replaced 013's `uq_users_email` and the baseline's `idx_users_email`) | 016 |
 | `users` | `signature_path`, `signature_type`, `signature_set_at`, `chk_users_signature_type` | 015 |
 | `idrs` | `inspector_signature_path`, `inspector_signed_at` | 015 |
 | `idrs` | everything except the flag | 004 |

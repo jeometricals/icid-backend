@@ -75,7 +75,8 @@ class TestUsersSchema:
 
     def test_email_is_unique_and_demo_users_are_indexed(self):
         schema = sql("schema.sql")
-        assert "CONSTRAINT uq_users_email UNIQUE (email)" in schema
+        assert "CREATE UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email));" in schema
+        assert "uq_users_email" not in schema and "idx_users_email ON" not in schema  # replaced by migration 016
         assert f"CREATE INDEX {IS_DEMO_INDEX}" in schema
 
 
@@ -106,10 +107,20 @@ class TestSeeds:
         assert bcrypt.checkpw(b"not the password", row.group(1).encode()) is False  # a hash bcrypt can read
         assert "password_hash = COALESCE(icid.users.password_hash, EXCLUDED.password_hash)" in seed
 
-    def test_auth_users_keeps_the_legacy_demo_users_uuid(self):
+    def test_auth_users_upserts_on_the_case_insensitive_email(self):
         seed = sql("seed_auth_users.sql")
-        assert f"VALUES ('{DEMO_UUID}', 'legacy-demo@icid.local', 'C00001', NULL, false)" in seed
-        assert "ON CONFLICT (uuid) DO UPDATE" in seed
+        assert "ON CONFLICT (lower(email)) DO UPDATE" in seed  # the only unique index on email since 016
+        assert "ON CONFLICT (email)" not in seed
+
+    def test_auth_users_puts_genghis_khans_email_back_and_nothing_else(self):
+        seed = re.sub(r"\s+", " ", sql("seed_auth_users.sql"))
+        assert (f"UPDATE icid.users SET email = 'KhanG@magnoleng.pc' WHERE uuid = '{DEMO_UUID}' "
+                "AND email = 'legacy-demo@icid.local';") in seed
+        # no row is created for that uuid any more, so a database built from seed.sql gets no second Genghis
+        assert inserted_columns(sql("seed_auth_users.sql"), "users") == [
+            ["email", "first_name", "client_id", "password_hash", "role", "is_demo"]]
+        assert seed.count("legacy-demo@icid.local") == 1
+        assert "'KhanG@magnoleng.pc'" in sql("seed.sql")  # the email seed.sql gives him
 
     def test_auth_users_assigns_reza_to_the_seeded_projects(self):
         seed = sql("seed_auth_users.sql")
@@ -201,3 +212,35 @@ class TestDemoCleanupMigration:
         for option in ("cron.schedule('cleanup-abandoned-demos', '0 3 * * *'", "Vercel Cron",
                        "SELECT icid.cleanup_abandoned_demo_users();"):
             assert option in text
+
+
+class TestMigration016:
+    def test_email_becomes_unique_without_regard_to_case(self):
+        migration = sql("migrations/016_users_email_lower.sql")
+        assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON icid.users (lower(email));" in migration
+        assert "ALTER TABLE icid.users DROP CONSTRAINT IF EXISTS uq_users_email;" in migration
+        assert "DROP INDEX IF EXISTS icid.idx_users_email;" in migration
+
+    def test_the_new_index_is_built_before_the_old_guarantee_goes(self):
+        migration = sql("migrations/016_users_email_lower.sql")
+        assert migration.count("BEGIN;") == migration.count("COMMIT;") == 1
+        order = [migration.index(part) for part in ("BEGIN;", "CREATE UNIQUE INDEX", "DROP CONSTRAINT", "DROP INDEX",
+                                                    "COMMIT;")]
+        assert order == sorted(order)
+
+    def test_it_carries_the_duplicate_pre_check(self):
+        text = (ROOT / "migrations" / "016_users_email_lower.sql").read_text(encoding="utf-8")
+        assert "SELECT lower(email), count(*) FROM icid.users GROUP BY lower(email) HAVING count(*) > 1;" in text
+
+    def test_it_matches_schema_sql_and_what_sign_in_asks(self):
+        from unittest.mock import patch
+        from api.queries.users import get_user_for_auth
+        assert "ON icid.users (lower(email));" in sql("schema.sql")
+        with patch("api.queries.users.run_query", return_value=[]) as run:
+            get_user_for_auth("Reza@ICID.local")
+        assert "WHERE lower(u.email) = %s" in run.call_args.args[0]  # the expression the index is on
+        assert run.call_args.args[1] == ("reza@icid.local",)
+
+    def test_no_data_is_touched(self):
+        migration = sql("migrations/016_users_email_lower.sql")
+        assert "UPDATE" not in migration and "DELETE" not in migration and "ADD COLUMN" not in migration
