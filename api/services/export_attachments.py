@@ -3,8 +3,8 @@ Prints an IDR's report attachments on copies of the template's Sketch Cont page 
 
 Each attachment gets a page of its own under the continuation header: its name as a title and its description beneath,
 then, for a photo, the photo fitted to the photo frame (B25:AI58 of the sketch grid). A PDF can't be drawn on a page,
-so its page shows a "no preview" box over the frame and names the file; a photo that can't be fetched or read gets a
-box there saying so. At most MAX_PHOTOS photos print per export; any past that are counted on one closing page.
+so its page shows a "no preview" box over the frame and names the file; a photo that can't be fetched or read gets the
+same page, its box saying so. At most MAX_PHOTOS photos print per export; any past that are counted on one closing page.
 
 Photos are fetched from Storage on a few threads at once, then shrunk (and HEIC / WebP converted) with Pillow so the
 workbook stays a reasonable size.
@@ -84,26 +84,24 @@ class CaptionStyle:
     description_row_pt: Optional[float]
 
 
-# Photo pages keep the template's 10 pt; a PDF page has room to spare, so its title and description are larger, on
-# taller rows (Arial's line height: 16 pt needs about 21 pt, 12 pt about 15.75). 12 pt holds 85 x 10 / 12 = 70
+# Photo pages keep the template's 10 pt; a page with no picture (a PDF, or a photo that couldn't be fetched) has room
+# to spare, so its title and description are larger, on taller rows (Arial's line height: 16 pt needs about 21 pt, 12 pt about 15.75). 12 pt holds 85 x 10 / 12 = 70
 # characters across B:AI, and 16 pt 85 x 10 / 16 = 53, so the description keeps its three lines.
 PHOTO_CAPTION = CaptionStyle(title_pt=None, title_chars=85, title_row_pt=None,
                              description=TextArea(rows=range(22, 25), column="B", line_chars=85),
                              description_pt=None, description_row_pt=None)
-PDF_CAPTION = CaptionStyle(title_pt=16, title_chars=53, title_row_pt=21,
-                           description=TextArea(rows=range(22, 25), column="B", line_chars=70),
-                           description_pt=12, description_row_pt=15.75)
+PLACEHOLDER_CAPTION = CaptionStyle(title_pt=16, title_chars=53, title_row_pt=21,
+                                   description=TextArea(rows=range(22, 25), column="B", line_chars=70),
+                                   description_pt=12, description_row_pt=15.75)
 
-# A PDF's page: a white box over the photo frame (hiding the grid) with a thin grey outline and the note centred in it,
-# and the file's name on the grid row below it (B59). An unavailable photo's page has the same box, its note in 10 pt
-# black.
+# A page with no picture: a white box over the photo frame (hiding the grid) with a thin grey outline and a grey note
+# centred in it, saying why, and the file's name on the grid row below it (B59)
 PDF_NOTE = "No preview available in this export — see ICID for the full file"
-PDF_NOTE_PT = 14
+UNAVAILABLE_NOTE = "This attachment couldn't be fetched for this export — see ICID for the file"
+PLACEHOLDER_NOTE_PT = 14
 GREY = "808080"
 FILE_CELL = "B59"
 FILE_PT = 10
-UNAVAILABLE_NOTE_PT = 10
-BLACK = "000000"
 
 
 @dataclass
@@ -226,23 +224,15 @@ def _new_page(workbook: WorkbookTemplate, number: int, idr: dict[str, Any], proj
     return sheet
 
 
-def _stamp_frame_box(workbook: WorkbookTemplate, sheet: str, note: str, points: float, rgb: str) -> None:
+def _stamp_placeholder(workbook: WorkbookTemplate, sheet: str, note: str, file_name: str) -> None:
     """
-    Cover the photo frame with a white, grey-outlined box, a note centred in it.
-    Takes the workbook, the sheet, the note, its size in points and its colour (RGB hex).
+    Fill a page that has no picture to show (a PDF, or a photo that couldn't be fetched) where the photo would go:
+    a white, grey-outlined box over the photo frame with the note centred in it, and the file's name in grey below.
+    Takes the workbook, the sheet, the note and the file's name.
     Returns nothing.
     """
     width, height = FRAME_PX
-    workbook.add_text_box(sheet, note, FRAME_CELL, width, height, points, rgb, GREY)
-
-
-def _stamp_pdf_placeholder(workbook: WorkbookTemplate, sheet: str, file_name: str) -> None:
-    """
-    Fill a PDF's page where a photo would go: the "no preview" box, and the file's name in grey below it.
-    Takes the workbook, the sheet and the PDF's file name.
-    Returns nothing.
-    """
-    _stamp_frame_box(workbook, sheet, PDF_NOTE, PDF_NOTE_PT, GREY)
+    workbook.add_text_box(sheet, note, FRAME_CELL, width, height, PLACEHOLDER_NOTE_PT, GREY, GREY)
     workbook.set_cell(sheet, FILE_CELL, f"File: {file_name}")
     workbook.set_style(sheet, FILE_CELL, workbook.font_style(workbook.cell_style(sheet, FILE_CELL), points=FILE_PT,
                                                              rgb=f"FF{GREY}"))
@@ -283,15 +273,13 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
             title = f"PDF: {name}" if is_pdf else name if photo else f"Attachment unavailable: {name}"
             number += 1
             sheet = _new_page(workbook, number, idr, project, inspector, title, attachment["attachment_description"],
-                              PDF_CAPTION if is_pdf else PHOTO_CAPTION)
+                              PHOTO_CAPTION if photo is not None else PLACEHOLDER_CAPTION)
             if photo is not None:
                 _place_photo(workbook, sheet, photo, name)
             elif is_pdf:
-                _stamp_pdf_placeholder(workbook, sheet, attachment["file_name"])
+                _stamp_placeholder(workbook, sheet, PDF_NOTE, attachment["file_name"])
             else:
-                _stamp_frame_box(workbook, sheet,
-                                 f"File: {attachment['file_name']} (couldn't be fetched for this export)",
-                                 UNAVAILABLE_NOTE_PT, BLACK)
+                _stamp_placeholder(workbook, sheet, UNAVAILABLE_NOTE, attachment["file_name"])
             workbook.fit_to_letter_page(sheet)
             pages.setdefault(report_id, []).append(sheet)
 

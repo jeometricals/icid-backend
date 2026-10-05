@@ -2234,7 +2234,7 @@ class TestAttachmentsExport:
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
         assert book["Attachments 1"]["B21"].value == "Attachment unavailable: Photo 1"
         assert [box["text"] for box in text_boxes(content, "Attachments 1")] == [
-            "File: photo_1.jpg (couldn't be fetched for this export)"]
+            "This attachment couldn't be fetched for this export — see ICID for the file"]
         assert [len(pictures(content, f"Attachments {n}")) for n in (1, 2, 3)] == [0, 1, 1]
 
     def test_photos_past_the_cap_are_counted_on_a_closing_page(self):
@@ -2338,9 +2338,37 @@ class TestAttachmentsExport:
         box, = text_boxes(content, "Attachments 1")
         assert frame_box(box) == (0, 0, FRAME_WIDTH, FRAME_HEIGHT)
         assert (box["size_pt"], box["color"], box["fill"], box["outline"], box["centred"]) == (
-            10, "000000", "FFFFFF", (9525, "808080"), True)
+            14, "808080", "FFFFFF", (9525, "808080"), True)
         assert pictures(content, "Attachments 1") == []
         assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]["B26"].value is None
+
+    def test_an_unavailable_photos_page_is_styled_like_a_pdfs(self):
+        rows = [attachment(1, SWCB_1, file_name="site.jpg", attachment_name="North wall"),
+                attachment(2, SWCB_1, PDF_TYPE, file_name="mix_ticket.pdf", attachment_name="Batch ticket")]
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows,
+                               files={rows[0]["storage_path"]: TimeoutError("read timed out")})
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        unavailable, pdf = book["Attachments 1"], book["Attachments 2"]
+        assert (unavailable["B21"].value, pdf["B21"].value) == ("Attachment unavailable: North wall", "PDF: Batch ticket")
+        for cell in ("B21", "B22", "B59"):  # title, description and file name: the same fonts, sizes and colours
+            assert (unavailable[cell].font.sz, unavailable[cell].font.b, unavailable[cell].font.color.rgb
+                    if unavailable[cell].font.color else None) == (
+                pdf[cell].font.sz, pdf[cell].font.b, pdf[cell].font.color.rgb if pdf[cell].font.color else None)
+        assert (unavailable["B21"].font.sz, unavailable["B22"].font.sz) == (16, 12)
+        assert [unavailable.row_dimensions[row].height for row in (21, 22, 23, 24)] == [21, 15.75, 15.75, 15.75]
+        assert (unavailable["B59"].value, unavailable["B59"].font.sz, unavailable["B59"].font.color.rgb) == (
+            "File: site.jpg", 10, "FF808080")
+        box, pdf_box = text_boxes(content, "Attachments 1")[0], text_boxes(content, "Attachments 2")[0]
+        assert {k: v for k, v in box.items() if k != "text"} == {k: v for k, v in pdf_box.items() if k != "text"}
+        assert box["text"] != pdf_box["text"]  # each says its own reason
+
+    def test_a_photo_that_arrives_keeps_the_templates_small_caption(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG")})
+        sheet = openpyxl.load_workbook(io.BytesIO(content))["Attachments 1"]
+        assert (sheet["B21"].font.sz, sheet["B22"].font.sz, sheet["B59"].value) == (10, 10, None)
+        assert text_boxes(content, "Attachments 1") == []
 
     def test_a_photo_a_pdf_and_a_photo_each_fill_their_own_page(self):
         rows = [attachment(1, SWCB_1), attachment(2, SWCB_1, PDF_TYPE), attachment(3, SWCB_1)]
