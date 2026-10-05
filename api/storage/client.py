@@ -96,13 +96,13 @@ def upload_file(bucket: str, path: str, data: bytes, content_type: str) -> None:
     _bucket(bucket).upload(path, data, {"content-type": content_type, "upsert": "true"})
 
 
-def download_file(path: str) -> bytes:
+def download_file(path: str, bucket: str = STORAGE_BUCKET_NAME) -> bytes:
     """
-    Fetch one object's bytes from the attachments bucket, server-side (no signed URL).
-    Takes the object path.
+    Fetch one object's bytes, server-side (no signed URL).
+    Takes the object path and the bucket (the attachments bucket unless given).
     Returns the file's bytes; raises the Storage client's error, or a timeout, when it can't be fetched.
     """
-    return _download_client().storage.from_(STORAGE_BUCKET_NAME).download(path)
+    return _download_client().storage.from_(bucket).download(path)
 
 
 def copy_file(bucket: str, from_path: str, to_path: str) -> None:

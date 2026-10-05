@@ -643,17 +643,66 @@ class WorkbookTemplate:
             raise ValueError(f"{sheet} has no drawing to add a picture to")
         return posixpath.normpath(posixpath.join(posixpath.dirname(sheet_part), target.group(1)))
 
+    def _ensure_drawing(self, sheet: str) -> str:
+        """
+        Find a sheet's drawing part, giving the sheet an empty one first if it has none (a sheet with no logo or
+        shapes): the part, its content type, the sheet's relationship to it and the sheet's <drawing> element.
+        Takes the sheet name.
+        Returns the drawing's part name.
+        """
+        try:
+            return self._drawing_part(sheet)
+        except ValueError:
+            pass
+        sheet_part = self._sheet_paths[sheet]
+        drawing = self._next_part("xl/drawings", "drawing", "xml")
+        self._add_part(drawing, (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
+            'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"></xdr:wsDr>').encode("utf-8"))
+        types = self._text("[Content_Types].xml")
+        override = (f'<Override PartName="/{drawing}" '
+                    'ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>')
+        self._write("[Content_Types].xml", types.replace("</Types>", override + "</Types>"))
+
+        rels_part = self._rels_part(sheet_part)
+        rels = self._parts.get(rels_part, b"").decode("utf-8") or (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships '
+            'xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>')
+        rel_id = f"rId{max((int(n) for n in re.findall(r'Id=.rId(\d+).', rels)), default=0) + 1}"
+        relationship = (f'<Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        f'relationships/drawing" Target="{posixpath.relpath(drawing, posixpath.dirname(sheet_part))}"/>')
+        rels = rels.replace("</Relationships>", relationship + "</Relationships>")
+        if rels_part in self._parts:
+            self._write(rels_part, rels)
+        else:
+            self._add_part(rels_part, rels.encode("utf-8"))
+
+        # <drawing> has a fixed place among a worksheet's children: after the page setup and breaks, before these
+        xml = self._sheet(sheet)
+        body_end = xml.index("</sheetData>")
+        later = re.search(r"<(?:legacyDrawing|legacyDrawingHF|drawingHF|picture|oleObjects|controls|webPublishItems|"
+                          r"tableParts)\b", xml[body_end:])
+        if later:
+            at = body_end + later.start()
+        elif xml.rstrip().endswith("</extLst></worksheet>"):
+            at = xml.rindex("<extLst")
+        else:
+            at = xml.rindex("</worksheet>")
+        self._write(sheet_part, xml[:at] + f'<drawing r:id="{rel_id}"/>' + xml[at:])
+        return drawing
+
     def add_picture(self, sheet: str, image: bytes, extension: str, coordinate: str, width_px: int, height_px: int,
                     offset_x_px: int = 0, offset_y_px: int = 0, description: str = "") -> None:
         """
         Place an image on a sheet at a fixed size (a one-cell anchor: it doesn't stretch with rows or columns), in the
-        sheet's existing drawing, with the image stored as a new media part.
+        sheet's drawing (a sheet without one gets one), with the image stored as a new media part.
         Takes the sheet, the image bytes, its file extension ("png" or "jpeg"), the cell its top-left corner sits in,
         its width and height in pixels (the caller keeps the aspect ratio), the corner's offset into that cell in
         pixels (each less than the cell's size) and alt text.
-        Returns nothing; raises ValueError for a sheet without a drawing.
+        Returns nothing.
         """
-        drawing = self._drawing_part(sheet)
+        drawing = self._ensure_drawing(sheet)
         media = self._next_part("xl/media", "image", extension)
         self._add_part(media, image)
         types = self._text("[Content_Types].xml")

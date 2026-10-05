@@ -22,7 +22,7 @@ every request to it.
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on a submitted IDR's pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the signature), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the auth users (the admin account and the legacy demo user) and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -149,6 +149,19 @@ Any change must follow these.
   - `UserOut` carries `signature_path` internally for the submit flow but never serialises it; responses show
     `has_signature` and `signature_set_at` only. IDR responses do carry `inspector_signature_path`.
   - The signer is whoever submits, not necessarily the IDR's reporter (there are no ownership checks yet).
+  - **The export prints it.** For a submitted IDR with `inspector_signature_path`, `export.py` downloads that
+    file once and stamps it, with the signed date, on every printed page that has an "Inspector's Signature"
+    line: Gen Bk, Conc Bk, AC Bk, Conc Mix, Report Cont and every attachment page, copies included. Front pages
+    have no line. Each module declares its page's `SIGNATURE_LAYOUT` (Report Cont's is in `export_common.py`);
+    the dispatcher maps a printed sheet to its layout by name, so a copy signs where its original does. A new
+    form with a signature line adds a layout and an entry in `SIGNATURE_LAYOUTS`.
+    - The image is letterboxed into the signature line's cell plus the blank row above it (209 x 34 px; Conc
+      Mix 224 x 32), since the line alone is one 17 px row. The date goes in the line's Date cell as m/d/yy, the
+      day it was in New York (`FORM_TIMEZONE`), not the UTC day.
+    - A draft is never signed, and its signature isn't even fetched. An IDR submitted before signatures
+      (no path), or one whose file can't be fetched or read, exports with blank lines; the failure is logged
+      and the export still completes.
+    - The Resident Engineer's line stays blank (Phase 1b).
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.

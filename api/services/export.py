@@ -4,17 +4,20 @@ Exports a submitted IDR as an .xlsx file built on the DDC report-forms template.
 This module loads the IDR's data and assembles the workbook; each report's pages are stamped by its own module
 (export_general for the General, export_swcb for a Sidewalk, Curb, Concrete Base report, export_conc_mix for a
 Concrete Truck & Mix Info report). Pages that hold nothing stay hidden, so the file prints only the IDR's pages. A draft
-IDR exports too, with "DRAFT - Not for Submission" across the top of every page it prints.
+IDR exports too, with "DRAFT - Not for Submission" across the top of every page it prints. A submitted IDR's pages
+carry the inspector's signature (the copy the IDR kept at submit) and the date it was signed, wherever a page has a
+signature line.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-from api.core.config import EXPORT_BUCKET_NAME, EXPORT_URL_EXPIRY_SECONDS
+from api.core.config import EXPORT_BUCKET_NAME, EXPORT_URL_EXPIRY_SECONDS, SIGNATURE_BUCKET_NAME
 from api.queries.idr_reports import get_general_report, list_non_general_main_reports, list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
@@ -23,12 +26,14 @@ from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
 from api.services import export_ac, export_attachments, export_conc_mix, export_swcb
 from api.services.auto_general import build_auto_general_data
+from api.services import export_general
 from api.services.export_common import (
-    REPORT_CONT, allocate_copies, pay_item_page_count, section, stamp_draft_marker,
+    REPORT_CONT, REPORT_CONT_SIGNATURE, SignatureImage, SignatureLayout, allocate_copies, pay_item_page_count,
+    prepare_signature, section, stamp_draft_marker, stamp_signature,
 )
 from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, stamp_general
 from api.services.xlsx_template import WorkbookTemplate
-from api.storage.client import create_signed_url, upload_file
+from api.storage.client import create_signed_url, download_file, upload_file
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +258,43 @@ def _stamp_contract_info(workbook: WorkbookTemplate, project: dict[str, Any]) ->
         workbook.set_cell(CONTRACT_INFO, coordinate, value)
 
 
+# Every page with an "Inspector's Signature" line, by the template sheet it is (or is a copy of)
+SIGNATURE_LAYOUTS: dict[str, SignatureLayout] = {
+    export_general.GEN_BACK: export_general.SIGNATURE_LAYOUT,
+    export_swcb.CONC_BACK: export_swcb.SIGNATURE_LAYOUT,
+    export_ac.AC_BACK: export_ac.SIGNATURE_LAYOUT,
+    export_conc_mix.CONC_MIX: export_conc_mix.SIGNATURE_LAYOUT,
+    REPORT_CONT: REPORT_CONT_SIGNATURE,
+    export_attachments.ATTACHMENTS: export_attachments.SIGNATURE_LAYOUT,
+}
+
+
+def _signature_layout(page: str) -> Optional[SignatureLayout]:
+    """
+    Find where a printed page takes the inspector's signature.
+    Takes the sheet name; a copy ("Conc Bk 2", "Attachments 7") signs where its original does.
+    Returns the SignatureLayout, or None for a page without a signature line (the front pages).
+    """
+    return SIGNATURE_LAYOUTS.get(re.sub(r" \d+$", "", page))
+
+
+def _load_signature(idr: dict[str, Any]) -> Optional[SignatureImage]:
+    """
+    Fetch the signature a submitted IDR was signed with, once for the whole export.
+    Takes the IDR row.
+    Returns the SignatureImage; None for a draft, for an IDR submitted without one, and when the file can't be
+    fetched or read (logged; the export goes on with blank signature lines).
+    """
+    path = idr.get("inspector_signature_path")
+    if idr["status"] != "submitted" or not path:
+        return None
+    try:
+        return prepare_signature(download_file(path, SIGNATURE_BUCKET_NAME))
+    except Exception as exc:  # noqa: BLE001 - a missing signature mustn't stop the export
+        logger.error("Signature %s unavailable for the export of IDR %s: %s", path, idr["idr_id"], exc)
+        return None
+
+
 def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
     Build an IDR's .xlsx export from the report-forms template: the General's pages, then each SWCB report's (on Conc
@@ -261,7 +303,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     its "Attached Pages" box when its report has attachments or continues on Report Cont. Pay items past a front
     page's table continue on copies of it, right after it. A report's extra sheets are numbered after it and counted
     in OF. Each report's attachments follow its last page, one unnumbered page each. A draft IDR's pages are each
-    marked "DRAFT - Not for Submission".
+    marked "DRAFT - Not for Submission"; a submitted IDR's carry the inspector's signature and the date it was signed
+    wherever a page has a signature line.
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -348,10 +391,14 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     for previous, page in zip(pages, pages[1:]):
         workbook.move_sheet(page, after=previous)
 
+    signature = _load_signature(idr)  # None for a draft: only a submitted IDR is signed
     for page in pages:
         workbook.fit_to_letter_page(page)
         if idr["status"] != "submitted":
             stamp_draft_marker(workbook, page)
+        layout = _signature_layout(page)
+        if layout is not None:
+            stamp_signature(workbook, page, layout, signature, idr.get("inspector_signed_at"))
     workbook.show_only(pages)
 
     return IdrExport(

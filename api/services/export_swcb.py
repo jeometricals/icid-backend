@@ -12,14 +12,19 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
+    SignatureLayout,
     CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
     WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, section, stamp_common_header, stamp_equipment,
     stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, text_value, tick_box, write_lines,
 )
-from api.services.xlsx_template import WorkbookTemplate
+from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 CONC_FRONT = "Conc Fr"
 CONC_BACK = "Conc Bk"
+
+# Conc Bk's signature line is row 59 (C59:M59), its date AE59:AH59; the image also takes the blank row above
+SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C58:M59", signature_cx_emu=209 * EMU_PER_PIXEL,
+                                   signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AE59")
 
 # Same cells as Gen Fr's header, except: the date cell is a single General-formatted cell (so the date goes in as
 # m/d/yy text), and each weather box is one merged area whose "AM" / "PM" label sits at its top left, so the value

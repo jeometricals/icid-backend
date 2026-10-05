@@ -12,12 +12,19 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
+    SignatureLayout,
     CHECK_MARK, TextArea, allocate_copies, fill_lines, mark_truncated, object_rows, paragraphs, section, short_date,
     text_value, write_lines,
 )
-from api.services.xlsx_template import WorkbookTemplate
+from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 CONC_MIX = "Conc Mix"
+
+# Conc Mix's signature line is row 60 (C60:P60), its date AK60:AO60; the image also takes the blank row above.
+# Its columns are 16 px, and row 59 is 15 px (11.25 pt), so the box is 14 x 16 = 224 px by 15 + 17 = 32 px.
+SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C59:P60", signature_cx_emu=224 * EMU_PER_PIXEL,
+                                   signature_cy_emu=32 * EMU_PER_PIXEL, date_cell="AK60", column_px=16,
+                                   row_px=(15, 17))
 
 # The header. HeaderLayout doesn't fit (it requires the day, times, temperatures and weather this form lacks), so it
 # is stamped here, as Report Cont's is. The template has formulas reading Contract Info in the project cells, replaced

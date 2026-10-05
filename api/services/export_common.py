@@ -7,13 +7,18 @@ Each form puts these in its own cells; a HeaderLayout or PayItemsLayout names th
 functions fill them. Per-report modules (export_general, export_swcb, ...) own their sheets' layouts.
 """
 
+import io
+import re
 import textwrap
 from dataclasses import dataclass
-from datetime import date, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from api.services.xlsx_template import WorkbookTemplate
+from PIL import Image
+
+from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 CHECK_MARK = "X"
 # A drawn checkbox rectangle (8-10 px, transparent since the template cleanup) is ticked with a small centred X
@@ -769,3 +774,114 @@ def stamp_draft_marker(workbook: WorkbookTemplate, sheet: str) -> None:
                        workbook.font_style(style, points=DRAFT_MARKER_FONT_PT, bold=True, rgb=DRAFT_MARKER_COLOR))
     workbook.center_cell(sheet, DRAFT_MARKER_CELL)
     workbook.set_row_height(sheet, 1, DRAFT_MARKER_ROW_HEIGHT)
+
+
+# ---- Inspector's signature ------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SignatureLayout:
+    """
+    Where one form page takes the inspector's signature and its date. The image is fitted to signature_cells: the
+    "Inspector's Signature" line and the blank row above it (the line alone is one 17 px row, too low to read a
+    signature in). The date goes in the Date cell on the same line.
+    """
+
+    signature_cells: str                 # the range the image is fitted to, e.g. "C58:M59"
+    signature_cx_emu: int                # that range's width
+    signature_cy_emu: int                # and height
+    date_cell: str                       # top-left cell of the line's Date cell
+    column_px: int = 19                  # width of each column in the range
+    row_px: tuple[int, ...] = (17, 17)   # height of each row in the range, top to bottom
+
+
+@dataclass(frozen=True)
+class SignatureImage:
+    """A signature ready to stamp: PNG bytes and their size in pixels."""
+
+    data: bytes
+    width: int
+    height: int
+
+
+# Report Cont's signature line is row 49 (C49:M49), its date AF49:AH49
+REPORT_CONT_SIGNATURE = SignatureLayout(signature_cells="C48:M49", signature_cx_emu=209 * EMU_PER_PIXEL,
+                                        signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AF49")
+
+# The image is stored once per page it is stamped on, so it is kept small: four times the 209 x 34 px box at most,
+# which still prints sharply
+SIGNATURE_MAX_PX = (836, 136)
+
+# The forms are New York City's: a signing time prints as that day's date there, whatever the server's clock zone
+FORM_TIMEZONE = "America/New_York"
+
+
+def prepare_signature(data: bytes) -> SignatureImage:
+    """
+    Read a signature image and shrink it for the workbook: at most SIGNATURE_MAX_PX, as PNG (transparency kept).
+    Takes the file's bytes.
+    Returns the SignatureImage; raises Pillow's error for a file it can't read.
+    """
+    with Image.open(io.BytesIO(data)) as source:
+        image = source.convert("RGBA")
+        image.thumbnail(SIGNATURE_MAX_PX)
+        output = io.BytesIO()
+        image.save(output, "PNG", optimize=True)
+        return SignatureImage(output.getvalue(), image.width, image.height)
+
+
+def signed_date(signed_at: datetime) -> date:
+    """
+    Work out the calendar day a signing time falls on in FORM_TIMEZONE.
+    Takes the time (taken as UTC when it carries no zone).
+    Returns the date; in UTC if the zone's data isn't available.
+    """
+    moment = signed_at if signed_at.tzinfo else signed_at.replace(tzinfo=timezone.utc)
+    try:
+        return moment.astimezone(ZoneInfo(FORM_TIMEZONE)).date()
+    except ZoneInfoNotFoundError:
+        return moment.astimezone(timezone.utc).date()
+
+
+def _column_letters(number: int) -> str:
+    """
+    Name a column by its number.
+    Takes the 1-based column number.
+    Returns its letters, e.g. 3 -> "C", 31 -> "AE".
+    """
+    letters = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def stamp_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
+                    signature: Optional[SignatureImage], signed_at: Optional[datetime]) -> None:
+    """
+    Stamp the inspector's signature on one page: the image as large as fits the layout's signature cells, keeping its
+    proportions, centred in them; and the day it was signed (m/d/yy) in the Date cell.
+    Takes the workbook, the sheet, its SignatureLayout, the signature (None leaves the page as it is: no image, no
+    date) and when it was signed (None leaves the date blank).
+    Returns nothing.
+    """
+    if signature is None:
+        return
+    box_width, box_height = layout.signature_cx_emu // EMU_PER_PIXEL, layout.signature_cy_emu // EMU_PER_PIXEL
+    scale = min(box_width / signature.width, box_height / signature.height)
+    width, height = max(1, round(signature.width * scale)), max(1, round(signature.height * scale))
+    left, top = (box_width - width) // 2, (box_height - height) // 2
+
+    first = re.fullmatch(r"([A-Z]+)(\d+):[A-Z]+\d+", layout.signature_cells)
+    first_column = sum((ord(letter) - ord("A") + 1) * 26 ** place
+                       for place, letter in enumerate(reversed(first.group(1))))
+    row = int(first.group(2))
+    for row_height in layout.row_px[:-1]:  # walk down to the row the image's top edge falls in
+        if top < row_height:
+            break
+        top -= row_height
+        row += 1
+    cell = f"{_column_letters(first_column + left // layout.column_px)}{row}"
+    workbook.add_picture(sheet, signature.data, "png", cell, width, height, offset_x_px=left % layout.column_px,
+                         offset_y_px=top, description="Inspector's signature")
+    if signed_at is not None:
+        workbook.set_cell(sheet, layout.date_cell, short_date(signed_date(signed_at)))

@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 
 from api.services.export_common import (
+    SignatureLayout,
     ContinuationHeader, TextArea, fill_lines, mark_truncated, paragraphs, stamp_continuation_header, text_value,
     write_lines,
 )
@@ -34,6 +35,11 @@ register_heif_opener()  # lets Pillow open HEIC / HEIF photos
 
 SKETCH_CONT = "Sketch Cont"
 ATTACHMENTS = "Attachments"
+
+# Every attachment page is a copy of Sketch Cont, whose signature line is row 61 (C61:M61), its date AF61:AH61;
+# the image also takes the blank row above
+SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C60:M61", signature_cx_emu=209 * EMU_PER_PIXEL,
+                                   signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AF61")
 PDF = "application/pdf"
 
 MAX_PHOTOS = 50

@@ -15,14 +15,19 @@ Cell positions come from reading templates/report_forms.xlsx; see the constants 
 from typing import Any, Optional
 
 from api.services.export_common import (
+    SignatureLayout,
     CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout,
     TextArea, WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, stamp_common_header, stamp_equipment,
     stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, write_lines,
 )
-from api.services.xlsx_template import WorkbookTemplate
+from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 GEN_FRONT = "Gen Fr"
 GEN_BACK = "Gen Bk"
+
+# Gen Bk's signature line is row 59 (C59:M59), its date AE59:AH59; the image also takes the blank row above
+SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C58:M59", signature_cx_emu=209 * EMU_PER_PIXEL,
+                                   signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AE59")
 
 # ---- Gen Fr -----------------------------------------------------------------
 

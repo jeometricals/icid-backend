@@ -3,7 +3,7 @@ import re
 import textwrap
 import zipfile
 from contextlib import contextmanager
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
@@ -121,12 +121,13 @@ GENERAL = {
 
 @contextmanager
 def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers Contracting Co.", user=USER,
-                   general=GENERAL, main_reports=None, reports=None, attachments=None, files=None):
+                   general=GENERAL, main_reports=None, reports=None, attachments=None, files=None, signature=None):
     """
     Patch the queries generate_idr_export reads, and Storage, so it runs without a database or a bucket.
     Takes the IDR, project, contractor name, user, General report (or None), non-General main reports, all the
-    IDR's reports (where the SWCB report is found), their uploaded attachment rows and {storage path: file bytes}
-    (a path that's missing, or maps to an exception, fails its download).
+    IDR's reports (where the SWCB report is found), their uploaded attachment rows, {storage path: file bytes}
+    (a path that's missing, or maps to an exception, fails its download) and the signature file's bytes (None, or
+    an exception, fails its download).
     Yields a dict of the mocks.
     """
     def download(path):
@@ -134,6 +135,11 @@ def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers 
         if isinstance(result, Exception):
             raise result
         return result
+
+    def download_signature(path, bucket):
+        if signature is None or isinstance(signature, Exception):
+            raise signature or FileNotFoundError(path)
+        return signature
 
     with (
         patch.object(export, "get_idr_by_id", return_value=idr) as gi,
@@ -145,9 +151,10 @@ def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers 
         patch.object(export, "list_reports_for_idr", return_value=reports or []) as lr,
         patch.object(export, "list_uploaded_attachments_for_reports", return_value=attachments or []) as la,
         patch.object(export_attachments, "download_file", side_effect=download) as df,
+        patch.object(export, "download_file", side_effect=download_signature) as ds,
     ):
         yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm, "reports": lr,
-               "attachments": la, "download": df}
+               "attachments": la, "download": df, "signature": ds}
 
 
 def exported_workbook(**overrides) -> openpyxl.Workbook:
@@ -3441,3 +3448,305 @@ def export_media_type() -> str:
     Returns the MIME type string.
     """
     return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+# ---------------------------------------------------------------------------
+# The inspector's signature and its date, on every page with a signature line
+# ---------------------------------------------------------------------------
+
+SIGNATURE_PATH = f"idrs/{IDR_ID}/inspector_0123456789abcdef0123456789abcdef.png"
+# 02:30 UTC on Oct 1 is 10:30 pm on Sep 30 in New York, where the forms are from
+SIGNED_IDR = {**SUBMITTED_IDR, "inspector_signature_path": SIGNATURE_PATH,
+              "inspector_signed_at": datetime(2026, 10, 1, 2, 30, tzinfo=timezone.utc)}
+SIGNED_ON = "9/30/26"
+# Each signed page: its signature line's first cell, its Date cell, and the label cells under them
+SIGNATURE_LINES = {
+    "Gen Bk": ("C59", "AE59", "C60", "AE60"), "Conc Bk": ("C59", "AE59", "C60", "AE60"),
+    "AC Bk": ("C55", "AE55", "C56", "AE56"), "Conc Mix": ("C60", "AK60", "C61", "AK61"),
+    "Report Cont": ("C49", "AF49", "C50", "AF50"), "Sketch Cont": ("C61", "AF61", "C62", "AF62"),
+}
+
+
+def signature_png(size: tuple[int, int] = (600, 60)) -> bytes:
+    """
+    Make a signature file in memory: a transparent PNG with a stroke across it.
+    Takes its size in pixels.
+    Returns the file's bytes.
+    """
+    from PIL import Image, ImageDraw
+    image = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(image).line([(2, size[1] - 2), (size[0] - 2, 2)], fill=(0, 0, 80, 255), width=3)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def stamped(content: bytes, sheet: str) -> list[dict]:
+    """
+    Read the pictures this export added to a sheet, whether or not the sheet has a drawing at all.
+    Takes the .xlsx bytes and the sheet name.
+    Returns what pictures() returns, or an empty list for a sheet without a drawing.
+    """
+    try:
+        return pictures(content, sheet)
+    except (AttributeError, KeyError):
+        return []
+
+
+def full_signed_export(**overrides) -> bytes:
+    """
+    Export an IDR with every kind of signed page: a General that runs onto Report Cont, an AC, an SWCB with a
+    Conc Mix addendum, and a photo.
+    Takes export_bytes overrides (the IDR is SIGNED_IDR and the signature a wide PNG unless given).
+    Returns the .xlsx bytes.
+    """
+    photo = attachment(1, SWCB_1)
+    setup = {"idr": {**SIGNED_IDR, "total_pages": 4}, "general": CASCADE, "signature": signature_png(),
+             "reports": [GENERAL_ROW, ac_row(page_number=2), swcb_row(1, 3), conc_mix_row(1, SWCB_1, 4)],
+             "attachments": [photo], "files": {photo["storage_path"]: image_bytes("JPEG")}}
+    return export_bytes(**{**setup, **overrides})
+
+
+SIGNED_PAGES = ["Gen Bk", "Report Cont", "AC Bk", "Conc Bk", "Conc Mix", "Attachments 1"]
+UNSIGNED_PAGES = ["Gen Fr", "AC Fr", "Conc Fr"]
+
+
+class TestSignatureExport:
+    def test_an_idr_without_a_signature_exports_with_blank_signature_lines(self):
+        with patched_export(reports=[GENERAL_ROW, swcb_row(1, 2)]) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        mocks["signature"].assert_not_called()
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        for sheet in ("Gen Bk", "Conc Bk"):
+            line, date_cell, label, date_label = SIGNATURE_LINES[sheet]
+            assert (book[sheet][line].value, book[sheet][date_cell].value) == (None, None)
+            assert (book[sheet][label].value, book[sheet][date_label].value) == ("Inspector's Signature", "Date")
+            assert stamped(content, sheet) == []
+
+    def test_a_signed_idr_is_stamped_on_every_page_with_a_signature_line(self):
+        content = full_signed_export()
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Report Cont", "AC Fr", "AC Bk", "Conc Fr", "Conc Bk",
+                                           "Attachments 1", "Conc Mix"]
+        for sheet in SIGNED_PAGES:
+            # an attachment page has its photo too: the signature is the PNG
+            signatures = [p for p in stamped(content, sheet) if p["format"] == "PNG"]
+            assert len(signatures) == 1, sheet
+        for sheet in UNSIGNED_PAGES:
+            assert stamped(content, sheet) == [], sheet
+
+    def test_the_date_cell_shows_the_day_it_was_signed_in_new_york(self):
+        book = openpyxl.load_workbook(io.BytesIO(full_signed_export()))
+        dates = {"Gen Bk": "AE59", "Conc Bk": "AE59", "AC Bk": "AE55", "Conc Mix": "AK60", "Report Cont": "AF49",
+                 "Attachments 1": "AF61"}
+        assert {sheet: book[sheet][cell].value for sheet, cell in dates.items()} == dict.fromkeys(dates, SIGNED_ON)
+        # the labels under the line are untouched, and nothing is written in the signature cell itself
+        assert (book["Gen Bk"]["C60"].value, book["Gen Bk"]["AE60"].value) == ("Inspector's Signature", "Date")
+        assert book["Gen Bk"]["C59"].value is None and book["Gen Bk"]["S59"].value is None  # the RE's line stays blank
+
+    def test_the_signature_is_fetched_once_from_the_signatures_bucket(self):
+        photo = attachment(1, SWCB_1)
+        with patched_export(idr=SIGNED_IDR, signature=signature_png(), reports=[GENERAL_ROW, swcb_row(1, 2)],
+                            attachments=[photo], files={photo["storage_path"]: image_bytes("JPEG")}) as mocks:
+            generate_idr_export(IDR_ID)
+        mocks["signature"].assert_called_once_with(SIGNATURE_PATH, "signatures")
+
+    def test_a_wide_signature_fills_the_boxs_width_centred_down_it(self):
+        content = export_bytes(idr=SIGNED_IDR, signature=signature_png((600, 60)))
+        # 600 x 60 in the 209 x 34 px box C58:M59 -> 209 x 21, 6 px down from the top of row 58
+        assert stamped(content, "Gen Bk") == [{"col": 2, "col_off": 0, "row": 57, "row_off": 6, "width": 209,
+                                               "height": 21, "format": "PNG", "size": (600, 60)}]
+
+    def test_a_tall_signature_fills_the_boxs_height_centred_across_it(self):
+        content = export_bytes(idr=SIGNED_IDR, signature=signature_png((60, 120)))
+        # 60 x 120 -> 17 x 34, 96 px in from C: five 19 px columns and 1 px, so in column H
+        assert stamped(content, "Gen Bk") == [{"col": 7, "col_off": 1, "row": 57, "row_off": 0, "width": 17,
+                                               "height": 34, "format": "PNG", "size": (60, 120)}]
+
+    def test_a_small_signature_is_enlarged_to_the_box(self):
+        placed = stamped(export_bytes(idr=SIGNED_IDR, signature=signature_png((61, 10))), "Gen Bk")[0]
+        assert (placed["width"], placed["height"]) == (207, 34) and placed["col_off"] == 1
+
+    def test_a_large_signature_is_shrunk_before_it_is_stored(self):
+        placed = stamped(export_bytes(idr=SIGNED_IDR, signature=signature_png((2400, 800))), "Gen Bk")[0]
+        assert placed["size"] == (408, 136)  # within 836 x 136, proportions kept
+        assert (placed["width"], placed["height"]) == (102, 34)
+
+    def test_each_sheet_is_stamped_in_its_own_box(self):
+        content = full_signed_export()
+        boxes = {sheet: next(p for p in stamped(content, sheet) if p["format"] == "PNG") for sheet in SIGNED_PAGES}
+        # the same 209 x 21 image, 6 px down from the top of the row above each sheet's own signature line
+        for sheet, row in (("Gen Bk", 57), ("Conc Bk", 57), ("AC Bk", 53), ("Report Cont", 47), ("Attachments 1", 59)):
+            assert {k: boxes[sheet][k] for k in ("col", "col_off", "row", "row_off", "width", "height")} == {
+                "col": 2, "col_off": 0, "row": row, "row_off": 6, "width": 209, "height": 21}, sheet
+        # Conc Mix's box is C59:P60, 224 x 32 px: 224 x 22, 5 px down
+        assert {k: boxes["Conc Mix"][k] for k in ("col", "col_off", "row", "row_off", "width", "height")} == {
+            "col": 2, "col_off": 0, "row": 58, "row_off": 5, "width": 224, "height": 22}
+
+    def test_copies_of_a_page_are_signed_like_the_original(self):
+        photos = [attachment(n, SWCB_1) for n in (1, 2, 3)]
+        content = export_bytes(idr={**SIGNED_IDR, "total_pages": 5}, signature=signature_png(),
+                               reports=[GENERAL_ROW, swcb_row(1, 2), conc_mix_row(1, SWCB_1, 3, trucks=12),
+                                        swcb_row(2, 4)],
+                               attachments=photos, files={p["storage_path"]: image_bytes("JPEG") for p in photos})
+        copies = ["Conc Bk", "Conc Bk 2", "Conc Mix", "Conc Mix 2", "Attachments 1", "Attachments 2", "Attachments 3"]
+        assert set(copies) <= set(visible_sheets(content))
+        for sheet in copies:
+            assert len([p for p in stamped(content, sheet) if p["format"] == "PNG"]) == 1, sheet
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[s]["AE59"].value for s in ("Conc Bk", "Conc Bk 2")] == [SIGNED_ON, SIGNED_ON]
+        assert [book[f"Attachments {n}"]["AF61"].value for n in (1, 2, 3)] == [SIGNED_ON] * 3
+        assert stamped(content, "Conc Fr 2") == []
+
+    def test_a_pdfs_page_and_the_closing_page_are_signed_too(self, monkeypatch):
+        monkeypatch.setattr(export_attachments, "MAX_PHOTOS", 1)
+        rows = [attachment(1, SWCB_1, PDF_TYPE), attachment(2, SWCB_1), attachment(3, SWCB_1)]
+        content = export_bytes(idr=SIGNED_IDR, signature=signature_png(), reports=[swcb_row(1, 2)], attachments=rows,
+                               files={r["storage_path"]: image_bytes("JPEG") for r in rows[1:]})
+        assert visible_sheets(content)[-3:] == ["Attachments 1", "Attachments 2", "Attachments 3"]
+        assert len(stamped(content, "Attachments 1")) == 1  # the PDF's page: the signature is its only picture
+        assert len([p for p in stamped(content, "Attachments 3") if p["format"] == "PNG"]) == 1  # the closing count
+
+    def test_a_signature_that_cant_be_fetched_leaves_the_lines_blank_and_is_logged(self, caplog):
+        with patched_export(idr=SIGNED_IDR, signature=TimeoutError("read timed out"),
+                            reports=[GENERAL_ROW, swcb_row(1, 2)]) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        mocks["signature"].assert_called_once()
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk"]  # the export still completes
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        for sheet in ("Gen Bk", "Conc Bk"):
+            assert stamped(content, sheet) == [] and book[sheet]["AE59"].value is None
+        assert SIGNATURE_PATH in caplog.text and "unavailable for the export" in caplog.text
+
+    def test_a_missing_signature_file_is_handled_the_same_way(self, caplog):
+        content = export_bytes(idr=SIGNED_IDR, signature=None)
+        assert stamped(content, "Gen Bk") == []
+        assert openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]["AE59"].value is None
+        assert SIGNATURE_PATH in caplog.text
+
+    def test_a_signature_file_that_isnt_an_image_is_handled_the_same_way(self, caplog):
+        content = export_bytes(idr=SIGNED_IDR, signature=b"not a png at all")
+        assert stamped(content, "Gen Bk") == []
+        assert openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]["AE59"].value is None
+        assert "unavailable for the export" in caplog.text
+
+    def test_a_draft_is_never_signed_even_with_a_path_on_its_row(self):
+        draft = {**SIGNED_IDR, "status": "draft", "submitted_at": None, "total_pages": None}
+        with patched_export(idr=draft, signature=signature_png(), reports=[GENERAL_ROW, swcb_row(1, None)]) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        mocks["signature"].assert_not_called()  # not even fetched
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        for sheet in ("Gen Bk", "Conc Bk"):
+            assert stamped(content, sheet) == [] and book[sheet]["AE59"].value is None
+            assert book[sheet]["B1"].value == "DRAFT - Not for Submission"
+
+    def test_a_signed_page_carries_no_draft_marker(self):
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=SIGNED_IDR, signature=signature_png())))
+        assert book["Gen Bk"]["B1"].value != "DRAFT - Not for Submission"
+
+    def test_gen_bk_which_had_no_drawing_gets_a_valid_one(self):
+        content = export_bytes(idr=SIGNED_IDR, signature=signature_png())
+        package, drawing, anchors = added_anchors(content, "Gen Bk")
+        assert len(anchors) == 1 and 'descr="Inspector\'s signature"' in anchors[0]
+        assert f'<Override PartName="/{drawing}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>' \
+            in package.read("[Content_Types].xml").decode()
+        assert package.testzip() is None
+        sheet_xml = package.read("xl/worksheets/sheet5.xml").decode()
+        assert sheet_xml.count("<drawing ") == 1
+        assert sheet_xml.index("<pageSetup") < sheet_xml.index("<drawing ") < sheet_xml.index("</worksheet>")
+        assert len(openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]._images) == 1
+
+    def test_the_tab_order_and_page_numbers_are_what_they_were(self):
+        signed, unsigned = full_signed_export(), full_signed_export(idr={**SUBMITTED_IDR, "total_pages": 4})
+        assert tab_order(signed) == tab_order(unsigned)
+        assert print_order_page_numbers(signed) == print_order_page_numbers(unsigned)
+
+
+class TestSignatureLayouts:
+    layouts = {"Gen Bk": export.SIGNATURE_LAYOUTS["Gen Bk"], "Conc Bk": export.SIGNATURE_LAYOUTS["Conc Bk"],
+               "AC Bk": export.SIGNATURE_LAYOUTS["AC Bk"], "Conc Mix": export.SIGNATURE_LAYOUTS["Conc Mix"],
+               "Report Cont": export.SIGNATURE_LAYOUTS["Report Cont"],
+               "Sketch Cont": export.SIGNATURE_LAYOUTS["Attachments"]}
+
+    def test_every_template_sheet_with_a_signature_line_has_a_layout(self):
+        assert set(self.layouts) == set(SIGNATURE_LINES)
+        assert set(export.SIGNATURE_LAYOUTS) == {"Gen Bk", "Conc Bk", "AC Bk", "Conc Mix", "Report Cont", "Attachments"}
+
+    @pytest.mark.parametrize("sheet", sorted(SIGNATURE_LINES))
+    def test_the_layout_matches_the_template(self, sheet):
+        from openpyxl.utils import range_boundaries
+        layout = self.layouts[sheet]
+        template = openpyxl.load_workbook(export.TEMPLATE_PATH)[sheet]
+        line, date_cell, label, date_label = SIGNATURE_LINES[sheet]
+        merged = {str(m).split(":")[0]: str(m) for m in template.merged_cells.ranges}
+        left, top, right, bottom = range_boundaries(layout.signature_cells)
+        # the box is the signature line's merged cell plus the one row above it
+        assert merged[line] == f"{line}:{openpyxl.utils.get_column_letter(right)}{bottom}"
+        assert (template[label].value, template[date_label].value) == ("Inspector's Signature", "Date")
+        assert openpyxl.utils.cell.coordinate_from_string(line) == (openpyxl.utils.get_column_letter(left), bottom)
+        assert top == bottom - 1 and len(layout.row_px) == 2
+        assert layout.date_cell == date_cell and date_cell in merged
+        # nothing is in the row above the line for the image to cover
+        assert all(template.cell(top, column).value is None for column in range(left, right + 1))
+        # and the measured size is the template's own: Excel shows a column 7 px a character, a row 4 px to 3 pt
+        widths = {round(template.column_dimensions[key].width * 7) for key, d in template.column_dimensions.items()
+                  if d.min <= left and right <= d.max}
+        assert widths == {layout.column_px}
+        heights = tuple(round((template.row_dimensions[row].height or 12.75) / 0.75) for row in (top, bottom))
+        assert heights == layout.row_px
+        assert layout.signature_cx_emu == (right - left + 1) * layout.column_px * 9525
+        assert layout.signature_cy_emu == sum(layout.row_px) * 9525
+
+    def test_a_copys_name_finds_its_originals_layout(self):
+        assert export._signature_layout("Conc Bk 2") is export.SIGNATURE_LAYOUTS["Conc Bk"]
+        assert export._signature_layout("Attachments 17") is export.SIGNATURE_LAYOUTS["Attachments"]
+        assert export._signature_layout("Conc Mix 3") is export.SIGNATURE_LAYOUTS["Conc Mix"]
+        assert export._signature_layout("Report Cont") is export.SIGNATURE_LAYOUTS["Report Cont"]
+        for front in ("Gen Fr", "Gen Fr 2", "Conc Fr", "Conc Fr 2", "AC Fr", "Contract Info"):
+            assert export._signature_layout(front) is None
+
+
+class TestSignatureHelpers:
+    def test_the_signed_date_is_the_day_in_new_york(self):
+        from api.services.export_common import signed_date
+        assert signed_date(datetime(2026, 10, 1, 2, 30, tzinfo=timezone.utc)) == date(2026, 9, 30)  # 10:30 pm EDT
+        assert signed_date(datetime(2026, 10, 1, 16, 0, tzinfo=timezone.utc)) == date(2026, 10, 1)
+        assert signed_date(datetime(2026, 1, 15, 4, 59, tzinfo=timezone.utc)) == date(2026, 1, 14)  # 11:59 pm EST
+        assert signed_date(datetime(2026, 1, 15, 5, 0, tzinfo=timezone.utc)) == date(2026, 1, 15)
+        assert signed_date(datetime(2026, 10, 1, 2, 30)) == date(2026, 9, 30)  # no zone: taken as UTC
+
+    def test_stamping_no_signature_changes_nothing(self):
+        from api.services.export_common import stamp_signature
+        workbook = WorkbookTemplate(export.TEMPLATE_PATH)
+        before = workbook.to_bytes()
+        stamp_signature(workbook, "Gen Bk", export.SIGNATURE_LAYOUTS["Gen Bk"], None,
+                        datetime(2026, 10, 1, tzinfo=timezone.utc))
+        after = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))
+        assert after["Gen Bk"]["AE59"].value is None  # no date without a signature
+        assert len(workbook.to_bytes()) == len(before)
+
+    def test_a_signature_with_no_signing_time_leaves_the_date_blank(self):
+        from api.services.export_common import prepare_signature, stamp_signature
+        workbook = WorkbookTemplate(export.TEMPLATE_PATH)
+        stamp_signature(workbook, "Conc Bk", export.SIGNATURE_LAYOUTS["Conc Bk"],
+                        prepare_signature(signature_png()), None)
+        content = workbook.to_bytes()
+        assert len(stamped(content, "Conc Bk")) == 1
+        assert openpyxl.load_workbook(io.BytesIO(content))["Conc Bk"]["AE59"].value is None
+
+    def test_prepare_signature_keeps_png_and_transparency(self):
+        from PIL import Image
+        from api.services.export_common import prepare_signature
+        prepared = prepare_signature(signature_png((300, 100)))
+        image = Image.open(io.BytesIO(prepared.data))
+        assert (image.format, image.mode, image.size) == ("PNG", "RGBA", (300, 100))
+        assert (prepared.width, prepared.height) == (300, 100)
+        assert image.getpixel((150, 5))[3] == 0  # still see-through off the stroke
+        with pytest.raises(Exception):
+            prepare_signature(b"not an image")
+
+    def test_a_sheets_existing_drawing_is_reused_not_replaced(self):
+        workbook = WorkbookTemplate(export.TEMPLATE_PATH)
+        existing = workbook._drawing_part("Conc Bk")
+        assert workbook._ensure_drawing("Conc Bk") == existing
+        created = workbook._ensure_drawing("Gen Bk")
+        assert workbook._ensure_drawing("Gen Bk") == created and created != existing  # made once, then found
