@@ -11,7 +11,11 @@
 --
 -- Both sit under client C00001 (users.client_id is NOT NULL).
 --
--- Idempotent. Run after schema.sql (or migrations/013) and seed.sql, which creates C00001:
+-- Reza is also assigned to every seeded project that exists (HWS0023, SE384, DEMO01): the admin
+-- role doesn't widen what a user sees, so without an assignment he would list no projects.
+--
+-- Idempotent. Run after schema.sql (or migrations/013), seed.sql (which creates C00001) and
+-- seed_test_project.sql (so DEMO01 is assigned too):
 --   psql -d icid -f seed_auth_users.sql
 
 BEGIN;
@@ -30,5 +34,12 @@ ON CONFLICT (uuid) DO UPDATE
 SET email = EXCLUDED.email,
     role = EXCLUDED.role,
     is_demo = EXCLUDED.is_demo;
+
+INSERT INTO icid.project_users (project_id, user_uuid, user_role)
+SELECT p.project_id, u.uuid, 'Admin'
+FROM icid.users u
+JOIN icid.projects p ON p.project_id IN ('HWS0023', 'SE384', 'DEMO01')
+WHERE u.email = 'reza@icid.local'
+ON CONFLICT (project_id, user_uuid) DO NOTHING;
 
 COMMIT;

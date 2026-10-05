@@ -1,9 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.queries.users import get_all_users
 from api.schemas.user import UserListItem, UserListResponse
+from api.services.auth import current_user
 
-router = APIRouter(prefix="/v1/users", tags=["Users"])
+# Every route needs a signed-in user (any role)
+router = APIRouter(prefix="/v1/users", tags=["Users"], dependencies=[Depends(current_user)])
 
 
 @router.get("/", response_model=UserListResponse)

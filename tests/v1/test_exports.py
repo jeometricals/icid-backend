@@ -3386,15 +3386,15 @@ def stored_export(upload_error: Optional[Exception] = None, sign_error: Optional
 class TestExportEndpoint:
     url = f"/v1/idrs/{IDR_ID}/export"
 
-    def test_returns_a_download_url_and_the_file_name(self, client):
+    def test_returns_a_download_url_and_the_file_name(self, admin_client):
         with patched_export(), stored_export():
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 200
         assert response.json() == {"download_url": SIGNED_EXPORT_URL, "filename": EXPORT_FILENAME}
 
-    def test_the_xlsx_is_uploaded_to_the_exports_bucket(self, client):
+    def test_the_xlsx_is_uploaded_to_the_exports_bucket(self, admin_client):
         with patched_export(), stored_export() as (upload, sign):
-            client.get(self.url)
+            admin_client.get(self.url)
         bucket, path, content, content_type = upload.call_args.args
         assert (bucket, content_type) == ("idr-exports", export_media_type())
         assert re.fullmatch(rf"{IDR_ID}/\d{{8}}_\d{{6}}_{re.escape(EXPORT_FILENAME)}", path)
@@ -3410,26 +3410,26 @@ class TestExportEndpoint:
             export.publish_idr_export(IDR_ID, now=at)
         assert upload.call_args.args[1] == f"{IDR_ID}/20261002_140509_{EXPORT_FILENAME}"
 
-    def test_a_draft_is_exported_too(self, client):
+    def test_a_draft_is_exported_too(self, admin_client):
         with patched_export(idr=DRAFT_IDR), stored_export() as (upload, _):
-            assert client.get(self.url).status_code == 200
+            assert admin_client.get(self.url).status_code == 200
         content = upload.call_args.args[2]
         assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]["B1"].value == DRAFT_MARKER
 
-    def test_unknown_idr_is_404_and_nothing_is_stored(self, client):
+    def test_unknown_idr_is_404_and_nothing_is_stored(self, admin_client):
         with patched_export(idr=None), stored_export() as (upload, _):
-            assert client.get(self.url).status_code == 404
+            assert admin_client.get(self.url).status_code == 404
         upload.assert_not_called()
 
-    def test_missing_project_is_500(self, client):
+    def test_missing_project_is_500(self, admin_client):
         with patched_export(project=None), stored_export():
-            assert client.get(self.url).status_code == 500
+            assert admin_client.get(self.url).status_code == 500
 
-    def test_storage_failing_is_502_with_a_readable_message(self, client):
+    def test_storage_failing_is_502_with_a_readable_message(self, admin_client):
         for errors in ({"upload_error": RuntimeError("bucket not found")},
                        {"sign_error": RuntimeError("no signed URL")}):
             with patched_export(), stored_export(**errors):
-                response = client.get(self.url)
+                response = admin_client.get(self.url)
             assert response.status_code == 502, errors
             assert response.json() == {"detail": export.STORAGE_UNAVAILABLE}
 

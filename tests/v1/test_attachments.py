@@ -9,6 +9,7 @@ import pytest
 from psycopg.errors import ForeignKeyViolation
 
 from api.core.config import STORAGE_URL_EXPIRY_SECONDS
+from tests.conftest import ADMIN_USER_ROW
 from api.services.attachments import MAX_FILE_SIZE_BYTES, UPLOADED_BY_FK, sanitize_file_name
 
 # ---------------------------------------------------------------------------
@@ -66,14 +67,6 @@ MOCK_REPORT_ROW = {
 }
 MOCK_AUTO_GENERAL_ROW = {**MOCK_REPORT_ROW, "report_type": "GEN", "is_auto_generated": True}
 
-MOCK_USER_ROW = {
-    "user_id": UUID(UPLOADER_UUID),
-    "email": "inspector@example.com",
-    "first_name": "Ada",
-    "last_name": "Inspector",
-    "phone_number": None,
-    "employer": "C1",
-}
 MOCK_ASSIGNMENT_ROW = {"?column?": 1}  # is_user_on_project does SELECT 1
 
 MOCK_ATTACHMENT_ROW = {
@@ -103,8 +96,8 @@ PUBLIC_FIELDS = {
 }
 UPLOAD_REQUEST_FIELDS = PUBLIC_FIELDS | {"storage_path", "upload_url", "upload_url_expires_at", "upload_headers"}
 
+# The uploader is the signed-in user (ADMIN_USER_ROW), not part of the body
 REQUEST_BODY = {
-    "uploaded_by": UPLOADER_UUID,
     "file_name": "site photo.jpg",
     "file_type": "image/jpeg",
     "file_size_bytes": 11,
@@ -176,7 +169,6 @@ def upload_ok(**overrides):
     results = {
         "idrs": [MOCK_IDR_ROW],
         "idr_reports": [MOCK_REPORT_ROW],
-        "users": [MOCK_USER_ROW],
         "projects": [MOCK_ASSIGNMENT_ROW],
         "attachments": [MOCK_PENDING_ROW],
     }
@@ -208,9 +200,9 @@ def on_report(attachments, idrs=None):
 
 class TestUploadRequest:
 
-    def test_returns_201_with_upload_url_and_metadata(self, client):
+    def test_returns_201_with_upload_url_and_metadata(self, admin_client):
         with patched(**upload_ok()):
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 201
         body = response.json()
         assert body["status"] == "success"
@@ -221,17 +213,17 @@ class TestUploadRequest:
         assert data["attachment_name"] == "North wall"
         assert data["attachment_description"] == "Crack along the north wall footing."
 
-    def test_response_exposes_only_upload_fields(self, client):
+    def test_response_exposes_only_upload_fields(self, admin_client):
         with patched(**upload_ok()):
-            data = client.post(UPLOAD_REQUEST, json=REQUEST_BODY).json()["data"]
+            data = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY).json()["data"]
         assert set(data) == UPLOAD_REQUEST_FIELDS
         assert "is_uploaded" not in data
 
-    def test_signs_the_path_then_inserts_a_pending_row(self, client, bucket):
+    def test_signs_the_path_then_inserts_a_pending_row(self, admin_client, bucket):
         # Pin the generated attachment id so the exact storage path is known up front.
         with patch("api.services.attachments.uuid4", return_value=UUID(ATTACHMENT_ID)), \
              patched(**upload_ok()) as mocks:
-            client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
 
         # {report_id}/{attachment_id}_{sanitized name} ("site photo.jpg" -> "site_photo.jpg").
         bucket.create_signed_upload_url.assert_called_once_with(STORAGE_PATH)
@@ -248,63 +240,63 @@ class TestUploadRequest:
             "image/jpeg",
             11,
             STORAGE_PATH,
-            UUID(UPLOADER_UUID),
+            ADMIN_USER_ROW["uuid"],  # the signed-in user
             "North wall",
             "Crack along the north wall footing.",
         )
 
-    def test_upload_url_expiry_is_supabases_7200_second_lifetime(self, client):
+    def test_upload_url_expiry_is_supabases_7200_second_lifetime(self, admin_client):
         # 7200 is written out, not imported, so a change to the service constant fails here.
         before = datetime.now(timezone.utc)
         with patched(**upload_ok()):
-            data = client.post(UPLOAD_REQUEST, json=REQUEST_BODY).json()["data"]
+            data = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY).json()["data"]
         expires_at = datetime.fromisoformat(data["upload_url_expires_at"])
         assert before + timedelta(seconds=7200) <= expires_at
         assert expires_at <= datetime.now(timezone.utc) + timedelta(seconds=7200)
 
-    def test_upload_headers_carry_the_normalized_content_type(self, client):
+    def test_upload_headers_carry_the_normalized_content_type(self, admin_client):
         with patched(**upload_ok()) as mocks:
-            data = client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_type": "image/JPEG; charset=binary"}).json()["data"]
+            data = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_type": "image/JPEG; charset=binary"}).json()["data"]
         assert data["upload_headers"] == {"Content-Type": "image/jpeg"}
         assert mocks["attachments"].call_args.args[1][3] == "image/jpeg"
 
-    def test_name_and_description_are_trimmed(self, client):
+    def test_name_and_description_are_trimmed(self, admin_client):
         body = {**REQUEST_BODY, "attachment_name": "  North wall  ", "attachment_description": "\tCrack.\n"}
         with patched(**upload_ok()) as mocks:
-            client.post(UPLOAD_REQUEST, json=body)
+            admin_client.post(UPLOAD_REQUEST, json=body)
         assert mocks["attachments"].call_args.args[1][7:] == ("North wall", "Crack.")
 
-    def test_accepts_pdf(self, client):
+    def test_accepts_pdf(self, admin_client):
         with patched(**upload_ok()) as mocks:
-            response = client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_name": "plan.pdf", "file_type": "application/pdf"})
+            response = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_name": "plan.pdf", "file_type": "application/pdf"})
         assert response.status_code == 201
         assert mocks["attachments"].call_args.args[1][3] == "application/pdf"
 
-    def test_file_too_large_returns_413(self, client, bucket):
+    def test_file_too_large_returns_413(self, admin_client, bucket):
         with patched(**upload_ok()) as mocks:
-            response = client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_size_bytes": MAX_FILE_SIZE_BYTES + 1})
+            response = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_size_bytes": MAX_FILE_SIZE_BYTES + 1})
         assert response.status_code == 413
         assert response.json()["detail"] == "File is larger than the 10 MB limit"
         bucket.create_signed_upload_url.assert_not_called()
         mocks["attachments"].assert_not_called()
 
-    def test_file_at_limit_is_accepted(self, client):
+    def test_file_at_limit_is_accepted(self, admin_client):
         with patched(**upload_ok()):
-            response = client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_size_bytes": MAX_FILE_SIZE_BYTES})
+            response = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_size_bytes": MAX_FILE_SIZE_BYTES})
         assert response.status_code == 201
 
     @pytest.mark.parametrize("size", [0, -1])
-    def test_empty_or_negative_size_returns_400(self, client, bucket, size):
+    def test_empty_or_negative_size_returns_400(self, admin_client, bucket, size):
         with patched(**upload_ok()):
-            response = client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_size_bytes": size})
+            response = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_size_bytes": size})
         assert response.status_code == 400
         assert response.json()["detail"] == "File is empty"
         bucket.create_signed_upload_url.assert_not_called()
 
     @pytest.mark.parametrize("file_type", ["text/plain", "image/svg+xml", "application/zip", ""])
-    def test_unsupported_type_returns_415(self, client, bucket, file_type):
+    def test_unsupported_type_returns_415(self, admin_client, bucket, file_type):
         with patched(**upload_ok()):
-            response = client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_type": file_type})
+            response = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "file_type": file_type})
         assert response.status_code == 415
         assert response.json()["detail"].startswith("Unsupported file type")
         bucket.create_signed_upload_url.assert_not_called()
@@ -317,22 +309,22 @@ class TestUploadRequest:
         ("attachment_description", "\n\t", "attachment_description must not be blank"),
         ("attachment_description", "d" * 2001, "attachment_description must be at most 2000 characters"),
     ])
-    def test_invalid_name_or_description_returns_400(self, client, bucket, field, value, detail):
+    def test_invalid_name_or_description_returns_400(self, admin_client, bucket, field, value, detail):
         with patched(**upload_ok()) as mocks:
-            response = client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, field: value})
+            response = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, field: value})
         assert response.status_code == 400
         assert response.json()["detail"] == detail
         bucket.create_signed_upload_url.assert_not_called()
         mocks["attachments"].assert_not_called()
 
-    def test_name_and_description_at_limit_are_accepted(self, client):
+    def test_name_and_description_at_limit_are_accepted(self, admin_client):
         body = {**REQUEST_BODY, "attachment_name": "n" * 200, "attachment_description": "d" * 2000}
         with patched(**upload_ok()):
-            assert client.post(UPLOAD_REQUEST, json=body).status_code == 201
+            assert admin_client.post(UPLOAD_REQUEST, json=body).status_code == 201
 
-    def test_auto_generated_general_returns_400(self, client, bucket):
+    def test_auto_generated_general_returns_400(self, admin_client, bucket):
         with patched(**upload_ok(idr_reports=[MOCK_AUTO_GENERAL_ROW])) as mocks:
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 400
         assert response.json()["detail"] == (
             "Attachments cannot be added to auto-generated General reports; edit child reports instead."
@@ -340,81 +332,83 @@ class TestUploadRequest:
         bucket.create_signed_upload_url.assert_not_called()
         mocks["attachments"].assert_not_called()
 
-    def test_unknown_uploader_returns_400(self, client, bucket):
-        with patched(**upload_ok(users=[])) as mocks:
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
-        assert response.status_code == 400
-        assert response.json()["detail"] == "Uploader user not found."
-        bucket.create_signed_upload_url.assert_not_called()
-        mocks["projects"].assert_not_called()
+    def test_an_uploaded_by_in_the_body_is_ignored(self, admin_client):
+        # the uploader is always the signed-in user, whatever an old client still sends
+        for sent in (UPLOADER_UUID, "28"):
+            with patched(**upload_ok()) as mocks:
+                response = admin_client.post(UPLOAD_REQUEST, json={**REQUEST_BODY, "uploaded_by": sent})
+            assert response.status_code == 201
+            assert mocks["attachments"].call_args.args[1][6] == ADMIN_USER_ROW["uuid"]
+            assert mocks["projects"].call_args.args[1] == (ADMIN_USER_ROW["uuid"], "HWS0023")
+            mocks["users"].assert_not_called()  # the session already vouches for the user
 
-    def test_uploader_fk_violation_returns_400(self, client, bucket):
+    def test_uploader_fk_violation_returns_400(self, admin_client, bucket):
         with patched(**upload_ok(attachments=UploaderFkViolation("violates report_attachments_uploaded_by_fkey"))):
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 400
         assert response.json()["detail"] == "Uploader user not found."
         bucket.remove.assert_not_called()  # nothing was uploaded, so nothing to clean up
 
-    def test_uploader_not_on_project_returns_403(self, client, bucket):
+    def test_uploader_not_on_project_returns_403(self, admin_client, bucket):
         with patched(**upload_ok(projects=[])):
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 403
         assert response.json()["detail"] == "Uploader is not assigned to this project"
         bucket.create_signed_upload_url.assert_not_called()
 
-    def test_report_not_found_returns_404(self, client, bucket):
+    def test_report_not_found_returns_404(self, admin_client, bucket):
         with patched(**upload_ok(idr_reports=[])):
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 404
         assert response.json()["detail"] == "Report not found in this IDR"
         bucket.create_signed_upload_url.assert_not_called()
 
-    def test_idr_not_found_returns_404(self, client):
+    def test_idr_not_found_returns_404(self, admin_client):
         with patched(**upload_ok(idrs=[])) as mocks:
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 404
         assert response.json()["detail"] == "IDR not found"
         mocks["idr_reports"].assert_not_called()
 
-    def test_submitted_idr_returns_409(self, client, bucket):
+    def test_submitted_idr_returns_409(self, admin_client, bucket):
         with patched(**upload_ok(idrs=[MOCK_SUBMITTED_IDR_ROW])) as mocks:
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 409
         bucket.create_signed_upload_url.assert_not_called()
         mocks["attachments"].assert_not_called()
 
-    def test_storage_signing_failure_returns_502_without_insert(self, client, bucket):
+    def test_storage_signing_failure_returns_502_without_insert(self, admin_client, bucket):
         bucket.create_signed_upload_url.side_effect = RuntimeError("storage down")
         with patched(**upload_ok()) as mocks:
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 502
         assert response.json()["detail"] == "Could not create an upload link"
         mocks["attachments"].assert_not_called()
 
-    def test_storage_returning_no_url_returns_502(self, client, bucket):
+    def test_storage_returning_no_url_returns_502(self, admin_client, bucket):
         bucket.create_signed_upload_url.return_value = {"token": "up"}
         with patched(**upload_ok()) as mocks:
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 502
         mocks["attachments"].assert_not_called()
 
-    def test_insert_failure_returns_500(self, client, bucket):
+    def test_insert_failure_returns_500(self, admin_client, bucket):
         with patched(**upload_ok(attachments=None)):
-            response = client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
+            response = admin_client.post(UPLOAD_REQUEST, json=REQUEST_BODY)
         assert response.status_code == 500
         assert response.json()["detail"] == "Failed to save attachment"
         bucket.remove.assert_not_called()
 
     @pytest.mark.parametrize("missing", sorted(REQUEST_BODY))
-    def test_missing_field_returns_422(self, client, missing):
+    def test_missing_field_returns_422(self, admin_client, missing):
         body = {k: v for k, v in REQUEST_BODY.items() if k != missing}
         with patched(**upload_ok()) as mocks:
-            assert client.post(UPLOAD_REQUEST, json=body).status_code == 422
+            assert admin_client.post(UPLOAD_REQUEST, json=body).status_code == 422
         mocks["idrs"].assert_not_called()
 
-    def test_old_single_step_upload_is_gone(self, client):
+    def test_old_single_step_upload_is_gone(self, admin_client):
         with patched(**upload_ok()):
-            response = client.post(BASE, files={"file": ("a.jpg", b"x", "image/jpeg")}, data={"uploaded_by": UPLOADER_UUID})
+            response = admin_client.post(BASE, files={"file": ("a.jpg", b"x", "image/jpeg")}, data={"uploaded_by": UPLOADER_UUID})
         assert response.status_code == 405
 
 
@@ -425,9 +419,9 @@ class TestUploadRequest:
 class TestUploadComplete:
     body = {"attachment_id": ATTACHMENT_ID}
 
-    def test_marks_the_attachment_uploaded(self, client):
+    def test_marks_the_attachment_uploaded(self, admin_client):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])) as mocks:
-            response = client.post(UPLOAD_COMPLETE, json=self.body)
+            response = admin_client.post(UPLOAD_COMPLETE, json=self.body)
         assert response.status_code == 200
         body = response.json()
         assert body["message"] == "Attachment uploaded"
@@ -440,48 +434,48 @@ class TestUploadComplete:
         assert "SET is_uploaded = true" in sql
         assert params == (UUID(REPORT_ID), UUID(ATTACHMENT_ID))
 
-    def test_trusts_the_client_without_checking_storage(self, client, bucket):
+    def test_trusts_the_client_without_checking_storage(self, admin_client, bucket):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):
-            client.post(UPLOAD_COMPLETE, json=self.body)
+            admin_client.post(UPLOAD_COMPLETE, json=self.body)
         assert bucket.mock_calls == []
 
-    def test_repeating_it_is_harmless(self, client):
+    def test_repeating_it_is_harmless(self, admin_client):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])) as mocks:
-            assert client.post(UPLOAD_COMPLETE, json=self.body).status_code == 200
-            assert client.post(UPLOAD_COMPLETE, json=self.body).status_code == 200
+            assert admin_client.post(UPLOAD_COMPLETE, json=self.body).status_code == 200
+            assert admin_client.post(UPLOAD_COMPLETE, json=self.body).status_code == 200
         # The same idempotent UPDATE both times.
         expected = call(ANY, (UUID(REPORT_ID), UUID(ATTACHMENT_ID)))
         assert mocks["attachments"].call_args_list == [expected, expected]
         assert all("SET is_uploaded = true" in c.args[0] for c in mocks["attachments"].call_args_list)
 
-    def test_attachment_not_on_report_returns_404(self, client):
+    def test_attachment_not_on_report_returns_404(self, admin_client):
         with patched(**on_report([])):
-            response = client.post(UPLOAD_COMPLETE, json=self.body)
+            response = admin_client.post(UPLOAD_COMPLETE, json=self.body)
         assert response.status_code == 404
         assert response.json()["detail"] == "Attachment not found"
 
-    def test_query_failure_returns_500(self, client):
+    def test_query_failure_returns_500(self, admin_client):
         with patched(**on_report(None)):
-            response = client.post(UPLOAD_COMPLETE, json=self.body)
+            response = admin_client.post(UPLOAD_COMPLETE, json=self.body)
         assert response.status_code == 500
         assert response.json()["detail"] == "Failed to complete upload"
 
-    def test_submitted_idr_returns_409(self, client):
+    def test_submitted_idr_returns_409(self, admin_client):
         with patched(**on_report([MOCK_ATTACHMENT_ROW], idrs=[MOCK_SUBMITTED_IDR_ROW])) as mocks:
-            response = client.post(UPLOAD_COMPLETE, json=self.body)
+            response = admin_client.post(UPLOAD_COMPLETE, json=self.body)
         assert response.status_code == 409
         mocks["attachments"].assert_not_called()
 
-    def test_report_not_found_returns_404(self, client):
+    def test_report_not_found_returns_404(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            response = client.post(UPLOAD_COMPLETE, json=self.body)
+            response = admin_client.post(UPLOAD_COMPLETE, json=self.body)
         assert response.status_code == 404
         mocks["attachments"].assert_not_called()
 
     @pytest.mark.parametrize("body", [{}, {"attachment_id": "not-a-uuid"}])
-    def test_missing_or_bad_attachment_id_returns_422(self, client, body):
+    def test_missing_or_bad_attachment_id_returns_422(self, admin_client, body):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):
-            assert client.post(UPLOAD_COMPLETE, json=body).status_code == 422
+            assert admin_client.post(UPLOAD_COMPLETE, json=body).status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -490,11 +484,11 @@ class TestUploadComplete:
 
 class TestUpdateAttachmentMetadata:
 
-    def test_replaces_name_and_description(self, client):
+    def test_replaces_name_and_description(self, admin_client):
         updated = {**MOCK_ATTACHMENT_ROW, "attachment_name": "South wall", "attachment_description": "Spalling."}
         body = {"attachment_name": "  South wall ", "attachment_description": "Spalling."}
         with patched(**on_report(([MOCK_ATTACHMENT_ROW], [updated]))) as mocks:
-            response = client.put(ONE, json=body)
+            response = admin_client.put(ONE, json=body)
         assert response.status_code == 200
         data = response.json()["data"]
         assert set(data) == PUBLIC_FIELDS
@@ -512,13 +506,13 @@ class TestUpdateAttachmentMetadata:
         for field in ("file_name", "file_type", "file_size_bytes"):
             assert data[field] == MOCK_ATTACHMENT_ROW[field]
 
-    def test_works_on_a_pending_attachment(self, client):
+    def test_works_on_a_pending_attachment(self, admin_client):
         with patched(**on_report(([MOCK_PENDING_ROW], [MOCK_PENDING_ROW]))):
-            assert client.put(ONE, json=METADATA_BODY).status_code == 200
+            assert admin_client.put(ONE, json=METADATA_BODY).status_code == 200
 
-    def test_does_not_touch_storage(self, client, bucket):
+    def test_does_not_touch_storage(self, admin_client, bucket):
         with patched(**on_report(([MOCK_ATTACHMENT_ROW], [MOCK_ATTACHMENT_ROW]))):
-            client.put(ONE, json=METADATA_BODY)
+            admin_client.put(ONE, json=METADATA_BODY)
         assert bucket.mock_calls == []
 
     @pytest.mark.parametrize("field, value", [
@@ -527,46 +521,46 @@ class TestUpdateAttachmentMetadata:
         ("attachment_description", ""),
         ("attachment_description", "d" * 2001),
     ])
-    def test_invalid_name_or_description_returns_400_without_update(self, client, field, value):
+    def test_invalid_name_or_description_returns_400_without_update(self, admin_client, field, value):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])) as mocks:
-            response = client.put(ONE, json={**METADATA_BODY, field: value})
+            response = admin_client.put(ONE, json={**METADATA_BODY, field: value})
         assert response.status_code == 400
         assert_only_lookup(mocks["attachments"])
 
-    def test_submitted_idr_returns_409_without_update(self, client):
+    def test_submitted_idr_returns_409_without_update(self, admin_client):
         with patched(**on_report([MOCK_ATTACHMENT_ROW], idrs=[MOCK_SUBMITTED_IDR_ROW])) as mocks:
-            response = client.put(ONE, json=METADATA_BODY)
+            response = admin_client.put(ONE, json=METADATA_BODY)
         assert response.status_code == 409
         assert response.json()["detail"] == "Only draft IDRs can be edited"
         assert_only_lookup(mocks["attachments"])
 
-    def test_attachment_not_found_returns_404(self, client):
+    def test_attachment_not_found_returns_404(self, admin_client):
         with patched(**on_report([])) as mocks:
-            response = client.put(ONE, json=METADATA_BODY)
+            response = admin_client.put(ONE, json=METADATA_BODY)
         assert response.status_code == 404
         assert response.json()["detail"] == "Attachment not found"
         assert_only_lookup(mocks["attachments"])
 
-    def test_row_gone_before_update_returns_404(self, client):
+    def test_row_gone_before_update_returns_404(self, admin_client):
         with patched(**on_report(([MOCK_ATTACHMENT_ROW], []))):
-            assert client.put(ONE, json=METADATA_BODY).status_code == 404
+            assert admin_client.put(ONE, json=METADATA_BODY).status_code == 404
 
-    def test_update_failure_returns_500(self, client):
+    def test_update_failure_returns_500(self, admin_client):
         with patched(**on_report(([MOCK_ATTACHMENT_ROW], None))):
-            response = client.put(ONE, json=METADATA_BODY)
+            response = admin_client.put(ONE, json=METADATA_BODY)
         assert response.status_code == 500
         assert response.json()["detail"] == "Failed to update attachment"
 
-    def test_report_not_found_returns_404(self, client):
+    def test_report_not_found_returns_404(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            assert client.put(ONE, json=METADATA_BODY).status_code == 404
+            assert admin_client.put(ONE, json=METADATA_BODY).status_code == 404
         mocks["attachments"].assert_not_called()
 
     @pytest.mark.parametrize("missing", sorted(METADATA_BODY))
-    def test_missing_field_returns_422(self, client, missing):
+    def test_missing_field_returns_422(self, admin_client, missing):
         body = {k: v for k, v in METADATA_BODY.items() if k != missing}
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):
-            assert client.put(ONE, json=body).status_code == 422
+            assert admin_client.put(ONE, json=body).status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -575,10 +569,10 @@ class TestUpdateAttachmentMetadata:
 
 class TestListAttachments:
 
-    def test_returns_200_with_attachments(self, client):
+    def test_returns_200_with_attachments(self, admin_client):
         second = {**MOCK_ATTACHMENT_ROW, "attachment_id": UUID("4d5e6f7a-8b9c-4d0e-9f1a-2b3c4d5e6f70")}
         with patched(**on_report([MOCK_ATTACHMENT_ROW, second])) as mocks:
-            response = client.get(BASE)
+            response = admin_client.get(BASE)
         assert response.status_code == 200
         body = response.json()
         assert body["message"] == "2 attachment(s)"
@@ -590,31 +584,31 @@ class TestListAttachments:
         assert "ORDER BY uploaded_at" in sql
         assert params == (UUID(REPORT_ID),)
 
-    def test_pending_attachments_are_filtered_out(self, client):
+    def test_pending_attachments_are_filtered_out(self, admin_client):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])) as mocks:
-            client.get(BASE)
+            admin_client.get(BASE)
         sql = mocks["attachments"].call_args.args[0]
         assert "WHERE report_id = %s AND is_uploaded" in sql
 
-    def test_empty_list(self, client):
+    def test_empty_list(self, admin_client):
         with patched(**on_report([])):
-            response = client.get(BASE)
+            response = admin_client.get(BASE)
         assert response.status_code == 200
         assert response.json()["data"] == []
 
-    def test_works_on_submitted_idr(self, client):
+    def test_works_on_submitted_idr(self, admin_client):
         with patched(**on_report([MOCK_ATTACHMENT_ROW], idrs=[MOCK_SUBMITTED_IDR_ROW])):
-            assert client.get(BASE).status_code == 200
+            assert admin_client.get(BASE).status_code == 200
 
-    def test_report_not_found_returns_404(self, client):
+    def test_report_not_found_returns_404(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            response = client.get(BASE)
+            response = admin_client.get(BASE)
         assert response.status_code == 404
         mocks["attachments"].assert_not_called()
 
-    def test_query_failure_returns_500(self, client):
+    def test_query_failure_returns_500(self, admin_client):
         with patched(**on_report(None)):
-            assert client.get(BASE).status_code == 500
+            assert admin_client.get(BASE).status_code == 500
 
 
 # ---------------------------------------------------------------------------
@@ -624,10 +618,10 @@ class TestListAttachments:
 class TestDownloadUrl:
     url = f"{ONE}/download-url"
 
-    def test_returns_signed_url_and_expiry(self, client, bucket):
+    def test_returns_signed_url_and_expiry(self, admin_client, bucket):
         before = datetime.now(timezone.utc)
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 200
         data = response.json()["data"]
         assert data["download_url"] == SIGNED_URL
@@ -635,44 +629,44 @@ class TestDownloadUrl:
         assert before + timedelta(seconds=STORAGE_URL_EXPIRY_SECONDS) <= expires_at
         assert expires_at <= datetime.now(timezone.utc) + timedelta(seconds=STORAGE_URL_EXPIRY_SECONDS)
 
-    def test_signs_the_stored_path_under_the_original_name(self, client, bucket):
+    def test_signs_the_stored_path_under_the_original_name(self, admin_client, bucket):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):
-            client.get(self.url)
+            admin_client.get(self.url)
         bucket.create_signed_url.assert_called_once_with(
             STORAGE_PATH, STORAGE_URL_EXPIRY_SECONDS, {"download": "site photo.jpg"}
         )
 
-    def test_generates_a_new_url_every_request(self, client, bucket):
+    def test_generates_a_new_url_every_request(self, admin_client, bucket):
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):
-            client.get(self.url)
-            client.get(self.url)
+            admin_client.get(self.url)
+            admin_client.get(self.url)
         expected = call(STORAGE_PATH, STORAGE_URL_EXPIRY_SECONDS, {"download": "site photo.jpg"})
         assert bucket.create_signed_url.call_args_list == [expected, expected]
 
-    def test_pending_attachment_returns_404(self, client, bucket):
+    def test_pending_attachment_returns_404(self, admin_client, bucket):
         with patched(**on_report([MOCK_PENDING_ROW])):
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 404
         assert response.json()["detail"] == "Attachment upload has not been completed"
         bucket.create_signed_url.assert_not_called()
 
-    def test_attachment_not_found_returns_404(self, client, bucket):
+    def test_attachment_not_found_returns_404(self, admin_client, bucket):
         with patched(**on_report([])):
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 404
         assert response.json()["detail"] == "Attachment not found"
         bucket.create_signed_url.assert_not_called()
 
-    def test_report_not_found_returns_404(self, client, bucket):
+    def test_report_not_found_returns_404(self, admin_client, bucket):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 404
         bucket.create_signed_url.assert_not_called()
 
-    def test_storage_failure_returns_502(self, client, bucket):
+    def test_storage_failure_returns_502(self, admin_client, bucket):
         bucket.create_signed_url.side_effect = RuntimeError("storage down")
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 502
         assert response.json()["detail"] == "Could not create a download link"
 
@@ -684,7 +678,7 @@ class TestDownloadUrl:
 class TestDeleteAttachment:
 
     @pytest.mark.parametrize("row", [MOCK_ATTACHMENT_ROW, MOCK_PENDING_ROW], ids=["uploaded", "pending"])
-    def test_returns_204_and_removes_file_then_row(self, client, bucket, row):
+    def test_returns_204_and_removes_file_then_row(self, admin_client, bucket, row):
         order = []
         bucket.remove.side_effect = lambda paths: order.append(("storage", paths))
 
@@ -694,7 +688,7 @@ class TestDeleteAttachment:
 
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_REPORT_ROW]) as mocks:
             mocks["attachments"].side_effect = query
-            response = client.delete(ONE)
+            response = admin_client.delete(ONE)
 
         assert response.status_code == 204
         assert response.content == b""
@@ -705,32 +699,32 @@ class TestDeleteAttachment:
             ("delete", (UUID(REPORT_ID), UUID(ATTACHMENT_ID))),
         ]
 
-    def test_storage_failure_still_deletes_row_and_logs_warning(self, client, bucket, caplog):
+    def test_storage_failure_still_deletes_row_and_logs_warning(self, admin_client, bucket, caplog):
         bucket.remove.side_effect = RuntimeError("storage down")
         with caplog.at_level(logging.WARNING, logger="api.services.attachments"):
             with patched(**on_report([MOCK_ATTACHMENT_ROW])) as mocks:
-                response = client.delete(ONE)
+                response = admin_client.delete(ONE)
         assert response.status_code == 204
         assert "DELETE FROM icid.report_attachments" in mocks["attachments"].call_args.args[0]
         assert STORAGE_PATH in caplog.text
 
-    def test_attachment_not_found_returns_404(self, client, bucket):
+    def test_attachment_not_found_returns_404(self, admin_client, bucket):
         with patched(**on_report([])):
-            response = client.delete(ONE)
+            response = admin_client.delete(ONE)
         assert response.status_code == 404
         assert response.json()["detail"] == "Attachment not found"
         bucket.remove.assert_not_called()
 
-    def test_report_not_found_returns_404(self, client, bucket):
+    def test_report_not_found_returns_404(self, admin_client, bucket):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            response = client.delete(ONE)
+            response = admin_client.delete(ONE)
         assert response.status_code == 404
         mocks["attachments"].assert_not_called()
         bucket.remove.assert_not_called()
 
-    def test_submitted_idr_returns_409(self, client, bucket):
+    def test_submitted_idr_returns_409(self, admin_client, bucket):
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW], idr_reports=[MOCK_REPORT_ROW]) as mocks:
-            response = client.delete(ONE)
+            response = admin_client.delete(ONE)
         assert response.status_code == 409
         mocks["attachments"].assert_not_called()
         bucket.remove.assert_not_called()

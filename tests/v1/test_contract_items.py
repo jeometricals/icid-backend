@@ -229,17 +229,17 @@ class TestSpecItemQueries:
 class TestListContractItems:
     url = "/v1/contract_items/"
 
-    def test_returns_the_23_seeded_items(self, client):
+    def test_returns_the_23_seeded_items(self, admin_client):
         with patch("api.queries.contract_items.run_query", return_value=_seeded_rows()):
-            response = client.get(self.url, params={"project_id": SEED_PROJECT_ID})
+            response = admin_client.get(self.url, params={"project_id": SEED_PROJECT_ID})
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "success"
         assert len(body["data"]) == 23
 
-    def test_items_carry_spec_fields_inline(self, client):
+    def test_items_carry_spec_fields_inline(self, admin_client):
         with patch("api.queries.contract_items.run_query", return_value=_seeded_rows()):
-            item = client.get(self.url, params={"project_id": SEED_PROJECT_ID}).json()["data"][0]
+            item = admin_client.get(self.url, params={"project_id": SEED_PROJECT_ID}).json()["data"][0]
         assert set(item) == {
             "contract_item_id", "project_id", "spec_item_id", "budget_code", "bid_quantity", "bid_unit_price",
             "item_no", "description", "spec_section", "pay_unit", "created_at", "updated_at",
@@ -249,26 +249,26 @@ class TestListContractItems:
         assert item["bid_quantity"] == 2500.0  # psycopg's Decimal goes out as a JSON number
         assert item["bid_unit_price"] == 18.5
 
-    def test_4_13_aas_appears_under_both_budget_codes(self, client):
+    def test_4_13_aas_appears_under_both_budget_codes(self, admin_client):
         with patch("api.queries.contract_items.run_query", return_value=_seeded_rows()):
-            data = client.get(self.url, params={"project_id": SEED_PROJECT_ID}).json()["data"]
+            data = admin_client.get(self.url, params={"project_id": SEED_PROJECT_ID}).json()["data"]
         aas = [item for item in data if item["item_no"] == "4.13 AAS"]
         assert [(i["budget_code"], i["bid_unit_price"]) for i in aas] == [("12345", 14.5), ("67890", 19.0)]
         assert aas[0]["spec_item_id"] == aas[1]["spec_item_id"]
         assert aas[0]["contract_item_id"] != aas[1]["contract_item_id"]
         assert {i["pay_unit"] for i in aas} == {"S.F."}
 
-    def test_empty_list_for_project_without_contract_items(self, client):
+    def test_empty_list_for_project_without_contract_items(self, admin_client):
         with patch("api.queries.contract_items.run_query", return_value=[]) as mock:
-            response = client.get(self.url, params={"project_id": EMPTY_PROJECT_ID})
+            response = admin_client.get(self.url, params={"project_id": EMPTY_PROJECT_ID})
         assert response.status_code == 200
         assert response.json()["data"] == []
         assert mock.call_args.args[1] == (EMPTY_PROJECT_ID,)
 
-    def test_query_failure_is_500(self, client):
+    def test_query_failure_is_500(self, admin_client):
         with patch("api.queries.contract_items.run_query", return_value=None):
-            response = client.get(self.url, params={"project_id": SEED_PROJECT_ID})
+            response = admin_client.get(self.url, params={"project_id": SEED_PROJECT_ID})
         assert response.status_code == 500
 
-    def test_project_id_is_required(self, client):
-        assert client.get(self.url).status_code == 422
+    def test_project_id_is_required(self, admin_client):
+        assert admin_client.get(self.url).status_code == 422

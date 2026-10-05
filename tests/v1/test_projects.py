@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+from tests.conftest import ADMIN_USER_ROW
+
 # ---------------------------------------------------------------------------
 # Mock data — dict rows, as run_query returns them under dict_row.
 # Keys match the SELECT column names in api/queries/projects.py.
@@ -39,29 +41,28 @@ MOCK_PROJECT_DETAIL_ROW = {
     "status": "active",
 }
 
-DEV_USER_ID = "7f3c2a9e-1b4d-4c8a-9e2f-3a5b6c7d8e90"  # users.uuid
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/projects/?user_id=<uuid>
+# GET /v1/projects/ (the signed-in user's projects)
 # ---------------------------------------------------------------------------
 
 class TestListProjectsForUser:
-    def test_returns_200(self, client):
+    def test_returns_200(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS):
-            response = client.get(f"/v1/projects/?user_id={DEV_USER_ID}")
+            response = admin_client.get("/v1/projects/")
         assert response.status_code == 200
 
-    def test_response_shape(self, client):
+    def test_response_shape(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS):
-            data = client.get(f"/v1/projects/?user_id={DEV_USER_ID}").json()
+            data = admin_client.get("/v1/projects/").json()
         assert data["status"] == "success"
         assert "message" in data
         assert isinstance(data["data"], list)
 
-    def test_project_fields_present(self, client):
+    def test_project_fields_present(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS):
-            projects = client.get(f"/v1/projects/?user_id={DEV_USER_ID}").json()["data"]
+            projects = admin_client.get("/v1/projects/").json()["data"]
         for p in projects:
             assert "project_id" in p
             assert "project_name" in p
@@ -69,32 +70,41 @@ class TestListProjectsForUser:
             assert "status" in p
             assert "user_role" in p
 
-    def test_returns_correct_count(self, client):
+    def test_returns_correct_count(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS):
-            projects = client.get(f"/v1/projects/?user_id={DEV_USER_ID}").json()["data"]
+            projects = admin_client.get("/v1/projects/").json()["data"]
         assert len(projects) == 3
 
-    def test_empty_list_when_no_projects(self, client):
+    def test_empty_list_when_no_projects(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=[]):
-            data = client.get(f"/v1/projects/?user_id={DEV_USER_ID}").json()
+            data = admin_client.get("/v1/projects/").json()
         assert data["status"] == "success"
         assert data["data"] == []
 
-    def test_missing_user_id_returns_422(self, client):
-        response = client.get("/v1/projects/")
-        assert response.status_code == 422
+    def test_lists_the_signed_in_users_projects(self, admin_client):
+        with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS) as run:
+            data = admin_client.get("/v1/projects/").json()
+        sql, params = run.call_args.args
+        assert "icid.project_users" in sql and params == (ADMIN_USER_ROW["uuid"],)
+        assert data["message"] == f"Projects for user {ADMIN_USER_ROW['uuid']}"
 
-    def test_non_uuid_user_id_returns_422(self, client):
-        response = client.get("/v1/projects/?user_id=not-a-uuid")
-        assert response.status_code == 422
+    def test_a_user_id_query_parameter_is_ignored(self, admin_client):
+        # the old ?user_id= no longer chooses whose projects are listed, whatever it holds
+        for other in ("7f3c2a9e-1b4d-4c8a-9e2f-3a5b6c7d8e90", "not-a-uuid"):
+            with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS) as run:
+                response = admin_client.get(f"/v1/projects/?user_id={other}")
+            assert response.status_code == 200
+            assert run.call_args.args[1] == (ADMIN_USER_ROW["uuid"],)
 
-    def test_integer_user_id_returns_422(self, client):
-        response = client.get("/v1/projects/?user_id=28")
-        assert response.status_code == 422
+    def test_an_admin_sees_only_assigned_projects(self, admin_client):
+        # no admin bypass: the admin role doesn't widen the list beyond project_users
+        with patch("api.queries.projects.run_query", return_value=[]) as run:
+            data = admin_client.get("/v1/projects/").json()
+        assert data["data"] == [] and run.call_count == 1
 
-    def test_db_failure_returns_500(self, client):
+    def test_db_failure_returns_500(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=None):
-            response = client.get(f"/v1/projects/?user_id={DEV_USER_ID}")
+            response = admin_client.get("/v1/projects/")
         assert response.status_code == 500
 
 
@@ -103,20 +113,20 @@ class TestListProjectsForUser:
 # ---------------------------------------------------------------------------
 
 class TestGetProjectDetail:
-    def test_returns_200(self, client):
+    def test_returns_200(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=[MOCK_PROJECT_DETAIL_ROW]):
-            response = client.get("/v1/projects/P001")
+            response = admin_client.get("/v1/projects/P001")
         assert response.status_code == 200
 
-    def test_response_shape(self, client):
+    def test_response_shape(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=[MOCK_PROJECT_DETAIL_ROW]):
-            data = client.get("/v1/projects/P001").json()
+            data = admin_client.get("/v1/projects/P001").json()
         assert data["status"] == "success"
         assert "data" in data
 
-    def test_project_detail_fields(self, client):
+    def test_project_detail_fields(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=[MOCK_PROJECT_DETAIL_ROW]):
-            project = client.get("/v1/projects/P001").json()["data"]
+            project = admin_client.get("/v1/projects/P001").json()["data"]
         assert project["project_id"] == "P001"
         assert project["project_name"] == "Brooklyn Bridge Rehab"
         assert project["borough"] == "Brooklyn"
@@ -124,12 +134,12 @@ class TestGetProjectDetail:
         assert project["registration_code"] == "REG-2024-001"
         assert "project_description" in project
 
-    def test_not_found_returns_404(self, client):
+    def test_not_found_returns_404(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=[]):
-            response = client.get("/v1/projects/DOESNOTEXIST")
+            response = admin_client.get("/v1/projects/DOESNOTEXIST")
         assert response.status_code == 404
 
-    def test_optional_fields_can_be_null(self, client):
+    def test_optional_fields_can_be_null(self, admin_client):
         row_with_nulls = {
             "project_id": "P002",
             "project_name": "Queens Plaza Upgrade",
@@ -139,6 +149,6 @@ class TestGetProjectDetail:
             "status": "active",
         }
         with patch("api.queries.projects.run_query", return_value=[row_with_nulls]):
-            project = client.get("/v1/projects/P002").json()["data"]
+            project = admin_client.get("/v1/projects/P002").json()["data"]
         assert project["project_description"] is None
         assert project["registration_code"] is None

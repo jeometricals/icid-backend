@@ -1,14 +1,14 @@
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
 from api.queries.idr_reports import get_idr_report
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import is_user_on_project
 from api.queries.report_attachments import get_attachment
-from api.queries.users import get_user_by_id
+from api.schemas.auth import UserOut
 from api.schemas.report_attachment import (
     Attachment,
     AttachmentListResponse,
@@ -31,7 +31,6 @@ from api.services.attachments import (
     InvalidAttachmentMetadataError,
     InvalidUserError,
     StorageUnavailableError,
-    UPLOADER_NOT_FOUND,
     UnsupportedFileTypeError,
     delete_attachment,
     get_download_url,
@@ -40,8 +39,10 @@ from api.services.attachments import (
     upload_complete,
     upload_request,
 )
+from api.services.auth import current_user
 
-router = APIRouter(prefix="/v1/idrs", tags=["Attachments"])
+# Every route needs a signed-in user (any role)
+router = APIRouter(prefix="/v1/idrs", tags=["Attachments"], dependencies=[Depends(current_user)])
 
 # HTTP status for each error the attachments service can raise.
 ERROR_STATUS: dict[type[AttachmentError], int] = {
@@ -129,25 +130,24 @@ def _single_attachment(rows: Optional[list[dict[str, Any]]], failure: str) -> At
     response_model=UploadRequestResponse,
     status_code=201,
 )
-def request_attachment_upload(idr_id: UUID, report_id: UUID, body: UploadRequestBody) -> UploadRequestResponse:
+def request_attachment_upload(
+    idr_id: UUID, report_id: UUID, body: UploadRequestBody, user: UserOut = Depends(current_user)
+) -> UploadRequestResponse:
     """
-    Start uploading a file to a report on a draft IDR: records a pending attachment and returns a signed URL to upload the file to.
-    Takes the IDR and report uuids as path parameters and an UploadRequestBody.
-    Returns an UploadRequestResponse; raises 404, 409 (not draft), 400 (unknown uploader, auto-General, empty file, blank or long name/description), 403 (uploader not on project), 413, 415, 500 and 502.
+    Start uploading a file to a report on a draft IDR: records a pending attachment, uploaded by the signed-in user, and returns a signed URL to upload the file to.
+    Takes the IDR and report uuids as path parameters, an UploadRequestBody and the signed-in user.
+    Returns an UploadRequestResponse; raises 404, 409 (not draft), 400 (auto-General, empty file, blank or long name/description), 403 (uploader not on project), 413, 415, 500 and 502.
     """
     idr, report = _load_report(idr_id, report_id)
     _require_draft(idr)
 
-    if get_user_by_id(str(body.uploaded_by)) is None:
-        raise HTTPException(status_code=400, detail=UPLOADER_NOT_FOUND)
-
-    if not is_user_on_project(body.uploaded_by, idr["project_id"]):
+    if not is_user_on_project(user.uuid, idr["project_id"]):
         raise HTTPException(status_code=403, detail="Uploader is not assigned to this project")
 
     try:
         row = upload_request(
             report,
-            body.uploaded_by,
+            user.uuid,
             body.file_name,
             body.file_type,
             body.file_size_bytes,

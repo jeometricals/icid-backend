@@ -28,7 +28,6 @@ class AttachmentListResponse(BaseModel):
 
 
 class UploadRequestBody(BaseModel):
-    uploaded_by: UUID
     file_name: str
     file_type: str
     file_size_bytes: int

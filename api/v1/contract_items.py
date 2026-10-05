@@ -1,9 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.queries.contract_items import list_contract_items_for_project
 from api.schemas.contract_item import ContractItem, ContractItemListResponse
+from api.services.auth import current_user
 
-router = APIRouter(prefix="/v1/contract_items", tags=["Contract Items"])
+# Every route needs a signed-in user (any role)
+router = APIRouter(prefix="/v1/contract_items", tags=["Contract Items"], dependencies=[Depends(current_user)])
 
 
 @router.get("/", response_model=ContractItemListResponse)

@@ -10,7 +10,6 @@ from api.schemas.idr_report import IdrReport
 
 class IdrCreate(BaseModel):
     project_id: str
-    reporter_uuid: UUID
     report_date: date
 
 

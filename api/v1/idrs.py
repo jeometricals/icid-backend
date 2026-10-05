@@ -1,7 +1,7 @@
 from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 
 from api.queries.idr_reports import (
@@ -24,7 +24,9 @@ from api.queries.idrs import (
 )
 from api.queries.projects import get_project_by_id, is_user_on_project
 from api.services.attachments import delete_all_storage_files_for_report
+from api.services.auth import current_user
 from api.services.auto_general import regenerate_auto_general
+from api.schemas.auth import UserOut
 from api.schemas.idr import (
     Idr,
     IdrConflict,
@@ -45,7 +47,8 @@ from api.schemas.idr_report import (
     ReportType,
 )
 
-router = APIRouter(prefix="/v1/idrs", tags=["IDRs"])
+# Every route needs a signed-in user (any role)
+router = APIRouter(prefix="/v1/idrs", tags=["IDRs"], dependencies=[Depends(current_user)])
 
 
 @router.post(
@@ -54,25 +57,25 @@ router = APIRouter(prefix="/v1/idrs", tags=["IDRs"])
     status_code=201,
     responses={409: {"model": IdrConflict, "description": "An IDR already exists for this day"}},
 )
-def create_draft_idr(body: IdrCreate) -> Union[IdrResponse, JSONResponse]:
+def create_draft_idr(body: IdrCreate, user: UserOut = Depends(current_user)) -> Union[IdrResponse, JSONResponse]:
     """
-    Create a new draft IDR for a reporter on a project for the given date.
-    Takes an IdrCreate body with the project id, reporter uuid and report date.
+    Create a new draft IDR for the signed-in user (its reporter) on a project for the given date.
+    Takes an IdrCreate body with the project id and report date, and the signed-in user.
     Returns an IdrResponse, raising 404 for an unknown project, 403 for an unassigned reporter, and 409 (with existing_idr_id) if that day's IDR exists.
     """
     if get_project_by_id(body.project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    if not is_user_on_project(body.reporter_uuid, body.project_id):
+    if not is_user_on_project(user.uuid, body.project_id):
         raise HTTPException(status_code=403, detail="Reporter is not assigned to this project")
 
-    rows = create_idr(body.project_id, body.reporter_uuid, body.report_date)
+    rows = create_idr(body.project_id, user.uuid, body.report_date)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to create IDR")
 
     if not rows:
-        existing_idr_id = get_idr_id_for_day(body.project_id, body.reporter_uuid, body.report_date)
+        existing_idr_id = get_idr_id_for_day(body.project_id, user.uuid, body.report_date)
 
         if existing_idr_id is None:
             raise HTTPException(status_code=500, detail="Failed to create IDR")

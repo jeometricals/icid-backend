@@ -1,8 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.schemas.export import ExportLink
+from api.services.auth import current_user
 from api.services.export import (
     ExportDataError,
     ExportError,
@@ -11,7 +12,8 @@ from api.services.export import (
     publish_idr_export,
 )
 
-router = APIRouter(prefix="/v1/idrs", tags=["Export"])
+# Needs a signed-in user (any role): any of them may export any IDR
+router = APIRouter(prefix="/v1/idrs", tags=["Export"], dependencies=[Depends(current_user)])
 
 # HTTP status for each export failure (Storage failing is a bad gateway, as for attachments)
 ERROR_STATUS = {

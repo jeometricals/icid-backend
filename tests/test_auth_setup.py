@@ -111,6 +111,14 @@ class TestSeeds:
         assert f"VALUES ('{DEMO_UUID}', 'legacy-demo@icid.local', 'C00001', NULL, false)" in seed
         assert "ON CONFLICT (uuid) DO UPDATE" in seed
 
+    def test_auth_users_assigns_reza_to_the_seeded_projects(self):
+        seed = sql("seed_auth_users.sql")
+        assert inserted_columns(seed, "project_users") == [["project_id", "user_uuid", "user_role"]]
+        assert "JOIN icid.projects p ON p.project_id IN ('HWS0023', 'SE384', 'DEMO01')" in seed
+        assert "WHERE u.email = 'reza@icid.local'" in seed
+        assert "ON CONFLICT (project_id, user_uuid) DO NOTHING" in seed
+        assert set(table_columns("project_users")) >= {"project_id", "user_uuid", "user_role"}
+
     def test_test_project_seeds_demo01(self):
         seed = sql("seed_test_project.sql")
         assert "VALUES ('DEMO01', 'Test Project', NULL, NULL, NULL, NULL)" in seed

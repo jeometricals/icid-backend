@@ -1,6 +1,4 @@
-from uuid import UUID
-
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.queries.projects import get_project_by_id, get_projects_for_user
 from api.schemas.project import (
@@ -9,18 +7,21 @@ from api.schemas.project import (
     ProjectListItem,
     ProjectListResponse,
 )
+from api.schemas.auth import UserOut
+from api.services.auth import current_user
 
-router = APIRouter(prefix="/v1/projects", tags=["Projects"])
+# Every route needs a signed-in user (any role)
+router = APIRouter(prefix="/v1/projects", tags=["Projects"], dependencies=[Depends(current_user)])
 
 
 @router.get("/", response_model=ProjectListResponse)
-def list_projects_for_user(user_id: UUID) -> ProjectListResponse:
+def list_projects_for_user(user: UserOut = Depends(current_user)) -> ProjectListResponse:
     """
-    Return every project assigned to the given user.
-    Takes the user uuid as the user_id query parameter.
+    Return every project assigned to the signed-in user.
+    Takes the user the request's bearer token belongs to.
     Returns a ProjectListResponse wrapping the list of projects.
     """
-    rows = get_projects_for_user(user_id)
+    rows = get_projects_for_user(user.uuid)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to fetch projects")
@@ -38,7 +39,7 @@ def list_projects_for_user(user_id: UUID) -> ProjectListResponse:
 
     return ProjectListResponse(
         status="success",
-        message=f"Projects for user {user_id}",
+        message=f"Projects for user {user.uuid}",
         data=data,
     )
 

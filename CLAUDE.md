@@ -38,10 +38,13 @@ every request to it.
 - `POST /v1/auth/login` — email (matched without regard to case) and password; returns `{access_token, token_type, expires_in, user}`, or 401 `Invalid email or password`
 - `GET /v1/auth/me` — the user the bearer token belongs to; 401 `Not authenticated`, `Token expired` or `Invalid token`
 - `POST /v1/auth/logout` — 204; stateless, the client drops its token
+
+Every route below needs a bearer token (401 without a valid one); see "Sign-in" under the conventions.
+
 - `GET /v1/users/`
-- `GET /v1/projects/?user_id=` (user uuid)
+- `GET /v1/projects/` — the signed-in user's projects (through `project_users`)
 - `GET /v1/projects/{project_id}`
-- `POST /v1/idrs/` — create a draft IDR (409 with `existing_idr_id` if one exists for that reporter, project and date)
+- `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count` and `has_general` (all filters optional)
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order
 - `PUT /v1/idrs/{idr_id}/header` — partial update of the shared header fields on a draft
@@ -49,7 +52,7 @@ every request to it.
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
 - `POST /v1/idrs/{idr_id}/submit` — submit a draft (locks it, numbers pages, sets `total_pages`)
-- `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details, `uploaded_by`) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
+- `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — replace an attachment's name and description; draft only
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments` — list a report's uploaded attachments (pending ones left out)
@@ -57,7 +60,7 @@ every request to it.
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment, pending or uploaded (Storage file, then record); draft only
 - `GET /v1/idrs/{idr_id}/export` — an IDR as an .xlsx on the DDC report-forms template (a draft's pages are marked "DRAFT - Not for Submission"), stored in the `idr-exports` bucket; returns `{download_url, filename}`, the URL valid 10 minutes
 - `GET /v1/contract_items/?project_id=` — a project's contract items, each joined to its spec item (`item_no`, `description`, `spec_section`, `pay_unit`); `[]` when none
-- `GET /debug/schema` — dev-only
+- `GET /debug/schema` — dev-only, and public like `/status`
 
 ## 3. Modularity rules
 
@@ -93,6 +96,18 @@ Any change must follow these.
     `row["employer"]`. Alias deliberately and the endpoint reads cleanly.
   - `run_query` returns `None` for statements with no result set, and for failures the
     endpoint surfaces as a 500. `None` and `[]` mean different things — don't conflate them.
+- **Sign-in.** Every `/v1` router except `auth` is created with `dependencies=[Depends(current_user)]`, so each of
+  its routes returns 401 without a valid bearer token; a new router does the same, and `tests/v1/test_auth.py`
+  fails for any `/v1` route left open. An endpoint that needs the user takes
+  `user: UserOut = Depends(current_user)` and reads `user.uuid`: the user never comes from a query parameter or a
+  request body (`reporter_uuid` and `uploaded_by` are set from the session). `/status`, `/debug/schema`,
+  `/v1/auth/login` and `/v1/auth/logout` stay public.
+  - **No admin bypass, no ownership checks (yet).** `role == "admin"` changes nothing: an admin lists only the
+    projects assigned to them in `project_users`, like anyone else, and `current_admin` is applied nowhere. Any
+    signed-in user can read, edit, submit or export any IDR by id, and list IDRs for any reporter
+    (`?reporter_uuid=` is a filter, not an identity). Role and ownership enforcement are Phase 2.
+  - Endpoint tests use the `admin_client` fixture (signed in as `ADMIN_USER_ROW`, `tests/conftest.py`); the plain
+    `client` is for testing what happens without a token.
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.
@@ -118,7 +133,7 @@ Any change must follow these.
 
 Not rules — current state, documented so nobody mistakes these for the intended pattern.
 
-- `api/v1/debug.py` exposes the live `icid` schema and is **dev-only**. Delete before
+- `api/v1/debug.py` exposes the live `icid` schema, without sign-in, and is **dev-only**. Delete before
   production. It has no test coverage.
 - Endpoints exist for `users`, `projects`, `idrs` (with attachments and the .xlsx export) and `contract_items` (read-only;
   the catalog is seeded, with no write endpoint yet). `api/schemas/` also defines models for
@@ -129,8 +144,11 @@ Not rules — current state, documented so nobody mistakes these for the intende
   `api/queries/` does. Imports work regardless, but don't take the inconsistency as intent.
 - CORS is `allow_origins=["*"]`. Tighten before production.
 - `POST /v1/auth/login` has no rate limiting, and there is no password-change endpoint (passwords are rotated
-  in SQL). Both are Phase 2. No endpoint requires sign-in yet: `current_user` guards only `/v1/auth/me`, and
-  `current_admin` is defined but not applied anywhere.
+  in SQL). Both are Phase 2.
+- `uq_users_email` is case-sensitive on the stored value, while sign-in looks emails up without regard to case.
+  `Reza@icid.local` and `reza@icid.local` could coexist as separate rows, and login would pick the oldest. Fix in
+  the next schema migration slice: drop `uq_users_email` and add
+  `UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email))`. Low priority.
 - Four overlapping READMEs exist (`README.md`, `README_01.md`, `README-db.md`,
   `README-api.md`) with conflicting run instructions. The one that works is
   `uvicorn api.index:app --reload`.

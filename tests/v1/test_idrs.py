@@ -8,6 +8,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
+from tests.conftest import ADMIN_USER_ROW
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, TYPE_LABELS, label_for
 from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
 
@@ -78,7 +79,8 @@ def patched(idrs=None, idr_reports=None, projects=None):
 # POST /v1/idrs/
 # ---------------------------------------------------------------------------
 
-CREATE_BODY = {"project_id": "HWS0023", "reporter_uuid": REPORTER_UUID, "report_date": "2026-09-25"}
+# The reporter is the signed-in user (ADMIN_USER_ROW), not part of the body
+CREATE_BODY = {"project_id": "HWS0023", "report_date": "2026-09-25"}
 
 # Creating an IDR makes two reads through api.queries.projects, in this order:
 # get_project_by_id, then is_user_on_project. Side effects supply one per call.
@@ -92,14 +94,14 @@ COLLISION = ([], [{"idr_id": UUID(EXISTING_IDR_ID)}])
 class TestCreateIdr:
     url = "/v1/idrs/"
 
-    def test_returns_201(self, client):
+    def test_returns_201(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED):
-            response = client.post(self.url, json=CREATE_BODY)
+            response = admin_client.post(self.url, json=CREATE_BODY)
         assert response.status_code == 201
 
-    def test_response_shape(self, client):
+    def test_response_shape(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED):
-            data = client.post(self.url, json=CREATE_BODY).json()
+            data = admin_client.post(self.url, json=CREATE_BODY).json()
         assert data["status"] == "success"
         idr = data["data"]
         assert idr["idr_id"] == IDR_ID
@@ -109,9 +111,9 @@ class TestCreateIdr:
         assert "created_at" in idr
         assert "updated_at" in idr
 
-    def test_new_idr_is_draft_with_empty_header(self, client):
+    def test_new_idr_is_draft_with_empty_header(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED):
-            idr = client.post(self.url, json=CREATE_BODY).json()["data"]
+            idr = admin_client.post(self.url, json=CREATE_BODY).json()["data"]
         assert idr["status"] == "draft"
         assert idr["submitted_at"] is None
         assert idr["total_pages"] is None
@@ -119,90 +121,95 @@ class TestCreateIdr:
         assert idr["temp_low"] is None
         assert idr["weather_am"] is None
 
-    def test_insert_targets_idrs_with_body_values(self, client):
+    def test_insert_targets_idrs_with_body_values(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED) as mocks:
-            client.post(self.url, json=CREATE_BODY)
+            admin_client.post(self.url, json=CREATE_BODY)
         sql, params = mocks["idrs"].call_args.args
         assert "INSERT INTO icid.idrs" in sql
         assert "ON CONFLICT (project_id, reporter_uuid, report_date) DO NOTHING" in sql
-        assert params == ("HWS0023", UUID(REPORTER_UUID), REPORT_DATE)
+        assert params == ("HWS0023", ADMIN_USER_ROW["uuid"], REPORT_DATE)
 
-    def test_existing_idr_for_day_returns_409_with_its_id(self, client):
+    def test_existing_idr_for_day_returns_409_with_its_id(self, admin_client):
         with patched(idrs=COLLISION, projects=ASSIGNED):
-            response = client.post(self.url, json=CREATE_BODY)
+            response = admin_client.post(self.url, json=CREATE_BODY)
         assert response.status_code == 409
         assert response.json() == {
             "detail": "IDR already exists for this project and date",
             "existing_idr_id": EXISTING_IDR_ID,
         }
 
-    def test_collision_lookup_uses_same_project_reporter_date(self, client):
+    def test_collision_lookup_uses_same_project_reporter_date(self, admin_client):
         with patched(idrs=COLLISION, projects=ASSIGNED) as mocks:
-            client.post(self.url, json=CREATE_BODY)
+            admin_client.post(self.url, json=CREATE_BODY)
         assert mocks["idrs"].call_count == 2
         sql, params = mocks["idrs"].call_args.args
         assert "FROM icid.idrs" in sql
-        assert params == ("HWS0023", UUID(REPORTER_UUID), REPORT_DATE)
+        assert params == ("HWS0023", ADMIN_USER_ROW["uuid"], REPORT_DATE)
 
-    def test_unknown_project_returns_404(self, client):
+    def test_unknown_project_returns_404(self, admin_client):
         with patched(projects=[]) as mocks:
-            response = client.post(self.url, json=CREATE_BODY)
+            response = admin_client.post(self.url, json=CREATE_BODY)
         assert response.status_code == 404
         assert response.json()["detail"] == "Project not found"
         assert mocks["projects"].call_count == 1
         mocks["idrs"].assert_not_called()
 
-    def test_unassigned_reporter_returns_403(self, client):
+    def test_unassigned_reporter_returns_403(self, admin_client):
         with patched(projects=NOT_ASSIGNED) as mocks:
-            response = client.post(self.url, json=CREATE_BODY)
+            response = admin_client.post(self.url, json=CREATE_BODY)
         assert response.status_code == 403
         assert response.json()["detail"] == "Reporter is not assigned to this project"
         mocks["idrs"].assert_not_called()
 
-    def test_assignment_check_reads_project_users(self, client):
+    def test_assignment_check_reads_project_users(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED) as mocks:
-            client.post(self.url, json=CREATE_BODY)
+            admin_client.post(self.url, json=CREATE_BODY)
         assert mocks["projects"].call_count == 2
         sql, params = mocks["projects"].call_args.args
         assert "icid.project_users" in sql
-        assert params == (UUID(REPORTER_UUID), "HWS0023")
+        assert params == (ADMIN_USER_ROW["uuid"], "HWS0023")
 
-    def test_provided_report_date_is_used(self, client):
+    def test_provided_report_date_is_used(self, admin_client):
         body = {**CREATE_BODY, "report_date": "2026-09-20"}
         with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED) as mocks:
-            response = client.post(self.url, json=body)
+            response = admin_client.post(self.url, json=body)
         assert response.status_code == 201
         assert mocks["idrs"].call_args.args[1][2] == date(2026, 9, 20)
 
-    def test_missing_report_date_returns_422(self, client):
-        body = {"project_id": "HWS0023", "reporter_uuid": REPORTER_UUID}
+    def test_missing_report_date_returns_422(self, admin_client):
+        body = {"project_id": "HWS0023"}
         with patched() as mocks:
-            response = client.post(self.url, json=body)
+            response = admin_client.post(self.url, json=body)
         assert response.status_code == 422
         mocks["projects"].assert_not_called()
         mocks["idrs"].assert_not_called()
 
-    def test_invalid_report_date_returns_422(self, client):
-        response = client.post(self.url, json={**CREATE_BODY, "report_date": "not-a-date"})
+    def test_invalid_report_date_returns_422(self, admin_client):
+        response = admin_client.post(self.url, json={**CREATE_BODY, "report_date": "not-a-date"})
         assert response.status_code == 422
 
-    def test_missing_project_id_returns_422(self, client):
-        body = {"reporter_uuid": REPORTER_UUID, "report_date": "2026-09-25"}
-        response = client.post(self.url, json=body)
+    def test_missing_project_id_returns_422(self, admin_client):
+        body = {"report_date": "2026-09-25"}
+        response = admin_client.post(self.url, json=body)
         assert response.status_code == 422
 
-    def test_non_uuid_reporter_returns_422(self, client):
-        response = client.post(self.url, json={**CREATE_BODY, "reporter_uuid": "28"})
-        assert response.status_code == 422
+    def test_a_reporter_uuid_in_the_body_is_ignored(self, admin_client):
+        # the reporter is always the signed-in user, whatever an old client still sends
+        for sent in (REPORTER_UUID, "28"):
+            with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED) as mocks:
+                response = admin_client.post(self.url, json={**CREATE_BODY, "reporter_uuid": sent})
+            assert response.status_code == 201
+            assert mocks["idrs"].call_args.args[1][1] == ADMIN_USER_ROW["uuid"]
+            assert mocks["projects"].call_args.args[1] == (ADMIN_USER_ROW["uuid"], "HWS0023")
 
-    def test_insert_failure_returns_500(self, client):
+    def test_insert_failure_returns_500(self, admin_client):
         with patched(idrs=None, projects=ASSIGNED):
-            response = client.post(self.url, json=CREATE_BODY)
+            response = admin_client.post(self.url, json=CREATE_BODY)
         assert response.status_code == 500
 
-    def test_collision_without_existing_row_returns_500(self, client):
+    def test_collision_without_existing_row_returns_500(self, admin_client):
         with patched(idrs=([], []), projects=ASSIGNED):
-            response = client.post(self.url, json=CREATE_BODY)
+            response = admin_client.post(self.url, json=CREATE_BODY)
         assert response.status_code == 500
 
 
@@ -249,9 +256,9 @@ MOCK_SUBMITTED_IDR_ROW = {**MOCK_IDR_ROW, "status": "submitted", "submitted_at":
 class TestGetIdr:
     url = f"/v1/idrs/{IDR_ID}"
 
-    def test_returns_200_with_idr_fields(self, client):
+    def test_returns_200_with_idr_fields(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]):
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
@@ -262,9 +269,9 @@ class TestGetIdr:
         assert idr["report_date"] == "2026-09-25"
         assert idr["status"] == "draft"
 
-    def test_reports_nested_with_report_data_as_stored(self, client):
+    def test_reports_nested_with_report_data_as_stored(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]):
-            reports = client.get(self.url).json()["data"]["reports"]
+            reports = admin_client.get(self.url).json()["data"]["reports"]
         assert len(reports) == 1
         report = reports[0]
         assert report["report_id"] == GEN_REPORT_ID
@@ -274,40 +281,40 @@ class TestGetIdr:
         assert report["parent_report_id"] is None
         assert report["report_data"] == GEN_REPORT_DATA
 
-    def test_page_number_present_when_null(self, client):
+    def test_page_number_present_when_null(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]):
-            report = client.get(self.url).json()["data"]["reports"][0]
+            report = admin_client.get(self.url).json()["data"]["reports"][0]
         assert "page_number" in report
         assert report["page_number"] is None
 
-    def test_no_reports_returns_empty_list(self, client):
+    def test_no_reports_returns_empty_list(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
-            idr = client.get(self.url).json()["data"]
+            idr = admin_client.get(self.url).json()["data"]
         assert idr["reports"] == []
 
-    def test_addendum_with_arbitrary_report_data(self, client):
+    def test_addendum_with_arbitrary_report_data(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW, MOCK_ADDENDUM_ROW]):
-            reports = client.get(self.url).json()["data"]["reports"]
+            reports = admin_client.get(self.url).json()["data"]["reports"]
         addendum = reports[1]
         assert addendum["is_addendum"] is True
         assert addendum["parent_report_id"] == GEN_REPORT_ID
         assert addendum["report_data"] == MOCK_ADDENDUM_ROW["report_data"]
 
-    def test_submitted_idr_includes_submit_fields_and_page_numbers(self, client):
+    def test_submitted_idr_includes_submit_fields_and_page_numbers(self, admin_client):
         pages = [
             {**MOCK_GEN_REPORT_ROW, "page_number": 1},
             {**MOCK_ADDENDUM_ROW, "page_number": 2},
         ]
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW], idr_reports=pages):
-            idr = client.get(self.url).json()["data"]
+            idr = admin_client.get(self.url).json()["data"]
         assert idr["status"] == "submitted"
         assert idr["submitted_at"] == "2026-09-25T15:30:00Z"
         assert idr["total_pages"] == 2
         assert [r["page_number"] for r in idr["reports"]] == [1, 2]
 
-    def test_queries_read_both_tables_by_idr_id(self, client):
+    def test_queries_read_both_tables_by_idr_id(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            client.get(self.url)
+            admin_client.get(self.url)
         idr_sql, idr_params = mocks["idrs"].call_args.args
         assert "FROM icid.idrs" in idr_sql
         assert idr_params == (UUID(IDR_ID),)
@@ -315,26 +322,26 @@ class TestGetIdr:
         assert "FROM icid.idr_reports" in reports_sql
         assert reports_params == (UUID(IDR_ID),)
 
-    def test_reports_ordered_by_page_then_creation(self, client):
+    def test_reports_ordered_by_page_then_creation(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            client.get(self.url)
+            admin_client.get(self.url)
         sql = mocks["idr_reports"].call_args.args[0]
         assert "ORDER BY page_number NULLS LAST, created_at" in sql
 
-    def test_missing_idr_returns_404(self, client):
+    def test_missing_idr_returns_404(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 404
         assert response.json()["detail"] == "IDR not found"
         mocks["idr_reports"].assert_not_called()
 
-    def test_non_uuid_idr_id_returns_422(self, client):
-        response = client.get("/v1/idrs/IDR1")
+    def test_non_uuid_idr_id_returns_422(self, admin_client):
+        response = admin_client.get("/v1/idrs/IDR1")
         assert response.status_code == 422
 
-    def test_reports_query_failure_returns_500(self, client):
+    def test_reports_query_failure_returns_500(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 500
 
 
@@ -368,9 +375,9 @@ GEN_COLLISION = ([], [{"report_id": UUID(GEN_REPORT_ID)}])
 class TestAddReport:
     url = f"/v1/idrs/{IDR_ID}/reports"
 
-    def test_returns_201_with_new_report(self, client):
+    def test_returns_201_with_new_report(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]):
-            response = client.post(self.url, json={"report_type": "SWR"})
+            response = admin_client.post(self.url, json={"report_type": "SWR"})
         assert response.status_code == 201
         data = response.json()
         assert data["status"] == "success"
@@ -381,52 +388,52 @@ class TestAddReport:
         assert report["report_data"] == {}
         assert report["page_number"] is None
 
-    def test_swcb_report_can_be_created(self, client):
+    def test_swcb_report_can_be_created(self, admin_client):
         swcb_row = {**MOCK_NEW_SWR_ROW, "report_type": "SWCB"}
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[swcb_row]) as mocks:
-            response = client.post(self.url, json={"report_type": "SWCB"})
+            response = admin_client.post(self.url, json={"report_type": "SWCB"})
         assert response.status_code == 201
         assert response.json()["data"]["report_type"] == "SWCB"
         assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "SWCB", False, None)
 
-    def test_insert_defaults_to_main_report_without_parent(self, client):
+    def test_insert_defaults_to_main_report_without_parent(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
-            client.post(self.url, json={"report_type": "SWR"})
+            admin_client.post(self.url, json={"report_type": "SWR"})
         assert mocks["idr_reports"].call_count == 1
         sql, params = mocks["idr_reports"].call_args.args
         assert "INSERT INTO icid.idr_reports" in sql
         assert params == (UUID(IDR_ID), "SWR", False, None)
 
-    def test_insert_guards_second_general_with_on_conflict(self, client):
+    def test_insert_guards_second_general_with_on_conflict(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
-            client.post(self.url, json={"report_type": "SWR"})
+            admin_client.post(self.url, json={"report_type": "SWR"})
         sql = mocks["idr_reports"].call_args.args[0]
         assert "ON CONFLICT (idr_id) WHERE report_type = 'GEN' AND is_addendum = false DO NOTHING" in sql
 
-    def test_addendum_types_default_to_not_addendum(self, client):
+    def test_addendum_types_default_to_not_addendum(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
-            client.post(self.url, json={"report_type": "SKETCH"})
+            admin_client.post(self.url, json={"report_type": "SKETCH"})
         assert mocks["idr_reports"].call_args.args[1][2] is False
 
-    def test_touches_idr_updated_at(self, client):
+    def test_touches_idr_updated_at(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
-            client.post(self.url, json={"report_type": "SWR"})
+            admin_client.post(self.url, json={"report_type": "SWR"})
         assert mocks["idrs"].call_count == 2
         sql, params = mocks["idrs"].call_args.args
         assert "UPDATE icid.idrs" in sql
         assert "updated_at = now()" in sql
         assert params == (UUID(IDR_ID),)
 
-    def test_standalone_addendum_without_parent_is_allowed(self, client):
+    def test_standalone_addendum_without_parent_is_allowed(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
-            response = client.post(self.url, json={"report_type": "FIELD_MEMO", "is_addendum": True})
+            response = admin_client.post(self.url, json={"report_type": "FIELD_MEMO", "is_addendum": True})
         assert response.status_code == 201
         assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "FIELD_MEMO", True, None)
 
-    def test_addendum_with_parent_in_same_idr(self, client):
+    def test_addendum_with_parent_in_same_idr(self, admin_client):
         body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": GEN_REPORT_ID}
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([MOCK_GEN_REPORT_ROW], [MOCK_NEW_SKETCH_ROW])) as mocks:
-            response = client.post(self.url, json=body)
+            response = admin_client.post(self.url, json=body)
         assert response.status_code == 201
         assert response.json()["data"]["parent_report_id"] == GEN_REPORT_ID
         parent_sql, parent_params = mocks["idr_reports"].call_args_list[0].args
@@ -434,9 +441,9 @@ class TestAddReport:
         assert parent_params == (UUID(IDR_ID), UUID(GEN_REPORT_ID))
         assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "SKETCH", True, UUID(GEN_REPORT_ID))
 
-    def test_second_general_returns_409_with_existing_id(self, client):
+    def test_second_general_returns_409_with_existing_id(self, admin_client):
         with patched(idrs=([MOCK_IDR_ROW],), idr_reports=GEN_COLLISION) as mocks:
-            response = client.post(self.url, json={"report_type": "GEN"})
+            response = admin_client.post(self.url, json={"report_type": "GEN"})
         assert response.status_code == 409
         assert response.json() == {
             "detail": "IDR already has a General report",
@@ -447,72 +454,72 @@ class TestAddReport:
         assert lookup_params == (UUID(IDR_ID),)
         assert mocks["idrs"].call_count == 1  # no touch on conflict
 
-    def test_missing_idr_returns_404(self, client):
+    def test_missing_idr_returns_404(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.post(self.url, json={"report_type": "SWR"})
+            response = admin_client.post(self.url, json={"report_type": "SWR"})
         assert response.status_code == 404
         assert response.json()["detail"] == "IDR not found"
         mocks["idr_reports"].assert_not_called()
 
-    def test_submitted_idr_returns_409(self, client):
+    def test_submitted_idr_returns_409(self, admin_client):
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
-            response = client.post(self.url, json={"report_type": "SWR"})
+            response = admin_client.post(self.url, json={"report_type": "SWR"})
         assert response.status_code == 409
         assert response.json()["detail"] == "Only draft IDRs can be edited"
         mocks["idr_reports"].assert_not_called()
 
-    def test_parent_on_main_report_returns_400(self, client):
+    def test_parent_on_main_report_returns_400(self, admin_client):
         body = {"report_type": "SWR", "parent_report_id": GEN_REPORT_ID}
         with patched(idrs=[MOCK_IDR_ROW]) as mocks:
-            response = client.post(self.url, json=body)
+            response = admin_client.post(self.url, json=body)
         assert response.status_code == 400
         assert response.json()["detail"] == "Only addendums can have a parent report"
         mocks["idr_reports"].assert_not_called()
 
-    def test_parent_not_in_this_idr_returns_400(self, client):
+    def test_parent_not_in_this_idr_returns_400(self, admin_client):
         body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": GEN_REPORT_ID}
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            response = client.post(self.url, json=body)
+            response = admin_client.post(self.url, json=body)
         assert response.status_code == 400
         assert response.json()["detail"] == "Parent report not found in this IDR"
         assert mocks["idr_reports"].call_count == 1  # lookup only, no insert
 
-    def test_addendum_parent_returns_400(self, client):
+    def test_addendum_parent_returns_400(self, admin_client):
         body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": ADDENDUM_REPORT_ID}
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_ADDENDUM_ROW]) as mocks:
-            response = client.post(self.url, json=body)
+            response = admin_client.post(self.url, json=body)
         assert response.status_code == 400
         assert response.json()["detail"] == "An addendum's parent must be a main report, not another addendum"
         assert mocks["idr_reports"].call_count == 1
 
-    def test_unknown_report_type_returns_422(self, client):
+    def test_unknown_report_type_returns_422(self, admin_client):
         with patched() as mocks:
-            response = client.post(self.url, json={"report_type": "WM"})
+            response = admin_client.post(self.url, json={"report_type": "WM"})
         assert response.status_code == 422
         assert "GEN" in str(response.json()["detail"])
         mocks["idrs"].assert_not_called()
 
-    def test_missing_report_type_returns_422(self, client):
-        response = client.post(self.url, json={"is_addendum": True})
+    def test_missing_report_type_returns_422(self, admin_client):
+        response = admin_client.post(self.url, json={"is_addendum": True})
         assert response.status_code == 422
 
-    def test_non_uuid_idr_id_returns_422(self, client):
-        response = client.post("/v1/idrs/IDR1/reports", json={"report_type": "SWR"})
+    def test_non_uuid_idr_id_returns_422(self, admin_client):
+        response = admin_client.post("/v1/idrs/IDR1/reports", json={"report_type": "SWR"})
         assert response.status_code == 422
 
-    def test_non_uuid_parent_returns_422(self, client):
+    def test_non_uuid_parent_returns_422(self, admin_client):
         body = {"report_type": "SKETCH", "is_addendum": True, "parent_report_id": "R1"}
-        response = client.post(self.url, json=body)
+        response = admin_client.post(self.url, json=body)
         assert response.status_code == 422
 
-    def test_insert_failure_returns_500(self, client):
+    def test_insert_failure_returns_500(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
-            response = client.post(self.url, json={"report_type": "SWR"})
+            response = admin_client.post(self.url, json={"report_type": "SWR"})
         assert response.status_code == 500
 
-    def test_collision_without_existing_general_returns_500(self, client):
+    def test_collision_without_existing_general_returns_500(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=([], [])):
-            response = client.post(self.url, json={"report_type": "GEN"})
+            response = admin_client.post(self.url, json={"report_type": "GEN"})
         assert response.status_code == 500
 
 
@@ -557,9 +564,9 @@ MOCK_SAVED_ROW = {**MOCK_GEN_REPORT_ROW, "report_data": SAVE_BODY}
 class TestSaveReportData:
     url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
 
-    def test_returns_200_with_saved_report(self, client):
+    def test_returns_200_with_saved_report(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]):
-            response = client.put(self.url, json=SAVE_BODY)
+            response = admin_client.put(self.url, json=SAVE_BODY)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
@@ -567,17 +574,17 @@ class TestSaveReportData:
         assert data["data"]["idr_id"] == IDR_ID
         assert data["data"]["report_data"] == SAVE_BODY
 
-    def test_stores_body_as_jsonb_unchanged(self, client):
+    def test_stores_body_as_jsonb_unchanged(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
-            client.put(self.url, json=SAVE_BODY)
+            admin_client.put(self.url, json=SAVE_BODY)
         params = mocks["idr_reports"].call_args.args[1]
         assert isinstance(params[0], Jsonb)
         assert params[0].obj == SAVE_BODY
         assert params[1:] == (UUID(IDR_ID), UUID(GEN_REPORT_ID))
 
-    def test_single_statement_replaces_data_and_stamps_both_updated_at(self, client):
+    def test_single_statement_replaces_data_and_stamps_both_updated_at(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
-            client.put(self.url, json=SAVE_BODY)
+            admin_client.put(self.url, json=SAVE_BODY)
         assert mocks["idr_reports"].call_count == 1
         assert mocks["idrs"].call_count == 1  # IDR lookup only; the touch is inside the CTE
         sql = mocks["idr_reports"].call_args.args[0]
@@ -587,14 +594,14 @@ class TestSaveReportData:
         assert sql.count("updated_at = now()") == 2
         assert "||" not in sql  # replace, not merge
 
-    def test_update_scoped_to_report_in_draft_idr(self, client):
+    def test_update_scoped_to_report_in_draft_idr(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
-            client.put(self.url, json=SAVE_BODY)
+            admin_client.put(self.url, json=SAVE_BODY)
         sql = mocks["idr_reports"].call_args.args[0]
         assert "r.idr_id = %s AND r.report_id = %s" in sql
         assert "i.status = 'draft'" in sql
 
-    def test_swcb_report_stores_arbitrary_body_unchanged(self, client):
+    def test_swcb_report_stores_arbitrary_body_unchanged(self, admin_client):
         swcb_body = {
             "description": "Replaced 3 sidewalk flags.",
             "sidewalk": {"flags": [{"sqft": "25", "thickness": "4in"}]},
@@ -602,68 +609,68 @@ class TestSaveReportData:
         }
         swcb_row = {**MOCK_GEN_REPORT_ROW, "report_type": "SWCB", "report_data": swcb_body}
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[swcb_row]) as mocks:
-            response = client.put(self.url, json=swcb_body)
+            response = admin_client.put(self.url, json=swcb_body)
         assert response.status_code == 200
         assert response.json()["data"]["report_type"] == "SWCB"
         assert response.json()["data"]["report_data"] == swcb_body
         assert mocks["idr_reports"].call_args.args[1][0].obj == swcb_body
 
-    def test_empty_object_is_accepted(self, client):
+    def test_empty_object_is_accepted(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
-            response = client.put(self.url, json={})
+            response = admin_client.put(self.url, json={})
         assert response.status_code == 200
         assert mocks["idr_reports"].call_args.args[1][0].obj == {}
 
-    def test_addendum_report_can_be_saved(self, client):
+    def test_addendum_report_can_be_saved(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{ADDENDUM_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_ADDENDUM_ROW]):
-            response = client.put(url, json=MOCK_ADDENDUM_ROW["report_data"])
+            response = admin_client.put(url, json=MOCK_ADDENDUM_ROW["report_data"])
         assert response.status_code == 200
         assert response.json()["data"]["is_addendum"] is True
 
-    def test_missing_idr_returns_404(self, client):
+    def test_missing_idr_returns_404(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.put(self.url, json=SAVE_BODY)
+            response = admin_client.put(self.url, json=SAVE_BODY)
         assert response.status_code == 404
         assert response.json()["detail"] == "IDR not found"
         mocks["idr_reports"].assert_not_called()
 
-    def test_submitted_idr_returns_409(self, client):
+    def test_submitted_idr_returns_409(self, admin_client):
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
-            response = client.put(self.url, json=SAVE_BODY)
+            response = admin_client.put(self.url, json=SAVE_BODY)
         assert response.status_code == 409
         assert response.json()["detail"] == "Only draft IDRs can be edited"
         mocks["idr_reports"].assert_not_called()
 
-    def test_report_not_in_idr_returns_404(self, client):
+    def test_report_not_in_idr_returns_404(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
-            response = client.put(self.url, json=SAVE_BODY)
+            response = admin_client.put(self.url, json=SAVE_BODY)
         assert response.status_code == 404
         assert response.json()["detail"] == "Report not found in this IDR"
 
-    def test_array_body_returns_422_with_message(self, client):
+    def test_array_body_returns_422_with_message(self, admin_client):
         with patched() as mocks:
-            response = client.put(self.url, json=[{"a": 1}])
+            response = admin_client.put(self.url, json=[{"a": 1}])
         assert response.status_code == 422
         assert response.json()["detail"][0]["msg"] == "report_data must be a JSON object"
         mocks["idrs"].assert_not_called()
 
-    def test_scalar_bodies_return_422(self, client):
+    def test_scalar_bodies_return_422(self, admin_client):
         for body in ["text", 42, True, None]:
-            response = client.put(self.url, json=body)
+            response = admin_client.put(self.url, json=body)
             assert response.status_code == 422, body
 
-    def test_missing_body_returns_422(self, client):
-        response = client.put(self.url)
+    def test_missing_body_returns_422(self, admin_client):
+        response = admin_client.put(self.url)
         assert response.status_code == 422
 
-    def test_non_uuid_ids_return_422(self, client):
-        assert client.put(f"/v1/idrs/IDR1/reports/{GEN_REPORT_ID}", json={}).status_code == 422
-        assert client.put(f"/v1/idrs/{IDR_ID}/reports/R1", json={}).status_code == 422
+    def test_non_uuid_ids_return_422(self, admin_client):
+        assert admin_client.put(f"/v1/idrs/IDR1/reports/{GEN_REPORT_ID}", json={}).status_code == 422
+        assert admin_client.put(f"/v1/idrs/{IDR_ID}/reports/R1", json={}).status_code == 422
 
-    def test_update_failure_returns_500(self, client):
+    def test_update_failure_returns_500(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
-            response = client.put(self.url, json=SAVE_BODY)
+            response = admin_client.put(self.url, json=SAVE_BODY)
         assert response.status_code == 500
 
 
@@ -707,9 +714,9 @@ def header_calls(row=MOCK_HEADER_ROW, stored=MOCK_IDR_ROW):
 class TestSaveHeader:
     url = f"/v1/idrs/{IDR_ID}/header"
 
-    def test_returns_200_with_full_idr(self, client):
+    def test_returns_200_with_full_idr(self, admin_client):
         with patched(idrs=header_calls()):
-            response = client.put(self.url, json=FULL_HEADER)
+            response = admin_client.put(self.url, json=FULL_HEADER)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
@@ -721,17 +728,17 @@ class TestSaveHeader:
         assert idr["weather_pm"] == "Cloudy"
         assert "reports" not in idr
 
-    def test_all_fields_reach_the_update(self, client):
+    def test_all_fields_reach_the_update(self, admin_client):
         with patched(idrs=header_calls()) as mocks:
-            client.put(self.url, json=FULL_HEADER)
+            admin_client.put(self.url, json=FULL_HEADER)
         sql, params = mocks["idrs"].call_args.args
         for column in FULL_HEADER:
             assert f"{column} = %s" in sql
         assert params == (time(7, 0), time(15, 30), time(6, 45), time(16, 0), 58.0, 74.5, "Clear", "Cloudy", UUID(IDR_ID))
 
-    def test_omitted_fields_are_not_touched(self, client):
+    def test_omitted_fields_are_not_touched(self, admin_client):
         with patched(idrs=header_calls()) as mocks:
-            client.put(self.url, json={"weather_am": "Rain"})
+            admin_client.put(self.url, json={"weather_am": "Rain"})
         sql, params = mocks["idrs"].call_args.args
         assert "weather_am = %s" in sql
         for column in FULL_HEADER:
@@ -739,116 +746,116 @@ class TestSaveHeader:
                 assert column not in sql.split("WHERE")[0].split("SET")[1]
         assert params == ("Rain", UUID(IDR_ID))
 
-    def test_explicit_null_clears_the_field(self, client):
+    def test_explicit_null_clears_the_field(self, admin_client):
         with patched(idrs=header_calls()) as mocks:
-            response = client.put(self.url, json={"weather_am": None})
+            response = admin_client.put(self.url, json={"weather_am": None})
         assert response.status_code == 200
         sql, params = mocks["idrs"].call_args.args
         assert "weather_am = %s" in sql
         assert params == (None, UUID(IDR_ID))
 
-    def test_update_is_atomic_draft_guard_and_stamps_updated_at(self, client):
+    def test_update_is_atomic_draft_guard_and_stamps_updated_at(self, admin_client):
         with patched(idrs=header_calls()) as mocks:
-            client.put(self.url, json={"weather_am": "Rain"})
+            admin_client.put(self.url, json={"weather_am": "Rain"})
         assert mocks["idrs"].call_count == 2
         sql = mocks["idrs"].call_args.args[0]
         assert "UPDATE icid.idrs" in sql
         assert "updated_at = now()" in sql
         assert "WHERE idr_id = %s AND status = 'draft'" in sql
 
-    def test_empty_body_only_stamps_updated_at(self, client):
+    def test_empty_body_only_stamps_updated_at(self, admin_client):
         with patched(idrs=header_calls(row=MOCK_IDR_ROW)) as mocks:
-            response = client.put(self.url, json={})
+            response = admin_client.put(self.url, json={})
         assert response.status_code == 200
         sql, params = mocks["idrs"].call_args.args
         assert "SET updated_at = now()" in sql
         assert params == (UUID(IDR_ID),)
 
-    def test_seconds_in_time_are_accepted(self, client):
+    def test_seconds_in_time_are_accepted(self, admin_client):
         with patched(idrs=header_calls()) as mocks:
-            response = client.put(self.url, json={"work_start_time": "07:00:30"})
+            response = admin_client.put(self.url, json={"work_start_time": "07:00:30"})
         assert response.status_code == 200
         assert mocks["idrs"].call_args.args[1][0] == time(7, 0, 30)
 
-    def test_overnight_work_times_are_allowed(self, client):
+    def test_overnight_work_times_are_allowed(self, admin_client):
         with patched(idrs=header_calls()):
-            response = client.put(self.url, json={"work_start_time": "22:00", "work_end_time": "06:00"})
+            response = admin_client.put(self.url, json={"work_start_time": "22:00", "work_end_time": "06:00"})
         assert response.status_code == 200
 
-    def test_temp_low_above_temp_high_returns_400(self, client):
+    def test_temp_low_above_temp_high_returns_400(self, admin_client):
         with patched(idrs=([MOCK_IDR_ROW],)) as mocks:
-            response = client.put(self.url, json={"temp_low": 80, "temp_high": 60})
+            response = admin_client.put(self.url, json={"temp_low": 80, "temp_high": 60})
         assert response.status_code == 400
         assert response.json()["detail"] == "temp_low cannot be greater than temp_high"
         assert mocks["idrs"].call_count == 1  # no update
 
-    def test_temp_order_checked_against_stored_value(self, client):
+    def test_temp_order_checked_against_stored_value(self, admin_client):
         stored = {**MOCK_IDR_ROW, "temp_low": Decimal("70.0")}
         with patched(idrs=([stored],)):
-            response = client.put(self.url, json={"temp_high": 65})
+            response = admin_client.put(self.url, json={"temp_high": 65})
         assert response.status_code == 400
 
-    def test_temp_order_skipped_when_other_side_cleared(self, client):
+    def test_temp_order_skipped_when_other_side_cleared(self, admin_client):
         stored = {**MOCK_IDR_ROW, "temp_low": Decimal("70.0")}
         with patched(idrs=header_calls(stored=stored)):
-            response = client.put(self.url, json={"temp_low": None, "temp_high": 65})
+            response = admin_client.put(self.url, json={"temp_low": None, "temp_high": 65})
         assert response.status_code == 200
 
-    def test_missing_idr_returns_404(self, client):
+    def test_missing_idr_returns_404(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.put(self.url, json={"weather_am": "Rain"})
+            response = admin_client.put(self.url, json={"weather_am": "Rain"})
         assert response.status_code == 404
         assert mocks["idrs"].call_count == 1
 
-    def test_submitted_idr_returns_409(self, client):
+    def test_submitted_idr_returns_409(self, admin_client):
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
-            response = client.put(self.url, json={"weather_am": "Rain"})
+            response = admin_client.put(self.url, json={"weather_am": "Rain"})
         assert response.status_code == 409
         assert response.json()["detail"] == "Only draft IDRs can be edited"
         assert mocks["idrs"].call_count == 1
 
-    def test_submitted_between_check_and_update_returns_409(self, client):
+    def test_submitted_between_check_and_update_returns_409(self, admin_client):
         with patched(idrs=([MOCK_IDR_ROW], [])):
-            response = client.put(self.url, json={"weather_am": "Rain"})
+            response = admin_client.put(self.url, json={"weather_am": "Rain"})
         assert response.status_code == 409
 
-    def test_disallowed_field_returns_422_naming_it(self, client):
+    def test_disallowed_field_returns_422_naming_it(self, admin_client):
         with patched() as mocks:
-            response = client.put(self.url, json={"weather_am": "Rain", "status": "submitted"})
+            response = admin_client.put(self.url, json={"weather_am": "Rain", "status": "submitted"})
         assert response.status_code == 422
         assert response.json()["detail"][0]["msg"] == "Field 'status' cannot be edited via this endpoint."
         mocks["idrs"].assert_not_called()
 
-    def test_several_disallowed_fields_are_all_named(self, client):
-        response = client.put(self.url, json={"weatherAM": "Clear", "report_date": "2026-09-01"})
+    def test_several_disallowed_fields_are_all_named(self, admin_client):
+        response = admin_client.put(self.url, json={"weatherAM": "Clear", "report_date": "2026-09-01"})
         assert response.status_code == 422
         assert response.json()["detail"][0]["msg"] == (
             "Fields 'report_date', 'weatherAM' cannot be edited via this endpoint."
         )
 
-    def test_malformed_time_returns_422(self, client):
-        response = client.put(self.url, json={"work_start_time": "7am"})
+    def test_malformed_time_returns_422(self, admin_client):
+        response = admin_client.put(self.url, json={"work_start_time": "7am"})
         assert response.status_code == 422
 
-    def test_extreme_temps_are_accepted(self, client):
+    def test_extreme_temps_are_accepted(self, admin_client):
         with patched(idrs=header_calls()) as mocks:
-            response = client.put(self.url, json={"temp_low": -60, "temp_high": 130})
+            response = admin_client.put(self.url, json={"temp_low": -60, "temp_high": 130})
         assert response.status_code == 200
         assert mocks["idrs"].call_args.args[1] == (-60.0, 130.0, UUID(IDR_ID))
 
-    def test_fractional_seconds_in_time_are_accepted(self, client):
+    def test_fractional_seconds_in_time_are_accepted(self, admin_client):
         with patched(idrs=header_calls()) as mocks:
-            response = client.put(self.url, json={"work_start_time": "07:00:30.123456"})
+            response = admin_client.put(self.url, json={"work_start_time": "07:00:30.123456"})
         assert response.status_code == 200
         assert mocks["idrs"].call_args.args[1][0] == time(7, 0, 30, 123456)
 
-    def test_non_uuid_idr_id_returns_422(self, client):
-        response = client.put("/v1/idrs/IDR1/header", json={"weather_am": "Rain"})
+    def test_non_uuid_idr_id_returns_422(self, admin_client):
+        response = admin_client.put("/v1/idrs/IDR1/header", json={"weather_am": "Rain"})
         assert response.status_code == 422
 
-    def test_update_failure_returns_500(self, client):
+    def test_update_failure_returns_500(self, admin_client):
         with patched(idrs=([MOCK_IDR_ROW], None)):
-            response = client.put(self.url, json={"weather_am": "Rain"})
+            response = admin_client.put(self.url, json={"weather_am": "Rain"})
         assert response.status_code == 500
 
 
@@ -881,15 +888,15 @@ DELETED_ADDENDUM = [{
 class TestDeleteReport:
     url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
 
-    def test_returns_204_with_empty_body(self, client):
+    def test_returns_204_with_empty_body(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_SWR):
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 204
         assert response.content == b""
 
-    def test_single_statement_deletes_scoped_to_draft_and_stamps_idr(self, client):
+    def test_single_statement_deletes_scoped_to_draft_and_stamps_idr(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_SWR) as mocks:
-            client.delete(self.url)
+            admin_client.delete(self.url)
         assert mocks["idrs"].call_count == 1  # IDR lookup only; the touch is inside the CTE
         assert mocks["idr_reports"].call_count == 2  # report lookup (before Storage), then the delete
         sql, params = mocks["idr_reports"].call_args.args
@@ -900,53 +907,53 @@ class TestDeleteReport:
         assert "updated_at = now()" in sql
         assert params == (UUID(IDR_ID), UUID(NEW_REPORT_ID))
 
-    def test_general_can_be_deleted(self, client):
+    def test_general_can_be_deleted(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_INSPECTOR_GEN):
-            response = client.delete(url)
+            response = admin_client.delete(url)
         assert response.status_code == 204
 
-    def test_addendum_can_be_deleted(self, client):
+    def test_addendum_can_be_deleted(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{ADDENDUM_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_ADDENDUM) as mocks:
-            response = client.delete(url)
+            response = admin_client.delete(url)
         assert response.status_code == 204
         assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), UUID(ADDENDUM_REPORT_ID))
 
-    def test_addendums_left_to_cascade_not_deleted_by_code(self, client):
+    def test_addendums_left_to_cascade_not_deleted_by_code(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_INSPECTOR_GEN) as mocks:
-            client.delete(url)
+            admin_client.delete(url)
         assert mocks["idr_reports"].call_count == 2  # report lookup, then the delete
         assert "parent_report_id" not in mocks["idr_reports"].call_args.args[0]
 
-    def test_missing_idr_returns_404(self, client):
+    def test_missing_idr_returns_404(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 404
         assert response.json()["detail"] == "IDR not found"
         mocks["idr_reports"].assert_not_called()
 
-    def test_submitted_idr_returns_409(self, client):
+    def test_submitted_idr_returns_409(self, admin_client):
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 409
         assert response.json()["detail"] == "Only draft IDRs can be edited"
         mocks["idr_reports"].assert_not_called()
 
-    def test_report_not_in_idr_returns_404(self, client):
+    def test_report_not_in_idr_returns_404(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 404
         assert response.json()["detail"] == "Report not found in this IDR"
 
-    def test_non_uuid_ids_return_422(self, client):
-        assert client.delete(f"/v1/idrs/IDR1/reports/{NEW_REPORT_ID}").status_code == 422
-        assert client.delete(f"/v1/idrs/{IDR_ID}/reports/R1").status_code == 422
+    def test_non_uuid_ids_return_422(self, admin_client):
+        assert admin_client.delete(f"/v1/idrs/IDR1/reports/{NEW_REPORT_ID}").status_code == 422
+        assert admin_client.delete(f"/v1/idrs/{IDR_ID}/reports/R1").status_code == 422
 
-    def test_delete_failure_returns_500(self, client):
+    def test_delete_failure_returns_500(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=(DELETED_SWR, None)):
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 500
 
 
@@ -980,13 +987,13 @@ def patched_report_delete(storage_paths, idr_reports=DELETED_SWR):
 class TestDeleteReportAttachments:
     url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
 
-    def test_removes_report_and_addendum_files_before_deleting_the_row(self, client):
+    def test_removes_report_and_addendum_files_before_deleting_the_row(self, admin_client):
         # One parent mock records Storage removes and idr_reports queries in the order they happen.
         timeline = MagicMock()
         with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
             timeline.attach_mock(mocks["bucket"].remove, "storage_remove")
             timeline.attach_mock(mocks["idr_reports"], "idr_reports_query")
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
 
         assert response.status_code == 204
         ids = (UUID(IDR_ID), UUID(NEW_REPORT_ID))
@@ -1001,13 +1008,13 @@ class TestDeleteReportAttachments:
         assert "DELETE" not in lookup_sql
         assert "DELETE FROM icid.idr_reports" in delete_sql
 
-    def test_partial_storage_failure_keeps_going_and_still_deletes(self, client, caplog):
+    def test_partial_storage_failure_keeps_going_and_still_deletes(self, admin_client, caplog):
         files = [f"{NEW_REPORT_ID}/{n}_photo{n}.jpg" for n in (1, 2, 3)]
         with caplog.at_level(logging.WARNING, logger="api.services.attachments"):
             with patched_report_delete([{"storage_path": f} for f in files]) as mocks:
                 # First remove succeeds, second raises, third succeeds.
                 mocks["bucket"].remove.side_effect = [None, RuntimeError("storage timeout"), None]
-                response = client.delete(self.url)
+                response = admin_client.delete(self.url)
 
         assert response.status_code == 204
         # All three were attempted, in order: the failure on the second didn't stop the third.
@@ -1020,60 +1027,60 @@ class TestDeleteReportAttachments:
         # Best-effort: the report row was still deleted, after the Storage attempts.
         assert "DELETE FROM icid.idr_reports" in mocks["idr_reports"].call_args.args[0]
 
-    def test_file_lookup_walks_the_addendum_tree(self, client):
+    def test_file_lookup_walks_the_addendum_tree(self, admin_client):
         with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
-            client.delete(self.url)
+            admin_client.delete(self.url)
         sql, params = mocks["attachments"].call_args.args
         assert "WITH RECURSIVE" in sql
         assert "r.parent_report_id = t.report_id" in sql
         assert "icid.report_attachments" in sql
         assert params == (UUID(NEW_REPORT_ID),)
 
-    def test_pending_and_uploaded_files_are_both_removed(self, client):
+    def test_pending_and_uploaded_files_are_both_removed(self, admin_client):
         # REPORT_FILE stands for an uploaded attachment, PENDING_FILE for one whose client
         # uploaded the file but never called upload-complete. Both must leave Storage.
         pending_file = f"{NEW_REPORT_ID}/5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7081_pending.jpg"
         with patched_report_delete([{"storage_path": REPORT_FILE}, {"storage_path": pending_file}]) as mocks:
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 204
         assert "is_uploaded" not in mocks["attachments"].call_args.args[0]  # the lookup doesn't filter pending rows
         assert mocks["bucket"].remove.call_args_list == [call([REPORT_FILE]), call([pending_file])]
 
-    def test_attachment_rows_are_left_to_the_cascade(self, client):
+    def test_attachment_rows_are_left_to_the_cascade(self, admin_client):
         with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
-            client.delete(self.url)
+            admin_client.delete(self.url)
         assert mocks["attachments"].call_count == 1  # the path lookup only; no DELETE of attachment rows
         schema = Path(__file__).resolve().parents[2].joinpath("schema.sql").read_text()
         table = schema.split("CREATE TABLE icid.report_attachments", 1)[1].split(");", 1)[0]
         assert "REFERENCES icid.idr_reports(report_id) ON DELETE CASCADE" in table
 
-    def test_report_without_attachments_skips_storage(self, client):
+    def test_report_without_attachments_skips_storage(self, admin_client):
         with patched_report_delete([]) as mocks:
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 204
         mocks["bucket"].remove.assert_not_called()
 
-    def test_storage_failure_still_deletes_the_report(self, client, caplog):
+    def test_storage_failure_still_deletes_the_report(self, admin_client, caplog):
         with caplog.at_level(logging.WARNING, logger="api.services.attachments"):
             with patched_report_delete(STORAGE_PATH_ROWS) as mocks:
                 mocks["bucket"].remove.side_effect = RuntimeError("storage down")
-                response = client.delete(self.url)
+                response = admin_client.delete(self.url)
         assert response.status_code == 204
         assert "DELETE FROM icid.idr_reports" in mocks["idr_reports"].call_args.args[0]
         assert REPORT_FILE in caplog.text and ADDENDUM_FILE in caplog.text
 
-    def test_file_lookup_failure_still_deletes_the_report(self, client, caplog):
+    def test_file_lookup_failure_still_deletes_the_report(self, admin_client, caplog):
         with caplog.at_level(logging.WARNING, logger="api.services.attachments"):
             with patched_report_delete(None) as mocks:
-                response = client.delete(self.url)
+                response = admin_client.delete(self.url)
         assert response.status_code == 204
         mocks["bucket"].remove.assert_not_called()
         assert "DELETE FROM icid.idr_reports" in mocks["idr_reports"].call_args.args[0]
         assert "left orphaned" in caplog.text
 
-    def test_report_not_in_idr_touches_no_files(self, client):
+    def test_report_not_in_idr_touches_no_files(self, admin_client):
         with patched_report_delete(STORAGE_PATH_ROWS, idr_reports=[]) as mocks:
-            response = client.delete(self.url)
+            response = admin_client.delete(self.url)
         assert response.status_code == 404
         mocks["attachments"].assert_not_called()
         mocks["bucket"].remove.assert_not_called()
@@ -1096,9 +1103,9 @@ MOCK_LIST_SUBMITTED_ROW = {**MOCK_SUBMITTED_IDR_ROW, "report_count": 2, "has_gen
 class TestListIdrs:
     url = "/v1/idrs/"
 
-    def test_returns_200_with_summary_fields(self, client):
+    def test_returns_200_with_summary_fields(self, admin_client):
         with patched(idrs=[MOCK_LIST_DRAFT_ROW, MOCK_LIST_EMPTY_DRAFT_ROW]):
-            response = client.get(self.url, params={"project_id": "HWS0023"})
+            response = admin_client.get(self.url, params={"project_id": "HWS0023"})
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
@@ -1113,92 +1120,92 @@ class TestListIdrs:
         assert second["has_general"] is False
         assert "reports" not in first
 
-    def test_submitted_item_carries_submit_fields(self, client):
+    def test_submitted_item_carries_submit_fields(self, admin_client):
         with patched(idrs=[MOCK_LIST_SUBMITTED_ROW]):
-            item = client.get(self.url, params={"status": "submitted"}).json()["data"][0]
+            item = admin_client.get(self.url, params={"status": "submitted"}).json()["data"][0]
         assert item["status"] == "submitted"
         assert item["submitted_at"] == "2026-09-25T15:30:00Z"
         assert item["total_pages"] == 2
 
-    def test_no_matches_returns_empty_list(self, client):
+    def test_no_matches_returns_empty_list(self, admin_client):
         with patched(idrs=[]):
-            response = client.get(self.url, params={"project_id": "NOPE999"})
+            response = admin_client.get(self.url, params={"project_id": "NOPE999"})
         assert response.status_code == 200
         assert response.json()["data"] == []
 
-    def test_all_filters_reach_the_query(self, client):
+    def test_all_filters_reach_the_query(self, admin_client):
         params = {"project_id": "HWS0023", "status": "draft", "reporter_uuid": REPORTER_UUID}
         with patched(idrs=[]) as mocks:
-            client.get(self.url, params=params)
+            admin_client.get(self.url, params=params)
         sql, query_params = mocks["idrs"].call_args.args
         assert "i.project_id = %s" in sql
         assert "i.status = %s" in sql
         assert "i.reporter_uuid = %s" in sql
         assert query_params == ("HWS0023", "draft", UUID(REPORTER_UUID))
 
-    def test_each_filter_is_optional(self, client):
+    def test_each_filter_is_optional(self, admin_client):
         with patched(idrs=[]) as mocks:
-            client.get(self.url, params={"status": "submitted"})
+            admin_client.get(self.url, params={"status": "submitted"})
         sql, query_params = mocks["idrs"].call_args.args
         assert "i.project_id = %s" not in sql
         assert "i.reporter_uuid = %s" not in sql
         assert query_params == ("submitted",)
 
-    def test_no_filters_lists_everything(self, client):
+    def test_no_filters_lists_everything(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.get(self.url)
+            response = admin_client.get(self.url)
         assert response.status_code == 200
         sql, query_params = mocks["idrs"].call_args.args
         assert "WHERE" not in sql.split("FROM icid.idrs i")[1]
         assert query_params == ()
 
-    def test_drafts_without_reporter_are_allowed(self, client):
+    def test_drafts_without_reporter_are_allowed(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.get(self.url, params={"project_id": "HWS0023", "status": "draft"})
+            response = admin_client.get(self.url, params={"project_id": "HWS0023", "status": "draft"})
         assert response.status_code == 200
         assert mocks["idrs"].call_args.args[1] == ("HWS0023", "draft")
 
-    def test_single_sort_by_updated_at_with_tiebreakers(self, client):
+    def test_single_sort_by_updated_at_with_tiebreakers(self, admin_client):
         for status in ("draft", "submitted"):
             with patched(idrs=[]) as mocks:
-                client.get(self.url, params={"status": status})
+                admin_client.get(self.url, params={"status": status})
             sql = mocks["idrs"].call_args.args[0]
             assert "ORDER BY i.updated_at DESC, i.created_at DESC, i.idr_id" in sql
             assert "submitted_at DESC" not in sql
 
-    def test_report_count_counts_all_reports(self, client):
+    def test_report_count_counts_all_reports(self, admin_client):
         with patched(idrs=[]) as mocks:
-            client.get(self.url)
+            admin_client.get(self.url)
         sql = mocks["idrs"].call_args.args[0]
         count_subquery = sql.split("AS report_count")[0]
         assert "COUNT(*)" in count_subquery
         assert "is_addendum" not in count_subquery
 
-    def test_has_general_checks_non_addendum_gen(self, client):
+    def test_has_general_checks_non_addendum_gen(self, admin_client):
         with patched(idrs=[]) as mocks:
-            client.get(self.url)
+            admin_client.get(self.url)
         sql = mocks["idrs"].call_args.args[0]
         assert "EXISTS" in sql
         assert "r.report_type = 'GEN' AND r.is_addendum = false" in sql
 
-    def test_one_query_only(self, client):
+    def test_one_query_only(self, admin_client):
         with patched(idrs=[], projects=[]) as mocks:
-            client.get(self.url, params={"project_id": "HWS0023"})
+            admin_client.get(self.url, params={"project_id": "HWS0023"})
         assert mocks["idrs"].call_count == 1
         mocks["projects"].assert_not_called()  # unknown project is [] not 404
         mocks["idr_reports"].assert_not_called()
 
-    def test_invalid_status_returns_422(self, client):
-        response = client.get(self.url, params={"status": "approved"})
+    def test_invalid_status_returns_422(self, admin_client):
+        response = admin_client.get(self.url, params={"status": "approved"})
         assert response.status_code == 422
 
-    def test_non_uuid_reporter_returns_422(self, client):
-        response = client.get(self.url, params={"reporter_uuid": "28"})
+    def test_non_uuid_reporter_returns_422(self, admin_client):
+        response = admin_client.get(self.url, params={"reporter_uuid": "28"})
         assert response.status_code == 422
 
-    def test_query_failure_returns_500(self, client):
+    def test_query_failure_returns_500(self, admin_client):
         with patched(idrs=None):
-            response = client.get(self.url, params={"project_id": "HWS0023"})
+            response = admin_client.get(self.url, params={"project_id": "HWS0023"})
         assert response.status_code == 500
 
 
@@ -1226,19 +1233,19 @@ REPORTS_THEN_NUMBERED = (
 class TestSubmitIdr:
     url = f"/v1/idrs/{IDR_ID}/submit"
 
-    def submit_sql(self, client):
+    def submit_sql(self, admin_client):
         """
         Submit through the endpoint with a happy-path setup and capture the submit statement.
         Takes the test client.
         Returns the (sql, params) the submit statement was run with.
         """
         with patched(idrs=DRAFT_THEN_SUBMITTED_IDR, idr_reports=REPORTS_THEN_NUMBERED) as mocks:
-            client.post(self.url)
+            admin_client.post(self.url)
         return mocks["idrs"].call_args.args
 
-    def test_returns_200_with_submitted_idr_and_numbered_reports(self, client):
+    def test_returns_200_with_submitted_idr_and_numbered_reports(self, admin_client):
         with patched(idrs=DRAFT_THEN_SUBMITTED_IDR, idr_reports=REPORTS_THEN_NUMBERED):
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
@@ -1250,24 +1257,24 @@ class TestSubmitIdr:
         assert [r["page_number"] for r in idr["reports"]] == [1, 2]
         assert idr["reports"][1]["parent_report_id"] == GEN_REPORT_ID
 
-    def test_submit_statement_takes_idr_id_only(self, client):
-        _, params = self.submit_sql(client)
+    def test_submit_statement_takes_idr_id_only(self, admin_client):
+        _, params = self.submit_sql(admin_client)
         assert params == (UUID(IDR_ID),)
 
-    def test_locks_draft_row_before_numbering(self, client):
-        sql, _ = self.submit_sql(client)
+    def test_locks_draft_row_before_numbering(self, admin_client):
+        sql, _ = self.submit_sql(admin_client)
         assert "WHERE idr_id = %s AND status = 'draft'" in sql
         assert "FOR UPDATE" in sql
 
-    def test_sets_status_timestamps_and_total_pages(self, client):
-        sql, _ = self.submit_sql(client)
+    def test_sets_status_timestamps_and_total_pages(self, admin_client):
+        sql, _ = self.submit_sql(admin_client)
         assert "status = 'submitted'" in sql
         assert "submitted_at = now()" in sql
         assert "total_pages = (SELECT COUNT(*) FROM ordered)" in sql
         assert sql.count("updated_at = now()") == 2  # the IDR and every numbered report
 
-    def test_numbers_every_report_in_page_order(self, client):
-        sql, _ = self.submit_sql(client)
+    def test_numbers_every_report_in_page_order(self, admin_client):
+        sql, _ = self.submit_sql(admin_client)
         assert "ROW_NUMBER() OVER" in sql
         assert "SET page_number = o.page_number" in sql
         order = sql.split("ORDER BY")[1].split(") AS page_number")[0]
@@ -1282,56 +1289,56 @@ class TestSubmitIdr:
             "r.report_id",
         ]
 
-    def test_statement_refuses_empty_idr(self, client):
-        sql, _ = self.submit_sql(client)
+    def test_statement_refuses_empty_idr(self, admin_client):
+        sql, _ = self.submit_sql(admin_client)
         assert "EXISTS (SELECT 1 FROM ordered)" in sql
 
-    def test_addendum_only_idr_can_be_submitted(self, client):
+    def test_addendum_only_idr_can_be_submitted(self, admin_client):
         standalone = {**MOCK_ADDENDUM_ROW, "parent_report_id": None}
         with patched(idrs=DRAFT_THEN_SUBMITTED_IDR, idr_reports=([standalone], [{**standalone, "page_number": 1}])):
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 200
 
-    def test_missing_idr_returns_404(self, client):
+    def test_missing_idr_returns_404(self, admin_client):
         with patched(idrs=[]) as mocks:
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 404
         assert response.json()["detail"] == "IDR not found"
         mocks["idr_reports"].assert_not_called()
 
-    def test_already_submitted_returns_409(self, client):
+    def test_already_submitted_returns_409(self, admin_client):
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 409
         assert response.json()["detail"] == "Only draft IDRs can be submitted"
         assert mocks["idrs"].call_count == 1  # no submit statement
         mocks["idr_reports"].assert_not_called()
 
-    def test_empty_idr_returns_400(self, client):
+    def test_empty_idr_returns_400(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 400
         assert response.json()["detail"] == "IDR must contain at least one report before submission."
         assert mocks["idrs"].call_count == 1  # no submit statement
 
-    def test_concurrent_change_returns_409(self, client):
+    def test_concurrent_change_returns_409(self, admin_client):
         with patched(idrs=([MOCK_IDR_ROW], []), idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 409
         assert mocks["idr_reports"].call_count == 1  # no numbered re-read
 
-    def test_non_uuid_idr_id_returns_422(self, client):
-        response = client.post("/v1/idrs/IDR1/submit")
+    def test_non_uuid_idr_id_returns_422(self, admin_client):
+        response = admin_client.post("/v1/idrs/IDR1/submit")
         assert response.status_code == 422
 
-    def test_submit_failure_returns_500(self, client):
+    def test_submit_failure_returns_500(self, admin_client):
         with patched(idrs=([MOCK_IDR_ROW], None), idr_reports=[MOCK_GEN_REPORT_ROW]):
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 500
 
-    def test_report_list_failure_returns_500(self, client):
+    def test_report_list_failure_returns_500(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=None) as mocks:
-            response = client.post(self.url)
+            response = admin_client.post(self.url)
         assert response.status_code == 500
         assert mocks["idrs"].call_count == 1  # no submit statement
 
@@ -1555,14 +1562,14 @@ INSPECTOR_GENERAL = {"is_auto_generated": False}
 class TestRegenerateAutoGeneral:
     """The orchestrator: the five behavioral cases A–E."""
 
-    def test_case_a_single_report_creates_nothing(self, client):
+    def test_case_a_single_report_creates_nothing(self, admin_client):
         with patched_service(idr=IDR_ACTIVE, general=None, main_reports=[_child("SWR")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["create"].assert_not_called()
         m["update"].assert_not_called()
         m["delete"].assert_not_called()
 
-    def test_case_c_creates_auto_general_on_second_report(self, client):
+    def test_case_c_creates_auto_general_on_second_report(self, admin_client):
         with patched_service(idr=IDR_ACTIVE, general=None, main_reports=[_child("SWR"), _child("CONC")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["create"].assert_called_once()
@@ -1571,7 +1578,7 @@ class TestRegenerateAutoGeneral:
         m["update"].assert_not_called()
         m["delete"].assert_not_called()
 
-    def test_ac_counts_toward_the_threshold_but_stays_out_of_the_merge(self, client):
+    def test_ac_counts_toward_the_threshold_but_stays_out_of_the_merge(self, admin_client):
         children = [
             _child("SWCB", {"description": "Poured curb."}),
             _child("AC", {"description": "Paved the lane.", "payItems": [_pay("6.01", "B", "3", unit="TON")]}),
@@ -1582,7 +1589,7 @@ class TestRegenerateAutoGeneral:
         assert m["create"].call_args.args[1] == {
             "description": f"Sidewalk, Curb, Concrete Base: Poured curb.\n\n{DESCRIPTION_FOOTER}", "payItems": []}
 
-    def test_swcb_contributes_to_auto_general_with_its_label(self, client):
+    def test_swcb_contributes_to_auto_general_with_its_label(self, admin_client):
         children = [
             _child("SWCB", {"description": "Poured 40 ft of curb."}),
             _child("SWR", {"description": "Laid 20 ft of 12in pipe."}),
@@ -1596,7 +1603,7 @@ class TestRegenerateAutoGeneral:
             f"{DESCRIPTION_FOOTER}"
         )
 
-    def test_case_c_refreshes_existing_auto_general(self, client):
+    def test_case_c_refreshes_existing_auto_general(self, admin_client):
         with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=[_child("SWR"), _child("CONC")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["update"].assert_called_once()
@@ -1604,7 +1611,7 @@ class TestRegenerateAutoGeneral:
         m["create"].assert_not_called()
         m["delete"].assert_not_called()
 
-    def test_case_b_leaves_inspector_general_untouched(self, client):
+    def test_case_b_leaves_inspector_general_untouched(self, admin_client):
         with patched_service(idr=IDR_ACTIVE, general=INSPECTOR_GENERAL, main_reports=[_child("SWR"), _child("CONC")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["create"].assert_not_called()
@@ -1612,33 +1619,33 @@ class TestRegenerateAutoGeneral:
         m["delete"].assert_not_called()
         m["list"].assert_not_called()  # returns before even reading the children
 
-    def test_case_e_deletes_auto_general_below_threshold(self, client):
+    def test_case_e_deletes_auto_general_below_threshold(self, admin_client):
         with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=[_child("SWR")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["delete"].assert_called_once_with(IDR_ID_UUID)
         m["create"].assert_not_called()
         m["update"].assert_not_called()
 
-    def test_dismissed_idr_never_recreates(self, client):
+    def test_dismissed_idr_never_recreates(self, admin_client):
         with patched_service(idr=IDR_DISMISSED, general=None, main_reports=[_child("SWR"), _child("CONC")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["create"].assert_not_called()
         m["update"].assert_not_called()
         m["delete"].assert_not_called()
 
-    def test_addendum_type_main_reports_do_not_count(self, client):
+    def test_addendum_type_main_reports_do_not_count(self, admin_client):
         # A SKETCH filed as a main report is an addendum-by-nature type: excluded, so only one contributor remains.
         with patched_service(idr=IDR_ACTIVE, general=None, main_reports=[_child("SWR"), _child("SKETCH")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["create"].assert_not_called()
 
-    def test_missing_idr_is_a_noop(self, client):
+    def test_missing_idr_is_a_noop(self, admin_client):
         with patched_service(idr=None, general=None, main_reports=[_child("SWR"), _child("CONC")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
         m["get_general"].assert_not_called()
         m["create"].assert_not_called()
 
-    def test_regeneration_writes_exactly_the_aggregated_shape(self, client):
+    def test_regeneration_writes_exactly_the_aggregated_shape(self, admin_client):
         # Locks the full-replace invariant: the auto-General's report_data is only {description, payItems}.
         with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=[_child("SWR"), _child("CONC")]) as m:
             regenerate_auto_general(IDR_ID_UUID)
@@ -1660,53 +1667,53 @@ class TestAutoGeneralHooks:
 
     reports_url = f"/v1/idrs/{IDR_ID}/reports"
 
-    def test_post_non_general_regenerates(self, client):
+    def test_post_non_general_regenerates(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
-            client.post(self.reports_url, json={"report_type": "SWR"})
+            admin_client.post(self.reports_url, json={"report_type": "SWR"})
         mocks["regen"].assert_called_once_with(IDR_ID_UUID)
         mocks["dismiss"].assert_not_called()
 
-    def test_post_general_does_not_regenerate(self, client):
+    def test_post_general_does_not_regenerate(self, admin_client):
         with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[MOCK_NEW_GEN_ROW]) as mocks:
-            client.post(self.reports_url, json={"report_type": "GEN"})
+            admin_client.post(self.reports_url, json={"report_type": "GEN"})
         mocks["regen"].assert_not_called()
 
-    def test_put_non_general_regenerates(self, client):
+    def test_put_non_general_regenerates(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_NEW_SWR_ROW]) as mocks:
-            client.put(url, json={"description": "x"})
+            admin_client.put(url, json={"description": "x"})
         mocks["regen"].assert_called_once_with(IDR_ID_UUID)
 
-    def test_put_general_does_not_regenerate(self, client):
+    def test_put_general_does_not_regenerate(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
-            client.put(url, json={"description": "x"})
+            admin_client.put(url, json={"description": "x"})
         mocks["regen"].assert_not_called()
 
-    def test_delete_non_general_regenerates(self, client):
+    def test_delete_non_general_regenerates(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{NEW_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_SWR) as mocks:
-            client.delete(url)
+            admin_client.delete(url)
         mocks["regen"].assert_called_once_with(IDR_ID_UUID)
         mocks["dismiss"].assert_not_called()
 
-    def test_delete_auto_general_sets_dismissed(self, client):
+    def test_delete_auto_general_sets_dismissed(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_AUTO_GEN) as mocks:
-            client.delete(url)
+            admin_client.delete(url)
         mocks["dismiss"].assert_called_once_with(IDR_ID_UUID)
         mocks["regen"].assert_not_called()
 
-    def test_delete_inspector_general_does_nothing(self, client):
+    def test_delete_inspector_general_does_nothing(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_INSPECTOR_GEN) as mocks:
-            client.delete(url)
+            admin_client.delete(url)
         mocks["regen"].assert_not_called()
         mocks["dismiss"].assert_not_called()
 
-    def test_delete_addendum_regenerates(self, client):
+    def test_delete_addendum_regenerates(self, admin_client):
         url = f"/v1/idrs/{IDR_ID}/reports/{ADDENDUM_REPORT_ID}"
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=DELETED_ADDENDUM) as mocks:
-            client.delete(url)
+            admin_client.delete(url)
         mocks["regen"].assert_called_once_with(IDR_ID_UUID)
         mocks["dismiss"].assert_not_called()

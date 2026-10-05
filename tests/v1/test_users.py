@@ -31,21 +31,21 @@ MOCK_USER_ROWS = [
 # ---------------------------------------------------------------------------
 
 class TestListAllUsers:
-    def test_returns_200(self, client):
+    def test_returns_200(self, admin_client):
         with patch("api.queries.users.run_query", return_value=MOCK_USER_ROWS):
-            response = client.get("/v1/users/")
+            response = admin_client.get("/v1/users/")
         assert response.status_code == 200
 
-    def test_response_shape(self, client):
+    def test_response_shape(self, admin_client):
         with patch("api.queries.users.run_query", return_value=MOCK_USER_ROWS):
-            data = client.get("/v1/users/").json()
+            data = admin_client.get("/v1/users/").json()
         assert data["status"] == "success"
         assert "message" in data
         assert isinstance(data["data"], list)
 
-    def test_user_fields_present(self, client):
+    def test_user_fields_present(self, admin_client):
         with patch("api.queries.users.run_query", return_value=MOCK_USER_ROWS):
-            users = client.get("/v1/users/").json()["data"]
+            users = admin_client.get("/v1/users/").json()["data"]
         for user in users:
             assert "user_id" in user
             assert "email" in user
@@ -54,37 +54,37 @@ class TestListAllUsers:
             assert "phone_number" in user
             assert "employer" in user
 
-    def test_returns_correct_count(self, client):
+    def test_returns_correct_count(self, admin_client):
         with patch("api.queries.users.run_query", return_value=MOCK_USER_ROWS):
-            users = client.get("/v1/users/").json()["data"]
+            users = admin_client.get("/v1/users/").json()["data"]
         assert len(users) == 2
 
-    def test_user_id_is_string(self, client):
+    def test_user_id_is_string(self, admin_client):
         with patch("api.queries.users.run_query", return_value=MOCK_USER_ROWS):
-            users = client.get("/v1/users/").json()["data"]
+            users = admin_client.get("/v1/users/").json()["data"]
         assert isinstance(users[0]["user_id"], str)
         assert users[0]["user_id"] == "7f3c2a9e-1b4d-4c8a-9e2f-3a5b6c7d8e90"
 
-    def test_employer_is_client_id(self, client):
+    def test_employer_is_client_id(self, admin_client):
         with patch("api.queries.users.run_query", return_value=MOCK_USER_ROWS):
-            users = client.get("/v1/users/").json()["data"]
+            users = admin_client.get("/v1/users/").json()["data"]
         assert users[0]["employer"] == "C00046"
 
-    def test_empty_list(self, client):
+    def test_empty_list(self, admin_client):
         with patch("api.queries.users.run_query", return_value=[]):
-            data = client.get("/v1/users/").json()
+            data = admin_client.get("/v1/users/").json()
         assert data["status"] == "success"
         assert data["data"] == []
 
-    def test_db_failure_returns_500(self, client):
+    def test_db_failure_returns_500(self, admin_client):
         with patch("api.queries.users.run_query", return_value=None):
-            response = client.get("/v1/users/")
+            response = admin_client.get("/v1/users/")
         assert response.status_code == 500
 
-    def test_a_reserved_domain_email_is_listed(self, client):
+    def test_a_reserved_domain_email_is_listed(self, admin_client):
         # the seeded auth users sit on @icid.local, which EmailStr would reject
         row = {**MOCK_USER_ROWS[0], "email": "reza@icid.local"}
         with patch("api.queries.users.run_query", return_value=[row, MOCK_USER_ROWS[1]]):
-            response = client.get("/v1/users/")
+            response = admin_client.get("/v1/users/")
         assert response.status_code == 200
         assert [user["email"] for user in response.json()["data"]] == ["reza@icid.local", "Nadir.shah@goorkaneng.com"]

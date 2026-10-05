@@ -263,3 +263,74 @@ class TestFixtures:
         response = admin_client.get("/v1/auth/me")
         assert response.status_code == 200
         assert (response.json()["email"], response.json()["role"]) == ("admin@icid.local", "admin")
+
+
+# ---------------------------------------------------------------------------
+# Every /v1 route needs a signed-in user, except signing in and out
+# ---------------------------------------------------------------------------
+
+PUBLIC_ROUTES = {("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout"), ("GET", "/status"), ("GET", "/debug/schema")}
+PATH_VALUES = {"idr_id": "9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e", "report_id": "e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091",
+               "attachment_id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "project_id": "HWS0023"}
+
+
+def api_routes() -> list[tuple[str, str]]:
+    """
+    List the app's own routes (not the generated docs).
+    Takes nothing.
+    Returns (method, path template) pairs, sorted.
+    """
+    from fastapi.routing import APIRoute
+    from api.index import app
+    return sorted((method, route.path) for route in app.routes if isinstance(route, APIRoute)
+                  for method in route.methods)
+
+
+PROTECTED_ROUTES = [route for route in api_routes() if route not in PUBLIC_ROUTES]
+
+
+class TestEveryRouteNeedsSignIn:
+    def test_the_protected_routes_are_the_ones_expected(self):
+        assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
+        assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
+            ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
+        assert len(PROTECTED_ROUTES) == 20
+        for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
+                         ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
+                         ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
+                         ("POST", "/v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request")):
+            assert expected in PROTECTED_ROUTES
+
+    @pytest.mark.parametrize("method,path", PROTECTED_ROUTES)
+    def test_no_token_is_401_before_anything_is_read(self, client, method, path):
+        with patch("api.db.runner.get_connection") as connect:
+            response = client.request(method, path.format(**PATH_VALUES))
+        assert response.status_code == 401 and response.json() == {"detail": "Not authenticated"}
+        connect.assert_not_called()
+
+    @pytest.mark.parametrize("method,path", PROTECTED_ROUTES)
+    def test_a_garbage_token_is_401(self, client, method, path):
+        with patch("api.db.runner.get_connection") as connect:
+            response = client.request(method, path.format(**PATH_VALUES), headers=bearer("garbage"))
+        assert response.status_code == 401 and response.json() == {"detail": "Invalid token"}
+        connect.assert_not_called()
+
+    @pytest.mark.parametrize("method,path", PROTECTED_ROUTES)
+    def test_an_expired_token_is_401(self, client, method, path):
+        with patch("api.db.runner.get_connection") as connect:
+            response = client.request(method, path.format(**PATH_VALUES), headers=bearer(token(expires_in=-60)))
+        assert response.status_code == 401 and response.json() == {"detail": "Token expired"}
+        connect.assert_not_called()
+
+    def test_the_old_user_id_query_parameter_doesnt_sign_anyone_in(self, client):
+        # the hardcoded demo uuid the frontend used to send
+        response = client.get("/v1/projects/?user_id=327d3ed2-a3d6-4235-9408-7fe721b12bed")
+        assert response.status_code == 401
+
+    def test_a_valid_token_for_a_user_who_is_gone_is_401_everywhere(self, client):
+        with patch(QUERY, return_value=[]):
+            response = client.get("/v1/idrs/", headers=bearer(token()))
+        assert response.status_code == 401 and response.json() == {"detail": "Invalid token"}
+
+    def test_status_stays_public(self, client):
+        assert client.get("/status").status_code == 200
