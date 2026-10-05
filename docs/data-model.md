@@ -65,10 +65,13 @@ People who sign in: inspectors, CCLs, engineers.
 | Column | Type | Notes |
 |---|---|---|
 | `uuid` | UUID PK | `uuid_generate_v4()`. The API calls it `user_id`. |
-| `email` | TEXT NOT NULL | Not unique-constrained |
+| `email` | TEXT NOT NULL | UNIQUE (`uq_users_email`) |
 | `first_name`, `last_name` | TEXT | |
 | `phone_number` | TEXT | |
 | `client_id` | TEXT NOT NULL | FK → `clients.client_id` (the user's employer) |
+| `password_hash` | TEXT | bcrypt. NULL: the user can't sign in with a password. |
+| `role` | TEXT | e.g. `admin`. NULL: no role yet. |
+| `is_demo` | BOOLEAN NOT NULL | Default `false`. Throwaway demo accounts; `idx_users_is_demo` (partial) serves their cleanup. |
 
 ### projects
 
@@ -362,12 +365,14 @@ content as TEXT, linked to a report and a form template).
 | 010 | `010_drop_storage_path_unique.sql` | A2a | Dropped `report_attachments_storage_path_key`, the UNIQUE on `storage_path` from 008, which 009 had meant to drop but didn't. |
 | 011 | `011_spec_items_and_contract_items.sql` | F2 | Created `spec_items` (UNIQUE `item_no`) and `contract_items` (FK to `projects` with ON DELETE CASCADE, FK to `spec_items`, UNIQUE `(project_id, spec_item_id, budget_code)`) and the two `contract_items` indexes. |
 | 012 | `012_idr_exports_bucket.sql` | D6a | Created the private Storage bucket `idr-exports` (50 MB per file; `.xlsx` and PDF only). No `icid` table changes. |
+| 013 | `013_auth_users.sql` | H0 | Added `users.password_hash` and `role` (TEXT, nullable) and `is_demo` (BOOLEAN NOT NULL DEFAULT false), `UNIQUE (email)` as `uq_users_email`, and the partial index `idx_users_is_demo`. |
 
 Where each current column came from:
 
 | Table | Columns | Added in |
 |---|---|---|
 | `clients`, `users`, `projects`, `project_users`, `project_clients`, `form_templates` | all | Baseline |
+| `users` | `password_hash`, `role`, `is_demo`, `uq_users_email`, `idx_users_is_demo` (index) | 013 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |
 | `idr_reports` | everything except the flag | 004 |

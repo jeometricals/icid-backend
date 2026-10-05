@@ -37,12 +37,17 @@ CREATE TABLE icid.users (
     client_id       TEXT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    password_hash   TEXT,
+    role            TEXT,
+    is_demo         BOOLEAN NOT NULL DEFAULT false,
     CONSTRAINT fk_users_client
-        FOREIGN KEY (client_id) REFERENCES icid.clients(client_id)
+        FOREIGN KEY (client_id) REFERENCES icid.clients(client_id),
+    CONSTRAINT uq_users_email UNIQUE (email)
 );
 
 CREATE INDEX idx_users_uuid ON icid.users(uuid);
 CREATE INDEX idx_users_email ON icid.users(email);
+CREATE INDEX idx_users_is_demo ON icid.users(is_demo) WHERE is_demo = true;
 
 ------------------------------------------------------------
 -- PROJECT
