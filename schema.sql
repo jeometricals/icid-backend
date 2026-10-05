@@ -40,9 +40,13 @@ CREATE TABLE icid.users (
     password_hash   TEXT,
     role            TEXT,
     is_demo         BOOLEAN NOT NULL DEFAULT false,
+    signature_path   TEXT,
+    signature_type   TEXT,
+    signature_set_at TIMESTAMPTZ,
     CONSTRAINT fk_users_client
         FOREIGN KEY (client_id) REFERENCES icid.clients(client_id),
-    CONSTRAINT uq_users_email UNIQUE (email)
+    CONSTRAINT uq_users_email UNIQUE (email),
+    CONSTRAINT chk_users_signature_type CHECK (signature_type IN ('drawn', 'uploaded'))
 );
 
 CREATE INDEX idx_users_uuid ON icid.users(uuid);
@@ -137,6 +141,8 @@ CREATE TABLE icid.idrs (
     submitted_at           TIMESTAMPTZ NULL,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    inspector_signature_path TEXT NULL,
+    inspector_signed_at      TIMESTAMPTZ NULL,
     CONSTRAINT chk_idrs_status CHECK (status IN ('draft', 'submitted')),
     CONSTRAINT uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date)
 );

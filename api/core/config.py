@@ -30,3 +30,7 @@ STORAGE_URL_EXPIRY_SECONDS: int = int(os.getenv("STORAGE_URL_EXPIRY_SECONDS", "3
 # IDR exports: each export is uploaded to this private bucket and handed out as a signed download URL
 EXPORT_BUCKET_NAME: str = os.getenv("EXPORT_BUCKET_NAME", "idr-exports")
 EXPORT_URL_EXPIRY_SECONDS: int = int(os.getenv("EXPORT_URL_EXPIRY_SECONDS", "600"))
+
+# Signatures: each user's signature PNG lives in this private bucket and is shown through a short-lived signed URL
+SIGNATURE_BUCKET_NAME: str = os.getenv("SIGNATURE_BUCKET_NAME", "signatures")
+SIGNATURE_URL_EXPIRY_SECONDS: int = int(os.getenv("SIGNATURE_URL_EXPIRY_SECONDS", "300"))

@@ -72,6 +72,9 @@ People who sign in: inspectors, CCLs, engineers.
 | `password_hash` | TEXT | bcrypt. NULL: the user can't sign in with a password. |
 | `role` | TEXT | e.g. `admin`. NULL: no role yet. |
 | `is_demo` | BOOLEAN NOT NULL | Default `false`. Throwaway demo accounts; `idx_users_is_demo` (partial) serves their cleanup. |
+| `signature_path` | TEXT | The user's current signature: its object path in the `signatures` bucket. NULL: none yet. |
+| `signature_type` | TEXT | `drawn` or `uploaded`; CHECK `chk_users_signature_type`. NULL with no signature. |
+| `signature_set_at` | TIMESTAMPTZ | When the current signature was set |
 
 A demo user is made by `POST /v1/auth/demo` (`demo-<uuid>@icid.local`, first name `Demo`, client `C00001`, no
 password, no role) together with one `project_users` row on `DEMO01` (`user_role` `Demo`). Signing out deletes the
@@ -137,6 +140,8 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `has_dismissed_auto_general` | BOOLEAN NOT NULL | Default `false`. See [Auto-generated General](#auto-generated-general) |
 | `status` | TEXT NOT NULL | `draft` (default) or `submitted`; CHECK `chk_idrs_status` |
 | `submitted_at` | TIMESTAMPTZ | NULL until submitted |
+| `inspector_signature_path` | TEXT | The signature stamped at submit (object path in the `signatures` bucket); not changed afterwards. NULL on drafts and on IDRs submitted before signatures. |
+| `inspector_signed_at` | TIMESTAMPTZ | When that signature was stamped |
 
 Constraints and indexes:
 - `uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date)`: one IDR per
@@ -215,6 +220,11 @@ at it.
 
 Known polish item: in the IDR export, the "Attachment unavailable" page (a photo the export couldn't
 fetch or read) still uses a small 10 pt note, unlike the PDF page's larger title and "no preview" box.
+
+### Signature files (Storage bucket `signatures`)
+
+Private bucket, PNG only, 500 KB per file, reached only by the backend (service key). `users.signature_path`
+and `idrs.inspector_signature_path` hold object paths in it. Nothing writes to it yet.
 
 ### Export files (Storage bucket `idr-exports`)
 
@@ -372,6 +382,8 @@ content as TEXT, linked to a report and a form template).
 | 012 | `012_idr_exports_bucket.sql` | D6a | Created the private Storage bucket `idr-exports` (50 MB per file; `.xlsx` and PDF only). No `icid` table changes. |
 | 013 | `013_auth_users.sql` | H0 | Added `users.password_hash` and `role` (TEXT, nullable) and `is_demo` (BOOLEAN NOT NULL DEFAULT false), `UNIQUE (email)` as `uq_users_email`, and the partial index `idx_users_is_demo`. |
 | 014 | `014_demo_cleanup.sql` | H3 | Created the function `icid.cleanup_abandoned_demo_users()` (SECURITY DEFINER, EXECUTE revoked from PUBLIC): deletes demo users older than 24 hours with their attachments, reports, IDRs and project assignments, and returns how many. No table changes; scheduling it is a separate, manual step. |
+| 015 | `015_signatures.sql` | I0 | Added `users.signature_path`, `signature_type` (CHECK `drawn` / `uploaded`) and `signature_set_at`, and `idrs.inspector_signature_path` and `inspector_signed_at`. All nullable. |
+| 015b | `015b_signatures_bucket.sql` | I0 | Created the private Storage bucket `signatures` (500 KB per file; PNG only). No `icid` table changes. |
 
 Where each current column came from:
 
@@ -379,6 +391,8 @@ Where each current column came from:
 |---|---|---|
 | `clients`, `users`, `projects`, `project_users`, `project_clients`, `form_templates` | all | Baseline |
 | `users` | `password_hash`, `role`, `is_demo`, `uq_users_email`, `idx_users_is_demo` (index) | 013 |
+| `users` | `signature_path`, `signature_type`, `signature_set_at`, `chk_users_signature_type` | 015 |
+| `idrs` | `inspector_signature_path`, `inspector_signed_at` | 015 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |
 | `idr_reports` | everything except the flag | 004 |
