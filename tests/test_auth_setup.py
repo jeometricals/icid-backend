@@ -101,7 +101,7 @@ class TestMigration013:
 class TestSeeds:
     def test_auth_users_seeds_reza_as_admin_with_a_bcrypt_hash(self):
         seed = sql("seed_auth_users.sql")
-        row = re.search(r"VALUES \('rgolestani@konekx\.com', 'Reza', 'C00001',\s+'([^']+)', 'admin', false\)", seed)
+        row = re.search(r"VALUES \('reza@icid\.local', 'Reza', 'C00001',\s+'([^']+)', 'admin', false\)", seed)
         assert re.fullmatch(r"\$2b\$12\$[./A-Za-z0-9]{53}", row.group(1))
         assert bcrypt.checkpw(b"not the password", row.group(1).encode()) is False  # a hash bcrypt can read
         assert "password_hash = COALESCE(icid.users.password_hash, EXCLUDED.password_hash)" in seed
