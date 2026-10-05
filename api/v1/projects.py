@@ -8,10 +8,12 @@ from api.schemas.project import (
     ProjectListResponse,
 )
 from api.schemas.auth import UserOut
-from api.services.auth import current_user
+from api.services.auth import current_user, demo_project_fence
 
-# Every route needs a signed-in user (any role)
-router = APIRouter(prefix="/v1/projects", tags=["Projects"], dependencies=[Depends(current_user)])
+# Every route needs a signed-in user (any role); a demo user reaches only their own project
+router = APIRouter(
+    prefix="/v1/projects", tags=["Projects"], dependencies=[Depends(current_user), Depends(demo_project_fence)]
+)
 
 
 @router.get("/", response_model=ProjectListResponse)

@@ -4,6 +4,9 @@ Sign-in: checking credentials, issuing tokens, and the dependencies that turn a 
 Everything provider-specific sits behind AuthProvider, so moving to another identity provider (e.g. Cognito) is a new
 AuthProvider class and a change to the auth_provider line below. LocalAuthProvider checks bcrypt hashes in icid.users
 and signs its own JWTs.
+
+Demo mode lives here too: the provider makes throwaway demo users, and the dependencies below keep them to their own
+IDRs and their own project, and stop them submitting.
 """
 
 from abc import ABC, abstractmethod
@@ -13,16 +16,28 @@ from uuid import UUID
 
 import bcrypt
 import jwt
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 
 from api.core.config import JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
-from api.queries.users import get_user_by_uuid, get_user_for_auth
+from api.queries.idrs import get_idr_by_id
+from api.queries.projects import get_project_by_id, is_user_on_project
+from api.queries.users import create_demo_user, get_user_by_uuid, get_user_for_auth
 from api.schemas.auth import UserOut
 
 # Checked when there is no user or no password to check, so an unknown email takes as long to refuse as a wrong
 # password. The hash of a random string nobody has.
 _NO_USER_HASH = "$2b$12$2nciNUoEvQeR/D4qg1tnC.3U5QOOua.Zlkji./9fpDrhQH2HtvPrG"
 _BEARER = {"WWW-Authenticate": "Bearer"}
+
+# Demo users: one project, one client, and a ceiling on how many exist at once (the endpoint that makes them is public)
+DEMO_PROJECT_ID = "DEMO01"
+DEMO_CLIENT_ID = "C00001"
+DEMO_PROJECT_ROLE = "Demo"
+MAX_DEMO_USERS = 200
+
+
+class DemoUnavailableError(Exception):
+    """A demo user can't be made right now: the demo project is missing, or too many demo users exist."""
 
 
 class AuthProvider(ABC):
@@ -42,6 +57,14 @@ class AuthProvider(ABC):
         Make an access token for a user.
         Takes the user.
         Returns the token.
+        """
+
+    @abstractmethod
+    def create_demo_user(self) -> UserOut:
+        """
+        Make a throwaway demo user, assigned to the demo project.
+        Takes nothing.
+        Returns the new user; raises DemoUnavailableError when one can't be made.
         """
 
 
@@ -69,6 +92,19 @@ class LocalAuthProvider(AuthProvider):
         now = datetime.now(timezone.utc)
         claims = {"sub": str(user.uuid), "iat": now, "exp": now + timedelta(seconds=JWT_EXPIRY_SECONDS)}
         return jwt.encode(claims, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+    def create_demo_user(self) -> UserOut:
+        """
+        Add a demo user to icid.users (is_demo, no password, no role) and assign them to DEMO01.
+        Takes nothing.
+        Returns the new user; raises DemoUnavailableError when DEMO01 is missing or MAX_DEMO_USERS already exist.
+        """
+        row = create_demo_user(DEMO_CLIENT_ID, DEMO_PROJECT_ID, DEMO_PROJECT_ROLE, MAX_DEMO_USERS)
+        if row is None:
+            if get_project_by_id(DEMO_PROJECT_ID) is None:
+                raise DemoUnavailableError("Demo mode is not set up")
+            raise DemoUnavailableError("Demo mode is busy, try again later")
+        return UserOut.model_validate(row)
 
 
 def _password_matches(password: str, password_hash: str) -> bool:
@@ -119,3 +155,68 @@ def current_admin(user: UserOut = Depends(current_user)) -> UserOut:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def optional_user(authorization: Optional[str] = Header(None)) -> Optional[UserOut]:
+    """
+    FastAPI dependency: the signed-in user if the request carries a valid bearer token.
+    Takes the Authorization header.
+    Returns the user, or None for a missing, malformed, expired or invalid token, or when the user can't be looked
+    up (never raises).
+    """
+    try:
+        return current_user(authorization)
+    except Exception:  # noqa: BLE001 - its one caller, signing out, must not fail
+        return None
+
+
+def require_full_user(user: UserOut = Depends(current_user)) -> UserOut:
+    """
+    FastAPI dependency for submitting: the signed-in user, who must not be a demo user.
+    Takes the current user.
+    Returns them; raises 403 for a demo user.
+    """
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Demo mode: submit is disabled")
+    return user
+
+
+def no_demo_users(user: UserOut = Depends(current_user)) -> UserOut:
+    """
+    FastAPI dependency for routes demo users have no business on (e.g. the users list).
+    Takes the current user.
+    Returns them; raises 403 for a demo user.
+    """
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail="Demo mode: not available")
+    return user
+
+
+def demo_idr_fence(request: Request, user: UserOut = Depends(current_user)) -> None:
+    """
+    FastAPI dependency for routes under an IDR: a demo user reaches only the IDRs they are the reporter of.
+    Takes the request (for its idr_id path parameter) and the current user.
+    Returns nothing; raises 404, as for an IDR that doesn't exist, when a demo user asks for someone else's.
+    Other users, and routes without an idr_id, pass untouched.
+    """
+    idr_id = request.path_params.get("idr_id")
+    if not user.is_demo or idr_id is None:
+        return
+    try:
+        idr = get_idr_by_id(UUID(idr_id))
+    except ValueError:
+        return  # not a uuid: the route answers 422
+    if idr is not None and idr["reporter_uuid"] != user.uuid:
+        raise HTTPException(status_code=404, detail="IDR not found")
+
+
+def demo_project_fence(request: Request, user: UserOut = Depends(current_user)) -> None:
+    """
+    FastAPI dependency for routes about one project: a demo user reaches only the projects they are assigned to.
+    Takes the request (for its project_id path or query parameter) and the current user.
+    Returns nothing; raises 404, as for a project that doesn't exist, when a demo user asks for another project.
+    Other users, and routes without a project_id, pass untouched.
+    """
+    project_id = request.path_params.get("project_id") or request.query_params.get("project_id")
+    if user.is_demo and project_id is not None and not is_user_on_project(user.uuid, project_id):
+        raise HTTPException(status_code=404, detail="Project not found")

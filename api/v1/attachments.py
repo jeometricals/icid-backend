@@ -39,10 +39,12 @@ from api.services.attachments import (
     upload_complete,
     upload_request,
 )
-from api.services.auth import current_user
+from api.services.auth import current_user, demo_idr_fence
 
-# Every route needs a signed-in user (any role)
-router = APIRouter(prefix="/v1/idrs", tags=["Attachments"], dependencies=[Depends(current_user)])
+# Every route needs a signed-in user (any role); a demo user reaches only their own IDRs
+router = APIRouter(
+    prefix="/v1/idrs", tags=["Attachments"], dependencies=[Depends(current_user), Depends(demo_idr_fence)]
+)
 
 # HTTP status for each error the attachments service can raise.
 ERROR_STATUS: dict[type[AttachmentError], int] = {

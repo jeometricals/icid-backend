@@ -22,7 +22,7 @@ every request to it.
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, and the `current_user` / `current_admin` dependencies), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the auth users (the admin account and the legacy demo user) and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -37,11 +37,12 @@ every request to it.
 - `GET /status`
 - `POST /v1/auth/login` — email (matched without regard to case) and password; returns `{access_token, token_type, expires_in, user}`, or 401 `Invalid email or password`
 - `GET /v1/auth/me` — the user the bearer token belongs to; 401 `Not authenticated`, `Token expired` or `Invalid token`
-- `POST /v1/auth/logout` — 204; stateless, the client drops its token
+- `POST /v1/auth/demo` — public; makes a throwaway demo user on `DEMO01` and returns what login returns; 503 when `DEMO01` is missing or 200 demo users already exist
+- `POST /v1/auth/logout` — 204 always; stateless, the client drops its token. A demo user signing out is deleted with everything they made
 
 Every route below needs a bearer token (401 without a valid one); see "Sign-in" under the conventions.
 
-- `GET /v1/users/`
+- `GET /v1/users/` — 403 for a demo user
 - `GET /v1/projects/` — the signed-in user's projects (through `project_users`)
 - `GET /v1/projects/{project_id}`
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
@@ -51,7 +52,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/reports` — add a report (typed by `ReportType`; addendums may name a parent)
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
-- `POST /v1/idrs/{idr_id}/submit` — submit a draft (locks it, numbers pages, sets `total_pages`)
+- `POST /v1/idrs/{idr_id}/submit` — submit a draft (locks it, numbers pages, sets `total_pages`); 403 `Demo mode: submit is disabled` for a demo user
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — replace an attachment's name and description; draft only
@@ -108,6 +109,28 @@ Any change must follow these.
     (`?reporter_uuid=` is a filter, not an identity). Role and ownership enforcement are Phase 2.
   - Endpoint tests use the `admin_client` fixture (signed in as `ADMIN_USER_ROW`, `tests/conftest.py`); the plain
     `client` is for testing what happens without a token.
+- **Demo mode.** `POST /v1/auth/demo` is public: it makes a throwaway user (`is_demo`, `demo-<uuid>@icid.local`,
+  no password, no role, client `C00001`) and their one `project_users` row on `DEMO01` in a single statement, and
+  signs them in. Since anyone can get a demo token, a demo user is kept to their own data:
+  - **No submitting.** `require_full_user` on the submit endpoint returns 403 `Demo mode: submit is disabled`.
+    Creating, editing, adding reports and attachments, and exporting all stay allowed.
+  - **Their own IDRs only.** `demo_idr_fence` sits on every router under `/v1/idrs`: a route with an `idr_id`
+    returns 404 unless the demo user is that IDR's reporter, and `GET /v1/idrs/` always filters to them, whatever
+    `reporter_uuid` says.
+  - **Their own project only.** `demo_project_fence` on the projects and contract-items routers returns 404 for a
+    project they aren't assigned to. `GET /v1/users/` is 403 (`no_demo_users`).
+  - A new router under an IDR or a project takes the matching fence; a route no demo user should see takes
+    `no_demo_users`. Other users pass all three untouched.
+  - **Deleted at sign-out.** `POST /v1/auth/logout` with a demo user's valid token removes their attachment files
+    from Storage (best-effort), then deletes, in one statement and children first, their attachments, reports,
+    IDRs, project assignments and the user row (`api/services/demo.py`). Every delete is tied to `is_demo = true`
+    in the SQL itself. Logout returns 204 even if that fails.
+  - **Daily backstop.** `icid.cleanup_abandoned_demo_users()` (migration 014) deletes demo users older than 24
+    hours, in the same order. It is not scheduled by the migration; the options are pg_cron
+    (`cron.schedule('cleanup-abandoned-demos', '0 3 * * *', …)`), a Vercel Cron hitting an admin-only endpoint
+    (not built), or running it by hand. They are spelled out in the migration file.
+  - At most `MAX_DEMO_USERS` (200) exist at once; past that the endpoint returns 503 until some are deleted.
+  - Tests use the `demo_client` fixture (signed in as `DEMO_USER_ROW`).
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.
@@ -145,6 +168,11 @@ Not rules — current state, documented so nobody mistakes these for the intende
 - CORS is `allow_origins=["*"]`. Tighten before production.
 - `POST /v1/auth/login` has no rate limiting, and there is no password-change endpoint (passwords are rotated
   in SQL). Both are Phase 2.
+- Demo mode leaves files behind: attachment files of demo users purged by the daily cleanup (a SQL function can't
+  reach Storage), and every demo export in `idr-exports`. Nothing points at them afterwards; a bucket sweep would
+  have to find them. `POST /v1/auth/demo` is also unthrottled apart from the 200-user ceiling.
+- No multi-statement transactions: `run_query` runs one statement per connection. Work that must be atomic is
+  written as one statement (data-modifying CTEs), as the demo user's insert and delete are.
 - `uq_users_email` is case-sensitive on the stored value, while sign-in looks emails up without regard to case.
   `Reza@icid.local` and `reza@icid.local` could coexist as separate rows, and login would pick the oldest. Fix in
   the next schema migration slice: drop `uq_users_email` and add

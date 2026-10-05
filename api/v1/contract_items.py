@@ -2,10 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from api.queries.contract_items import list_contract_items_for_project
 from api.schemas.contract_item import ContractItem, ContractItemListResponse
-from api.services.auth import current_user
+from api.services.auth import current_user, demo_project_fence
 
-# Every route needs a signed-in user (any role)
-router = APIRouter(prefix="/v1/contract_items", tags=["Contract Items"], dependencies=[Depends(current_user)])
+# Every route needs a signed-in user (any role); a demo user reaches only their own project
+router = APIRouter(
+    prefix="/v1/contract_items",
+    tags=["Contract Items"],
+    dependencies=[Depends(current_user), Depends(demo_project_fence)],
+)
 
 
 @router.get("/", response_model=ContractItemListResponse)

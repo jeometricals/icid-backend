@@ -171,3 +171,24 @@ def list_storage_paths_for_report_tree(report_id: UUID) -> Optional[list[dict[st
         ORDER BY a.storage_path;
     """
     return run_query(sql, (report_id,))
+
+
+def list_storage_paths_for_demo_user(user_uuid: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    List the storage_path of every attachment, pending or uploaded, a demo user's delete removes: those they uploaded and those on their IDRs' reports. Lists nothing for a user who isn't a demo user.
+    Takes the user's uuid.
+    Returns a list of {storage_path} rows (empty if none), or None on failure.
+    """
+    sql = """
+        SELECT a.storage_path
+        FROM icid.report_attachments a
+        JOIN icid.users u ON u.uuid = %s AND u.is_demo = true
+        WHERE a.uploaded_by = u.uuid
+           OR a.report_id IN (
+               SELECT r.report_id
+               FROM icid.idr_reports r
+               JOIN icid.idrs i ON i.idr_id = r.idr_id
+               WHERE i.reporter_uuid = u.uuid
+           );
+    """
+    return run_query(sql, (user_uuid,))

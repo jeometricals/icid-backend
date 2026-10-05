@@ -8,7 +8,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from tests.conftest import ADMIN_USER_ROW
+from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, TYPE_LABELS, label_for
 from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
 
@@ -1717,3 +1717,61 @@ class TestAutoGeneralHooks:
             admin_client.delete(url)
         mocks["regen"].assert_called_once_with(IDR_ID_UUID)
         mocks["dismiss"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Demo users on the IDR endpoints: their own drafts only, and no submitting
+# ---------------------------------------------------------------------------
+
+DEMO_IDR_ROW = {**MOCK_IDR_ROW, "project_id": "DEMO01", "reporter_uuid": DEMO_USER_ROW["uuid"]}
+
+
+class TestDemoUserIdrs:
+    list_url = "/v1/idrs/"
+    submit_url = f"/v1/idrs/{IDR_ID}/submit"
+
+    def test_submit_is_disabled_for_a_demo_user(self, demo_client):
+        with patched(idrs=[DEMO_IDR_ROW]) as mocks:
+            response = demo_client.post(self.submit_url)
+        assert response.status_code == 403
+        assert response.json() == {"detail": "Demo mode: submit is disabled"}
+        mocks["idr_reports"].assert_not_called()
+        assert all("UPDATE" not in call.args[0] for call in mocks["idrs"].call_args_list)  # nothing was submitted
+
+    def test_submit_still_works_for_everyone_else(self, admin_client):
+        with patched(idrs=DRAFT_THEN_SUBMITTED_IDR, idr_reports=REPORTS_THEN_NUMBERED):
+            response = admin_client.post(self.submit_url)
+        assert response.status_code == 200 and response.json()["data"]["status"] == "submitted"
+
+    def test_a_demo_user_lists_only_their_own_idrs(self, demo_client):
+        for params in ({}, {"reporter_uuid": REPORTER_UUID}, {"reporter_uuid": str(ADMIN_USER_ROW["uuid"])}):
+            with patched(idrs=[]) as mocks:
+                response = demo_client.get(self.list_url, params=params)
+            assert response.status_code == 200
+            sql, query_params = mocks["idrs"].call_args.args
+            assert "i.reporter_uuid = %s" in sql and query_params == (DEMO_USER_ROW["uuid"],)
+
+    def test_a_demo_users_other_filters_still_apply(self, demo_client):
+        with patched(idrs=[]) as mocks:
+            demo_client.get(self.list_url, params={"project_id": "DEMO01", "status": "draft"})
+        assert mocks["idrs"].call_args.args[1] == ("DEMO01", "draft", DEMO_USER_ROW["uuid"])
+
+    def test_everyone_else_keeps_the_optional_reporter_filter(self, admin_client):
+        with patched(idrs=[]) as mocks:
+            admin_client.get(self.list_url)
+        assert "i.reporter_uuid = %s" not in mocks["idrs"].call_args.args[0]
+        with patched(idrs=[]) as mocks:
+            admin_client.get(self.list_url, params={"reporter_uuid": REPORTER_UUID})
+        assert mocks["idrs"].call_args.args[1] == (UUID(REPORTER_UUID),)
+
+    def test_a_demo_user_can_create_a_draft_on_their_project(self, demo_client):
+        with patched(idrs=[DEMO_IDR_ROW], projects=ASSIGNED) as mocks:
+            response = demo_client.post("/v1/idrs/", json={"project_id": "DEMO01", "report_date": "2026-09-25"})
+        assert response.status_code == 201
+        assert mocks["idrs"].call_args.args[1][:2] == ("DEMO01", DEMO_USER_ROW["uuid"])
+
+    def test_a_demo_user_can_read_and_edit_their_own_draft(self, demo_client):
+        with patched(idrs=[DEMO_IDR_ROW], idr_reports=[]):
+            assert demo_client.get(f"/v1/idrs/{IDR_ID}").status_code == 200
+        with patched(idrs=[DEMO_IDR_ROW]):
+            assert demo_client.put(f"/v1/idrs/{IDR_ID}/header", json={"weather_am": "Clear"}).status_code == 200

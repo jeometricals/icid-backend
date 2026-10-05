@@ -89,3 +89,70 @@ def get_user_by_uuid(uuid: UUID) -> Optional[dict[str, Any]]:
     """
     rows = run_query(_AUTH_USER_SELECT + "        WHERE u.uuid = %s;", (uuid,))
     return rows[0] if rows else None
+
+
+def create_demo_user(
+    client_id: str, project_id: str, project_role: str, max_demo_users: int
+) -> Optional[dict[str, Any]]:
+    """
+    Create a throwaway demo user (demo-<uuid>@icid.local, no password, no role) and assign them to the demo project, in one statement: both rows are written or neither.
+    Takes the client the user sits under, the demo project's id, the user's role on it, and the most demo users allowed at once.
+    Returns the new user dict (uuid, email, names, client_id, role, is_demo), or None when the project doesn't exist or the limit is reached.
+    """
+    sql = """
+        WITH new_user AS (
+            INSERT INTO icid.users (uuid, email, first_name, client_id, is_demo)
+            SELECT id.uuid, 'demo-' || id.uuid::text || '@icid.local', 'Demo', %s, true
+            FROM (SELECT uuid_generate_v4() AS uuid) AS id
+            WHERE EXISTS (SELECT 1 FROM icid.projects p WHERE p.project_id = %s)
+              AND (SELECT count(*) FROM icid.users d WHERE d.is_demo = true) < %s
+            RETURNING uuid, email, first_name, last_name, client_id, role, is_demo
+        ),
+        assigned AS (
+            INSERT INTO icid.project_users (project_id, user_uuid, user_role)
+            SELECT %s, new_user.uuid, %s
+            FROM new_user
+        )
+        SELECT uuid, email, first_name, last_name, client_id, role, is_demo
+        FROM new_user;
+    """
+    rows = run_query(sql, (client_id, project_id, max_demo_users, project_id, project_role))
+    return rows[0] if rows else None
+
+
+def delete_demo_user_rows(uuid: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Delete a demo user and everything of theirs, children first, in one statement: their attachments, reports, IDRs, project assignments, then the user. Does nothing for a user who isn't a demo user.
+    Takes the user's uuid.
+    Returns a one-row list with the deleted user's uuid, or an empty list when no demo user matched.
+    """
+    sql = """
+        WITH demo AS (
+            SELECT u.uuid FROM icid.users u WHERE u.uuid = %s AND u.is_demo = true
+        ),
+        demo_idrs AS (
+            SELECT i.idr_id FROM icid.idrs i WHERE i.reporter_uuid IN (SELECT uuid FROM demo)
+        ),
+        gone_attachments AS (
+            DELETE FROM icid.report_attachments a
+            WHERE a.uploaded_by IN (SELECT uuid FROM demo)
+               OR a.report_id IN (
+                   SELECT r.report_id FROM icid.idr_reports r WHERE r.idr_id IN (SELECT idr_id FROM demo_idrs)
+               )
+        ),
+        gone_reports AS (
+            DELETE FROM icid.idr_reports r WHERE r.idr_id IN (SELECT idr_id FROM demo_idrs)
+        ),
+        gone_idrs AS (
+            DELETE FROM icid.idrs i WHERE i.idr_id IN (SELECT idr_id FROM demo_idrs)
+        ),
+        gone_assignments AS (
+            DELETE FROM icid.project_users pu WHERE pu.user_uuid IN (SELECT uuid FROM demo)
+        ),
+        gone_user AS (
+            DELETE FROM icid.users u WHERE u.uuid IN (SELECT uuid FROM demo) AND u.is_demo = true
+            RETURNING u.uuid
+        )
+        SELECT uuid FROM gone_user;
+    """
+    return run_query(sql, (uuid,))

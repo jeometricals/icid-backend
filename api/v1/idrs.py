@@ -24,7 +24,7 @@ from api.queries.idrs import (
 )
 from api.queries.projects import get_project_by_id, is_user_on_project
 from api.services.attachments import delete_all_storage_files_for_report
-from api.services.auth import current_user
+from api.services.auth import current_user, demo_idr_fence, require_full_user
 from api.services.auto_general import regenerate_auto_general
 from api.schemas.auth import UserOut
 from api.schemas.idr import (
@@ -47,8 +47,8 @@ from api.schemas.idr_report import (
     ReportType,
 )
 
-# Every route needs a signed-in user (any role)
-router = APIRouter(prefix="/v1/idrs", tags=["IDRs"], dependencies=[Depends(current_user)])
+# Every route needs a signed-in user (any role); a demo user reaches only their own IDRs
+router = APIRouter(prefix="/v1/idrs", tags=["IDRs"], dependencies=[Depends(current_user), Depends(demo_idr_fence)])
 
 
 @router.post(
@@ -301,12 +301,16 @@ def list_project_idrs(
     project_id: Optional[str] = None,
     status: Optional[Literal["draft", "submitted"]] = None,
     reporter_uuid: Optional[UUID] = None,
+    user: UserOut = Depends(current_user),
 ) -> IdrListResponse:
     """
-    List IDRs most recently edited first, each with report_count and has_general; every filter is optional.
-    Takes optional project_id, status and reporter_uuid query parameters.
+    List IDRs most recently edited first, each with report_count and has_general; every filter is optional. A demo user is always listed their own IDRs only, whatever reporter_uuid says.
+    Takes optional project_id, status and reporter_uuid query parameters, and the signed-in user.
     Returns an IdrListResponse (empty data list when nothing matches), or raises 500 on a query failure.
     """
+    if user.is_demo:
+        reporter_uuid = user.uuid
+
     rows = list_idrs(project_id, status, reporter_uuid)
 
     if rows is None:
@@ -319,12 +323,12 @@ def list_project_idrs(
     )
 
 
-@router.post("/{idr_id}/submit", response_model=IdrWithReportsResponse)
+@router.post("/{idr_id}/submit", response_model=IdrWithReportsResponse, dependencies=[Depends(require_full_user)])
 def submit_draft_idr(idr_id: UUID) -> IdrWithReportsResponse:
     """
-    Submit a draft IDR: lock it, stamp submitted_at, number every report and set total_pages.
+    Submit a draft IDR: lock it, stamp submitted_at, number every report and set total_pages. Not open to demo users.
     Takes the IDR uuid as a path parameter; no body.
-    Returns an IdrWithReportsResponse with the reports in page order; raises 404 (no IDR), 409 (not draft) and 400 (no reports).
+    Returns an IdrWithReportsResponse with the reports in page order; raises 403 (demo user), 404 (no IDR), 409 (not draft) and 400 (no reports).
     """
     idr = get_idr_by_id(idr_id)
 

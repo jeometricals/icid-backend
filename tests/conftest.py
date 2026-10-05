@@ -46,3 +46,29 @@ def admin_client(admin_token):
     with patch("api.services.auth.get_user_by_uuid", return_value=ADMIN_USER_ROW):
         with TestClient(app, headers={"Authorization": f"Bearer {admin_token}"}) as c:
             yield c
+
+
+# A demo user, as POST /v1/auth/demo makes them: no role, no password, assigned to DEMO01 only
+DEMO_USER_ROW = {"uuid": UUID("d0000000-0000-4000-8000-000000000004"),
+                 "email": "demo-d0000000-0000-4000-8000-000000000004@icid.local", "first_name": "Demo",
+                 "last_name": None, "client_id": "C00001", "role": None, "is_demo": True}
+
+
+@pytest.fixture
+def demo_token() -> str:
+    """
+    A valid bearer token for the test demo user (DEMO_USER_ROW).
+    Returns the encoded JWT.
+    """
+    return auth_provider.issue_token(UserOut.model_validate(DEMO_USER_ROW))
+
+
+@pytest.fixture
+def demo_client(demo_token):
+    """
+    A TestClient signed in as the test demo user: every request carries their bearer token, and the token's user
+    lookup returns DEMO_USER_ROW without touching the query layer other tests patch.
+    """
+    with patch("api.services.auth.get_user_by_uuid", return_value=DEMO_USER_ROW):
+        with TestClient(app, headers={"Authorization": f"Bearer {demo_token}"}) as c:
+            yield c

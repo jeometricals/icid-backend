@@ -228,3 +228,50 @@ CREATE TABLE icid.contract_items (
 
 CREATE INDEX idx_contract_items_project ON icid.contract_items(project_id);
 CREATE INDEX idx_contract_items_spec_item ON icid.contract_items(spec_item_id);
+
+------------------------------------------------------------
+-- DEMO MODE: daily backstop for demo users who never signed out
+-- (migrations/014_demo_cleanup.sql; scheduling options are listed there)
+------------------------------------------------------------
+CREATE OR REPLACE FUNCTION icid.cleanup_abandoned_demo_users()
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = icid, pg_temp
+AS $$
+DECLARE
+    stale UUID[];
+    purged_count INTEGER;
+BEGIN
+    SELECT array_agg(u.uuid) INTO stale
+    FROM icid.users u
+    WHERE u.is_demo = true AND u.created_at < now() - interval '24 hours';
+
+    IF stale IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    DELETE FROM icid.report_attachments a
+    WHERE a.uploaded_by = ANY(stale)
+       OR a.report_id IN (
+           SELECT r.report_id
+           FROM icid.idr_reports r
+           JOIN icid.idrs i ON i.idr_id = r.idr_id
+           WHERE i.reporter_uuid = ANY(stale)
+       );
+
+    DELETE FROM icid.idr_reports r
+    WHERE r.idr_id IN (SELECT i.idr_id FROM icid.idrs i WHERE i.reporter_uuid = ANY(stale));
+
+    DELETE FROM icid.idrs i WHERE i.reporter_uuid = ANY(stale);
+
+    DELETE FROM icid.project_users pu WHERE pu.user_uuid = ANY(stale);
+
+    DELETE FROM icid.users u WHERE u.uuid = ANY(stale) AND u.is_demo = true;
+    GET DIAGNOSTICS purged_count = ROW_COUNT;
+
+    RETURN purged_count;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION icid.cleanup_abandoned_demo_users() FROM PUBLIC;

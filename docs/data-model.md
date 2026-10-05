@@ -73,6 +73,11 @@ People who sign in: inspectors, CCLs, engineers.
 | `role` | TEXT | e.g. `admin`. NULL: no role yet. |
 | `is_demo` | BOOLEAN NOT NULL | Default `false`. Throwaway demo accounts; `idx_users_is_demo` (partial) serves their cleanup. |
 
+A demo user is made by `POST /v1/auth/demo` (`demo-<uuid>@icid.local`, first name `Demo`, client `C00001`, no
+password, no role) together with one `project_users` row on `DEMO01` (`user_role` `Demo`). Signing out deletes the
+user with their attachments, reports, IDRs and assignments; `icid.cleanup_abandoned_demo_users()` deletes the ones
+older than 24 hours who never signed out.
+
 ### projects
 
 Construction contracts.
@@ -366,6 +371,7 @@ content as TEXT, linked to a report and a form template).
 | 011 | `011_spec_items_and_contract_items.sql` | F2 | Created `spec_items` (UNIQUE `item_no`) and `contract_items` (FK to `projects` with ON DELETE CASCADE, FK to `spec_items`, UNIQUE `(project_id, spec_item_id, budget_code)`) and the two `contract_items` indexes. |
 | 012 | `012_idr_exports_bucket.sql` | D6a | Created the private Storage bucket `idr-exports` (50 MB per file; `.xlsx` and PDF only). No `icid` table changes. |
 | 013 | `013_auth_users.sql` | H0 | Added `users.password_hash` and `role` (TEXT, nullable) and `is_demo` (BOOLEAN NOT NULL DEFAULT false), `UNIQUE (email)` as `uq_users_email`, and the partial index `idx_users_is_demo`. |
+| 014 | `014_demo_cleanup.sql` | H3 | Created the function `icid.cleanup_abandoned_demo_users()` (SECURITY DEFINER, EXECUTE revoked from PUBLIC): deletes demo users older than 24 hours with their attachments, reports, IDRs and project assignments, and returns how many. No table changes; scheduling it is a separate, manual step. |
 
 Where each current column came from:
 

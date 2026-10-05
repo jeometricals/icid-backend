@@ -155,3 +155,49 @@ class TestJwtConfig:
 def test_the_auth_libraries_are_pinned():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     assert "PyJWT==2.15.0" in requirements and "bcrypt==5.0.0" in requirements
+
+
+class TestDemoCleanupMigration:
+    def function_sql(self, name: str) -> str:
+        """
+        Cut the cleanup function (through its REVOKE) out of a SQL file.
+        Takes the file's path under the repo root.
+        Returns the function's text.
+        """
+        text = (ROOT / name).read_text(encoding="utf-8")
+        start = text.index("CREATE OR REPLACE FUNCTION icid.cleanup_abandoned_demo_users()")
+        end = text.index("FROM PUBLIC;", start) + len("FROM PUBLIC;")
+        return text[start:end]
+
+    def test_schema_sql_carries_the_same_function(self):
+        assert self.function_sql("migrations/014_demo_cleanup.sql") == self.function_sql("schema.sql")
+
+    def test_the_function_is_well_formed(self):
+        function = self.function_sql("migrations/014_demo_cleanup.sql")
+        assert "RETURNS INTEGER" in function and "LANGUAGE plpgsql" in function
+        assert "SECURITY DEFINER" in function and "SET search_path = icid, pg_temp" in function
+        assert function.count("$$") == 2 and function.count("(") == function.count(")")
+        body = function.split("$$")[1]
+        assert body.strip().startswith("DECLARE") and body.strip().endswith("END;")
+        assert body.count("BEGIN") == 1 and body.count("IF stale IS NULL THEN") == body.count("END IF;") == 1
+        assert "RETURN purged_count;" in body and "GET DIAGNOSTICS purged_count = ROW_COUNT;" in body
+        statements = [s for s in body.split(";") if "DELETE FROM" in s]
+        assert len(statements) == 5
+        assert function.rstrip().endswith("REVOKE ALL ON FUNCTION icid.cleanup_abandoned_demo_users() FROM PUBLIC;")
+
+    def test_it_purges_only_demo_users_older_than_a_day_children_first(self):
+        function = self.function_sql("migrations/014_demo_cleanup.sql")
+        assert "WHERE u.is_demo = true AND u.created_at < now() - interval '24 hours'" in function
+        assert re.findall(r"DELETE FROM icid\.(\w+)", function) == [
+            "report_attachments", "idr_reports", "idrs", "project_users", "users"]
+        assert "DELETE FROM icid.users u WHERE u.uuid = ANY(stale) AND u.is_demo = true;" in function
+        assert function.count("ANY(stale)") == 6  # every delete is limited to the stale demo users
+
+    def test_the_migration_is_one_transaction_and_lists_the_scheduling_options(self):
+        text = (ROOT / "migrations/014_demo_cleanup.sql").read_text(encoding="utf-8")
+        migration = sql("migrations/014_demo_cleanup.sql")
+        assert migration.index("BEGIN;") < migration.index("CREATE OR REPLACE FUNCTION") < migration.rindex("COMMIT;")
+        assert "ALTER TABLE" not in migration and "CREATE TABLE" not in migration
+        for option in ("cron.schedule('cleanup-abandoned-demos', '0 3 * * *'", "Vercel Cron",
+                       "SELECT icid.cleanup_abandoned_demo_users();"):
+            assert option in text
