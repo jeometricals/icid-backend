@@ -150,8 +150,9 @@ Constraints and indexes:
 - `idx_idrs_project_status (project_id, status)` and `idx_idrs_reporter (reporter_uuid)`.
 
 Lifecycle: an IDR is created as a `draft`, and its header and reports can be edited freely.
-`POST /v1/idrs/{id}/submit` locks it in one statement. It sets `status = 'submitted'`,
-`submitted_at`, and `total_pages`, and numbers every report's `page_number`. After that the API
+`POST /v1/idrs/{id}/submit` first copies the submitting user's signature to the IDR's own path, then
+locks the IDR in one statement. It sets `status = 'submitted'`, `submitted_at`, `total_pages`,
+`inspector_signature_path` and `inspector_signed_at`, and numbers every report's `page_number`. After that the API
 refuses edits (409).
 
 ### idr_reports
@@ -224,7 +225,9 @@ fetch or read) still uses a small 10 pt note, unlike the PDF page's larger title
 ### Signature files (Storage bucket `signatures`)
 
 Private bucket, PNG only, 500 KB per file, reached only by the backend (service key). `users.signature_path`
-and `idrs.inspector_signature_path` hold object paths in it. Nothing writes to it yet.
+and `idrs.inspector_signature_path` hold object paths in it: `users/{user uuid}/signature.png` for a user's
+current signature (replaced when they set a new one), and `idrs/{idr id}/inspector_{random}.png` for the copy an
+IDR keeps from submit (never replaced or removed).
 
 ### Export files (Storage bucket `idr-exports`)
 

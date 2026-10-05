@@ -1,5 +1,7 @@
 from functools import lru_cache
 
+from storage3.exceptions import StorageApiError
+from storage3.types import CreateSignedUploadUrlOptions
 from supabase import Client, ClientOptions, create_client
 
 from api.core.config import STORAGE_BUCKET_NAME, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
@@ -44,13 +46,17 @@ def _bucket(bucket: str = STORAGE_BUCKET_NAME):
     return get_client().storage.from_(bucket)
 
 
-def create_signed_upload_url(path: str) -> str:
+def create_signed_upload_url(path: str, bucket: str = STORAGE_BUCKET_NAME, upsert: bool = False) -> str:
     """
     Make a signed URL the client can upload one object to directly, without other credentials.
-    Takes the object path the file must be stored at.
+    Takes the object path the file must be stored at, the bucket (the attachments bucket unless given) and whether
+    the upload may replace an object already at that path.
     Returns the signed upload URL, or raises RuntimeError if Storage returned none.
     """
-    result = _bucket().create_signed_upload_url(path)
+    if upsert:
+        result = _bucket(bucket).create_signed_upload_url(path, CreateSignedUploadUrlOptions(upsert="true"))
+    else:
+        result = _bucket(bucket).create_signed_upload_url(path)
     url = result.get("signed_url") or result.get("signedUrl")
     if not url:
         raise RuntimeError(f"Storage returned no signed upload URL for {path}")
@@ -97,3 +103,27 @@ def download_file(path: str) -> bytes:
     Returns the file's bytes; raises the Storage client's error, or a timeout, when it can't be fetched.
     """
     return _download_client().storage.from_(STORAGE_BUCKET_NAME).download(path)
+
+
+def copy_file(bucket: str, from_path: str, to_path: str) -> None:
+    """
+    Copy one object to a new path in the same bucket, server-side. Fails if an object is already at the new path.
+    Takes the bucket, the object's path and the path of the copy.
+    Returns nothing; raises the Storage client's error on failure.
+    """
+    _bucket(bucket).copy(from_path, to_path)
+
+
+def object_exists(bucket: str, path: str) -> bool:
+    """
+    Check whether an object is in a bucket (a HEAD request; the file isn't fetched).
+    Takes the bucket and the object path.
+    Returns True if it is there, False if Storage says it isn't; raises the Storage client's error on any other
+    failure.
+    """
+    try:
+        return bool(_bucket(bucket).exists(path))
+    except StorageApiError as exc:
+        if str(exc.status) in ("400", "404"):  # Storage answers either for a missing object
+            return False
+        raise

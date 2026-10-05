@@ -1,7 +1,8 @@
+from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class UserOut(BaseModel):
@@ -13,6 +14,15 @@ class UserOut(BaseModel):
     last_name: Optional[str] = None
     role: Optional[str] = None
     is_demo: bool
+    signature_set_at: Optional[datetime] = None
+    # Where the user's signature file is. Internal: carried for the submit flow, never part of a response.
+    signature_path: Optional[str] = Field(default=None, exclude=True)
+
+    @computed_field
+    @property
+    def has_signature(self) -> bool:
+        """Whether the user has a signature on file."""
+        return self.signature_path is not None
 
 
 class UserWithHash(UserOut):

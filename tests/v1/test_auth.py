@@ -33,7 +33,7 @@ REZA_ROW = {"uuid": UUID("b0000000-0000-4000-8000-000000000002"), "email": "reza
             "last_name": None, "client_id": "C00001", "role": "admin", "is_demo": False}
 REZA_AUTH_ROW = {**REZA_ROW, "password_hash": bcrypt.hashpw(PASSWORD.encode(), bcrypt.gensalt(4)).decode()}
 REZA_OUT = {"uuid": str(REZA_ROW["uuid"]), "email": "reza@icid.local", "first_name": "Reza", "last_name": None,
-            "role": "admin", "is_demo": False}
+            "role": "admin", "is_demo": False, "has_signature": False, "signature_set_at": None}
 INSPECTOR_ROW = {**REZA_ROW, "uuid": UUID("c0000000-0000-4000-8000-000000000003"), "email": "KhanG@magnoleng.pc",
                  "role": None}
 QUERY = "api.queries.users.run_query"
@@ -344,11 +344,12 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 20
+        assert len(PROTECTED_ROUTES) == 22
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
-                         ("POST", "/v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request")):
+                         ("POST", "/v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request"),
+                         ("POST", "/v1/signatures/upload-request"), ("POST", "/v1/signatures/confirm")):
             assert expected in PROTECTED_ROUTES
 
     @pytest.mark.parametrize("method,path", PROTECTED_ROUTES)
@@ -392,7 +393,7 @@ class TestEveryRouteNeedsSignIn:
 
 CASCADE_ORDER = ["report_attachments", "idr_reports", "idrs", "project_users", "users"]
 DEMO_OUT = {"uuid": str(DEMO_USER_ROW["uuid"]), "email": DEMO_USER_ROW["email"], "first_name": "Demo",
-            "last_name": None, "role": None, "is_demo": True}
+            "last_name": None, "role": None, "is_demo": True, "has_signature": False, "signature_set_at": None}
 OTHER_DEMO_ROW = {**DEMO_USER_ROW, "uuid": UUID("d0000000-0000-4000-8000-000000000005"),
                   "email": "demo-d0000000-0000-4000-8000-000000000005@icid.local"}
 SOMEONE_ELSES_IDR = {"idr_id": UUID(PATH_VALUES["idr_id"]), "reporter_uuid": REZA_ROW["uuid"]}

@@ -9,6 +9,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW
+from api.services.signatures import SignatureStorageError
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, TYPE_LABELS, label_for
 from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
 
@@ -56,12 +57,17 @@ MOCK_PROJECT_ROW = {
 MOCK_ASSIGNMENT_ROW = {"?column?": 1}  # is_user_on_project does SELECT 1
 
 
+# Where submit's copy of the signer's signature lands (the real path ends in a random name)
+SIGNATURE_COPY = f"idrs/{IDR_ID}/inspector_0123456789abcdef0123456789abcdef.png"
+
+
 @contextmanager
 def patched(idrs=None, idr_reports=None, projects=None):
     """
     Patch run_query in each query module the IDR endpoints use, plus the auto-General and attachment-Storage hooks.
     Takes the return value (or side_effect tuple) for each module's run_query.
-    Yields a dict of the mocks keyed by module name, with "regen", "dismiss" and "storage" for the hooks.
+    Yields a dict of the mocks keyed by module name, with "regen", "dismiss" and "storage" for the hooks, and
+    "signature" for submit's copy of the signer's signature (it returns SIGNATURE_COPY).
     """
     def kwargs(value):
         return {"side_effect": value} if isinstance(value, tuple) else {"return_value": value}
@@ -71,8 +77,10 @@ def patched(idrs=None, idr_reports=None, projects=None):
          patch("api.queries.projects.run_query", **kwargs(projects)) as p, \
          patch("api.v1.idrs.regenerate_auto_general") as regen, \
          patch("api.v1.idrs.set_dismissed_auto_general") as dismiss, \
-         patch("api.v1.idrs.delete_all_storage_files_for_report") as storage:
-        yield {"idrs": i, "idr_reports": ir, "projects": p, "regen": regen, "dismiss": dismiss, "storage": storage}
+         patch("api.v1.idrs.delete_all_storage_files_for_report") as storage, \
+         patch("api.v1.idrs.snapshot_signature_for_idr", return_value=SIGNATURE_COPY) as signature:
+        yield {"idrs": i, "idr_reports": ir, "projects": p, "regen": regen, "dismiss": dismiss, "storage": storage,
+               "signature": signature}
 
 
 # ---------------------------------------------------------------------------
@@ -1257,9 +1265,9 @@ class TestSubmitIdr:
         assert [r["page_number"] for r in idr["reports"]] == [1, 2]
         assert idr["reports"][1]["parent_report_id"] == GEN_REPORT_ID
 
-    def test_submit_statement_takes_idr_id_only(self, admin_client):
+    def test_submit_statement_takes_the_idr_id_and_the_signature_copy(self, admin_client):
         _, params = self.submit_sql(admin_client)
-        assert params == (UUID(IDR_ID),)
+        assert params == (UUID(IDR_ID), SIGNATURE_COPY)
 
     def test_locks_draft_row_before_numbering(self, admin_client):
         sql, _ = self.submit_sql(admin_client)
@@ -1775,3 +1783,110 @@ class TestDemoUserIdrs:
             assert demo_client.get(f"/v1/idrs/{IDR_ID}").status_code == 200
         with patched(idrs=[DEMO_IDR_ROW]):
             assert demo_client.put(f"/v1/idrs/{IDR_ID}/header", json={"weather_am": "Clear"}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/idrs/{idr_id}/submit: the signature
+# ---------------------------------------------------------------------------
+
+MOCK_SIGNED_IDR_ROW = {**MOCK_JUST_SUBMITTED_ROW, "inspector_signature_path": SIGNATURE_COPY, "inspector_signed_at": NOW}
+
+
+class TestSubmitSignature:
+    url = f"/v1/idrs/{IDR_ID}/submit"
+
+    def test_a_user_without_a_signature_cant_submit(self, unsigned_client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
+            response = unsigned_client.post(self.url)
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Signature required before submitting"}
+        mocks["signature"].assert_not_called()
+        assert mocks["idrs"].call_count == 1  # the lookup only: no submit statement, the IDR stays a draft
+
+    def test_the_signers_current_signature_is_copied_to_the_idr_before_the_submit(self, admin_client):
+        order = []
+        with patched(idrs=([MOCK_IDR_ROW], [MOCK_SIGNED_IDR_ROW]), idr_reports=REPORTS_THEN_NUMBERED) as mocks:
+            mocks["signature"].side_effect = lambda *args: order.append("copy") or SIGNATURE_COPY
+            mocks["idrs"].side_effect = lambda *args: (order.append("query"), [MOCK_IDR_ROW] if len(order) == 1
+                                                       else [MOCK_SIGNED_IDR_ROW])[1]
+            response = admin_client.post(self.url)
+        assert response.status_code == 200
+        mocks["signature"].assert_called_once_with(ADMIN_USER_ROW["signature_path"], UUID(IDR_ID))
+        assert order == ["query", "copy", "query"]  # load the IDR, copy the file, then the one submit statement
+
+    def test_the_submit_statement_stamps_the_copy_and_the_time(self, admin_client):
+        with patched(idrs=([MOCK_IDR_ROW], [MOCK_SIGNED_IDR_ROW]), idr_reports=REPORTS_THEN_NUMBERED) as mocks:
+            admin_client.post(self.url)
+        sql, params = mocks["idrs"].call_args.args
+        assert "inspector_signature_path = %s" in sql and "inspector_signed_at = now()" in sql
+        assert "status = 'submitted'" in sql and sql.count("UPDATE icid.idrs") == 1  # still one statement
+        returning = sql.split("RETURNING")[1]
+        assert "inspector_signature_path" in returning and "inspector_signed_at" in returning
+        assert params == (UUID(IDR_ID), SIGNATURE_COPY)
+
+    def test_the_response_carries_the_signature_and_when_it_was_signed(self, admin_client):
+        with patched(idrs=([MOCK_IDR_ROW], [MOCK_SIGNED_IDR_ROW]), idr_reports=REPORTS_THEN_NUMBERED):
+            idr = admin_client.post(self.url).json()["data"]
+        assert idr["status"] == "submitted"
+        assert idr["inspector_signature_path"] == SIGNATURE_COPY
+        assert idr["inspector_signed_at"] == "2026-09-25T15:30:00Z"
+
+    def test_a_failed_copy_is_502_and_the_idr_stays_a_draft(self, admin_client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
+            mocks["signature"].side_effect = SignatureStorageError("Could not copy the signature for this IDR")
+            response = admin_client.post(self.url)
+        assert response.status_code == 502
+        assert response.json() == {"detail": "Could not copy the signature for this IDR"}
+        assert mocks["idrs"].call_count == 1  # no submit statement
+
+    def test_a_failed_submit_after_the_copy_is_500_and_the_orphan_is_logged(self, admin_client, caplog):
+        with patched(idrs=([MOCK_IDR_ROW], None), idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
+            response = admin_client.post(self.url)
+        assert response.status_code == 500 and response.json() == {"detail": "Failed to submit IDR"}
+        mocks["signature"].assert_called_once()
+        assert SIGNATURE_COPY in caplog.text and "left orphaned" in caplog.text
+
+    def test_a_submit_that_raises_after_the_copy_logs_the_orphan_too(self, caplog):
+        from starlette.testclient import TestClient
+        from api.index import app
+        from api.services.auth import require_full_user
+        from api.schemas.auth import UserOut
+        app.dependency_overrides[require_full_user] = lambda: UserOut.model_validate(ADMIN_USER_ROW)
+        try:
+            with patch("api.services.auth.get_user_by_uuid", return_value=ADMIN_USER_ROW), \
+                    patched(idrs=([MOCK_IDR_ROW], RuntimeError("db down")), idr_reports=[MOCK_GEN_REPORT_ROW]), \
+                    TestClient(app, raise_server_exceptions=False) as client:
+                from tests.v1.test_auth import bearer, token
+                response = client.post(self.url, headers=bearer(token(ADMIN_USER_ROW["uuid"])))
+        finally:
+            app.dependency_overrides.clear()
+        assert response.status_code == 500
+        assert SIGNATURE_COPY in caplog.text and "left orphaned" in caplog.text
+
+    def test_a_lost_race_after_the_copy_is_409_and_the_orphan_is_logged(self, admin_client, caplog):
+        with patched(idrs=([MOCK_IDR_ROW], []), idr_reports=[MOCK_GEN_REPORT_ROW]):
+            response = admin_client.post(self.url)
+        assert response.status_code == 409
+        assert SIGNATURE_COPY in caplog.text and "left orphaned" in caplog.text
+
+    def test_nothing_is_copied_for_an_idr_that_cant_be_submitted(self, admin_client):
+        # a submitted IDR's signature must never be touched; nor is a copy made for a missing or empty IDR
+        for setup in ({"idrs": [MOCK_SUBMITTED_IDR_ROW]}, {"idrs": []}, {"idrs": [MOCK_IDR_ROW], "idr_reports": []}):
+            with patched(**setup) as mocks:
+                assert admin_client.post(self.url).status_code in (400, 404, 409)
+            mocks["signature"].assert_not_called()
+
+    def test_a_demo_user_is_refused_before_any_of_it(self, demo_client):
+        with patched(idrs=[DEMO_IDR_ROW], idr_reports=[MOCK_GEN_REPORT_ROW]) as mocks:
+            response = demo_client.post(self.url)
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: submit is disabled"}
+        mocks["signature"].assert_not_called()
+
+    def test_idr_reads_carry_the_signature_columns(self, admin_client):
+        with patched(idrs=[MOCK_SIGNED_IDR_ROW], idr_reports=[]) as mocks:
+            idr = admin_client.get(f"/v1/idrs/{IDR_ID}").json()["data"]
+        assert "inspector_signature_path" in mocks["idrs"].call_args.args[0]
+        assert (idr["inspector_signature_path"], idr["inspector_signed_at"]) == (SIGNATURE_COPY, "2026-09-25T15:30:00Z")
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
+            draft = admin_client.get(f"/v1/idrs/{IDR_ID}").json()["data"]
+        assert (draft["inspector_signature_path"], draft["inspector_signed_at"]) == (None, None)

@@ -4,17 +4,18 @@ from uuid import UUID
 from api.db.runner import run_query
 
 # What sign-in reads about a user. The password hash is added only by get_user_for_auth.
-_AUTH_USER_SELECT = """
-        SELECT
+_AUTH_USER_COLUMNS = """
             u.uuid,
             u.email,
             u.first_name,
             u.last_name,
             u.client_id,
             u.role,
-            u.is_demo
-        FROM icid.users u
-"""
+            u.is_demo,
+            u.signature_path,
+            u.signature_type,
+            u.signature_set_at"""
+_AUTH_USER_SELECT = "\n        SELECT" + _AUTH_USER_COLUMNS + "\n        FROM icid.users u\n"
 _AUTH_USER_WITH_HASH_SELECT = _AUTH_USER_SELECT.replace("u.is_demo", "u.is_demo,\n            u.password_hash")
 # Emails are stored as entered and matched without regard to case; the oldest wins if two differ only by case
 _BY_EMAIL = "        WHERE lower(u.email) = %s\n        ORDER BY u.created_at, u.uuid\n        LIMIT 1;"
@@ -156,3 +157,25 @@ def delete_demo_user_rows(uuid: UUID) -> Optional[list[dict[str, Any]]]:
         SELECT uuid FROM gone_user;
     """
     return run_query(sql, (uuid,))
+
+
+def set_user_signature(uuid: UUID, signature_path: str, signature_type: str) -> Optional[dict[str, Any]]:
+    """
+    Record a user's current signature: where its file is, how it was made, and now as when it was set. Never a demo user's.
+    Takes the user's uuid, the file's object path in the signatures bucket, and 'drawn' or 'uploaded'.
+    Returns the updated user dict (as get_user_by_uuid returns it), or None if no such non-demo user exists.
+    """
+    sql = (
+        """
+        UPDATE icid.users u
+        SET signature_path = %s,
+            signature_type = %s,
+            signature_set_at = now(),
+            updated_at = now()
+        WHERE u.uuid = %s AND u.is_demo = false
+        RETURNING"""
+        + _AUTH_USER_COLUMNS
+        + ";"
+    )
+    rows = run_query(sql, (signature_path, signature_type, uuid))
+    return rows[0] if rows else None

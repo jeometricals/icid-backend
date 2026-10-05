@@ -170,15 +170,24 @@ def optional_user(authorization: Optional[str] = Header(None)) -> Optional[UserO
         return None
 
 
+def _refuse_demo(user: UserOut, detail: str) -> UserOut:
+    """
+    Turn a demo user away.
+    Takes the user and what to tell a demo user.
+    Returns the user; raises 403 with that detail for a demo user.
+    """
+    if user.is_demo:
+        raise HTTPException(status_code=403, detail=detail)
+    return user
+
+
 def require_full_user(user: UserOut = Depends(current_user)) -> UserOut:
     """
     FastAPI dependency for submitting: the signed-in user, who must not be a demo user.
     Takes the current user.
     Returns them; raises 403 for a demo user.
     """
-    if user.is_demo:
-        raise HTTPException(status_code=403, detail="Demo mode: submit is disabled")
-    return user
+    return _refuse_demo(user, "Demo mode: submit is disabled")
 
 
 def no_demo_users(user: UserOut = Depends(current_user)) -> UserOut:
@@ -187,9 +196,16 @@ def no_demo_users(user: UserOut = Depends(current_user)) -> UserOut:
     Takes the current user.
     Returns them; raises 403 for a demo user.
     """
-    if user.is_demo:
-        raise HTTPException(status_code=403, detail="Demo mode: not available")
-    return user
+    return _refuse_demo(user, "Demo mode: not available")
+
+
+def no_demo_signatures(user: UserOut = Depends(current_user)) -> UserOut:
+    """
+    FastAPI dependency for the signature routes: demo users can't submit, so they have no signature.
+    Takes the current user.
+    Returns them; raises 403 for a demo user.
+    """
+    return _refuse_demo(user, "Demo mode: signatures are not available")
 
 
 def demo_idr_fence(request: Request, user: UserOut = Depends(current_user)) -> None:

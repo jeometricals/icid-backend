@@ -32,6 +32,8 @@ class Idr(BaseModel):
     submitted_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    inspector_signature_path: Optional[str] = None
+    inspector_signed_at: Optional[datetime] = None
 
 
 class IdrResponse(BaseModel):

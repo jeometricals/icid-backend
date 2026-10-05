@@ -88,3 +88,14 @@ class TestListAllUsers:
             response = admin_client.get("/v1/users/")
         assert response.status_code == 200
         assert [user["email"] for user in response.json()["data"]] == ["reza@icid.local", "Nadir.shah@goorkaneng.com"]
+
+    def test_the_list_never_carries_signature_or_sign_in_columns(self, admin_client):
+        leaky = {**MOCK_USER_ROWS[0], "signature_path": "users/x/signature.png", "signature_type": "drawn",
+                 "signature_set_at": "2026-10-01T09:00:00Z", "password_hash": "$2b$12$x", "role": "admin"}
+        with patch("api.queries.users.run_query", return_value=[leaky]) as run:
+            response = admin_client.get("/v1/users/")
+        assert set(response.json()["data"][0]) == {"user_id", "email", "first_name", "last_name", "phone_number",
+                                                   "employer"}
+        assert "signature" not in response.text and "password_hash" not in response.text
+        sql = run.call_args.args[0]
+        assert "signature" not in sql and "password_hash" not in sql

@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 
@@ -26,6 +27,7 @@ from api.queries.projects import get_project_by_id, is_user_on_project
 from api.services.attachments import delete_all_storage_files_for_report
 from api.services.auth import current_user, demo_idr_fence, require_full_user
 from api.services.auto_general import regenerate_auto_general
+from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 from api.schemas.auth import UserOut
 from api.schemas.idr import (
     Idr,
@@ -46,6 +48,8 @@ from api.schemas.idr_report import (
     ReportData,
     ReportType,
 )
+
+logger = logging.getLogger(__name__)
 
 # Every route needs a signed-in user (any role); a demo user reaches only their own IDRs
 router = APIRouter(prefix="/v1/idrs", tags=["IDRs"], dependencies=[Depends(current_user), Depends(demo_idr_fence)])
@@ -323,12 +327,12 @@ def list_project_idrs(
     )
 
 
-@router.post("/{idr_id}/submit", response_model=IdrWithReportsResponse, dependencies=[Depends(require_full_user)])
-def submit_draft_idr(idr_id: UUID) -> IdrWithReportsResponse:
+@router.post("/{idr_id}/submit", response_model=IdrWithReportsResponse)
+def submit_draft_idr(idr_id: UUID, user: UserOut = Depends(require_full_user)) -> IdrWithReportsResponse:
     """
-    Submit a draft IDR: lock it, stamp submitted_at, number every report and set total_pages. Not open to demo users.
-    Takes the IDR uuid as a path parameter; no body.
-    Returns an IdrWithReportsResponse with the reports in page order; raises 403 (demo user), 404 (no IDR), 409 (not draft) and 400 (no reports).
+    Submit a draft IDR, signed by the signed-in user: copy their signature to the IDR, then lock it, stamp submitted_at and the signature, number every report and set total_pages. Not open to demo users.
+    Takes the IDR uuid as a path parameter and the signed-in user; no body.
+    Returns an IdrWithReportsResponse with the reports in page order; raises 403 (demo user), 404 (no IDR), 409 (not draft), 400 (no reports, or the user has no signature) and 502 (the signature couldn't be copied).
     """
     idr = get_idr_by_id(idr_id)
 
@@ -346,7 +350,24 @@ def submit_draft_idr(idr_id: UUID) -> IdrWithReportsResponse:
     if not reports:
         raise HTTPException(status_code=400, detail="IDR must contain at least one report before submission.")
 
-    rows = submit_idr(idr_id)
+    if user.signature_path is None:
+        raise HTTPException(status_code=400, detail="Signature required before submitting")
+
+    # The copy comes first: Storage and Postgres can't share a transaction, and a submitted IDR must never point at
+    # a signature that isn't there. If the submit below doesn't go through, the copy is left behind, unreferenced.
+    try:
+        signature_copy = snapshot_signature_for_idr(user.signature_path, idr_id)
+    except SignatureStorageError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
+        rows = submit_idr(idr_id, signature_copy)
+    except Exception:
+        logger.warning("Submit of IDR %s failed after its signature was copied; %s is left orphaned", idr_id, signature_copy)
+        raise
+
+    if not rows:
+        logger.warning("IDR %s was not submitted after its signature was copied; %s is left orphaned", idr_id, signature_copy)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to submit IDR")

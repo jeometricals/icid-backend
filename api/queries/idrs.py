@@ -22,7 +22,9 @@ IDR_COLUMNS = """
     status,
     submitted_at,
     created_at,
-    updated_at
+    updated_at,
+    inspector_signature_path,
+    inspector_signed_at
 """
 
 
@@ -184,10 +186,10 @@ def list_idrs(
     return run_query(sql, tuple(params))
 
 
-def submit_idr(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+def submit_idr(idr_id: UUID, signature_path: str) -> Optional[list[dict[str, Any]]]:
     """
-    Submit a draft IDR in one statement: lock it, number its reports, set total_pages, status, submitted_at and updated_at.
-    Takes the IDR uuid. Pages run General's group first, then other main reports by creation, each followed by its addendums, then standalone addendums.
+    Submit a draft IDR in one statement: lock it, number its reports, set total_pages, status, submitted_at and updated_at, and stamp the inspector's signature (its path, and now as when it was signed).
+    Takes the IDR uuid and the object path of the IDR's own copy of the signature. Pages run General's group first, then other main reports by creation, each followed by its addendums, then standalone addendums.
     Returns a one-row list with the submitted IDR, an empty list if it is not a draft or has no reports, or None on failure.
     """
     sql = f"""
@@ -224,9 +226,11 @@ def submit_idr(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
         SET status = 'submitted',
             submitted_at = now(),
             updated_at = now(),
-            total_pages = (SELECT COUNT(*) FROM ordered)
+            total_pages = (SELECT COUNT(*) FROM ordered),
+            inspector_signature_path = %s,
+            inspector_signed_at = now()
         WHERE idr_id IN (SELECT idr_id FROM target)
             AND EXISTS (SELECT 1 FROM ordered)
         RETURNING {IDR_COLUMNS};
     """
-    return run_query(sql, (idr_id,))
+    return run_query(sql, (idr_id, signature_path))

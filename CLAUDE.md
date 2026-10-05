@@ -17,12 +17,12 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`, `debug.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`, `debug.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the auth users (the admin account and the legacy demo user) and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -36,12 +36,14 @@ every request to it.
 <!-- Update this list when endpoints change -->
 - `GET /status`
 - `POST /v1/auth/login` — email (matched without regard to case) and password; returns `{access_token, token_type, expires_in, user}`, or 401 `Invalid email or password`
-- `GET /v1/auth/me` — the user the bearer token belongs to; 401 `Not authenticated`, `Token expired` or `Invalid token`
+- `GET /v1/auth/me` — the user the bearer token belongs to, with `has_signature` and `signature_set_at`; 401 `Not authenticated`, `Token expired` or `Invalid token`
 - `POST /v1/auth/demo` — public; makes a throwaway demo user on `DEMO01` and returns what login returns; 503 when `DEMO01` is missing or 200 demo users already exist
 - `POST /v1/auth/logout` — 204 always; stateless, the client drops its token. A demo user signing out is deleted with everything they made
 
 Every route below needs a bearer token (401 without a valid one); see "Sign-in" under the conventions.
 
+- `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
+- `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
 - `GET /v1/users/` — 403 for a demo user
 - `GET /v1/projects/` — the signed-in user's projects (through `project_users`)
 - `GET /v1/projects/{project_id}`
@@ -52,7 +54,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/reports` — add a report (typed by `ReportType`; addendums may name a parent)
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
-- `POST /v1/idrs/{idr_id}/submit` — submit a draft (locks it, numbers pages, sets `total_pages`); 403 `Demo mode: submit is disabled` for a demo user
+- `POST /v1/idrs/{idr_id}/submit` — submit a draft, signed by the signed-in user (locks it, numbers pages, sets `total_pages`, stamps `inspector_signature_path` and `inspector_signed_at`); 400 `Signature required before submitting` when they have no signature, 502 when it can't be copied, 403 `Demo mode: submit is disabled` for a demo user
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — replace an attachment's name and description; draft only
@@ -131,6 +133,22 @@ Any change must follow these.
     (not built), or running it by hand. They are spelled out in the migration file.
   - At most `MAX_DEMO_USERS` (200) exist at once; past that the endpoint returns 503 until some are deleted.
   - Tests use the `demo_client` fixture (signed in as `DEMO_USER_ROW`).
+- **Signatures.** Files live in the private `signatures` bucket; nothing but the backend reads it.
+  - **Setting one takes two steps**, like an attachment: `upload-request` signs a URL for
+    `users/{user uuid}/signature.png`, the client PUTs the PNG there, and `confirm` checks the file exists and
+    records `signature_path`, `signature_type` and `signature_set_at` on the user. The path is fixed per user and
+    the upload replaces the file, so a user has one current signature. The bucket itself enforces PNG and 500 KB.
+  - **Submitting signs.** The submit endpoint needs the signed-in user to have a signature (400 otherwise). It
+    copies their current file to `idrs/{idr id}/inspector_{random}.png`, then runs the one submit statement, which
+    stamps that path and the time on the IDR. The copy is the IDR's own: changing the signature later doesn't
+    change what was signed, and nothing under `idrs/` is ever overwritten or removed.
+  - **The copy comes before the UPDATE.** If the copy fails, the submit is refused (502) and the IDR stays a
+    draft. If the UPDATE then fails or loses a race, the copy is left behind unreferenced, and logged.
+  - **Demo users have no signatures**: both signature routes return 403 `Demo mode: signatures are not
+    available`, and they can't submit anyway.
+  - `UserOut` carries `signature_path` internally for the submit flow but never serialises it; responses show
+    `has_signature` and `signature_set_at` only. IDR responses do carry `inspector_signature_path`.
+  - The signer is whoever submits, not necessarily the IDR's reporter (there are no ownership checks yet).
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.
