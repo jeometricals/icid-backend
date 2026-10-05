@@ -80,3 +80,11 @@ class TestListAllUsers:
         with patch("api.queries.users.run_query", return_value=None):
             response = client.get("/v1/users/")
         assert response.status_code == 500
+
+    def test_a_reserved_domain_email_is_listed(self, client):
+        # the seeded auth users sit on @icid.local, which EmailStr would reject
+        row = {**MOCK_USER_ROWS[0], "email": "reza@icid.local"}
+        with patch("api.queries.users.run_query", return_value=[row, MOCK_USER_ROWS[1]]):
+            response = client.get("/v1/users/")
+        assert response.status_code == 200
+        assert [user["email"] for user in response.json()["data"]] == ["reza@icid.local", "Nadir.shah@goorkaneng.com"]
