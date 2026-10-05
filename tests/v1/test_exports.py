@@ -2117,7 +2117,18 @@ def text_boxes(content: bytes, sheet: str) -> list[dict]:
     return found
 
 
+def frame_box(box: dict) -> tuple[int, int, int, int]:
+    """
+    Place an anchor against the photo frame (B25:AI58, 19 px columns and 17 px rows).
+    Takes an anchor as anchor_box reads it.
+    Returns (its left and top edges' distance from the frame's top-left corner, its width, its height), in pixels.
+    """
+    return ((box["col"] - 1) * 19 + box["col_off"], (box["row"] - 24) * 17 + box["row_off"], box["width"],
+            box["height"])
+
+
 PDF_TYPE = "application/pdf"
+FRAME_WIDTH, FRAME_HEIGHT = 646, 578  # B25:AI58, in pixels
 
 
 class TestAttachmentsExport:
@@ -2129,8 +2140,8 @@ class TestAttachmentsExport:
         sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]
         assert (sheet["B21"].value, sheet["B22"].value) == ("Photo 1", "What photo 1 shows.")
         assert sheet["B21"].font.b is True
-        # 40 x 30 fills the 646 x 561 px area's width (646 x 484), centred down it: 38 px = 2 rows + 4 px from B26
-        assert pictures(content, "Attachments 1") == [{"col": 1, "col_off": 0, "row": 27, "row_off": 4,
+        # 40 x 30 fills the 646 x 578 px frame's width (646 x 484), centred down it: 47 px = 2 rows + 13 px from B25
+        assert pictures(content, "Attachments 1") == [{"col": 1, "col_off": 0, "row": 26, "row_off": 13,
                                                        "width": 646, "height": 484, "format": "JPEG",
                                                        "size": (40, 30)}]
 
@@ -2170,11 +2181,11 @@ class TestAttachmentsExport:
         assert sheet["B26"].value is None
         assert pictures(content, "Attachments 1") == []
 
-    def test_a_pdfs_page_has_a_no_preview_box_over_the_photo_area(self):
+    def test_a_pdfs_page_has_a_no_preview_box_over_the_photo_frame(self):
         pdf = attachment(1, SWCB_1, "application/pdf", file_name="mix_ticket.pdf")
         content = export_bytes(reports=[swcb_row(1, 2)], attachments=[pdf])
         assert text_boxes(content, "Attachments 1") == [{
-            "col": 1, "col_off": 0, "row": 25, "row_off": 0, "width": 646, "height": 561,  # B26:AI58
+            "col": 1, "col_off": 0, "row": 24, "row_off": 0, "width": 646, "height": 578,  # B25:AI58
             "text": "No preview available in this export — see ICID for the full file", "size_pt": 14,
             "color": "808080", "fill": "FFFFFF", "outline": (9525, "808080"), "centred": True,
         }]
@@ -2204,7 +2215,7 @@ class TestAttachmentsExport:
         content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
                                files={photo["storage_path"]: image_bytes("JPEG", (40, 30), orientation=6)})
         placed = pictures(content, "Attachments 1")[0]
-        assert placed["size"] == (30, 40) and (placed["width"], placed["height"]) == (421, 561)  # fits the height
+        assert placed["size"] == (30, 40) and (placed["width"], placed["height"]) == (434, 578)  # fits the height
 
     def test_a_photo_that_cant_be_fetched_gets_a_placeholder_and_frees_its_place(self, monkeypatch):
         monkeypatch.setattr(export_attachments, "MAX_PHOTOS", 2)
@@ -2214,8 +2225,9 @@ class TestAttachmentsExport:
         content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows, files=files)
         assert visible_sheets(content)[-3:] == ["Attachments 1", "Attachments 2", "Attachments 3"]  # no closing page
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
-        assert (book["Attachments 1"]["B21"].value, book["Attachments 1"]["B26"].value) == (
-            "Attachment unavailable: Photo 1", "File: photo_1.jpg (couldn't be fetched for this export)")
+        assert book["Attachments 1"]["B21"].value == "Attachment unavailable: Photo 1"
+        assert [box["text"] for box in text_boxes(content, "Attachments 1")] == [
+            "File: photo_1.jpg (couldn't be fetched for this export)"]
         assert [len(pictures(content, f"Attachments {n}")) for n in (1, 2, 3)] == [0, 1, 1]
 
     def test_photos_past_the_cap_are_counted_on_a_closing_page(self):
@@ -2252,8 +2264,9 @@ class TestAttachmentsExport:
                                files={photo["storage_path"]: image_bytes("JPEG")})
         sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]
         assert sheet["B21"].value == "N" * 82 + "..."
-        lines = [sheet[f"B{row}"].value for row in range(22, 26)]
-        assert lines[0].startswith("word0") and lines[3].endswith("… (continued in ICID)")
+        lines = [sheet[f"B{row}"].value for row in range(22, 25)]
+        assert lines[0].startswith("word0") and lines[2].endswith("… (continued in ICID)")
+        assert sheet["B25"].value is None  # the frame's first row
         assert [sheet[c].value for c in ("G12", "I13", "F15", "H17", "I19", "U19")] == [
             "HWS0023", "Installation of Curb, Sidewalk & Ped-Ramp <Queens>", "Queens", "Genghis Khan", "9/30/26", None]
 
@@ -2265,6 +2278,89 @@ class TestAttachmentsExport:
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
         assert [book[f"Attachments {n}"]["B21"].value for n in (1, 2, 3)] == ["Photo 1", "PDF: Photo 2", "Photo 3"]
         assert [len(pictures(content, f"Attachments {n}")) for n in (1, 2, 3)] == [1, 0, 1]
+
+    def test_the_frame_is_b25_to_ai58(self):
+        assert (export_attachments.PHOTO_FRAME_COL, export_attachments.PHOTO_FRAME_ROW) == ("B", 25)
+        assert (export_attachments.PHOTO_FRAME_CX, export_attachments.PHOTO_FRAME_CY) == (
+            FRAME_WIDTH * 9525, FRAME_HEIGHT * 9525) == (6153150, 5505450)
+        # The template's own sizes: 34 columns of 2.71 characters (19 px), 34 rows of 12.75 pt (17 px)
+        sheet = openpyxl.load_workbook(export.TEMPLATE_PATH)["Sketch Cont"]
+        assert sheet.column_dimensions["A"].width == 2.7109375 and sheet.column_dimensions["A"].max >= 35
+        assert {sheet.row_dimensions[row].height for row in range(25, 59)} == {12.75}
+
+    def test_a_landscape_photo_fills_the_frames_width(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG", (1200, 900))})
+        left, top, width, height = frame_box(pictures(content, "Attachments 1")[0])
+        assert (width, height) == (FRAME_WIDTH, 484)  # 646 x 3/4 = 484.5
+        assert left == 0 and top == (FRAME_HEIGHT - 484) // 2 == FRAME_HEIGHT - 484 - top  # equal strips: 47 px
+
+    def test_a_portrait_photo_fills_the_frames_height(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG", (900, 1200))})
+        left, top, width, height = frame_box(pictures(content, "Attachments 1")[0])
+        assert (width, height) == (434, FRAME_HEIGHT)  # 578 x 3/4 = 433.5
+        assert top == 0 and left == (FRAME_WIDTH - 434) // 2 == FRAME_WIDTH - 434 - left  # equal strips: 106 px
+
+    def test_a_square_photo_fills_the_frames_shorter_side(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG", (1000, 1000))})
+        left, top, width, height = frame_box(pictures(content, "Attachments 1")[0])
+        assert (width, height) == (FRAME_HEIGHT, FRAME_HEIGHT)
+        assert top == 0 and left == (FRAME_WIDTH - FRAME_HEIGHT) // 2 == FRAME_WIDTH - FRAME_HEIGHT - left  # 34 px
+
+    def test_a_sideways_photo_is_measured_after_it_is_stood_upright(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG", (1200, 900), orientation=6)})
+        assert frame_box(pictures(content, "Attachments 1")[0]) == (106, 0, 434, FRAME_HEIGHT)  # as a portrait
+
+    def test_a_pdfs_box_fills_the_frame(self):
+        pdf = attachment(1, SWCB_1, PDF_TYPE)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[pdf])
+        assert [frame_box(box) for box in text_boxes(content, "Attachments 1")] == [
+            (0, 0, FRAME_WIDTH, FRAME_HEIGHT)]
+
+    def test_an_unavailable_photos_box_fills_the_frame(self):
+        photo = attachment(1, SWCB_1)
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=[photo],
+                               files={photo["storage_path"]: TimeoutError("read timed out")})
+        box, = text_boxes(content, "Attachments 1")
+        assert frame_box(box) == (0, 0, FRAME_WIDTH, FRAME_HEIGHT)
+        assert (box["size_pt"], box["color"], box["fill"], box["outline"], box["centred"]) == (
+            10, "000000", "FFFFFF", (9525, "808080"), True)
+        assert pictures(content, "Attachments 1") == []
+        assert openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]["B26"].value is None
+
+    def test_a_photo_a_pdf_and_a_photo_each_fill_their_own_page(self):
+        rows = [attachment(1, SWCB_1), attachment(2, SWCB_1, PDF_TYPE), attachment(3, SWCB_1)]
+        content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows,
+                               files={rows[0]["storage_path"]: image_bytes("JPEG", (1200, 900)),
+                                      rows[2]["storage_path"]: image_bytes("JPEG", (900, 1200))})
+        assert visible_sheets(content)[-3:] == ["Attachments 1", "Attachments 2", "Attachments 3"]
+        assert [[frame_box(p) for p in pictures(content, f"Attachments {n}")] for n in (1, 2, 3)] == [
+            [(0, 47, FRAME_WIDTH, 484)], [], [(106, 0, 434, FRAME_HEIGHT)]]
+        assert [[frame_box(b) for b in text_boxes(content, f"Attachments {n}")] for n in (1, 2, 3)] == [
+            [], [(0, 0, FRAME_WIDTH, FRAME_HEIGHT)], []]
+
+    def test_a_full_idr_keeps_its_tab_order_with_attachments(self):
+        ac = ac_row(page_number=2)
+        rows = [attachment(1, GENERAL_ROW["report_id"]), attachment(2, ac["report_id"], PDF_TYPE),
+                attachment(3, SWCB_1)]
+        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 3}, reports=[GENERAL_ROW, ac, swcb_row(1, 3)],
+                               attachments=rows, files={rows[0]["storage_path"]: image_bytes("JPEG"),
+                                                        rows[2]["storage_path"]: image_bytes("PNG")})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Attachments 1", "AC Fr", "AC Bk", "Attachments 2",
+                                           "Conc Fr", "Conc Bk", "Attachments 3"]
+        assert print_order_page_numbers(content) == [1, None, None, 2, None, None, 3, None, None]
+        assert zipfile.ZipFile(io.BytesIO(content)).testzip() is None
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        assert [book[f"Attachments {n}"]["B21"].value for n in (1, 2, 3)] == ["Photo 1", "PDF: Photo 2", "Photo 3"]
+        assert [len(pictures(content, f"Attachments {n}")) for n in (1, 2, 3)] == [1, 0, 1]
+        assert [frame_box(b) for b in text_boxes(content, "Attachments 2")] == [(0, 0, FRAME_WIDTH, FRAME_HEIGHT)]
 
     def test_an_unprinted_reports_attachments_come_last(self):
         sewer = {"report_id": UUID(int=0x5E01), "report_type": "SWR", "is_addendum": False,

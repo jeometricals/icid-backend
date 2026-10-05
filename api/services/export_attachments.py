@@ -2,9 +2,9 @@
 Prints an IDR's report attachments on copies of the template's Sketch Cont page ("Attachments 1", "Attachments 2", ...).
 
 Each attachment gets a page of its own under the continuation header: its name as a title and its description beneath,
-then, for a photo, the photo fitted to the sketch grid. A PDF can't be drawn on a page, so its page shows a "no preview"
-box and names the file; a photo that can't be fetched or read gets a page saying so. At most MAX_PHOTOS photos print
-per export; any past that are counted on one closing page.
+then, for a photo, the photo fitted to the photo frame (B25:AI58 of the sketch grid). A PDF can't be drawn on a page,
+so its page shows a "no preview" box over the frame and names the file; a photo that can't be fetched or read gets a
+box there saying so. At most MAX_PHOTOS photos print per export; any past that are counted on one closing page.
 
 Photos are fetched from Storage on a few threads at once, then shrunk (and HEIC / WebP converted) with Pillow so the
 workbook stays a reasonable size.
@@ -25,7 +25,7 @@ from api.services.export_common import (
     ContinuationHeader, TextArea, fill_lines, mark_truncated, paragraphs, stamp_continuation_header, text_value,
     write_lines,
 )
-from api.services.xlsx_template import WorkbookTemplate
+from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 from api.storage.client import download_file
 
 logger = logging.getLogger(__name__)
@@ -53,19 +53,22 @@ SKETCH_CONT_HEADER = ContinuationHeader(
     inspector="H17",
 )
 
-# The page below the header: row 21 (empty, above the grid) holds the title, the grid's first four rows the description
-# (10 pt across B:AI, 85 characters a line, as on Report Cont), and the rest of the grid the photo. Every column is
-# 19 px and every grid row 17 px, so the photo area B26:AI58 is 34 x 19 = 646 px wide and 33 x 17 = 561 px tall.
+# The page below the header: row 21 (empty, above the grid) holds the title, the grid's first three rows the
+# description (10 pt across B:AI, 85 characters a line, as on Report Cont), and the rest of the grid, B25:AI58, is the
+# photo frame. Every column is 19 px and every grid row 17 px, so the frame is 34 x 19 = 646 px wide and
+# 34 x 17 = 578 px tall.
 TITLE_CELL = "B21"
-PHOTO_COLUMN, PHOTO_ROW = "B", 26
 COLUMN_PX, ROW_PX = 19, 17
-PHOTO_AREA_PX = (34 * COLUMN_PX, 33 * ROW_PX)
-NOTE_CELL = "B26"  # why a photo is missing, where it would go
+PHOTO_FRAME_COL, PHOTO_FRAME_ROW = "B", 25
+PHOTO_FRAME_CX = 34 * COLUMN_PX * EMU_PER_PIXEL  # 6,153,150 EMU
+PHOTO_FRAME_CY = 34 * ROW_PX * EMU_PER_PIXEL     # 5,505,450 EMU
+FRAME_CELL = f"{PHOTO_FRAME_COL}{PHOTO_FRAME_ROW}"
+FRAME_PX = (PHOTO_FRAME_CX // EMU_PER_PIXEL, PHOTO_FRAME_CY // EMU_PER_PIXEL)
 
 
 @dataclass(frozen=True)
 class CaptionStyle:
-    """How a page's title (B21) and description (B22:B25) are set: font sizes, characters a line, row heights."""
+    """How a page's title (B21) and description (B22:B24) are set: font sizes, characters a line, row heights."""
 
     title_pt: Optional[float]           # None keeps the template's 10 pt
     title_chars: int
@@ -77,21 +80,24 @@ class CaptionStyle:
 
 # Photo pages keep the template's 10 pt; a PDF page has room to spare, so its title and description are larger, on
 # taller rows (Arial's line height: 16 pt needs about 21 pt, 12 pt about 15.75). 12 pt holds 85 x 10 / 12 = 70
-# characters across B:AI, and 16 pt 85 x 10 / 16 = 53, so the description keeps its four lines.
+# characters across B:AI, and 16 pt 85 x 10 / 16 = 53, so the description keeps its three lines.
 PHOTO_CAPTION = CaptionStyle(title_pt=None, title_chars=85, title_row_pt=None,
-                             description=TextArea(rows=range(22, 26), column="B", line_chars=85),
+                             description=TextArea(rows=range(22, 25), column="B", line_chars=85),
                              description_pt=None, description_row_pt=None)
 PDF_CAPTION = CaptionStyle(title_pt=16, title_chars=53, title_row_pt=21,
-                           description=TextArea(rows=range(22, 26), column="B", line_chars=70),
+                           description=TextArea(rows=range(22, 25), column="B", line_chars=70),
                            description_pt=12, description_row_pt=15.75)
 
-# A PDF's page: a white box over the photo area (hiding the grid) with a thin grey outline and the note centred in it,
-# and the file's name on the grid row below it (B59)
+# A PDF's page: a white box over the photo frame (hiding the grid) with a thin grey outline and the note centred in it,
+# and the file's name on the grid row below it (B59). An unavailable photo's page has the same box, its note in 10 pt
+# black.
 PDF_NOTE = "No preview available in this export — see ICID for the full file"
 PDF_NOTE_PT = 14
 GREY = "808080"
 FILE_CELL = "B59"
 FILE_PT = 10
+UNAVAILABLE_NOTE_PT = 10
+BLACK = "000000"
 
 
 @dataclass
@@ -167,16 +173,16 @@ def fetch_photos(candidates: list[dict[str, Any]]) -> dict[UUID, Optional[Photo]
 
 def _place_photo(workbook: WorkbookTemplate, sheet: str, photo: Photo, description: str) -> None:
     """
-    Draw a photo as large as fits the photo area, keeping its proportions, centred in it.
+    Draw a photo as large as fits the photo frame, keeping its proportions, centred in it.
     Takes the workbook, the sheet, the Photo and its alt text.
     Returns nothing.
     """
-    area_width, area_height = PHOTO_AREA_PX
-    scale = min(area_width / photo.width, area_height / photo.height)
+    frame_width, frame_height = FRAME_PX
+    scale = min(frame_width / photo.width, frame_height / photo.height)
     width, height = max(1, round(photo.width * scale)), max(1, round(photo.height * scale))
-    left, top = (area_width - width) // 2, (area_height - height) // 2
-    first_column = ord(PHOTO_COLUMN) - ord("A")
-    cell = f"{chr(ord('A') + first_column + left // COLUMN_PX)}{PHOTO_ROW + top // ROW_PX}"
+    left, top = (frame_width - width) // 2, (frame_height - height) // 2
+    first_column = ord(PHOTO_FRAME_COL) - ord("A")
+    cell = f"{chr(ord('A') + first_column + left // COLUMN_PX)}{PHOTO_FRAME_ROW + top // ROW_PX}"
     workbook.add_picture(sheet, photo.data, photo.extension, cell, width, height,
                          offset_x_px=left % COLUMN_PX, offset_y_px=top % ROW_PX, description=description)
 
@@ -186,7 +192,7 @@ def _new_page(workbook: WorkbookTemplate, number: int, idr: dict[str, Any], proj
     """
     Make the next attachment page: a copy of the blank Sketch Cont with its header, a bold title and the description.
     Takes the workbook, the page's number (Attachments <number>), the IDR row, the project row, the inspector's
-    name, the title, the description (cut with "continued in ICID" past four lines) and how they're set.
+    name, the title, the description (cut with "continued in ICID" past three lines) and how they're set.
     Returns the page's sheet name.
     """
     sheet = f"{ATTACHMENTS} {number}"
@@ -214,28 +220,27 @@ def _new_page(workbook: WorkbookTemplate, number: int, idr: dict[str, Any], proj
     return sheet
 
 
+def _stamp_frame_box(workbook: WorkbookTemplate, sheet: str, note: str, points: float, rgb: str) -> None:
+    """
+    Cover the photo frame with a white, grey-outlined box, a note centred in it.
+    Takes the workbook, the sheet, the note, its size in points and its colour (RGB hex).
+    Returns nothing.
+    """
+    width, height = FRAME_PX
+    workbook.add_text_box(sheet, note, FRAME_CELL, width, height, points, rgb, GREY)
+
+
 def _stamp_pdf_placeholder(workbook: WorkbookTemplate, sheet: str, file_name: str) -> None:
     """
     Fill a PDF's page where a photo would go: the "no preview" box, and the file's name in grey below it.
     Takes the workbook, the sheet and the PDF's file name.
     Returns nothing.
     """
-    width, height = PHOTO_AREA_PX
-    workbook.add_text_box(sheet, PDF_NOTE, f"{PHOTO_COLUMN}{PHOTO_ROW}", width, height, PDF_NOTE_PT, GREY, GREY)
+    _stamp_frame_box(workbook, sheet, PDF_NOTE, PDF_NOTE_PT, GREY)
     workbook.set_cell(sheet, FILE_CELL, f"File: {file_name}")
     workbook.set_style(sheet, FILE_CELL, workbook.font_style(workbook.cell_style(sheet, FILE_CELL), points=FILE_PT,
                                                              rgb=f"FF{GREY}"))
     workbook.align_left(sheet, FILE_CELL)
-
-
-def _write_note(workbook: WorkbookTemplate, sheet: str, note: str) -> None:
-    """
-    Write a one-line note where the photo would go (why a photo is missing).
-    Takes the workbook, the sheet and the note.
-    Returns nothing.
-    """
-    workbook.set_cell(sheet, NOTE_CELL, note)
-    workbook.align_left(sheet, NOTE_CELL)
 
 
 def more_attachments_note(count: int) -> str:
@@ -251,7 +256,7 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
            attachments: list[tuple[UUID, list[dict[str, Any]]]]) -> tuple[dict[UUID, list[str]], list[str]]:
     """
     Print the IDR's attachments, one page each, numbered Attachments 1, 2, ... in the order given: photos fitted to
-    the page, PDFs as a "no preview" box naming the file, unavailable photos as a note naming the file, and, when
+    the frame, PDFs as a "no preview" box naming the file, unavailable photos as a box naming the file, and, when
     more than MAX_PHOTOS photos arrived, a closing page counting the ones left out.
     Takes the workbook, the IDR row, the project row, the inspector's name and each report's uploaded attachments,
     reports in print order (each report's in upload order).
@@ -278,7 +283,9 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
             elif is_pdf:
                 _stamp_pdf_placeholder(workbook, sheet, attachment["file_name"])
             else:
-                _write_note(workbook, sheet, f"File: {attachment['file_name']} (couldn't be fetched for this export)")
+                _stamp_frame_box(workbook, sheet,
+                                 f"File: {attachment['file_name']} (couldn't be fetched for this export)",
+                                 UNAVAILABLE_NOTE_PT, BLACK)
             workbook.fit_to_letter_page(sheet)
             pages.setdefault(report_id, []).append(sheet)
 
