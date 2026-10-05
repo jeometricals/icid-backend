@@ -28,6 +28,7 @@ every request to it.
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. |
+| `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). |
 | `scripts/` | One-off local utilities. Just `clean_report_template.py`, which builds the export template. Not imported by the app. Seeds and ad-hoc SQL are run in the Supabase SQL editor. |
 
@@ -212,6 +213,3 @@ Not rules — current state, documented so nobody mistakes these for the intende
   have to find them. `POST /v1/auth/demo` is also unthrottled apart from the 200-user ceiling.
 - No multi-statement transactions: `run_query` runs one statement per connection. Work that must be atomic is
   written as one statement (data-modifying CTEs), as the demo user's insert and delete are.
-- Four overlapping READMEs exist (`README.md`, `README_01.md`, `README-db.md`,
-  `README-api.md`) with conflicting run instructions. The one that works is
-  `uvicorn api.index:app --reload`.
