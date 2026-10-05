@@ -318,8 +318,7 @@ class TestFixtures:
 # Every /v1 route needs a signed-in user, except signing in and out
 # ---------------------------------------------------------------------------
 
-PUBLIC_ROUTES = {("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout"), ("POST", "/v1/auth/demo"), ("GET", "/status"),
-                 ("GET", "/debug/schema")}
+PUBLIC_ROUTES = {("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout"), ("POST", "/v1/auth/demo"), ("GET", "/status")}
 PATH_VALUES = {"idr_id": "9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e", "report_id": "e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091",
                "attachment_id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "project_id": "HWS0023"}
 
@@ -385,6 +384,13 @@ class TestEveryRouteNeedsSignIn:
 
     def test_status_stays_public(self, client):
         assert client.get("/status").status_code == 200
+
+    def test_status_is_the_only_route_outside_v1(self):
+        assert [route for route in api_routes() if not route[1].startswith("/v1/")] == [("GET", "/status")]
+
+    def test_the_schema_debug_route_is_gone(self, client, admin_client):
+        assert client.get("/debug/schema").status_code == 404
+        assert admin_client.get("/debug/schema").status_code == 404
 
 
 # ---------------------------------------------------------------------------

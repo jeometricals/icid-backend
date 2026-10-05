@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`, `debug.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -29,7 +29,7 @@ every request to it.
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). |
-| `scripts/` | One-off local utilities (seeding, ad-hoc SQL). Not imported by the app. |
+| `scripts/` | One-off local utilities. Just `clean_report_template.py`, which builds the export template. Not imported by the app. Seeds and ad-hoc SQL are run in the Supabase SQL editor. |
 
 ### Endpoints
 
@@ -63,7 +63,6 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment, pending or uploaded (Storage file, then record); draft only
 - `GET /v1/idrs/{idr_id}/export` — an IDR as an .xlsx on the DDC report-forms template (a draft's pages are marked "DRAFT - Not for Submission"), stored in the `idr-exports` bucket; returns `{download_url, filename}`, the URL valid 10 minutes
 - `GET /v1/contract_items/?project_id=` — a project's contract items, each joined to its spec item (`item_no`, `description`, `spec_section`, `pay_unit`); `[]` when none
-- `GET /debug/schema` — dev-only, and public like `/status`
 
 ## 3. Modularity rules
 
@@ -103,8 +102,8 @@ Any change must follow these.
   its routes returns 401 without a valid bearer token; a new router does the same, and `tests/v1/test_auth.py`
   fails for any `/v1` route left open. An endpoint that needs the user takes
   `user: UserOut = Depends(current_user)` and reads `user.uuid`: the user never comes from a query parameter or a
-  request body (`reporter_uuid` and `uploaded_by` are set from the session). `/status`, `/debug/schema`,
-  `/v1/auth/login` and `/v1/auth/logout` stay public.
+  request body (`reporter_uuid` and `uploaded_by` are set from the session). `/status`, `/v1/auth/login`,
+  `/v1/auth/demo` and `/v1/auth/logout` stay public.
   - **No admin bypass, no ownership checks (yet).** `role == "admin"` changes nothing: an admin lists only the
     projects assigned to them in `project_users`, like anyone else, and `current_admin` is applied nowhere. Any
     signed-in user can read, edit, submit or export any IDR by id, and list IDRs for any reporter
@@ -187,8 +186,6 @@ Any change must follow these.
 
 Not rules — current state, documented so nobody mistakes these for the intended pattern.
 
-- `api/v1/debug.py` exposes the live `icid` schema, without sign-in, and is **dev-only**. Delete before
-  production. It has no test coverage.
 - Endpoints exist for `users`, `projects`, `idrs` (with attachments and the .xlsx export) and `contract_items` (read-only;
   the catalog is seeded, with no write endpoint yet). `api/schemas/` also defines models for
   clients, form templates and the join tables — those schemas run
