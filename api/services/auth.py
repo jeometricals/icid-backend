@@ -9,6 +9,7 @@ Demo mode lives here too: the provider makes throwaway demo users, and the depen
 IDRs and their own project, and stop them submitting.
 """
 
+import hmac
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -18,7 +19,7 @@ import bcrypt
 import jwt
 from fastapi import Depends, Header, HTTPException, Request
 
-from api.core.config import JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
+from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, is_user_on_project
 from api.queries.users import create_demo_user, get_user_by_uuid, get_user_for_auth
@@ -155,6 +156,18 @@ def current_admin(user: UserOut = Depends(current_user)) -> UserOut:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def admin_or_cron(authorization: Optional[str] = Header(None)) -> Optional[UserOut]:
+    """
+    FastAPI dependency for scheduled jobs an admin may also run by hand: lets in the scheduler, which sends CRON_SECRET as its bearer token (as Vercel Cron does), or a signed-in admin.
+    Takes the Authorization header.
+    Returns the admin, or None for the scheduler; raises 401 without a valid token and 403 for a user who isn't an admin. With CRON_SECRET unset, only an admin gets in.
+    """
+    if CRON_SECRET and authorization and hmac.compare_digest(
+            authorization.encode("utf-8"), f"Bearer {CRON_SECRET}".encode("utf-8")):
+        return None
+    return current_admin(current_user(authorization))
 
 
 def optional_user(authorization: Optional[str] = Header(None)) -> Optional[UserOut]:

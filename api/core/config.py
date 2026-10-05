@@ -20,6 +20,9 @@ if not JWT_SECRET_KEY:
 JWT_EXPIRY_SECONDS: int = int(os.getenv("JWT_EXPIRY_SECONDS", "86400"))
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 
+# Scheduled jobs: Vercel Cron sends this as its bearer token. Unset, no scheduled call is let in.
+CRON_SECRET: str = os.getenv("CRON_SECRET", "")
+
 # Supabase Storage (attachments). Checked when the Storage client is first used, not at
 # import, so the rest of the API runs without them.
 SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")

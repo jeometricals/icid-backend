@@ -10,5 +10,11 @@
       "src": "/(.*)",
       "dest": "api/index.py"
     }
+  ],
+  "crons": [
+    {
+      "path": "/v1/admin/cleanup-demos",
+      "schedule": "0 3 * * *"
+    }
   ]
 }

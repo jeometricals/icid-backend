@@ -179,3 +179,13 @@ def set_user_signature(uuid: UUID, signature_path: str, signature_type: str) -> 
     )
     rows = run_query(sql, (signature_path, signature_type, uuid))
     return rows[0] if rows else None
+
+
+def cleanup_abandoned_demo_users() -> Optional[int]:
+    """
+    Delete the demo users created more than 24 hours ago, with everything of theirs, by running the database's cleanup function (migration 014).
+    Takes nothing.
+    Returns how many users it deleted, or None if the function returned nothing.
+    """
+    rows = run_query("SELECT icid.cleanup_abandoned_demo_users() AS purged_count;")
+    return rows[0]["purged_count"] if rows else None

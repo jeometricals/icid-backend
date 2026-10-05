@@ -343,12 +343,13 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 22
+        assert len(PROTECTED_ROUTES) == 24
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
                          ("POST", "/v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request"),
-                         ("POST", "/v1/signatures/upload-request"), ("POST", "/v1/signatures/confirm")):
+                         ("POST", "/v1/signatures/upload-request"), ("POST", "/v1/signatures/confirm"),
+                         ("GET", "/v1/admin/cleanup-demos"), ("POST", "/v1/admin/cleanup-demos")):
             assert expected in PROTECTED_ROUTES
 
     @pytest.mark.parametrize("method,path", PROTECTED_ROUTES)

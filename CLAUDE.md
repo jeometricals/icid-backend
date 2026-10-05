@@ -17,13 +17,13 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
 | `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on a submitted IDR's pages, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the signature), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
-| `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
+| `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
@@ -42,6 +42,7 @@ every request to it.
 
 Every route below needs a bearer token (401 without a valid one); see "Sign-in" under the conventions.
 
+- `POST` or `GET /v1/admin/cleanup-demos` — deletes demo users older than 24 hours; returns `{purged_count}`. For a signed-in admin, or the scheduler sending `CRON_SECRET` as its bearer token; 403 for anyone else signed in
 - `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
 - `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
 - `GET /v1/users/` — 403 for a demo user
@@ -111,9 +112,10 @@ Any change must follow these.
     renamed it `legacy-demo@icid.local`; his email (`KhanG@magnoleng.pc`) has been put back, and
     `seed_auth_users.sql` no longer touches the row except to undo that rename. He has no password.
   - **No admin bypass, no ownership checks (yet).** `role == "admin"` changes nothing: an admin lists only the
-    projects assigned to them in `project_users`, like anyone else, and `current_admin` is applied nowhere. Any
+    projects assigned to them in `project_users`, like anyone else, and `current_admin` guards nothing but the demo cleanup. Any
     signed-in user can read, edit, submit or export any IDR by id, and list IDRs for any reporter
-    (`?reporter_uuid=` is a filter, not an identity). Role and ownership enforcement are Phase 2.
+    (`?reporter_uuid=` is a filter, not an identity). Role and ownership enforcement are Phase 2. The one
+    admin-only route is `/v1/admin/cleanup-demos`.
   - Endpoint tests use the `admin_client` fixture (signed in as `ADMIN_USER_ROW`, `tests/conftest.py`); the plain
     `client` is for testing what happens without a token.
 - **Demo mode.** `POST /v1/auth/demo` is public: it makes a throwaway user (`is_demo`, `demo-<uuid>@icid.local`,
@@ -133,9 +135,12 @@ Any change must follow these.
     IDRs, project assignments and the user row (`api/services/demo.py`). Every delete is tied to `is_demo = true`
     in the SQL itself. Logout returns 204 even if that fails.
   - **Daily backstop.** `icid.cleanup_abandoned_demo_users()` (migration 014) deletes demo users older than 24
-    hours, in the same order. It is not scheduled by the migration; the options are pg_cron
-    (`cron.schedule('cleanup-abandoned-demos', '0 3 * * *', …)`), a Vercel Cron hitting an admin-only endpoint
-    (not built), or running it by hand. They are spelled out in the migration file.
+    hours, in the same order. Vercel Cron runs it every day at 03:00 UTC (`crons` in `vercel.json`) by calling
+    `/v1/admin/cleanup-demos`. Vercel Cron can only send a GET, and sends the project's `CRON_SECRET`
+    environment variable as `Authorization: Bearer …`, so the route takes GET as well as POST and the
+    `admin_or_cron` dependency lets in either that exact secret or a signed-in admin (the first use of
+    `current_admin`). Without `CRON_SECRET` set in Vercel the daily call gets 401 and nothing is cleaned up.
+    pg_cron remains an alternative (see the migration file).
   - At most `MAX_DEMO_USERS` (200) exist at once; past that the endpoint returns 503 until some are deleted.
   - Tests use the `demo_client` fixture (signed in as `DEMO_USER_ROW`).
 - **Signatures.** Files live in the private `signatures` bucket; nothing but the backend reads it.
