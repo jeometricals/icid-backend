@@ -39,7 +39,7 @@ def create_idr(
     sql = f"""
         INSERT INTO icid.idrs (project_id, reporter_uuid, report_date)
         VALUES (%s, %s, %s)
-        ON CONFLICT (project_id, reporter_uuid, report_date) DO NOTHING
+        ON CONFLICT DO NOTHING
         RETURNING {IDR_COLUMNS};
     """
     return run_query(sql, (project_id, reporter_uuid, report_date))

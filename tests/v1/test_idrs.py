@@ -134,7 +134,7 @@ class TestCreateIdr:
             admin_client.post(self.url, json=CREATE_BODY)
         sql, params = mocks["idrs"].call_args.args
         assert "INSERT INTO icid.idrs" in sql
-        assert "ON CONFLICT (project_id, reporter_uuid, report_date) DO NOTHING" in sql
+        assert "ON CONFLICT DO NOTHING" in sql  # no target: the per-day index is partial since migration 017
         assert params == ("HWS0023", ADMIN_USER_ROW["uuid"], REPORT_DATE)
 
     def test_existing_idr_for_day_returns_409_with_its_id(self, admin_client):

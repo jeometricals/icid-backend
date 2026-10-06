@@ -117,6 +117,15 @@ Any change must follow these.
     signed-in user can read, edit, submit or export any IDR by id, and list IDRs for any reporter
     (`?reporter_uuid=` is a filter, not an identity). Role and ownership enforcement are Phase 2. The one
     admin-only route is `/v1/admin/cleanup-demos`.
+  - **Project roles (groundwork, not yet enforced).** `project_users.role` is `inspector`, `oe` or `re`, one row
+    per role, so a user can hold several on a project (migration 018). `require_project_role("oe", "re")` builds a
+    dependency for a route with an `idr_id`: it passes a user holding one of those roles on the IDR's project, and
+    any admin; 404 for an unknown IDR, 403 `Role required: oe/re` otherwise. No route uses it yet. `user_role` on
+    the same table is a display label and is never checked.
+  - **Unique rules on `idrs` are partial indexes** (`WHERE deleted_at IS NULL`, migration 017):
+    `uq_idrs_project_reporter_date` (one IDR per reporter, project and day) and `uq_idrs_project_number`. A
+    soft-deleted IDR frees its day and its number. An INSERT can't name either with a bare column list, so
+    `create_idr` uses `ON CONFLICT DO NOTHING` with no target.
   - Endpoint tests use the `admin_client` fixture (signed in as `ADMIN_USER_ROW`, `tests/conftest.py`); the plain
     `client` is for testing what happens without a token.
 - **Demo mode.** `POST /v1/auth/demo` is public: it makes a throwaway user (`is_demo`, `demo-<uuid>@icid.local`,

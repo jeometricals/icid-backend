@@ -15,9 +15,10 @@ from api.queries.users import (
     create_demo_user, delete_demo_user_rows, get_user_by_email, get_user_by_uuid, get_user_for_auth,
 )
 from api.schemas.auth import UserOut
+from api.queries.projects import get_user_roles_on_project
 from api.services.auth import (
-    AuthProvider, DemoUnavailableError, LocalAuthProvider, auth_provider, current_admin, current_user, optional_user,
-    require_full_user,
+    PROJECT_ROLES, AuthProvider, DemoUnavailableError, LocalAuthProvider, auth_provider, current_admin, current_user,
+    optional_user, require_full_user, require_project_role,
 )
 from api.services.demo import delete_demo_user_cascade
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW
@@ -270,6 +271,124 @@ class TestCurrentAdmin:
         with patch(QUERY, return_value=[INSPECTOR_ROW]):
             user = current_user(f"Bearer {token(INSPECTOR_ROW['uuid'])}")
         assert user.email == "KhanG@magnoleng.pc" and user.role is None
+
+
+# ---------------------------------------------------------------------------
+# require_project_role: the roles a user holds on an IDR's project
+# ---------------------------------------------------------------------------
+
+ROLE_IDR_ID = UUID("e0000000-0000-4000-8000-000000000005")
+ROLE_IDR_ROW = {"idr_id": ROLE_IDR_ID, "project_id": "HWS0023", "reporter_uuid": INSPECTOR_ROW["uuid"]}
+IDRS_QUERY = "api.queries.idrs.run_query"
+PROJECTS_QUERY = "api.queries.projects.run_query"
+
+
+def role_rows(*roles: str) -> list[dict]:
+    """
+    Build the rows get_user_roles_on_project reads.
+    Takes the roles the user holds on the project.
+    Returns one {"role": ...} dict per role.
+    """
+    return [{"role": role} for role in roles]
+
+
+class TestRequireProjectRole:
+    def check(self, allowed: tuple, held: tuple, user_row: dict = INSPECTOR_ROW) -> UserOut:
+        """
+        Run the dependency for a user holding some roles on the IDR's project.
+        Takes the roles the route allows, the roles the user holds and the user's row.
+        Returns what the dependency returns (the user), or raises its HTTPException.
+        """
+        with patch(IDRS_QUERY, return_value=[ROLE_IDR_ROW]), patch(PROJECTS_QUERY, return_value=role_rows(*held)):
+            return require_project_role(*allowed)(ROLE_IDR_ID, UserOut.model_validate(user_row))
+
+    @pytest.mark.parametrize("allowed,held", [
+        (("oe",), ("oe",)), (("oe", "re"), ("re",)), (("oe", "re"), ("inspector", "oe")),
+        (("re",), ("inspector", "oe", "re")), (("inspector",), ("inspector",)),
+    ])
+    def test_a_user_holding_one_of_the_roles_passes(self, allowed, held):
+        assert self.check(allowed, held) == UserOut.model_validate(INSPECTOR_ROW)
+
+    @pytest.mark.parametrize("allowed,held", [
+        (("oe", "re"), ("inspector",)), (("re",), ("inspector", "oe")), (("oe",), ()), (("inspector",), ("oe",)),
+    ])
+    def test_a_user_holding_none_of_them_is_forbidden(self, allowed, held):
+        with pytest.raises(HTTPException) as raised:
+            self.check(allowed, held)
+        assert (raised.value.status_code, raised.value.detail) == (403, "Role required: " + "/".join(allowed))
+
+    def test_adding_a_role_is_what_lets_an_inspector_in(self):
+        with pytest.raises(HTTPException):
+            self.check(("oe", "re"), ("inspector",))
+        assert self.check(("oe", "re"), ("inspector", "oe")).uuid == INSPECTOR_ROW["uuid"]
+
+    def test_the_roles_are_read_for_the_idrs_project(self):
+        with patch(IDRS_QUERY, return_value=[ROLE_IDR_ROW]) as idrs, \
+                patch(PROJECTS_QUERY, return_value=role_rows("re")) as projects:
+            require_project_role("re")(ROLE_IDR_ID, UserOut.model_validate(INSPECTOR_ROW))
+        assert idrs.call_args.args[1] == (ROLE_IDR_ID,)
+        sql, params = projects.call_args.args
+        assert "SELECT role" in sql and "FROM icid.project_users" in sql
+        assert params == (INSPECTOR_ROW["uuid"], "HWS0023")
+
+    def test_an_admin_passes_without_a_lookup(self):
+        admin = UserOut.model_validate(REZA_ROW)
+        with patch(IDRS_QUERY) as idrs, patch(PROJECTS_QUERY) as projects:
+            assert require_project_role("re")(ROLE_IDR_ID, admin) is admin
+        idrs.assert_not_called()
+        projects.assert_not_called()
+
+    def test_a_demo_user_is_only_ever_an_inspector(self):
+        with pytest.raises(HTTPException) as raised:
+            self.check(("oe", "re"), ("inspector",), DEMO_USER_ROW)
+        assert raised.value.status_code == 403
+
+    def test_an_idr_that_doesnt_exist_is_404(self):
+        with patch(IDRS_QUERY, return_value=[]), patch(PROJECTS_QUERY) as projects:
+            with pytest.raises(HTTPException) as raised:
+                require_project_role("oe")(ROLE_IDR_ID, UserOut.model_validate(INSPECTOR_ROW))
+        assert (raised.value.status_code, raised.value.detail) == (404, "IDR not found")
+        projects.assert_not_called()
+
+    def test_a_failed_role_lookup_lets_no_one_in(self):
+        with patch(IDRS_QUERY, return_value=[ROLE_IDR_ROW]), patch(PROJECTS_QUERY, return_value=None):
+            assert get_user_roles_on_project(INSPECTOR_ROW["uuid"], "HWS0023") == set()
+            with pytest.raises(HTTPException) as raised:
+                require_project_role("oe")(ROLE_IDR_ID, UserOut.model_validate(INSPECTOR_ROW))
+        assert raised.value.status_code == 403
+
+    @pytest.mark.parametrize("roles", [(), ("OE",), ("admin",), ("oe", "reviewer")])
+    def test_only_the_known_roles_can_be_asked_for(self, roles):
+        with pytest.raises(ValueError, match="Project roles are inspector, oe, re"):
+            require_project_role(*roles)
+        assert PROJECT_ROLES == ("inspector", "oe", "re")
+
+    def test_it_works_as_a_route_dependency(self):
+        from fastapi import Depends, FastAPI
+        from starlette.testclient import TestClient
+
+        app = FastAPI()
+
+        @app.post("/idrs/{idr_id}/approve")
+        def approve(user: UserOut = Depends(require_project_role("oe", "re"))) -> dict:
+            """
+            A stand-in review route.
+            Takes the user the dependency lets through.
+            Returns their email.
+            """
+            return {"email": user.email}
+
+        headers = bearer(token(INSPECTOR_ROW["uuid"]))
+        with TestClient(app) as test_client, patch(QUERY, return_value=[INSPECTOR_ROW]), \
+                patch(IDRS_QUERY, return_value=[ROLE_IDR_ROW]):
+            with patch(PROJECTS_QUERY, return_value=role_rows("inspector")):
+                refused = test_client.post(f"/idrs/{ROLE_IDR_ID}/approve", headers=headers)
+            with patch(PROJECTS_QUERY, return_value=role_rows("inspector", "oe")):
+                allowed = test_client.post(f"/idrs/{ROLE_IDR_ID}/approve", headers=headers)
+            assert test_client.post(f"/idrs/{ROLE_IDR_ID}/approve").status_code == 401
+            assert test_client.post("/idrs/not-a-uuid/approve", headers=headers).status_code == 422
+        assert (refused.status_code, refused.json()) == (403, {"detail": "Role required: oe/re"})
+        assert (allowed.status_code, allowed.json()) == (200, {"email": "KhanG@magnoleng.pc"})
 
 
 class TestProvider:

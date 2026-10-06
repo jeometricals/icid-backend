@@ -41,6 +41,21 @@ def is_user_on_project(user_id: UUID, project_id: str) -> bool:
     return bool(rows)
 
 
+def get_user_roles_on_project(user_id: UUID, project_id: str) -> set[str]:
+    """
+    Fetch the roles a user holds on a project.
+    Takes the user uuid and the project id.
+    Returns the set of roles ('inspector', 'oe', 're'), empty when they hold none or the lookup fails.
+    """
+    sql = """
+        SELECT role
+        FROM icid.project_users
+        WHERE user_uuid = %s AND project_id = %s;
+    """
+    rows = run_query(sql, (user_id, project_id))
+    return {row["role"] for row in rows or []}
+
+
 def get_project_contractor_name(project_id: str) -> Optional[str]:
     """
     Fetch the name of the organisation on a project in the Contractor role.

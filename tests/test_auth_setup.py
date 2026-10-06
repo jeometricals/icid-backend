@@ -127,7 +127,7 @@ class TestSeeds:
         assert inserted_columns(seed, "project_users") == [["project_id", "user_uuid", "user_role"]]
         assert "JOIN icid.projects p ON p.project_id IN ('HWS0023', 'SE384', 'DEMO01')" in seed
         assert "WHERE u.email = 'reza@icid.local'" in seed
-        assert "ON CONFLICT (project_id, user_uuid) DO NOTHING" in seed
+        assert "ON CONFLICT (project_id, user_uuid, role) DO NOTHING" in seed  # the primary key since 018
         assert set(table_columns("project_users")) >= {"project_id", "user_uuid", "user_role"}
 
     def test_test_project_seeds_demo01(self):

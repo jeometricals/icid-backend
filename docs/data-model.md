@@ -105,10 +105,12 @@ Assigns users to projects. `GET /v1/projects/?user_id=` reads through this table
 |---|---|---|
 | `project_id` | TEXT | PK part; FK → `projects.project_id` |
 | `user_uuid` | UUID | PK part; FK → `users.uuid` |
-| `user_role` | TEXT | The user's role on this project, e.g. `Inspector`, `CCL` |
+| `user_role` | TEXT | A free-text label for the user on this project, e.g. `Inspector`, `CCL`. Shown by the projects list; not checked by the API |
 | `assigned_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
+| `role` | TEXT NOT NULL | PK part. `inspector` (default), `oe` or `re`; CHECK `chk_project_users_role`. What the API checks |
 
-Primary key: `(project_id, user_uuid)`, so a user holds one role per project.
+Primary key: `(project_id, user_uuid, role)`. Roles are additive: a user holding several roles on a
+project has one row per role. Admin is not a project role; it is `users.role`.
 
 ### project_clients
 
@@ -138,16 +140,31 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `weather_am`, `weather_pm` | TEXT | |
 | `total_pages` | INTEGER | NULL while draft; set on submit to the number of reports |
 | `has_dismissed_auto_general` | BOOLEAN NOT NULL | Default `false`. See [Auto-generated General](#auto-generated-general) |
-| `status` | TEXT NOT NULL | `draft` (default) or `submitted`; CHECK `chk_idrs_status` |
+| `status` | TEXT NOT NULL | `draft` (default), `submitted`, `stage1_review`, `stage2_review`, `approved`, `returned` or `deleted`; CHECK `chk_idrs_status`. Only `draft` and `submitted` are set by the API so far |
 | `submitted_at` | TIMESTAMPTZ | NULL until submitted |
 | `inspector_signature_path` | TEXT | The signature stamped at submit (object path in the `signatures` bucket); not changed afterwards. NULL on drafts and on IDRs submitted before signatures. |
 | `inspector_signed_at` | TIMESTAMPTZ | When that signature was stamped |
+| `idr_number` | TEXT | Free text, set when a reviewer picks the IDR up at Stage 1 |
+| `stage1_reviewer_uuid` | UUID | FK → `users.uuid`. Who picked it up at Stage 1 |
+| `stage1_reviewed_at` | TIMESTAMPTZ | |
+| `re_reviewer_uuid` | UUID | FK → `users.uuid`. The RE who picked it up at Stage 2 |
+| `re_signature_path`, `re_signed_at` | TEXT, TIMESTAMPTZ | The RE's signature stamped at approval, like the inspector's pair |
+| `return_reason` | TEXT | The latest return comment |
+| `returned_from` | TEXT | `stage1` or `stage2`; CHECK `chk_idrs_returned_from` |
+| `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete: when and by whom (FK → `users.uuid`). The row is kept |
+
+The review columns (from `idr_number` down) came with migration 017. Nothing reads or writes them yet.
 
 Constraints and indexes:
-- `uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date)`: one IDR per
-  inspector per project per day. `POST /v1/idrs/` returns 409 with `existing_idr_id` when it
-  would be violated.
-- `idx_idrs_project_status (project_id, status)` and `idx_idrs_reporter (reporter_uuid)`.
+- `uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date) WHERE deleted_at IS NULL`:
+  one IDR per inspector per project per day among IDRs that aren't deleted. A partial unique index
+  since migration 017 (a constraint before), so a soft delete frees the day. `POST /v1/idrs/` returns
+  409 with `existing_idr_id` when it would be violated; its INSERT uses a bare `ON CONFLICT DO NOTHING`,
+  since a column list alone no longer matches the index.
+- `uq_idrs_project_number UNIQUE (project_id, idr_number) WHERE idr_number IS NOT NULL AND deleted_at IS NULL`:
+  an IDR number is used once per project among IDRs that aren't deleted. A soft delete frees it.
+- `idx_idrs_project_status (project_id, status)` and `idx_idrs_status (status)`, both partial
+  (`WHERE deleted_at IS NULL`), and `idx_idrs_reporter (reporter_uuid)`.
 
 Lifecycle: an IDR is created as a `draft`, and its header and reports can be edited freely.
 `POST /v1/idrs/{id}/submit` first copies the submitting user's signature to the IDR's own path, then
@@ -388,6 +405,8 @@ content as TEXT, linked to a report and a form template).
 | 015 | `015_signatures.sql` | I0 | Added `users.signature_path`, `signature_type` (CHECK `drawn` / `uploaded`) and `signature_set_at`, and `idrs.inspector_signature_path` and `inspector_signed_at`. All nullable. |
 | 015b | `015b_signatures_bucket.sql` | I0 | Created the private Storage bucket `signatures` (500 KB per file; PNG only). No `icid` table changes. |
 | 016 | `016_users_email_lower.sql` | Housekeeping | Created the unique index `idx_users_email_lower` on `lower(email)`; dropped `uq_users_email` (case-sensitive, from 013) and the baseline's plain `idx_users_email`. |
+| 017 | `017_review_workflow.sql` | J0 | Widened `chk_idrs_status` to the review statuses (`stage1_review`, `stage2_review`, `approved`, `returned`, `deleted`). Added the review columns on `idrs` (`idr_number`, the Stage 1 and RE reviewer columns, `re_signature_path`, `re_signed_at`, `return_reason`, `returned_from` with its CHECK, `deleted_at`, `deleted_by`), all nullable. Rebuilt `idx_idrs_project_status` as a partial index and added `idx_idrs_status` and the partial unique index `uq_idrs_project_number`. Replaced the constraint `uq_idrs_project_reporter_date` with a partial unique index of the same name (`WHERE deleted_at IS NULL`). |
+| 018 | `018_project_roles.sql` | J0 | Added `project_users.role` (`inspector` / `oe` / `re`, NOT NULL DEFAULT `inspector`, CHECK) and replaced the primary key `(project_id, user_uuid)` with `(project_id, user_uuid, role)`. |
 
 Where each current column came from:
 
@@ -398,6 +417,8 @@ Where each current column came from:
 | `users` | `idx_users_email_lower` (unique index; replaced 013's `uq_users_email` and the baseline's `idx_users_email`) | 016 |
 | `users` | `signature_path`, `signature_type`, `signature_set_at`, `chk_users_signature_type` | 015 |
 | `idrs` | `inspector_signature_path`, `inspector_signed_at` | 015 |
+| `idrs` | the review columns, `chk_idrs_returned_from`, `idx_idrs_status`, `uq_idrs_project_number`; the wider `chk_idrs_status`, the partial `idx_idrs_project_status`, and `uq_idrs_project_reporter_date` as a partial unique index | 017 |
+| `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |
 | `idr_reports` | everything except the flag | 004 |

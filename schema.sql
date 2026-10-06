@@ -77,7 +77,9 @@ CREATE TABLE icid.project_users (
     user_uuid    UUID NOT NULL,
     user_role    TEXT,
     assigned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, user_uuid),
+    role         TEXT NOT NULL DEFAULT 'inspector',
+    PRIMARY KEY (project_id, user_uuid, role),
+    CONSTRAINT chk_project_users_role CHECK (role IN ('inspector', 'oe', 're')),
     CONSTRAINT fk_project_users_project
         FOREIGN KEY (project_id) REFERENCES icid.projects(project_id),
     CONSTRAINT fk_project_users_user
@@ -143,12 +145,32 @@ CREATE TABLE icid.idrs (
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     inspector_signature_path TEXT NULL,
     inspector_signed_at      TIMESTAMPTZ NULL,
-    CONSTRAINT chk_idrs_status CHECK (status IN ('draft', 'submitted')),
-    CONSTRAINT uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date)
+    idr_number             TEXT,
+    stage1_reviewer_uuid   UUID REFERENCES icid.users(uuid),
+    stage1_reviewed_at     TIMESTAMPTZ,
+    re_reviewer_uuid       UUID REFERENCES icid.users(uuid),
+    re_signature_path      TEXT,
+    re_signed_at           TIMESTAMPTZ,
+    return_reason          TEXT,
+    returned_from          TEXT,
+    deleted_at             TIMESTAMPTZ,
+    deleted_by             UUID REFERENCES icid.users(uuid),
+    CONSTRAINT chk_idrs_status CHECK (status IN ('draft', 'submitted', 'stage1_review', 'stage2_review', 'approved', 'returned', 'deleted')),
+    CONSTRAINT chk_idrs_returned_from CHECK (returned_from IN ('stage1', 'stage2'))
 );
 
-CREATE INDEX idx_idrs_project_status ON icid.idrs(project_id, status);
+-- One IDR per inspector per project per day among IDRs that aren't deleted; a soft delete frees the day
+CREATE UNIQUE INDEX uq_idrs_project_reporter_date
+    ON icid.idrs(project_id, reporter_uuid, report_date)
+    WHERE deleted_at IS NULL;
+
+CREATE INDEX idx_idrs_project_status ON icid.idrs(project_id, status) WHERE deleted_at IS NULL;
+CREATE INDEX idx_idrs_status ON icid.idrs(status) WHERE deleted_at IS NULL;
 CREATE INDEX idx_idrs_reporter ON icid.idrs(reporter_uuid);
+-- An IDR number is used once per project among IDRs that aren't deleted; a soft delete frees it
+CREATE UNIQUE INDEX uq_idrs_project_number
+    ON icid.idrs(project_id, idr_number)
+    WHERE idr_number IS NOT NULL AND deleted_at IS NULL;
 
 ------------------------------------------------------------
 -- IDR REPORT (typed report within an IDR; addenda link to a parent)

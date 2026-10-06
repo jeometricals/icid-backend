@@ -16,7 +16,8 @@
 -- seed.sql has Genghis under another uuid, with his email intact).
 --
 -- Idempotent. Run after schema.sql (or migrations/016, for the case-insensitive email index
--- the upsert relies on), seed.sql (which creates C00001) and seed_test_project.sql (so DEMO01
+-- the upsert relies on, and migrations/018, for the project_users key the assignment's
+-- ON CONFLICT names), seed.sql (which creates C00001) and seed_test_project.sql (so DEMO01
 -- is assigned too):
 --   psql -d icid -f seed_auth_users.sql
 
@@ -40,6 +41,6 @@ SELECT p.project_id, u.uuid, 'Admin'
 FROM icid.users u
 JOIN icid.projects p ON p.project_id IN ('HWS0023', 'SE384', 'DEMO01')
 WHERE u.email = 'reza@icid.local'
-ON CONFLICT (project_id, user_uuid) DO NOTHING;
+ON CONFLICT (project_id, user_uuid, role) DO NOTHING;
 
 COMMIT;

@@ -12,7 +12,7 @@ IDRs and their own project, and stop them submitting.
 import hmac
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional
 from uuid import UUID
 
 import bcrypt
@@ -21,7 +21,7 @@ from fastapi import Depends, Header, HTTPException, Request
 
 from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
 from api.queries.idrs import get_idr_by_id
-from api.queries.projects import get_project_by_id, is_user_on_project
+from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.users import create_demo_user, get_user_by_uuid, get_user_for_auth
 from api.schemas.auth import UserOut
 
@@ -35,6 +35,9 @@ DEMO_PROJECT_ID = "DEMO01"
 DEMO_CLIENT_ID = "C00001"
 DEMO_PROJECT_ROLE = "Demo"
 MAX_DEMO_USERS = 200
+
+# The roles a user can hold on a project (icid.project_users.role). Admin is not one: it is users.role.
+PROJECT_ROLES = ("inspector", "oe", "re")
 
 
 class DemoUnavailableError(Exception):
@@ -156,6 +159,34 @@ def current_admin(user: UserOut = Depends(current_user)) -> UserOut:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def require_project_role(*roles: str) -> Callable[..., UserOut]:
+    """
+    Build a FastAPI dependency for routes under an IDR: the signed-in user must hold one of the roles on its project.
+    Takes the project roles that may pass ('inspector', 'oe', 're'); raises ValueError for none or an unknown one.
+    Returns the dependency, which returns the user, or raises 404 for an IDR that doesn't exist and 403 for a user
+    with none of the roles. An admin passes without holding any.
+    """
+    if not roles or not set(roles) <= set(PROJECT_ROLES):
+        raise ValueError(f"Project roles are {', '.join(PROJECT_ROLES)}; got {roles!r}")
+
+    def dependency(idr_id: UUID, user: UserOut = Depends(current_user)) -> UserOut:
+        """
+        Check the signed-in user's roles on the project of the IDR in the path.
+        Takes the idr_id path parameter and the current user.
+        Returns the user; raises 404 or 403 as described above.
+        """
+        if user.role == "admin":
+            return user
+        idr = get_idr_by_id(idr_id)
+        if idr is None:
+            raise HTTPException(status_code=404, detail="IDR not found")
+        if not get_user_roles_on_project(user.uuid, idr["project_id"]) & set(roles):
+            raise HTTPException(status_code=403, detail="Role required: " + "/".join(roles))
+        return user
+
+    return dependency
 
 
 def admin_or_cron(authorization: Optional[str] = Header(None)) -> Optional[UserOut]:
