@@ -349,7 +349,7 @@ class TestGeneralFrontHeader:
         assert sheet["AD13"].value == "Low  45" and sheet["AK13"].value == "High  62.5"
         assert sheet["AD17"].value == "Cloudy" and sheet["AK17"].value == "Rain"
         assert sheet["H17"].value == "Genghis Khan"
-        assert sheet["AH6"].value is None  # no I.R. No. in the data model yet
+        assert sheet["AH6"].value is None  # this IDR has no number yet
 
     def test_empty_fields_clear_the_template_placeholders(self):
         idr = {**SUBMITTED_IDR, "work_start_time": None, "work_end_time": None, "inspector_start_time": None,
@@ -418,7 +418,7 @@ def quantity_cell_xml(content: bytes, sheet_part: str, coordinate: str) -> str:
     return re.search(rf'<c r="{coordinate}"[^>]*?(?:/>|>.*?</c>)', xml, re.DOTALL).group(0)
 
 
-UNIT_RUN = ('<r><rPr><vertAlign val="superscript"/><sz val="7"/><rFont val="Arial"/><family val="2"/></rPr>'
+UNIT_RUN = ('<r><rPr><vertAlign val="superscript"/><sz val="8"/><rFont val="Arial"/><family val="2"/></rPr>'
             '<t xml:space="preserve">{unit}</t></r>')
 
 
@@ -436,6 +436,27 @@ class TestPayItems:
         assert 't="inlineStr"' in cell
         # the number carries no font of its own: it keeps the cell's (Arial 14 on Gen Fr)
         assert '<is><r><t xml:space="preserve">312.50</t></r>' + UNIT_RUN.format(unit="SF") + "</is>" in cell
+
+    def test_the_units_size_and_position_are_two_constants(self, monkeypatch):
+        from api.services import export_common
+        assert (export_common.PAY_UNIT_FONT_PT, export_common.PAY_UNIT_SUPERSCRIPT) == (8, True)  # as shipped
+        monkeypatch.setattr(export_common, "PAY_UNIT_FONT_PT", 9)
+        monkeypatch.setattr(export_common, "PAY_UNIT_SUPERSCRIPT", False)
+        cell = quantity_cell_xml(export_bytes(general=general_with(payItems=[pay_item(1)])), "sheet4.xml", "N39")
+        assert '<r><rPr><sz val="9"/><rFont val="Arial"/><family val="2"/></rPr><t xml:space="preserve">SF</t></r>' in cell
+        assert "vertAlign" not in cell
+
+    def test_the_item_no_cell_shrinks_to_fit_on_every_front_page(self):
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(
+            general=general_with(payItems=[pay_item(1, itemNo="4.02 AB-R")]),
+            reports=[GENERAL_ROW, swcb_row(1, 2, payItems=[pay_item(1)]), ac_row(2, 3, payItems=[pay_item(1)])])))
+        for sheet, cell in (("Gen Fr", "B39"), ("Conc Fr", "B49"), ("AC Fr", "B39")):
+            assert book[sheet][cell].alignment.shrink_to_fit is True, sheet
+            assert book[sheet][cell].alignment.horizontal == "center"  # the rest of its style is kept
+        # Gen Fr's is the 14 pt one that clipped a code's first digit; the size is still the cell's own
+        assert (book["Gen Fr"]["B39"].value, book["Gen Fr"]["B39"].font.sz) == ("4.02 AB-R", 14)
+        assert not book["Gen Fr"]["B40"].alignment.shrink_to_fit  # an empty row is left as the template has it
+        assert not book["Gen Fr"]["G39"].alignment.shrink_to_fit  # and so is the budget code
 
     def test_the_number_keeps_each_pages_own_size(self):
         book = openpyxl.load_workbook(io.BytesIO(export_bytes(
@@ -1007,7 +1028,7 @@ class TestSwcbHeader:
         ]
         assert sheet["AI4"].value == "9/30/26"  # a General-formatted cell here, so the date goes in as text
         assert sheet["AL5"].fill.fill_type == "solid"  # Wednesday
-        assert sheet["AH6"].value is None  # no I.R. No. in the data model yet
+        assert sheet["AH6"].value is None  # this IDR has no number yet
         assert (sheet["AH8"].value, sheet["AM8"].value) == (2, 3)
         assert sheet["AG10"].value == "( Start 07:00 End 15:30 )"
         assert sheet["AG12"].value == "( Start 06:45 End ________ )"
@@ -1412,10 +1433,15 @@ class TestConcMixHeader:
         draft = openpyxl.load_workbook(io.BytesIO(conc_mix_render(DRAFT_IDR, None)[1]), read_only=True)["Conc Mix"]
         assert (draft["AD10"].value, draft["AJ10"].value) == (None, None)
 
-    def test_attachment_to_ir_no_stays_blank(self):
+    def test_attachment_to_ir_no_stays_blank_for_an_idr_without_a_number(self):
         sheet = openpyxl.load_workbook(io.BytesIO(conc_mix_render()[1]), read_only=True)["Conc Mix"]
         assert sheet["AJ17"].value is None
         assert sheet["Y17"].value == "ATTACHMENT TO I.R. NO.:"  # the label stays
+
+    def test_attachment_to_ir_no_takes_the_idrs_number(self):
+        numbered = {**SUBMITTED_IDR, "idr_number": "005"}
+        sheet = openpyxl.load_workbook(io.BytesIO(conc_mix_render(numbered)[1]), read_only=True)["Conc Mix"]
+        assert (sheet["Y17"].value, sheet["AJ17"].value) == ("ATTACHMENT TO I.R. NO.:", "005")
 
     def test_no_contract_info_formulas_left_on_conc_mix(self):
         # Read the XML: Material Usage's "=" labels (V41:V44, AK41:AK44) are text openpyxl can't tell from formulas
@@ -2536,7 +2562,7 @@ class TestAcHeader:
         sheet = openpyxl.load_workbook(io.BytesIO(ac_render()[1]), read_only=True)["AC Fr"]
         assert sheet["AI4"].value == "9/30/26"  # General-formatted, so text
         assert sheet["AL5"].fill.fill_type == "solid"  # Wednesday
-        assert sheet["AH6"].value is None  # no I.R. No. in the data model yet
+        assert sheet["AH6"].value is None  # this IDR has no number yet
         assert (sheet["AH8"].value, sheet["AM8"].value) == (2, 3)
 
     def test_times_temperatures_and_weather(self):
@@ -4010,6 +4036,59 @@ class TestOneDateOnEveryPage:
         book = openpyxl.load_workbook(io.BytesIO(approved_export(idr=moved)))
         assert book["Gen Bk"]["AE59"].value == "2/3/26" and book["Gen Bk"]["S60"].value == "RE: Rex Resident, 2/3/26"
         assert book["Conc Mix"]["AK60"].value == "2/3/26"
+
+
+# ---------------------------------------------------------------------------
+# I.R. No.: the IDR's number, on every page that has the field
+# ---------------------------------------------------------------------------
+
+# Each page's I.R. No. cell (Conc Mix calls it "ATTACHMENT TO I.R. NO.")
+IR_NO_CELLS = {"Gen Fr": "AH6", "AC Fr": "AH6", "Conc Fr": "AH6", "Report Cont": "U10", "Conc Mix": "AJ17",
+               "Attachments 1": "U19"}
+
+
+class TestIrNumber:
+    def test_every_page_with_the_field_carries_the_idrs_number(self):
+        book = openpyxl.load_workbook(io.BytesIO(approved_export()))  # APPROVED_IDR is number 005
+        assert {sheet: book[sheet][cell].value for sheet, cell in IR_NO_CELLS.items()} == dict.fromkeys(IR_NO_CELLS, "005")
+
+    def test_the_number_is_text_so_its_zeros_and_letters_survive(self):
+        for number in ("005", "2026-041", "IR 7/B"):
+            sheet = exported_workbook(idr={**SUBMITTED_IDR, "idr_number": number})["Gen Fr"]
+            assert sheet["AH6"].value == number
+
+    def test_copies_of_a_page_carry_it_too(self):
+        numbered = {**SUBMITTED_IDR, "idr_number": "005", "total_pages": 5}
+        photos = [attachment(n, SWCB_1) for n in (1, 2)]
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(
+            idr=numbered, general=general_with(payItems=[pay_item(n) for n in range(14)]),
+            reports=[GENERAL_ROW, swcb_row(1, 2), conc_mix_row(1, SWCB_1, 3, trucks=12), swcb_row(2, 4)],
+            attachments=photos, files={p["storage_path"]: image_bytes("JPEG") for p in photos})), read_only=True)
+        for sheet, cell in (("Gen Fr 2", "AH6"), ("Conc Fr 2", "AH6"), ("Conc Mix 2", "AJ17"), ("Attachments 2", "U19")):
+            assert book[sheet][cell].value == "005", sheet
+
+    @pytest.mark.parametrize("number", [None, "", "   "])
+    def test_an_idr_nobody_has_accepted_leaves_the_field_blank(self, number):
+        photo = attachment(1, SWCB_1)
+        book = openpyxl.load_workbook(io.BytesIO(full_signed_export(idr={**SIGNED_IDR, "idr_number": number,
+                                                                         "total_pages": 4})))
+        assert {sheet: book[sheet][cell].value for sheet, cell in IR_NO_CELLS.items()} == dict.fromkeys(IR_NO_CELLS)
+        assert photo  # (the export above has one attachment page, so "Attachments 1" exists)
+
+    def test_a_returned_draft_keeps_showing_the_number_it_was_given(self):
+        returned = {**DRAFT_IDR, "idr_number": "005", "return_reason": "fix the pay-item quantity"}
+        assert exported_workbook(idr=returned)["Gen Fr"]["AH6"].value == "005"
+
+    def test_the_labels_beside_the_field_are_untouched(self):
+        book = openpyxl.load_workbook(io.BytesIO(approved_export()))
+        template = openpyxl.load_workbook(export.TEMPLATE_PATH)
+        for sheet, source in (("Gen Fr", "Gen Fr"), ("Conc Fr", "Conc Fr"), ("Report Cont", "Report Cont")):
+            labels = [c.value for row in template[source].iter_rows(min_row=4, max_row=12) for c in row
+                      if isinstance(c.value, str) and "I.R. No" in c.value]
+            assert labels, sheet
+            printed = [c.value for row in book[sheet].iter_rows(min_row=4, max_row=12) for c in row
+                       if isinstance(c.value, str) and "I.R. No" in c.value]
+            assert printed == labels, sheet
 
 
 class TestReSignatureLayouts:

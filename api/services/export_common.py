@@ -41,8 +41,10 @@ PAY_ITEMS_CONTINUED_FROM = "Pay items continued from previous page"
 # (so "L.F." and "LF" are one unit). A unit that isn't listed prints in that same form, cut to four characters.
 PAY_UNIT_ABBREVIATIONS = {"LF": "LF", "SF": "SF", "CY": "CY", "SY": "SY", "TON": "TN", "EACH": "EA"}
 PAY_UNIT_MAX_CHARS = 4
-# The unit is printed after the quantity as a small superscript, whatever size the quantity cell's own font is
-PAY_UNIT_FONT_PT = 7
+# The unit is printed after the quantity, smaller, whatever size the quantity cell's own font is: its size in points,
+# and whether it is raised as a superscript (which Excel draws smaller still) or sits on the number's baseline
+PAY_UNIT_FONT_PT = 8
+PAY_UNIT_SUPERSCRIPT = True
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,7 @@ class ContinuationHeader:
     project_cells: dict[str, str]   # cell -> project field; formulas reading Contract Info there are replaced
     date: str                       # General-formatted: the date goes in as m/d/yy text
     day_of_week: tuple[str, ...]    # S M T W T F S, Sunday first
-    ir_no: str                      # "__________", cleared
+    ir_no: str                      # "__________", replaced by the IDR's number (cleared when it has none)
     sheet_no: str                   # "Sheet No.: ____ of ____", left as its label
     inspector: str
 
@@ -137,6 +139,15 @@ def typed_value(value: Any) -> Any:
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
         return value
     return text_value(value)
+
+
+def ir_number(idr: dict[str, Any]) -> Optional[str]:
+    """
+    Give what a page's "I.R. No." takes: the IDR's number, as the reviewer typed it at Stage 1.
+    Takes the IDR row.
+    Returns the number as text (so "005" keeps its zeros), or None for an IDR nobody has accepted yet.
+    """
+    return text_value(idr.get("idr_number")) or None
 
 
 def short_date(day: date) -> str:
@@ -208,14 +219,14 @@ def stamp_common_header(workbook: WorkbookTemplate, sheet: str, layout: HeaderLa
     temperatures, weather, sheet number and inspector, clearing the template's placeholders when a value is missing.
     Takes the workbook, sheet name, its layout, the IDR row, the project row, the contractor's and inspector's names,
     and this page's number (None leaves Sheet No. blank, e.g. for a page that isn't one of the IDR's numbered pages).
-    Returns nothing; I.R. No. stays blank, as the data model has no source for it yet.
+    Returns nothing; I.R. No. takes the IDR's number, and stays blank for an IDR without one.
     """
     for cell, field in layout.project_cells.items():
         workbook.set_cell(sheet, cell, contractor if field == "contractor" else project.get(field))
     report_date: date = idr["report_date"]
     workbook.set_cell(sheet, layout.date, short_date(report_date) if layout.date_as_text else report_date)
     highlight_day(workbook, sheet, layout.day_of_week, report_date)
-    workbook.set_cell(sheet, layout.ir_no, None)
+    workbook.set_cell(sheet, layout.ir_no, ir_number(idr))
     has_page = page_number is not None
     workbook.set_cell(sheet, layout.sheet_no, page_number if has_page else None)
     workbook.set_cell(sheet, layout.sheet_of, idr.get("total_pages") if has_page else None)
@@ -384,7 +395,8 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
     """
     Write the pay items into a form's table, blanking unused rows. Descriptions wrap, and a row whose description
     needs two lines gets a row tall enough for them (lines x the font's line height). A quantity is followed by its
-    unit as a small superscript, and its cell shrinks to fit, so a long number is scaled down rather than cut off.
+    unit, smaller (PAY_UNIT_FONT_PT, PAY_UNIT_SUPERSCRIPT). The Item No. and Pay Quantity cells shrink to fit, so a
+    wide code or a long number is scaled down rather than cut off.
     Takes the workbook, sheet name, the table's layout, the sheet's payItems (no more than fit) and whether they
     continue on another sheet (the last row then says "Pay items continued on next page").
     Returns nothing.
@@ -394,10 +406,13 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
         values = rows[index] if index < len(rows) else {}
         for field, column in layout.columns.items():
             workbook.set_cell(sheet, f"{column}{row}", values.get(field))
+        if values.get("itemNo"):
+            workbook.shrink_to_fit_cell(sheet, f"{layout.columns['itemNo']}{row}")
         if values.get("payQuantity"):
             cell = f"{layout.columns['payQuantity']}{row}"
             if values.get("unit"):
-                workbook.set_cell_with_superscript(sheet, cell, values["payQuantity"], values["unit"], PAY_UNIT_FONT_PT)
+                workbook.set_cell_with_suffix(sheet, cell, values["payQuantity"], values["unit"], PAY_UNIT_FONT_PT,
+                                              superscript=PAY_UNIT_SUPERSCRIPT)
             workbook.shrink_to_fit_cell(sheet, cell)
         description = values.get("description")
         if description:
@@ -752,14 +767,14 @@ def stamp_continuation_header(workbook: WorkbookTemplate, sheet: str, layout: Co
                               idr: dict[str, Any], project: dict[str, Any], inspector: Optional[str]) -> None:
     """
     Write a continuation form's header: project details as values (not Contract Info formulas), the date as m/d/yy
-    text, the day of the week, and the inspector; I.R. No. is cleared and "Sheet No.: ____ of ____" keeps only its
-    label (these pages aren't numbered).
+    text, the day of the week, and the inspector; I.R. No. takes the IDR's number (cleared when it has none) and
+    "Sheet No.: ____ of ____" keeps only its label (these pages aren't numbered).
     Takes the workbook, the sheet, its header layout, the IDR row, the project row and the inspector's name.
     Returns nothing.
     """
     workbook.set_cell(sheet, layout.date, short_date(idr["report_date"]))
     highlight_day(workbook, sheet, layout.day_of_week, idr["report_date"])
-    workbook.set_cell(sheet, layout.ir_no, None)
+    workbook.set_cell(sheet, layout.ir_no, ir_number(idr))
     workbook.set_cell(sheet, layout.sheet_no, "Sheet No.:")
     for cell, field in layout.project_cells.items():
         workbook.set_cell(sheet, cell, project.get(field))

@@ -226,7 +226,8 @@ Any change must follow these.
       (`column_widths_px`). On attachment pages the caption cells aren't merged in the template; the export
       merges them so the text shrinks to the line, not to one column.
 - **Pay quantities on the export.** A front page's Pay Quantity cell holds the quantity as the inspector entered
-  it, followed straight away by its unit as a second run of the same cell: Arial 7, superscript. The number keeps
+  it, followed straight away by its unit as a second run of the same cell: Arial 8, superscript
+  (`PAY_UNIT_FONT_PT`, `PAY_UNIT_SUPERSCRIPT` in `export_common.py`). The number keeps
   the cell's own font (Arial 14 on Gen Fr, Arial 10 on Conc Fr and AC Fr), and the cell is set to shrink to fit,
   so a long number is scaled down by Excel, not cut off.
   - The unit is abbreviated by `pay_unit_abbreviation` (`export_common.py`): `L.F.` → `LF`, `S.F.` → `SF`,
@@ -234,7 +235,13 @@ Any change must follow these.
     prints without its periods and spaces, in capitals, cut to four characters (`Gal.` → `GAL`). The catalog and
     saved reports keep their units as they are; only the export abbreviates.
   - An item with no quantity prints nothing in the cell, unit or not.
-  - `WorkbookTemplate.set_cell_with_superscript` writes the two runs.
+  - `WorkbookTemplate.set_cell_with_suffix` writes the two runs.
+  - The Item No. cell shrinks to fit too: Gen Fr's is 14 pt, and a code like `4.01 AAS` lost its first digit
+    at the cell's left edge.
+- **I.R. No. on the export.** Every page that has the field prints the IDR's `idr_number`, as text (`005` keeps
+  its zeros): the header's "I.R. No." on Gen Fr, Conc Fr, AC Fr, Report Cont and the attachment pages, and
+  "ATTACHMENT TO I.R. NO." on Conc Mix (`ir_number` in `export_common.py`). An IDR nobody has accepted yet has no
+  number and the field stays blank; a returned draft keeps showing the one it was given.
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.

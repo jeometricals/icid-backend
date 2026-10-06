@@ -162,12 +162,14 @@ class WorkbookTemplate:
         style = style if style is not None else self.cell_style(sheet, coordinate)
         self._put_cell(sheet, coordinate, _cell_xml(coordinate, style, value))
 
-    def set_cell_with_superscript(self, sheet: str, coordinate: str, text: str, superscript: str,
-                                  points: float, font: str = "Arial") -> None:
+    def set_cell_with_suffix(self, sheet: str, coordinate: str, text: str, suffix: str, points: float,
+                             superscript: bool = True, font: str = "Arial") -> None:
         """
-        Write text followed straight away by a small raised suffix, as two runs of one cell (e.g. a quantity and its
-        unit). The text keeps the cell's own font; the suffix is superscript, in the given font and size.
-        Takes the sheet name, cell reference, the text, the suffix, and the suffix's size in points and font name.
+        Write text followed straight away by a smaller suffix, as two runs of one cell (e.g. a quantity and its
+        unit). The text keeps the cell's own font; the suffix is in the given font and size, raised as a superscript
+        unless told otherwise.
+        Takes the sheet name, cell reference, the text, the suffix, the suffix's size in points, whether it is a
+        superscript, and its font name.
         Returns nothing; the cell keeps its style, and is added when the template doesn't have it.
         """
         def clean(value: str) -> str:
@@ -175,10 +177,10 @@ class WorkbookTemplate:
 
         style = self.cell_style(sheet, coordinate)
         style_attr = f' s="{style}"' if style is not None else ""
-        suffix_font = (f'<rPr><vertAlign val="superscript"/><sz val="{points:g}"/>'
-                       f'<rFont val="{escape(font)}"/><family val="2"/></rPr>')
+        raised = '<vertAlign val="superscript"/>' if superscript else ""
+        suffix_font = f'<rPr>{raised}<sz val="{points:g}"/><rFont val="{escape(font)}"/><family val="2"/></rPr>'
         runs = (f'<r><t xml:space="preserve">{clean(text)}</t></r>'
-                f'<r>{suffix_font}<t xml:space="preserve">{clean(superscript)}</t></r>')
+                f'<r>{suffix_font}<t xml:space="preserve">{clean(suffix)}</t></r>')
         self._put_cell(sheet, coordinate, f'<c r="{coordinate}"{style_attr} t="inlineStr"><is>{runs}</is></c>')
 
     def _put_cell(self, sheet: str, coordinate: str, new_cell: str) -> None:

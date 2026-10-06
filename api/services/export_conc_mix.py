@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 from api.services.export_common import (
     SignatureLayout,
-    CHECK_MARK, TextArea, allocate_copies, fill_lines, mark_truncated, object_rows, paragraphs, section, short_date,
-    text_value, write_lines,
+    CHECK_MARK, TextArea, allocate_copies, fill_lines, ir_number, mark_truncated, object_rows, paragraphs, section,
+    short_date, text_value, write_lines,
 )
 from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
@@ -127,7 +127,7 @@ def _stamp_header(workbook: WorkbookTemplate, sheet: str, idr: dict[str, Any], p
     Write a Conc Mix sheet's header: project details (as values, not Contract Info formulas), date, page number and
     inspector. Takes the workbook, the sheet, the IDR row (its total_pages fills OF), the project row, the contractor's
     and inspector's names, and the sheet's page number (None leaves PAGE / OF blank).
-    Returns nothing; ATTACHMENT TO I.R. NO. stays blank.
+    Returns nothing; ATTACHMENT TO I.R. NO. takes the IDR's number, and stays blank for an IDR without one.
     """
     for cell, field in CONC_MIX_PROJECT_CELLS.items():
         workbook.set_cell(sheet, cell, contractor if field == "contractor" else project.get(field))
@@ -136,7 +136,7 @@ def _stamp_header(workbook: WorkbookTemplate, sheet: str, idr: dict[str, Any], p
     workbook.set_cell(sheet, CONC_MIX_SHEET_NO, page_number if has_page else None)
     workbook.set_cell(sheet, CONC_MIX_SHEET_OF, idr.get("total_pages") if has_page else None)
     workbook.set_cell(sheet, CONC_MIX_INSPECTOR, inspector)
-    workbook.set_cell(sheet, CONC_MIX_IR_NO, None)
+    workbook.set_cell(sheet, CONC_MIX_IR_NO, ir_number(idr))
 
 
 def _tick(workbook: WorkbookTemplate, sheet: str, box: tuple[str, ...], ticked: bool) -> None:
