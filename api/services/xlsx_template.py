@@ -159,9 +159,35 @@ class WorkbookTemplate:
         Takes the sheet name, cell reference, value (text, number, date or None to empty it) and an optional style index.
         Returns nothing; adds the cell (and its row) when the template doesn't have it.
         """
-        xml = self._sheet(sheet)
         style = style if style is not None else self.cell_style(sheet, coordinate)
-        new_cell = _cell_xml(coordinate, style, value)
+        self._put_cell(sheet, coordinate, _cell_xml(coordinate, style, value))
+
+    def set_cell_with_superscript(self, sheet: str, coordinate: str, text: str, superscript: str,
+                                  points: float, font: str = "Arial") -> None:
+        """
+        Write text followed straight away by a small raised suffix, as two runs of one cell (e.g. a quantity and its
+        unit). The text keeps the cell's own font; the suffix is superscript, in the given font and size.
+        Takes the sheet name, cell reference, the text, the suffix, and the suffix's size in points and font name.
+        Returns nothing; the cell keeps its style, and is added when the template doesn't have it.
+        """
+        def clean(value: str) -> str:
+            return escape(_INVALID_XML_CHARS.sub("", value))
+
+        style = self.cell_style(sheet, coordinate)
+        style_attr = f' s="{style}"' if style is not None else ""
+        suffix_font = (f'<rPr><vertAlign val="superscript"/><sz val="{points:g}"/>'
+                       f'<rFont val="{escape(font)}"/><family val="2"/></rPr>')
+        runs = (f'<r><t xml:space="preserve">{clean(text)}</t></r>'
+                f'<r>{suffix_font}<t xml:space="preserve">{clean(superscript)}</t></r>')
+        self._put_cell(sheet, coordinate, f'<c r="{coordinate}"{style_attr} t="inlineStr"><is>{runs}</is></c>')
+
+    def _put_cell(self, sheet: str, coordinate: str, new_cell: str) -> None:
+        """
+        Put a <c> element in a sheet, in place of the cell already there or as a new one.
+        Takes the sheet name, the cell reference and the element's XML.
+        Returns nothing; adds the cell (and its row) when the template doesn't have it.
+        """
+        xml = self._sheet(sheet)
         existing = re.compile(rf'<c r="{coordinate}"(?=[\s/>])[^>]*?(?:/>|>.*?</c>)', re.DOTALL)
         if existing.search(xml):
             xml = existing.sub(lambda _: new_cell, xml, count=1)

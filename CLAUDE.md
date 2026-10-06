@@ -199,14 +199,16 @@ Any change must follow these.
     accepted, so the name printed with the signature is always the signer's (an admin approving in an RE's place
     included).
   - **The export prints it.** For an IDR past draft (submitted, in review or approved) with
-    `inspector_signature_path`, `export.py` downloads that file once and stamps it, with the signed date, on every
-    printed page that has an "Inspector's Signature" line: Gen Bk, Conc Bk, AC Bk, Conc Mix, Report Cont and every attachment page, copies included. Front pages
+    `inspector_signature_path`, `export.py` downloads that file once and stamps it, with the IDR's work date, on
+    every printed page that has an "Inspector's Signature" line: Gen Bk, Conc Bk, AC Bk, Conc Mix, Report Cont and every attachment page, copies included. Front pages
     have no line. Each module declares its page's `SIGNATURE_LAYOUT` (Report Cont's is in `export_common.py`);
     the dispatcher maps a printed sheet to its layout by name, so a copy signs where its original does. A new
     form with a signature line adds a layout and an entry in `SIGNATURE_LAYOUTS`.
     - The image is letterboxed into the signature line's cell plus the blank row above it (209 x 34 px; Conc
-      Mix 224 x 32), since the line alone is one 17 px row. The date goes in the line's Date cell as m/d/yy, the
-      day it was in New York (`FORM_TIMEZONE`), not the UTC day.
+      Mix 224 x 32), since the line alone is one 17 px row.
+    - **Every date on a page is the work date.** The line's Date cell takes the IDR's `report_date` as m/d/yy,
+      the same day as the date at the top of the page, and so does the RE's caption. `inspector_signed_at` and
+      `re_signed_at` stay on the IDR as the record of when each signed; the export doesn't print them.
     - A draft is never signed, a returned one included, and its signature isn't even fetched; only a draft
       carries the "DRAFT - Not for Submission" marker. An IDR submitted before signatures (no path), or one
       whose file can't be fetched or read, exports with blank lines; the failure is logged and the export
@@ -216,13 +218,23 @@ Any change must follow these.
       (`RE_SIGNATURE_LAYOUTS` in `export.py`). The image is fitted to that line plus the row above, as the
       inspector's is. The page has one Date cell and it is the inspector's, so the caption under the RE's line
       ("Resident Engineer's Name") is replaced by `RE: <name>, <m/d/yy>`: the approver's name (`re_reviewer_uuid`)
-      and the New York day of `re_signed_at`, in the caption's own style, set to shrink to fit.
+      and the IDR's work date, in the caption's own style, set to shrink to fit.
     - The RE's signature is stamped only when `status = 'approved'` and `re_signature_path` is set, so a path
       left on an IDR that is no longer approved never prints. Without it, or when its file can't be used, the
       printed caption stays and the line is blank.
     - Conc Mix's RE line has one narrower column (X, 11 px), so its layout lists each column's width
       (`column_widths_px`). On attachment pages the caption cells aren't merged in the template; the export
       merges them so the text shrinks to the line, not to one column.
+- **Pay quantities on the export.** A front page's Pay Quantity cell holds the quantity as the inspector entered
+  it, followed straight away by its unit as a second run of the same cell: Arial 7, superscript. The number keeps
+  the cell's own font (Arial 14 on Gen Fr, Arial 10 on Conc Fr and AC Fr), and the cell is set to shrink to fit,
+  so a long number is scaled down by Excel, not cut off.
+  - The unit is abbreviated by `pay_unit_abbreviation` (`export_common.py`): `L.F.` → `LF`, `S.F.` → `SF`,
+    `C.Y.` → `CY`, `S.Y.` → `SY`, `Ton` → `TN`, `Each` → `EA`. A unit that isn't in `PAY_UNIT_ABBREVIATIONS`
+    prints without its periods and spaces, in capitals, cut to four characters (`Gal.` → `GAL`). The catalog and
+    saved reports keep their units as they are; only the export abbreviates.
+  - An item with no quantity prints nothing in the cell, unit or not.
+  - `WorkbookTemplate.set_cell_with_superscript` writes the two runs.
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.

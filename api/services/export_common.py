@@ -11,10 +11,9 @@ import io
 import re
 import textwrap
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image
 
@@ -36,6 +35,14 @@ LINE_HEIGHT = {10: 12.75, 8: 11.25}  # points per line of Arial at that size (Ex
 # A report with more pay items than its table holds continues on copies of its front page
 PAY_ITEMS_CONTINUED_NEXT = "Pay items continued on next page"
 PAY_ITEMS_CONTINUED_FROM = "Pay items continued from previous page"
+
+
+# How the forms abbreviate a pay unit, keyed by the catalog's unit with its periods and spaces dropped, in capitals
+# (so "L.F." and "LF" are one unit). A unit that isn't listed prints in that same form, cut to four characters.
+PAY_UNIT_ABBREVIATIONS = {"LF": "LF", "SF": "SF", "CY": "CY", "SY": "SY", "TON": "TN", "EACH": "EA"}
+PAY_UNIT_MAX_CHARS = 4
+# The unit is printed after the quantity as a small superscript, whatever size the quantity cell's own font is
+PAY_UNIT_FONT_PT = 7
 
 
 @dataclass(frozen=True)
@@ -284,25 +291,40 @@ def _pay_item_list(pay_items: Any) -> list[dict[str, Any]]:
     return [item for item in pay_items if isinstance(item, dict)] if isinstance(pay_items, list) else []
 
 
+def pay_unit_abbreviation(unit: Any) -> Optional[str]:
+    """
+    Shorten a pay unit for the form: "L.F." -> "LF", "Ton" -> "TN", "Each" -> "EA".
+    Takes the unit as saved with the pay item (the catalog's pay_unit, or anything else).
+    Returns the abbreviation; for a unit that isn't in PAY_UNIT_ABBREVIATIONS, the unit without periods and spaces,
+    in capitals, cut to PAY_UNIT_MAX_CHARS; None when there is no unit.
+    """
+    plain = re.sub(r"[.\s]", "", text_value(unit) or "").upper()
+    if not plain:
+        return None
+    return PAY_UNIT_ABBREVIATIONS.get(plain, plain[:PAY_UNIT_MAX_CHARS])
+
+
 def pay_item_rows(pay_items: Any, capacity: int, continued: bool = False) -> list[dict[str, Optional[str]]]:
     """
-    Lay pay items out for a form's table: the unit folded into Pay Quantity, Quantity Chk left for the RE.
+    Lay pay items out for a form's table: the quantity as entered, its unit abbreviated beside it, Quantity Chk left
+    for the RE. An item without a quantity has no unit either, so its Pay Quantity cell stays empty.
     Takes the sheet's payItems (anything that isn't a list counts as none), the table's row count, and whether the
     items continue on another sheet (the last row then says so instead of holding an item).
     Returns at most one dict per table row.
     """
     rows = []
     for item in _pay_item_list(pay_items)[: capacity - 1 if continued else capacity]:
-        quantity = " ".join(part for part in (text_value(item.get("payQuantity")), text_value(item.get("unit"))) if part)
+        quantity = text_value(item.get("payQuantity")) or None
         rows.append({
             "itemNo": text_value(item.get("itemNo")),
             "budgetCode": text_value(item.get("budgetCode")),
-            "payQuantity": quantity or None,
+            "payQuantity": quantity,
+            "unit": pay_unit_abbreviation(item.get("unit")) if quantity else None,
             "quantityChk": None,
             "description": text_value(item.get("description")),
         })
     if continued:
-        rows.append({"itemNo": None, "budgetCode": None, "payQuantity": None, "quantityChk": None,
+        rows.append({"itemNo": None, "budgetCode": None, "payQuantity": None, "unit": None, "quantityChk": None,
                      "description": PAY_ITEMS_CONTINUED_NEXT})
     return rows
 
@@ -361,7 +383,8 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
                     continued: bool = False) -> None:
     """
     Write the pay items into a form's table, blanking unused rows. Descriptions wrap, and a row whose description
-    needs two lines gets a row tall enough for them (lines x the font's line height).
+    needs two lines gets a row tall enough for them (lines x the font's line height). A quantity is followed by its
+    unit as a small superscript, and its cell shrinks to fit, so a long number is scaled down rather than cut off.
     Takes the workbook, sheet name, the table's layout, the sheet's payItems (no more than fit) and whether they
     continue on another sheet (the last row then says "Pay items continued on next page").
     Returns nothing.
@@ -371,6 +394,11 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
         values = rows[index] if index < len(rows) else {}
         for field, column in layout.columns.items():
             workbook.set_cell(sheet, f"{column}{row}", values.get(field))
+        if values.get("payQuantity"):
+            cell = f"{layout.columns['payQuantity']}{row}"
+            if values.get("unit"):
+                workbook.set_cell_with_superscript(sheet, cell, values["payQuantity"], values["unit"], PAY_UNIT_FONT_PT)
+            workbook.shrink_to_fit_cell(sheet, cell)
         description = values.get("description")
         if description:
             cell = f"{layout.columns['description']}{row}"
@@ -783,7 +811,7 @@ class SignatureLayout:
     """
     Where one form page takes a signature. The image is fitted to signature_cells: the signature line and the blank
     row above it (the line alone is one 17 px row, too low to read a signature in).
-    The inspector's layout names the Date cell on the same line, which takes the day it was signed. The Resident
+    The inspector's layout names the Date cell on the same line, which takes the IDR's work date. The Resident
     Engineer's has no Date cell of its own (the page has one, and it is the inspector's), so it names the caption
     under its line instead, which is replaced by "RE: <name>, <date>".
     """
@@ -819,10 +847,6 @@ REPORT_CONT_RE_SIGNATURE = SignatureLayout(signature_cells="S48:AD49", signature
 # which still prints sharply
 SIGNATURE_MAX_PX = (836, 136)
 
-# The forms are New York City's: a signing time prints as that day's date there, whatever the server's clock zone
-FORM_TIMEZONE = "America/New_York"
-
-
 def prepare_signature(data: bytes) -> SignatureImage:
     """
     Read a signature image and shrink it for the workbook: at most SIGNATURE_MAX_PX, as PNG (transparency kept).
@@ -835,19 +859,6 @@ def prepare_signature(data: bytes) -> SignatureImage:
         output = io.BytesIO()
         image.save(output, "PNG", optimize=True)
         return SignatureImage(output.getvalue(), image.width, image.height)
-
-
-def signed_date(signed_at: datetime) -> date:
-    """
-    Work out the calendar day a signing time falls on in FORM_TIMEZONE.
-    Takes the time (taken as UTC when it carries no zone).
-    Returns the date; in UTC if the zone's data isn't available.
-    """
-    moment = signed_at if signed_at.tzinfo else signed_at.replace(tzinfo=timezone.utc)
-    try:
-        return moment.astimezone(ZoneInfo(FORM_TIMEZONE)).date()
-    except ZoneInfoNotFoundError:
-        return moment.astimezone(timezone.utc).date()
 
 
 def _column_letters(number: int) -> str:
@@ -908,39 +919,41 @@ def _stamp_signature_image(workbook: WorkbookTemplate, sheet: str, layout: Signa
 
 
 def stamp_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
-                    signature: Optional[SignatureImage], signed_at: Optional[datetime]) -> None:
+                    signature: Optional[SignatureImage], work_date: Optional[date]) -> None:
     """
-    Stamp the inspector's signature on one page: the image fitted to the layout's signature cells, and the day it
-    was signed (m/d/yy) in the Date cell.
+    Stamp the inspector's signature on one page: the image fitted to the layout's signature cells, and the IDR's
+    work date (m/d/yy) in the Date cell, so every date on the page is the same day. When it was signed is kept on
+    the IDR, not printed.
     Takes the workbook, the sheet, its SignatureLayout, the signature (None leaves the page as it is: no image, no
-    date) and when it was signed (None leaves the date blank).
+    date) and the IDR's report date (None leaves the date blank).
     Returns nothing.
     """
     if signature is None:
         return
     _stamp_signature_image(workbook, sheet, layout, signature, "Inspector's signature")
-    if signed_at is not None:
-        workbook.set_cell(sheet, layout.date_cell, short_date(signed_date(signed_at)))
+    if work_date is not None:
+        workbook.set_cell(sheet, layout.date_cell, short_date(work_date))
 
 
-def re_signature_caption(name: Optional[str], signed_at: Optional[datetime]) -> str:
+def re_signature_caption(name: Optional[str], work_date: Optional[date]) -> str:
     """
     Word the caption under the Resident Engineer's signature.
-    Takes the approver's name and when they signed (either may be None).
+    Takes the approver's name and the IDR's report date (either may be None).
     Returns "RE: <name>, <m/d/yy>", with whichever part is known ("RE:" alone when neither is).
     """
-    parts = [name, short_date(signed_date(signed_at)) if signed_at is not None else None]
+    parts = [name, short_date(work_date) if work_date is not None else None]
     return " ".join(["RE:", ", ".join(part for part in parts if part)]).strip()
 
 
 def stamp_re_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
                        signature: Optional[SignatureImage], name: Optional[str],
-                       signed_at: Optional[datetime]) -> None:
+                       work_date: Optional[date]) -> None:
     """
     Stamp the Resident Engineer's signature on one page: the image fitted to the layout's signature cells, and
-    "RE: <name>, <date>" in place of the caption under the line, shrunk to fit if it is long.
+    "RE: <name>, <date>" in place of the caption under the line, shrunk to fit if it is long. The date is the IDR's
+    work date, like the inspector's.
     Takes the workbook, the sheet, its RE SignatureLayout, the signature (None leaves the page as it is: no image and
-    the printed caption), the approver's name and when they signed.
+    the printed caption), the approver's name and the IDR's report date.
     Returns nothing.
     """
     if signature is None:
@@ -949,5 +962,5 @@ def stamp_re_signature(workbook: WorkbookTemplate, sheet: str, layout: Signature
     caption = layout.caption_cells.split(":")[0]
     if not layout.caption_is_merged:
         workbook.merge_cells(sheet, layout.caption_cells)  # so the text shrinks to the line's width, not one column's
-    workbook.set_cell(sheet, caption, re_signature_caption(name, signed_at))
+    workbook.set_cell(sheet, caption, re_signature_caption(name, work_date))
     workbook.shrink_to_fit_cell(sheet, caption)

@@ -18,7 +18,8 @@ from api.queries.report_attachments import list_uploaded_attachments_for_reports
 from api.services import export, export_ac, export_attachments, export_conc_mix, export_swcb
 from api.services.export import generate_idr_export
 from api.services.export_common import (
-    fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, truncate_to_lines,
+    fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, pay_unit_abbreviation,
+    truncate_to_lines,
 )
 from api.services.export_common import DRAFT_MARKER, REPORT_CONT_TEXT, typed_value
 from api.services.export_general import GEN_FRONT_PAY_ITEMS
@@ -407,18 +408,94 @@ def pay_item(n: int, **overrides) -> dict:
             "description": f"Sidewalk {n}", **overrides}
 
 
+def quantity_cell_xml(content: bytes, sheet_part: str, coordinate: str) -> str:
+    """
+    Read one cell's raw XML from an export, to check the runs a Pay Quantity cell is made of.
+    Takes the .xlsx bytes, the sheet's part name (e.g. "sheet4.xml" for Gen Fr) and the cell reference.
+    Returns the <c> element's text.
+    """
+    xml = zipfile.ZipFile(io.BytesIO(content)).read(f"xl/worksheets/{sheet_part}").decode()
+    return re.search(rf'<c r="{coordinate}"[^>]*?(?:/>|>.*?</c>)', xml, re.DOTALL).group(0)
+
+
+UNIT_RUN = ('<r><rPr><vertAlign val="superscript"/><sz val="7"/><rFont val="Arial"/><family val="2"/></rPr>'
+            '<t xml:space="preserve">{unit}</t></r>')
+
+
 class TestPayItems:
-    def test_stamps_each_column_with_the_unit_in_pay_quantity_and_chk_blank(self):
+    def test_stamps_each_column_with_the_unit_after_the_quantity_and_chk_blank(self):
         general = general_with(payItems=[pay_item(1, quantityChk="RM")])
         sheet = exported_workbook(general=general)["Gen Fr"]
-        assert [sheet[f"{c}39"].value for c in "BGNSX"] == ["4.01 AAS", "12345", "312.50 S.F.", None, "Sidewalk 1"]
+        # read as plain text, the quantity and its superscript unit run together
+        assert [sheet[f"{c}39"].value for c in "BGNSX"] == ["4.01 AAS", "12345", "312.50SF", None, "Sidewalk 1"]
         assert sheet["B40"].value is None
 
+    def test_the_quantity_is_one_run_and_the_unit_a_small_superscript_run_after_it(self):
+        content = export_bytes(general=general_with(payItems=[pay_item(1)]))
+        cell = quantity_cell_xml(content, "sheet4.xml", "N39")
+        assert 't="inlineStr"' in cell
+        # the number carries no font of its own: it keeps the cell's (Arial 14 on Gen Fr)
+        assert '<is><r><t xml:space="preserve">312.50</t></r>' + UNIT_RUN.format(unit="SF") + "</is>" in cell
+
+    def test_the_number_keeps_each_pages_own_size(self):
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(
+            general=general_with(payItems=[pay_item(1)]),
+            reports=[GENERAL_ROW, swcb_row(1, 2, payItems=[pay_item(1)]), ac_row(2, 3, payItems=[pay_item(1)])])))
+        sizes = {sheet: (book[sheet][cell].font.name, book[sheet][cell].font.sz)
+                 for sheet, cell in (("Gen Fr", "N39"), ("Conc Fr", "K49"), ("AC Fr", "K39"))}
+        assert sizes == {"Gen Fr": ("Arial", 14), "Conc Fr": ("Arial", 10), "AC Fr": ("Arial", 10)}
+        for sheet, cell in (("Gen Fr", "N39"), ("Conc Fr", "K49"), ("AC Fr", "K39")):
+            assert book[sheet][cell].value == "312.50SF", sheet
+
+    def test_a_quantity_cell_shrinks_to_fit_and_an_empty_row_is_left_alone(self):
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(
+            general=general_with(payItems=[pay_item(1, payQuantity="100000.00"), pay_item(2, unit="")]))))
+        sheet = book["Gen Fr"]
+        assert sheet["N39"].value == "100000.00SF" and sheet["N39"].alignment.shrink_to_fit is True
+        assert sheet["N40"].alignment.shrink_to_fit is True  # a number without a unit too
+        assert sheet["N39"].alignment.horizontal == "center"  # the rest of the style is kept
+        assert not sheet["N41"].alignment.shrink_to_fit and sheet["N41"].value is None
+
     def test_pay_quantity_without_a_unit_is_just_the_number(self):
-        general = general_with(payItems=[pay_item(1, unit=""), pay_item(2, payQuantity="", unit="S.F.")])
+        content = export_bytes(general=general_with(payItems=[pay_item(1, unit=""), pay_item(2, unit=None)]))
+        sheet = openpyxl.load_workbook(io.BytesIO(content))["Gen Fr"]
+        assert (sheet["N39"].value, sheet["N40"].value) == ("312.50", "312.50")
+        assert "<r>" not in quantity_cell_xml(content, "sheet4.xml", "N39")  # plain text, no runs
+
+    def test_a_unit_without_a_quantity_prints_nothing(self):
+        general = general_with(payItems=[pay_item(1, payQuantity="", unit="S.F."), pay_item(2, payQuantity=None),
+                                         pay_item(3, payQuantity="   ")])
         sheet = exported_workbook(general=general)["Gen Fr"]
-        assert sheet["N39"].value == "312.50"
-        assert sheet["N40"].value == "S.F."
+        assert [sheet[f"N{row}"].value for row in (39, 40, 41)] == [None, None, None]
+        assert [sheet[f"B{row}"].value for row in (39, 40, 41)] == ["4.01 AAS", "4.02 AAS", "4.03 AAS"]  # still listed
+
+    @pytest.mark.parametrize("unit,short", [("L.F.", "LF"), ("S.F.", "SF"), ("C.Y.", "CY"), ("S.Y.", "SY"),
+                                            ("Ton", "TN"), ("Each", "EA")])
+    def test_every_unit_in_the_catalog_has_its_abbreviation(self, unit, short):
+        assert pay_unit_abbreviation(unit) == short
+        sheet = exported_workbook(general=general_with(payItems=[pay_item(1, payQuantity="29.00", unit=unit)]))["Gen Fr"]
+        assert sheet["N39"].value == f"29.00{short}"
+
+    def test_the_catalogs_units_are_all_mapped(self):
+        seeded = set(re.findall(r"'([^']+)'\)\s*[,;]", (ROOT / "seed_sidewalk_pay_items.sql").read_text(encoding="utf-8")))
+        units = {unit for unit in seeded if pay_unit_abbreviation(unit) in ("LF", "SF", "CY", "SY", "TN", "EA")}
+        assert {"L.F.", "S.F.", "C.Y.", "S.Y.", "Ton"} <= units
+
+    @pytest.mark.parametrize("unit,short", [
+        ("LF", "LF"), ("l.f.", "LF"), (" S. F. ", "SF"), ("TON", "TN"), ("each", "EA"),  # the same units, written otherwise
+        ("Gal.", "GAL"), ("L.S.", "LS"), ("Hours", "HOUR"), ("M.F.B.M.", "MFBM"), ("Lump Sum", "LUMP"),  # unlisted ones
+    ])
+    def test_other_spellings_and_unlisted_units_fall_back_to_capitals_without_periods(self, unit, short):
+        assert pay_unit_abbreviation(unit) == short
+
+    @pytest.mark.parametrize("unit", [None, "", "   ", ". ."])
+    def test_no_unit_is_none(self, unit):
+        assert pay_unit_abbreviation(unit) is None
+
+    def test_the_rows_carry_the_quantity_and_the_abbreviated_unit_apart(self):
+        rows = pay_item_rows([pay_item(1), pay_item(2, payQuantity=""), pay_item(3, unit="")], 12)
+        assert [(row["payQuantity"], row["unit"]) for row in rows] == [("312.50", "SF"), (None, None), ("312.50", None)]
+        assert pay_item_rows([pay_item(1)], 12, continued=True)[-1]["unit"] is None
 
     def test_more_items_than_rows_continue_on_the_next_page(self):
         general = general_with(payItems=[pay_item(n) for n in range(14)])
@@ -1087,7 +1164,7 @@ class TestSwcbFront:
         items = [pay_item(1, description=on_one_line_here, quantityChk="RM"), pay_item(2, description=long)]
         content, workbook = swcb_body(payItems=items)
         sheet = workbook["Conc Fr"]
-        assert [sheet[f"{c}49"].value for c in "BFKPU"] == ["4.01 AAS", "12345", "312.50 S.F.", None, on_one_line_here]
+        assert [sheet[f"{c}49"].value for c in "BFKPU"] == ["4.01 AAS", "12345", "312.50SF", None, on_one_line_here]
         assert (sheet["U49"].font.sz, conc_front_row_height(content, 49)) == (10, 15.0)  # one line: template's 15 pt
         assert (sheet["U50"].font.sz, conc_front_row_height(content, 50)) == (8, 22.5)  # two lines at 8 pt
         assert sheet["B51"].value is None
@@ -2732,7 +2809,7 @@ class TestAcPayItems:
     def test_items_use_conc_frs_columns_with_the_unit_in_pay_quantity(self):
         sheet = ac_front(payItems=[pay_item(1, quantityChk="RM"), pay_item(2)])
         assert [sheet[f"{c}39"].value for c in ("B", "F", "K", "P", "U")] == [
-            "4.01 AAS", "12345", "312.50 S.F.", None, "Sidewalk 1"]
+            "4.01 AAS", "12345", "312.50SF", None, "Sidewalk 1"]
         assert (sheet["B40"].value, sheet["B41"].value) == ("4.02 AAS", None)
 
     def test_a_short_description_keeps_one_10_pt_line(self):
@@ -3489,10 +3566,11 @@ def export_media_type() -> str:
 # ---------------------------------------------------------------------------
 
 SIGNATURE_PATH = f"idrs/{IDR_ID}/inspector_0123456789abcdef0123456789abcdef.png"
-# 02:30 UTC on Oct 1 is 10:30 pm on Sep 30 in New York, where the forms are from
+# Signed three days after the work it reports: the page shows the work date, never the day it was signed
 SIGNED_IDR = {**SUBMITTED_IDR, "inspector_signature_path": SIGNATURE_PATH,
-              "inspector_signed_at": datetime(2026, 10, 1, 2, 30, tzinfo=timezone.utc)}
-SIGNED_ON = "9/30/26"
+              "inspector_signed_at": datetime(2026, 10, 3, 14, 30, tzinfo=timezone.utc)}
+assert SUBMITTED_IDR["report_date"] == date(2026, 9, 30)
+SIGNED_ON = "9/30/26"  # the IDR's report_date
 # Each signed page: its signature line's first cell, its Date cell, and the label cells under them
 SIGNATURE_LINES = {
     "Gen Bk": ("C59", "AE59", "C60", "AE60"), "Conc Bk": ("C59", "AE59", "C60", "AE60"),
@@ -3568,7 +3646,7 @@ class TestSignatureExport:
         for sheet in UNSIGNED_PAGES:
             assert stamped(content, sheet) == [], sheet
 
-    def test_the_date_cell_shows_the_day_it_was_signed_in_new_york(self):
+    def test_the_date_cell_shows_the_idrs_work_date_not_the_day_it_was_signed(self):
         book = openpyxl.load_workbook(io.BytesIO(full_signed_export()))
         dates = {"Gen Bk": "AE59", "Conc Bk": "AE59", "AC Bk": "AE55", "Conc Mix": "AK60", "Report Cont": "AF49",
                  "Attachments 1": "AF61"}
@@ -3724,10 +3802,10 @@ class TestSignedThroughReview:
 RE_SIGNATURE_PATH = f"idrs/{IDR_ID}/re_fedcba9876543210fedcba9876543210.png"
 RE_UUID = UUID("f0000000-0000-4000-8000-000000000006")
 RE_USER = {"user_id": RE_UUID, "email": "rex@icid.local", "first_name": "Rex", "last_name": "Resident"}
-# 03:15 UTC on Oct 7 is 11:15 pm on Oct 6 in New York
+# Approved a week after the work date; the caption shows the work date all the same
 APPROVED_IDR = {**SIGNED_IDR, "status": "approved", "idr_number": "005", "re_reviewer_uuid": RE_UUID,
                 "re_signature_path": RE_SIGNATURE_PATH, "re_signed_at": datetime(2026, 10, 7, 3, 15, tzinfo=timezone.utc)}
-RE_CAPTION = "RE: Rex Resident, 10/6/26"
+RE_CAPTION = "RE: Rex Resident, 9/30/26"
 # Each signed page: the RE line's first cell, the caption under it, and what the template prints there
 RE_LINES = {
     "Gen Bk": ("S59", "S60", "Resident Engineer's Signature"), "Conc Bk": ("S59", "S60", "Resident Engineer's Name"),
@@ -3787,7 +3865,7 @@ class TestReSignatureExport:
         for sheet in SIGNED_PAGES:
             assert signatures_on(approved, sheet)[0] == signatures_on(submitted, sheet)[0], sheet
 
-    def test_the_caption_under_the_line_names_the_approver_and_the_day_in_new_york(self):
+    def test_the_caption_under_the_line_names_the_approver_and_the_work_date(self):
         book = openpyxl.load_workbook(io.BytesIO(approved_export()))
         assert {sheet: book[sheet][cell].value for sheet, cell in RE_CAPTIONS.items()} == dict.fromkeys(
             RE_CAPTIONS, RE_CAPTION)
@@ -3817,7 +3895,7 @@ class TestReSignatureExport:
     def test_a_long_name_is_printed_whole(self):
         long_name = {**RE_USER, "first_name": "Maximiliana-Guadalupe", "last_name": "Featherstonehaugh-Cholmondeley"}
         book = openpyxl.load_workbook(io.BytesIO(approved_export(users={RE_UUID: long_name})))
-        assert book["Gen Bk"]["S60"].value == "RE: Maximiliana-Guadalupe Featherstonehaugh-Cholmondeley, 10/6/26"
+        assert book["Gen Bk"]["S60"].value == "RE: Maximiliana-Guadalupe Featherstonehaugh-Cholmondeley, 9/30/26"
         assert book["Gen Bk"]["S60"].alignment.shrink_to_fit is True
 
     def test_copies_of_a_page_carry_it_too(self):
@@ -3886,14 +3964,14 @@ class TestReSignatureExport:
         unknown = {**APPROVED_IDR, "re_reviewer_uuid": None}
         book = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=unknown, signature=signature_png(),
                                                                re_signature=signature_png())))
-        assert book["Gen Bk"]["S60"].value == "RE: 10/6/26"
+        assert book["Gen Bk"]["S60"].value == "RE: 9/30/26"
 
     def test_the_approvers_email_stands_in_for_a_missing_name(self):
         nameless = {**RE_USER, "first_name": None, "last_name": None}
         book = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=APPROVED_IDR, signature=signature_png(),
                                                                re_signature=signature_png(),
                                                                users={RE_UUID: nameless})))
-        assert book["Gen Bk"]["S60"].value == "RE: rex@icid.local, 10/6/26"
+        assert book["Gen Bk"]["S60"].value == "RE: rex@icid.local, 9/30/26"
 
     def test_the_two_pictures_are_told_apart_in_the_file(self):
         _, _, anchors = added_anchors(export_bytes(idr=APPROVED_IDR, signature=signature_png(),
@@ -3906,6 +3984,32 @@ class TestReSignatureExport:
         approved, submitted = approved_export(), full_signed_export()
         assert tab_order(approved) == tab_order(submitted)
         assert print_order_page_numbers(approved) == print_order_page_numbers(submitted)
+
+
+class TestOneDateOnEveryPage:
+    def test_the_header_the_signature_date_and_the_re_caption_all_show_the_work_date(self):
+        book = openpyxl.load_workbook(io.BytesIO(approved_export()))
+        for sheet, signed, caption in (("Gen Bk", "AE59", "S60"), ("Conc Bk", "AE59", "S60"), ("AC Bk", "AE55", "S56"),
+                                       ("Conc Mix", "AK60", "W61"), ("Report Cont", "AF49", "S50"),
+                                       ("Attachments 1", "AF61", "S62")):
+            assert (book[sheet][signed].value, book[sheet][caption].value) == ("9/30/26", RE_CAPTION), sheet
+        # and the date at the top of the General's front page is that same day
+        header = book["Gen Fr"]["AI4"].value
+        assert (header.year, header.month, header.day) == (2026, 9, 30)
+
+    def test_neither_signing_time_is_printed_anywhere(self):
+        content = approved_export()
+        package = zipfile.ZipFile(io.BytesIO(content))
+        sheets = "".join(package.read(name).decode() for name in package.namelist()
+                         if name.startswith("xl/worksheets/sheet"))
+        for signing_day in ("10/3/26", "10/6/26", "10/7/26"):
+            assert signing_day not in sheets
+
+    def test_a_different_work_date_changes_all_of_them_together(self):
+        moved = {**APPROVED_IDR, "report_date": date(2026, 2, 3), "total_pages": 4}
+        book = openpyxl.load_workbook(io.BytesIO(approved_export(idr=moved)))
+        assert book["Gen Bk"]["AE59"].value == "2/3/26" and book["Gen Bk"]["S60"].value == "RE: Rex Resident, 2/3/26"
+        assert book["Conc Mix"]["AK60"].value == "2/3/26"
 
 
 class TestReSignatureLayouts:
@@ -3962,9 +4066,9 @@ class TestReSignatureLayouts:
 class TestReSignatureHelpers:
     def test_the_caption_wording(self):
         from api.services.export_common import re_signature_caption
-        signed = datetime(2026, 10, 7, 3, 15, tzinfo=timezone.utc)
-        assert re_signature_caption("Rex Resident", signed) == "RE: Rex Resident, 10/6/26"
-        assert re_signature_caption(None, signed) == "RE: 10/6/26"
+        signed = date(2026, 9, 30)  # the IDR's work date
+        assert re_signature_caption("Rex Resident", signed) == "RE: Rex Resident, 9/30/26"
+        assert re_signature_caption(None, signed) == "RE: 9/30/26"
         assert re_signature_caption("Rex Resident", None) == "RE: Rex Resident"
         assert re_signature_caption(None, None) == "RE:"
 
@@ -3973,7 +4077,7 @@ class TestReSignatureHelpers:
         workbook = WorkbookTemplate(export.TEMPLATE_PATH)
         before = workbook.to_bytes()
         stamp_re_signature(workbook, "Gen Bk", export.RE_SIGNATURE_LAYOUTS["Gen Bk"], None, "Rex Resident",
-                           datetime(2026, 10, 7, tzinfo=timezone.utc))
+                           date(2026, 9, 30))
         after = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))
         assert after["Gen Bk"]["S60"].value == "Resident Engineer's Signature"
         assert len(workbook.to_bytes()) == len(before)
@@ -4032,25 +4136,23 @@ class TestSignatureLayouts:
 
 
 class TestSignatureHelpers:
-    def test_the_signed_date_is_the_day_in_new_york(self):
-        from api.services.export_common import signed_date
-        assert signed_date(datetime(2026, 10, 1, 2, 30, tzinfo=timezone.utc)) == date(2026, 9, 30)  # 10:30 pm EDT
-        assert signed_date(datetime(2026, 10, 1, 16, 0, tzinfo=timezone.utc)) == date(2026, 10, 1)
-        assert signed_date(datetime(2026, 1, 15, 4, 59, tzinfo=timezone.utc)) == date(2026, 1, 14)  # 11:59 pm EST
-        assert signed_date(datetime(2026, 1, 15, 5, 0, tzinfo=timezone.utc)) == date(2026, 1, 15)
-        assert signed_date(datetime(2026, 10, 1, 2, 30)) == date(2026, 9, 30)  # no zone: taken as UTC
+    def test_the_date_stamped_is_the_date_given_as_m_d_yy(self):
+        from api.services.export_common import prepare_signature, stamp_signature
+        workbook = WorkbookTemplate(export.TEMPLATE_PATH)
+        stamp_signature(workbook, "Gen Bk", export.SIGNATURE_LAYOUTS["Gen Bk"], prepare_signature(signature_png()),
+                        date(2026, 1, 5))
+        assert openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))["Gen Bk"]["AE59"].value == "1/5/26"
 
     def test_stamping_no_signature_changes_nothing(self):
         from api.services.export_common import stamp_signature
         workbook = WorkbookTemplate(export.TEMPLATE_PATH)
         before = workbook.to_bytes()
-        stamp_signature(workbook, "Gen Bk", export.SIGNATURE_LAYOUTS["Gen Bk"], None,
-                        datetime(2026, 10, 1, tzinfo=timezone.utc))
+        stamp_signature(workbook, "Gen Bk", export.SIGNATURE_LAYOUTS["Gen Bk"], None, date(2026, 9, 30))
         after = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))
         assert after["Gen Bk"]["AE59"].value is None  # no date without a signature
         assert len(workbook.to_bytes()) == len(before)
 
-    def test_a_signature_with_no_signing_time_leaves_the_date_blank(self):
+    def test_a_signature_with_no_date_given_leaves_the_date_blank(self):
         from api.services.export_common import prepare_signature, stamp_signature
         workbook = WorkbookTemplate(export.TEMPLATE_PATH)
         stamp_signature(workbook, "Conc Bk", export.SIGNATURE_LAYOUTS["Conc Bk"],

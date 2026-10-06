@@ -5,9 +5,9 @@ This module loads the IDR's data and assembles the workbook; each report's pages
 (export_general for the General, export_swcb for a Sidewalk, Curb, Concrete Base report, export_conc_mix for a
 Concrete Truck & Mix Info report). Pages that hold nothing stay hidden, so the file prints only the IDR's pages. A draft
 IDR exports too, with "DRAFT - Not for Submission" across the top of every page it prints. From submission on, an
-IDR's pages carry the inspector's signature (the copy the IDR kept at submit) and the date it was signed, wherever a
-page has a signature line. An approved IDR's carry the Resident Engineer's signature beside it (the copy kept at
-final approval), captioned with the approver's name and the date.
+IDR's pages carry the inspector's signature (the copy the IDR kept at submit), wherever a page has a signature line.
+An approved IDR's carry the Resident Engineer's signature beside it (the copy kept at final approval), captioned with
+the approver's name. Both are dated with the IDR's work date, not the day they were signed.
 """
 
 import logging
@@ -338,8 +338,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     its "Attached Pages" box when its report has attachments or continues on Report Cont. Pay items past a front
     page's table continue on copies of it, right after it. A report's extra sheets are numbered after it and counted
     in OF. Each report's attachments follow its last page, one unnumbered page each. A draft IDR's pages are each
-    marked "DRAFT - Not for Submission"; from submission on they carry the inspector's signature and the date it was
-    signed wherever a page has a signature line, and an approved IDR's carry the Resident Engineer's beside it.
+    marked "DRAFT - Not for Submission"; from submission on they carry the inspector's signature wherever a page has
+    a signature line, and an approved IDR's carry the Resident Engineer's beside it, both dated with the work date.
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -437,9 +437,10 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
             stamp_draft_marker(workbook, page)
         layout = _signature_layout(page)
         if layout is not None:
-            stamp_signature(workbook, page, layout, signature, idr.get("inspector_signed_at"))
+            # Both signatures are dated with the IDR's work date, the date at the top of the page
+            stamp_signature(workbook, page, layout, signature, idr["report_date"])
             stamp_re_signature(workbook, page, _signature_layout(page, RE_SIGNATURE_LAYOUTS), re_signature, re_name,
-                               idr.get("re_signed_at"))
+                               idr["report_date"])
     workbook.show_only(pages)
 
     return IdrExport(
