@@ -9,6 +9,7 @@ A write only goes through while the field still holds the old value the caller r
 cross: the loser gets an empty result and reads again.
 """
 
+from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
@@ -119,10 +120,12 @@ def apply_header_edit(idr_id: UUID, column: str, old_value: Any, new_value: Any,
 
 def _json_safe(value: Any) -> Any:
     """
-    Make a header value storable as JSON: a time or a decimal becomes its text.
+    Make a header value storable as JSON: a temperature read from its NUMERIC column becomes a number, a time its text.
     Takes the value.
-    Returns it unchanged when it is None, text, a bool or a number; otherwise str(value).
+    Returns it unchanged when it is None, text, a bool or a number; a Decimal as a float; anything else as str(value).
     """
+    if isinstance(value, Decimal):
+        return float(value)
     return value if value is None or isinstance(value, (str, bool, int, float)) else str(value)
 
 

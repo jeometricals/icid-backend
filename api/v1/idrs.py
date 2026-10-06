@@ -27,6 +27,7 @@ from api.queries.projects import get_project_by_id, is_user_on_project
 from api.services.attachments import delete_all_storage_files_for_report
 from api.services.auth import current_user, demo_idr_fence, require_full_user, require_project_role
 from api.services.auto_general import regenerate_auto_general
+from api.services.field_edits import field_edits_for
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 from api.schemas.auth import UserOut
 from api.schemas.idr import (
@@ -101,9 +102,9 @@ def create_draft_idr(body: IdrCreate, user: UserOut = Depends(current_user)) -> 
 @router.get("/{idr_id}", response_model=IdrWithReportsResponse)
 def get_idr(idr_id: UUID) -> IdrWithReportsResponse:
     """
-    Return an IDR with its header fields and every report inside it, report_data as stored.
+    Return an IDR with its header fields, every report inside it (report_data as stored) and every edit reviewers made on it, oldest first. The header and the reports already hold the edited values; the edits are their history.
     Takes the IDR uuid as a path parameter.
-    Returns an IdrWithReportsResponse (reports is [] when none), or raises 404 if the IDR does not exist.
+    Returns an IdrWithReportsResponse (reports and field_edits are [] when none), or raises 404 if the IDR does not exist.
     """
     idr = get_idr_by_id(idr_id)
 
@@ -115,10 +116,15 @@ def get_idr(idr_id: UUID) -> IdrWithReportsResponse:
     if reports is None:
         raise HTTPException(status_code=500, detail="Failed to load IDR reports")
 
+    edits = field_edits_for(idr_id)
+
+    if edits is None:
+        raise HTTPException(status_code=500, detail="Failed to load IDR edits")
+
     return IdrWithReportsResponse(
         status="success",
         message="IDR detail",
-        data=IdrWithReports.model_validate({**idr, "reports": reports}),
+        data=IdrWithReports.model_validate({**idr, "reports": reports, "field_edits": edits}),
     )
 
 

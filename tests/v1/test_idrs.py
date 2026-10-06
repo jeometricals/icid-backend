@@ -75,6 +75,7 @@ def patched(idrs=None, idr_reports=None, projects=None):
         return {"side_effect": value} if isinstance(value, tuple) else {"return_value": value}
 
     with patch("api.queries.idrs.run_query", **kwargs(idrs)) as i, \
+         patch("api.queries.idr_field_edits.run_query", return_value=[]), \
          patch("api.queries.idr_reports.run_query", **kwargs(idr_reports)) as ir, \
          patch("api.queries.projects.run_query", **kwargs(projects)) as p, \
          patch("api.v1.idrs.regenerate_auto_general") as regen, \

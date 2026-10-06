@@ -17,12 +17,12 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -53,7 +53,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count`, `has_general` and the names of the inspector and reviewers (all filters optional). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true)
-- `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order
+- `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order, and `field_edits`: every edit reviewers made on it, oldest first, each with `editor_name` and `editor_initials`
 - `PUT /v1/idrs/{idr_id}/header` — partial update of the shared header fields on a draft
 - `POST /v1/idrs/{idr_id}/reports` — add a report (typed by `ReportType`; addendums may name a parent)
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
@@ -65,6 +65,9 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid`; the status stays `stage2_review`, and the last to accept wins
 - `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`; only the RE reviewer; 400 `Signature required before approving`, 502 when the signature can't be copied
 - `POST /v1/idrs/{idr_id}/return` — body `{to: "inspector" | "oe", comment}`; back to `draft` (inspector) or, from Stage 2, to `stage1_review` (OE), with `return_reason` and `returned_from`; only the current stage's reviewer; 400 for a blank comment
+- `PATCH /v1/idrs/{idr_id}/field` — the current stage's reviewer (or an admin) edits one field of an IDR in review: body `{report_id, field_path, new_value}` (`report_id` left out for `header.<column>`). The new value is written into the IDR and the old one logged. Returns the IDR with its reports and `field_edits`. 400 when the IDR isn't in review, the path isn't a field of the report, the value doesn't fit, or nothing changes; 403 for anyone but that reviewer; 409 if the field changed meanwhile
+- `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/revise` — same caller: body `{revised_quantity}`; the pay item is found by its id in whichever report holds it. 404 when no report of the IDR holds it
+- `POST /v1/idrs/{idr_id}/pay-items/add` — same caller: body `{report_id, item_no, budget_code, quantity, unit, description}`; appends a pay item to that report (General, SWCB or AC), logged as added by the reviewer
 - `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at` and `re_reviewer_uuid` cleared, so an RE must accept and approve again; the IDR number stays. 400 for a draft, submitted, Stage 1 or deleted IDR
 - `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept). Deleting an IDR already deleted is a 200 that changes nothing
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
@@ -154,8 +157,8 @@ Any change must follow these.
       and writes its `icid.idr_audit` row in a single statement (`_move_idr` in `api/queries/idrs.py`, with
       `AUDIT_CTE` from `api/queries/idr_audit.py`). A move that finds the IDR changed returns 409. Submit logs
       the same way.
-    - Reviewers can't edit an IDR yet: the edit routes still take drafts only. The groundwork for reviewer edits
-      is in (see "Reviewer edits" below); no route uses it. Admin edits outside review are not built.
+    - A reviewer edits an IDR through the reviewer-edit routes only (see "Reviewer edits" below); the
+      inspector's edit routes still take drafts only. Admin edits outside review are not built.
     - **Admin unlock** sends an approved IDR back to `stage2_review` and clears the RE's signature and the RE
       reviewer, so the export stops printing the old signature and an RE has to accept it before approving
       again. The admin does not approve. Logged as `admin_unlock`.
@@ -170,7 +173,7 @@ Any change must follow these.
     `create_idr` uses `ON CONFLICT DO NOTHING` with no target.
   - Endpoint tests use the `admin_client` fixture (signed in as `ADMIN_USER_ROW`, `tests/conftest.py`); the plain
     `client` is for testing what happens without a token.
-- **Reviewer edits (groundwork; no route yet).** A reviewer's change to an IDR in review is applied and logged.
+- **Reviewer edits.** A reviewer's change to an IDR in review is applied and logged (`api/v1/field_edits.py`, `api/services/field_edits.py`).
   - **Applied and logged, not overlaid.** One statement locks the IDR, writes the new value into it (a header
     column, or the report's `report_data`), adds an `icid.idr_field_edits` row holding the old and new value, and
     adds the `idr_audit` row. The IDR always holds the current value, so the export, the auto-General and the
@@ -196,7 +199,21 @@ Any change must follow these.
     IDR's `stage1_reviewer_uuid` in `stage1_review` or its `re_reviewer_uuid` in `stage2_review`, and still hold
     a role that reviews at that stage; an admin stands in. 400 for an IDR that isn't in review, 403 otherwise.
     It is tighter than `require_project_role`, which any holder of the role passes.
-  - The inspector's own changes to a returned draft are ordinary saves and are not logged as edits.
+  - The inspector's own changes to a returned draft are ordinary saves and are not logged as edits. A client
+    can tell: the field's current value differs from the last edit's `new_value`.
+  - **What can be edited:** the eight header fields (never the work date, the IDR number or a signature), and
+    any single value inside a report: text, a number, true/false or nothing. A path naming a whole object, a
+    list or a pay item is refused, as is a pay item's `id`. `report_data` has no schema on the server, so the
+    rule is only "the field must already exist in this report"; an edit never creates a key.
+  - **An edit that changes nothing is refused** (400), so the log holds only real changes.
+  - **Pay items:** editing `payItems[<id>].payQuantity` is a `pay_item_revision` whichever route it comes
+    through. A reviewer-added item gets a fresh id, the keys the report form saves (`itemNo`, `budgetCode`,
+    `payQuantity` as text, `unit`, `description`) and no marker of its own: that it was added, and by whom, is
+    its `pay_item_add` edit row. An inspector adds items to a draft through the report form, not these routes.
+  - **The auto-General:** it can't be edited. After an edit to a main report it summarises, it is rebuilt
+    (`regenerate_auto_general`) so its merged pay items and description show the reviewer's value; that
+    rebuild is a second statement, not part of the edit's. Nothing is rebuilt, or created, when the IDR has an
+    inspector's General or none.
 - **Demo mode.** `POST /v1/auth/demo` is public: it makes a throwaway user (`is_demo`, `demo-<uuid>@icid.local`,
   no password, no role, client `C00001`) and their one `project_users` row on `DEMO01` in a single statement, and
   signs them in. Since anyone can get a demo token, a demo user is kept to their own data:

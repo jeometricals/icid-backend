@@ -228,6 +228,9 @@ Indexes: `idx_idr_field_edits_idr (idr_id, edited_at)` and `idx_idr_field_edits_
 | `payItems[<id>].<key>` | `payItems[3f2a…].payQuantity` | A pay item's field, by the item's `id`; `payQuantity` is a `pay_item_revision` |
 | `payItems[<id>]` | `payItems[3f2a…]` | A pay item a reviewer added (`pay_item_add`) |
 
+The routes that write these rows are `PATCH /v1/idrs/{id}/field`, `POST /v1/idrs/{id}/pay-items/{item id}/revise`
+and `POST /v1/idrs/{id}/pay-items/add`; `GET /v1/idrs/{id}` returns them as `field_edits`.
+
 Each edit also writes an `idr_audit` row (`field_edit`, `pay_item_revise` or `pay_item_add`) whose `note` is
 `{"edit_id", "field_path"}`.
 

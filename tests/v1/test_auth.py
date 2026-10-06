@@ -556,7 +556,8 @@ class TestFixtures:
 
 PUBLIC_ROUTES = {("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout"), ("POST", "/v1/auth/demo"), ("GET", "/status")}
 PATH_VALUES = {"idr_id": "9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e", "report_id": "e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091",
-               "attachment_id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "project_id": "HWS0023"}
+               "attachment_id": "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d", "project_id": "HWS0023",
+               "pay_item_id": "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b"}
 
 
 def api_routes() -> list[tuple[str, str]]:
@@ -579,7 +580,7 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 34
+        assert len(PROTECTED_ROUTES) == 37
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
@@ -590,7 +591,9 @@ class TestEveryRouteNeedsSignIn:
                          ("GET", "/v1/idrs/queue"), ("POST", "/v1/idrs/{idr_id}/accept-stage1"),
                          ("POST", "/v1/idrs/{idr_id}/approve-stage1"), ("POST", "/v1/idrs/{idr_id}/accept-stage2"),
                          ("POST", "/v1/idrs/{idr_id}/approve-stage2"), ("POST", "/v1/idrs/{idr_id}/return"),
-                         ("POST", "/v1/idrs/{idr_id}/admin/unlock"), ("POST", "/v1/idrs/{idr_id}/admin/delete")):
+                         ("POST", "/v1/idrs/{idr_id}/admin/unlock"), ("POST", "/v1/idrs/{idr_id}/admin/delete"),
+                         ("PATCH", "/v1/idrs/{idr_id}/field"), ("POST", "/v1/idrs/{idr_id}/pay-items/add"),
+                         ("POST", "/v1/idrs/{idr_id}/pay-items/{pay_item_id}/revise")):
             assert expected in PROTECTED_ROUTES
 
     @pytest.mark.parametrize("method,path", PROTECTED_ROUTES)
@@ -740,7 +743,7 @@ class TestDemoFences:
         attachments.assert_not_called()
 
     def test_the_fence_covers_every_route_under_an_idr(self):
-        assert len(IDR_ROUTES) == 20
+        assert len(IDR_ROUTES) == 23
         assert ("POST", "/v1/idrs/{idr_id}/approve-stage2") in IDR_ROUTES  # the review routes too
         assert ("GET", "/v1/idrs/{idr_id}/export") in IDR_ROUTES
         assert ("GET", "/v1/idrs/{idr_id}/reports/{report_id}/attachments") in IDR_ROUTES

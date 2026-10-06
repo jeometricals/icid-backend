@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic_core import PydanticCustomError
 
+from api.schemas.field_edit import FieldEdit
 from api.schemas.idr_report import IdrReport
 
 
@@ -120,6 +121,8 @@ class IdrHeaderUpdate(BaseModel):
 
 class IdrWithReports(Idr):
     reports: list[IdrReport]
+    # Every edit reviewers made on the IDR, oldest first; the IDR and its reports already hold the edited values
+    field_edits: list[FieldEdit] = []
 
 
 class IdrWithReportsResponse(BaseModel):
