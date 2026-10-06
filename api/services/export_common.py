@@ -776,22 +776,27 @@ def stamp_draft_marker(workbook: WorkbookTemplate, sheet: str) -> None:
     workbook.set_row_height(sheet, 1, DRAFT_MARKER_ROW_HEIGHT)
 
 
-# ---- Inspector's signature ------------------------------------------------------------------------------------------
+# ---- Signatures: the inspector's and the Resident Engineer's --------------------------------------------------------
 
 @dataclass(frozen=True)
 class SignatureLayout:
     """
-    Where one form page takes the inspector's signature and its date. The image is fitted to signature_cells: the
-    "Inspector's Signature" line and the blank row above it (the line alone is one 17 px row, too low to read a
-    signature in). The date goes in the Date cell on the same line.
+    Where one form page takes a signature. The image is fitted to signature_cells: the signature line and the blank
+    row above it (the line alone is one 17 px row, too low to read a signature in).
+    The inspector's layout names the Date cell on the same line, which takes the day it was signed. The Resident
+    Engineer's has no Date cell of its own (the page has one, and it is the inspector's), so it names the caption
+    under its line instead, which is replaced by "RE: <name>, <date>".
     """
 
     signature_cells: str                 # the range the image is fitted to, e.g. "C58:M59"
     signature_cx_emu: int                # that range's width
     signature_cy_emu: int                # and height
-    date_cell: str                       # top-left cell of the line's Date cell
+    date_cell: Optional[str] = None      # top-left cell of the line's Date cell (the inspector's layout)
     column_px: int = 19                  # width of each column in the range
     row_px: tuple[int, ...] = (17, 17)   # height of each row in the range, top to bottom
+    column_widths_px: Optional[tuple[int, ...]] = None  # each column's width, for a range whose columns differ
+    caption_cells: Optional[str] = None  # the caption under the line, e.g. "S60:AC60" (the RE's layout)
+    caption_is_merged: bool = True       # False where the template leaves those cells unmerged
 
 
 @dataclass(frozen=True)
@@ -806,6 +811,9 @@ class SignatureImage:
 # Report Cont's signature line is row 49 (C49:M49), its date AF49:AH49
 REPORT_CONT_SIGNATURE = SignatureLayout(signature_cells="C48:M49", signature_cx_emu=209 * EMU_PER_PIXEL,
                                         signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AF49")
+# The Resident Engineer's line on Report Cont is S49:AD49 (twelve columns), its caption S50:AD50
+REPORT_CONT_RE_SIGNATURE = SignatureLayout(signature_cells="S48:AD49", signature_cx_emu=228 * EMU_PER_PIXEL,
+                                           signature_cy_emu=34 * EMU_PER_PIXEL, caption_cells="S50:AD50")
 
 # The image is stored once per page it is stamped on, so it is kept small: four times the 209 x 34 px box at most,
 # which still prints sharply
@@ -855,17 +863,31 @@ def _column_letters(number: int) -> str:
     return letters
 
 
-def stamp_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
-                    signature: Optional[SignatureImage], signed_at: Optional[datetime]) -> None:
+def _column_at(layout: SignatureLayout, first_column: int, left: int) -> tuple[int, int]:
     """
-    Stamp the inspector's signature on one page: the image as large as fits the layout's signature cells, keeping its
-    proportions, centred in them; and the day it was signed (m/d/yy) in the Date cell.
-    Takes the workbook, the sheet, its SignatureLayout, the signature (None leaves the page as it is: no image, no
-    date) and when it was signed (None leaves the date blank).
+    Find the column a point falls in, counting pixels from the left edge of a layout's signature cells.
+    Takes the layout, the number of its first column and the distance in pixels.
+    Returns (the column's number, how far into that column the point is).
+    """
+    if layout.column_widths_px is None:
+        return first_column + left // layout.column_px, left % layout.column_px
+    column = first_column
+    for width in layout.column_widths_px[:-1]:
+        if left < width:
+            break
+        left -= width
+        column += 1
+    return column, left
+
+
+def _stamp_signature_image(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
+                           signature: SignatureImage, description: str) -> None:
+    """
+    Place a signature image on one page: as large as fits the layout's signature cells, keeping its proportions,
+    centred in them.
+    Takes the workbook, the sheet, its SignatureLayout, the signature and the picture's description.
     Returns nothing.
     """
-    if signature is None:
-        return
     box_width, box_height = layout.signature_cx_emu // EMU_PER_PIXEL, layout.signature_cy_emu // EMU_PER_PIXEL
     scale = min(box_width / signature.width, box_height / signature.height)
     width, height = max(1, round(signature.width * scale)), max(1, round(signature.height * scale))
@@ -880,8 +902,52 @@ def stamp_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLay
             break
         top -= row_height
         row += 1
-    cell = f"{_column_letters(first_column + left // layout.column_px)}{row}"
-    workbook.add_picture(sheet, signature.data, "png", cell, width, height, offset_x_px=left % layout.column_px,
-                         offset_y_px=top, description="Inspector's signature")
+    column, offset_x = _column_at(layout, first_column, left)
+    workbook.add_picture(sheet, signature.data, "png", f"{_column_letters(column)}{row}", width, height,
+                         offset_x_px=offset_x, offset_y_px=top, description=description)
+
+
+def stamp_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
+                    signature: Optional[SignatureImage], signed_at: Optional[datetime]) -> None:
+    """
+    Stamp the inspector's signature on one page: the image fitted to the layout's signature cells, and the day it
+    was signed (m/d/yy) in the Date cell.
+    Takes the workbook, the sheet, its SignatureLayout, the signature (None leaves the page as it is: no image, no
+    date) and when it was signed (None leaves the date blank).
+    Returns nothing.
+    """
+    if signature is None:
+        return
+    _stamp_signature_image(workbook, sheet, layout, signature, "Inspector's signature")
     if signed_at is not None:
         workbook.set_cell(sheet, layout.date_cell, short_date(signed_date(signed_at)))
+
+
+def re_signature_caption(name: Optional[str], signed_at: Optional[datetime]) -> str:
+    """
+    Word the caption under the Resident Engineer's signature.
+    Takes the approver's name and when they signed (either may be None).
+    Returns "RE: <name>, <m/d/yy>", with whichever part is known ("RE:" alone when neither is).
+    """
+    parts = [name, short_date(signed_date(signed_at)) if signed_at is not None else None]
+    return " ".join(["RE:", ", ".join(part for part in parts if part)]).strip()
+
+
+def stamp_re_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
+                       signature: Optional[SignatureImage], name: Optional[str],
+                       signed_at: Optional[datetime]) -> None:
+    """
+    Stamp the Resident Engineer's signature on one page: the image fitted to the layout's signature cells, and
+    "RE: <name>, <date>" in place of the caption under the line, shrunk to fit if it is long.
+    Takes the workbook, the sheet, its RE SignatureLayout, the signature (None leaves the page as it is: no image and
+    the printed caption), the approver's name and when they signed.
+    Returns nothing.
+    """
+    if signature is None:
+        return
+    _stamp_signature_image(workbook, sheet, layout, signature, "Resident Engineer's signature")
+    caption = layout.caption_cells.split(":")[0]
+    if not layout.caption_is_merged:
+        workbook.merge_cells(sheet, layout.caption_cells)  # so the text shrinks to the line's width, not one column's
+    workbook.set_cell(sheet, caption, re_signature_caption(name, signed_at))
+    workbook.shrink_to_fit_cell(sheet, caption)

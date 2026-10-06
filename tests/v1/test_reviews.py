@@ -376,8 +376,15 @@ class TestApproveStage2:
         seen["signature"].assert_called_once_with(REVIEWER["signature_path"], UUID(IDR_ID), "re")
         sql, params = seen["moves"][0]
         assert "re_signature_path = %s, re_signed_at = now()" in sql and "AND re_reviewer_uuid = %s" in sql
-        assert params == (UUID(IDR_ID), "stage2_review", REVIEWER["uuid"], "approved", RE_SIGNATURE_COPY,
-                          REVIEWER["uuid"], "approve_stage2", None)
+        assert params == (UUID(IDR_ID), "stage2_review", REVIEWER["uuid"], "approved", REVIEWER["uuid"],
+                          RE_SIGNATURE_COPY, REVIEWER["uuid"], "approve_stage2", None)
+
+    def test_the_approver_is_recorded_as_the_re_reviewer(self):
+        with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",), moved=[APPROVED_IDR]) as seen:
+            client.post(self.url)
+        sql, params = seen["moves"][0]
+        assert "SET status = %s, updated_at = now(), re_reviewer_uuid = %s, re_signature_path = %s" in " ".join(sql.split())
+        assert params[4] == REVIEWER["uuid"]  # so the name on the IDR is the signer's
 
     def test_the_inspectors_signature_is_left_alone(self):
         with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",), moved=[APPROVED_IDR]) as seen:
@@ -402,7 +409,11 @@ class TestApproveStage2:
             response = admin_client.post(self.url)
         assert response.status_code == 200
         seen["signature"].assert_called_once_with(ADMIN_USER_ROW["signature_path"], UUID(IDR_ID), "re")
-        assert "AND re_reviewer_uuid = %s" not in seen["moves"][0][0]
+        sql, params = seen["moves"][0]
+        assert "AND re_reviewer_uuid = %s" not in sql
+        # the admin replaces whoever accepted: their name goes with their signature
+        assert params == (UUID(IDR_ID), "stage2_review", "approved", ADMIN_USER_ROW["uuid"], RE_SIGNATURE_COPY,
+                          ADMIN_USER_ROW["uuid"], "approve_stage2", None)
 
     def test_an_re_without_a_signature_is_400(self):
         unsigned = {**REVIEWER, "signature_path": None, "signature_type": None, "signature_set_at": None}

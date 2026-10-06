@@ -407,13 +407,14 @@ def approve_stage2(
     idr_id: UUID, actor_uuid: UUID, signature_path: str, as_reviewer: bool
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Approve an IDR for good: move it to approved, stamp the RE's signature (its path, and now as when it was signed) and clear any return.
-    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, and whether they must be the IDR's RE reviewer (False for an admin).
+    Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, and clear any return. The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place.
+    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, and whether they must already be the IDR's RE reviewer (False for an admin).
     Returns a one-row list with the IDR, an empty list if it isn't in Stage 2 review under that reviewer, or None on failure.
     """
-    assignments = "re_signature_path = %s, re_signed_at = now(), return_reason = NULL, returned_from = NULL"
+    assignments = ("re_reviewer_uuid = %s, re_signature_path = %s, re_signed_at = now(), "
+                   "return_reason = NULL, returned_from = NULL")
     return _move_idr(idr_id, actor_uuid, "approve_stage2", "stage2_review", "approved", assignments,
-                     (signature_path,), reviewer_column="re_reviewer_uuid" if as_reviewer else None)
+                     (actor_uuid, signature_path), reviewer_column="re_reviewer_uuid" if as_reviewer else None)
 
 
 def return_idr(

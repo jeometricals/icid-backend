@@ -121,13 +121,15 @@ GENERAL = {
 
 @contextmanager
 def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers Contracting Co.", user=USER,
-                   general=GENERAL, main_reports=None, reports=None, attachments=None, files=None, signature=None):
+                   general=GENERAL, main_reports=None, reports=None, attachments=None, files=None, signature=None,
+                   re_signature=None, users=None):
     """
     Patch the queries generate_idr_export reads, and Storage, so it runs without a database or a bucket.
     Takes the IDR, project, contractor name, user, General report (or None), non-General main reports, all the
     IDR's reports (where the SWCB report is found), their uploaded attachment rows, {storage path: file bytes}
-    (a path that's missing, or maps to an exception, fails its download) and the signature file's bytes (None, or
-    an exception, fails its download).
+    (a path that's missing, or maps to an exception, fails its download), the inspector's signature file's bytes
+    and the RE's (None, or an exception, fails that download), and {user uuid: users row} for anyone other than the
+    reporter (an unlisted uuid gets the reporter's row).
     Yields a dict of the mocks.
     """
     def download(path):
@@ -137,15 +139,19 @@ def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers 
         return result
 
     def download_signature(path, bucket):
-        if signature is None or isinstance(signature, Exception):
-            raise signature or FileNotFoundError(path)
-        return signature
+        wanted = re_signature if "/re_" in path else signature
+        if wanted is None or isinstance(wanted, Exception):
+            raise wanted or FileNotFoundError(path)
+        return wanted
+
+    def user_by_id(user_id):
+        return (users or {}).get(user_id, user)
 
     with (
         patch.object(export, "get_idr_by_id", return_value=idr) as gi,
         patch.object(export, "get_project_by_id", return_value=project) as gp,
         patch.object(export, "get_project_contractor_name", return_value=contractor) as gc,
-        patch.object(export, "get_user_by_id", return_value=user) as gu,
+        patch.object(export, "get_user_by_id", side_effect=user_by_id) as gu,
         patch.object(export, "get_general_report", return_value=general) as gg,
         patch.object(export, "list_non_general_main_reports", return_value=main_reports or []) as lm,
         patch.object(export, "list_reports_for_idr", return_value=reports or []) as lr,
@@ -3687,6 +3693,298 @@ class TestSignatureExport:
         signed, unsigned = full_signed_export(), full_signed_export(idr={**SUBMITTED_IDR, "total_pages": 4})
         assert tab_order(signed) == tab_order(unsigned)
         assert print_order_page_numbers(signed) == print_order_page_numbers(unsigned)
+
+
+# ---------------------------------------------------------------------------
+# From submission on: the inspector's signature stays through review and approval
+# ---------------------------------------------------------------------------
+
+class TestSignedThroughReview:
+    @pytest.mark.parametrize("status", ["submitted", "stage1_review", "stage2_review", "approved"])
+    def test_the_inspectors_signature_and_date_print_at_every_status_after_draft(self, status):
+        content = export_bytes(idr={**SIGNED_IDR, "status": status}, signature=signature_png())
+        assert len(stamped(content, "Gen Bk")) == 1
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        assert book["Gen Bk"]["AE59"].value == SIGNED_ON
+        assert book["Gen Bk"]["B1"].value != "DRAFT - Not for Submission"
+
+    def test_a_returned_draft_is_marked_draft_and_unsigned_again(self):
+        returned = {**SIGNED_IDR, "status": "draft", "return_reason": "fix the pay-item quantity", "idr_number": "005"}
+        with patched_export(idr=returned, signature=signature_png()) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        mocks["signature"].assert_not_called()
+        assert stamped(content, "Gen Bk") == []
+        assert openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]["B1"].value == "DRAFT - Not for Submission"
+
+
+# ---------------------------------------------------------------------------
+# The Resident Engineer's signature, beside the inspector's, on an approved IDR
+# ---------------------------------------------------------------------------
+
+RE_SIGNATURE_PATH = f"idrs/{IDR_ID}/re_fedcba9876543210fedcba9876543210.png"
+RE_UUID = UUID("f0000000-0000-4000-8000-000000000006")
+RE_USER = {"user_id": RE_UUID, "email": "rex@icid.local", "first_name": "Rex", "last_name": "Resident"}
+# 03:15 UTC on Oct 7 is 11:15 pm on Oct 6 in New York
+APPROVED_IDR = {**SIGNED_IDR, "status": "approved", "idr_number": "005", "re_reviewer_uuid": RE_UUID,
+                "re_signature_path": RE_SIGNATURE_PATH, "re_signed_at": datetime(2026, 10, 7, 3, 15, tzinfo=timezone.utc)}
+RE_CAPTION = "RE: Rex Resident, 10/6/26"
+# Each signed page: the RE line's first cell, the caption under it, and what the template prints there
+RE_LINES = {
+    "Gen Bk": ("S59", "S60", "Resident Engineer's Signature"), "Conc Bk": ("S59", "S60", "Resident Engineer's Name"),
+    "AC Bk": ("S55", "S56", "Resident Engineer's Name"), "Conc Mix": ("W60", "W61", "Resident Engineer's Name"),
+    "Report Cont": ("S49", "S50", "Resident Engineer's Name"), "Sketch Cont": ("S61", "S62", "Resident Engineer's Name"),
+}
+RE_CAPTIONS = {"Gen Bk": "S60", "Conc Bk": "S60", "AC Bk": "S56", "Conc Mix": "W61", "Report Cont": "S50",
+               "Attachments 1": "S62"}
+
+
+def approved_export(**overrides) -> bytes:
+    """
+    Export an approved IDR with every kind of signed page (see full_signed_export), both signatures on file.
+    Takes export_bytes overrides.
+    Returns the .xlsx bytes.
+    """
+    setup = {"idr": {**APPROVED_IDR, "total_pages": 4}, "re_signature": signature_png((300, 90)),
+             "users": {RE_UUID: RE_USER}}
+    return full_signed_export(**{**setup, **overrides})
+
+
+def signatures_on(content: bytes, sheet: str) -> list[dict]:
+    """
+    Read the signature pictures on a sheet, left to right (an attachment page's photo is left out).
+    Takes the .xlsx bytes and the sheet name.
+    Returns the pictures() entries of its PNGs: the inspector's, then the RE's.
+    """
+    return sorted((p for p in stamped(content, sheet) if p["format"] == "PNG"), key=lambda p: p["col"])
+
+
+class TestReSignatureExport:
+    def test_an_approved_idr_carries_both_signatures_on_every_page_with_a_signature_line(self):
+        content = approved_export()
+        for sheet in SIGNED_PAGES:
+            inspector, resident = signatures_on(content, sheet)
+            assert (inspector["size"], resident["size"]) == ((600, 60), (300, 90)), sheet
+        for sheet in UNSIGNED_PAGES:
+            assert stamped(content, sheet) == [], sheet
+
+    def test_the_res_signature_sits_on_the_reviewed_by_line_of_each_sheet(self):
+        content = approved_export()
+        boxes = {sheet: signatures_on(content, sheet)[1] for sheet in SIGNED_PAGES}
+        # 300 x 90 in the 209 x 34 box S58:AC59 -> 113 x 34, 48 px in from S: two 19 px columns and 10 px, so column U
+        for sheet, row in (("Gen Bk", 57), ("Conc Bk", 57), ("AC Bk", 53)):
+            assert {k: boxes[sheet][k] for k in ("col", "col_off", "row", "row_off", "width", "height")} == {
+                "col": 20, "col_off": 10, "row": row, "row_off": 0, "width": 113, "height": 34}, sheet
+        # Report Cont and the attachment pages have a twelve-column line, 228 px: 57 px in, exactly three columns
+        for sheet, row in (("Report Cont", 47), ("Attachments 1", 59)):
+            assert {k: boxes[sheet][k] for k in ("col", "col_off", "row", "row_off", "width", "height")} == {
+                "col": 21, "col_off": 0, "row": row, "row_off": 0, "width": 113, "height": 34}, sheet
+        # Conc Mix: 203 x 32 box W59:AI60 -> 107 x 32, 48 px in: W is 16 px, X 11, Y 16, so 5 px into column Z
+        assert {k: boxes["Conc Mix"][k] for k in ("col", "col_off", "row", "row_off", "width", "height")} == {
+            "col": 25, "col_off": 5, "row": 58, "row_off": 0, "width": 107, "height": 32}
+
+    def test_the_inspectors_signature_is_where_it_was(self):
+        approved, submitted = approved_export(), full_signed_export()
+        for sheet in SIGNED_PAGES:
+            assert signatures_on(approved, sheet)[0] == signatures_on(submitted, sheet)[0], sheet
+
+    def test_the_caption_under_the_line_names_the_approver_and_the_day_in_new_york(self):
+        book = openpyxl.load_workbook(io.BytesIO(approved_export()))
+        assert {sheet: book[sheet][cell].value for sheet, cell in RE_CAPTIONS.items()} == dict.fromkeys(
+            RE_CAPTIONS, RE_CAPTION)
+        # the page's one Date cell is still the inspector's, and the inspector's caption is untouched
+        assert book["Gen Bk"]["AE59"].value == SIGNED_ON and book["Gen Bk"]["C60"].value == "Inspector's Signature"
+        assert book["Gen Bk"]["S59"].value is None and book["Gen Bk"]["N59"].value.strip() == "Reviewed by:"
+
+    def test_the_caption_keeps_its_style_and_shrinks_to_fit(self):
+        book = openpyxl.load_workbook(io.BytesIO(approved_export()))
+        template = openpyxl.load_workbook(export.TEMPLATE_PATH)
+        for sheet, cell in RE_CAPTIONS.items():
+            caption = book[sheet][cell]
+            printed = template["Sketch Cont" if sheet == "Attachments 1" else sheet][cell]
+            assert (caption.font.name, caption.font.sz, caption.alignment.horizontal) == ("Arial", 8, "center"), sheet
+            assert (caption.font.name, caption.font.sz) == (printed.font.name, printed.font.sz)
+            assert caption.alignment.shrink_to_fit is True, sheet
+            assert not printed.alignment.shrink_to_fit  # only the stamped caption changes
+
+    def test_the_caption_spans_the_whole_line_on_every_sheet(self):
+        book = openpyxl.load_workbook(io.BytesIO(approved_export()))
+        spans = {"Gen Bk": "S60:AC60", "Conc Bk": "S60:AC60", "AC Bk": "S56:AC56", "Conc Mix": "W61:AI61",
+                 "Report Cont": "S50:AD50", "Attachments 1": "S62:AD62"}  # the last is merged by the export
+        for sheet, span in spans.items():
+            assert span in {str(m) for m in book[sheet].merged_cells.ranges}, sheet
+            assert [str(m) for m in book[sheet].merged_cells.ranges].count(span) == 1, sheet
+
+    def test_a_long_name_is_printed_whole(self):
+        long_name = {**RE_USER, "first_name": "Maximiliana-Guadalupe", "last_name": "Featherstonehaugh-Cholmondeley"}
+        book = openpyxl.load_workbook(io.BytesIO(approved_export(users={RE_UUID: long_name})))
+        assert book["Gen Bk"]["S60"].value == "RE: Maximiliana-Guadalupe Featherstonehaugh-Cholmondeley, 10/6/26"
+        assert book["Gen Bk"]["S60"].alignment.shrink_to_fit is True
+
+    def test_copies_of_a_page_carry_it_too(self):
+        photos = [attachment(n, SWCB_1) for n in (1, 2)]
+        content = export_bytes(idr={**APPROVED_IDR, "total_pages": 5}, signature=signature_png(),
+                               re_signature=signature_png((300, 90)), users={RE_UUID: RE_USER},
+                               reports=[GENERAL_ROW, swcb_row(1, 2), conc_mix_row(1, SWCB_1, 3, trucks=12),
+                                        swcb_row(2, 4)],
+                               attachments=photos, files={p["storage_path"]: image_bytes("JPEG") for p in photos})
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        for sheet, cell in (("Conc Bk", "S60"), ("Conc Bk 2", "S60"), ("Conc Mix", "W61"), ("Conc Mix 2", "W61"),
+                            ("Attachments 1", "S62"), ("Attachments 2", "S62")):
+            assert len(signatures_on(content, sheet)) == 2, sheet
+            assert book[sheet][cell].value == RE_CAPTION, sheet
+
+    def test_each_signature_is_fetched_once_and_the_name_looked_up_once(self):
+        with patched_export(idr=APPROVED_IDR, signature=signature_png(), re_signature=signature_png(),
+                            users={RE_UUID: RE_USER}, reports=[GENERAL_ROW, swcb_row(1, 2)]) as mocks:
+            generate_idr_export(IDR_ID)
+        assert [call.args for call in mocks["signature"].call_args_list] == [
+            (SIGNATURE_PATH, "signatures"), (RE_SIGNATURE_PATH, "signatures")]
+        assert [call.args[0] for call in mocks["user"].call_args_list].count(RE_UUID) == 1
+
+    @pytest.mark.parametrize("status", ["submitted", "stage1_review", "stage2_review"])
+    def test_an_idr_that_isnt_approved_never_prints_an_re_signature_left_on_its_row(self, status):
+        # e.g. an approved IDR an admin later unlocked: the old path must not print
+        stale = {**APPROVED_IDR, "status": status}
+        with patched_export(idr=stale, signature=signature_png(), re_signature=signature_png(),
+                            users={RE_UUID: RE_USER}) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        assert [call.args[0] for call in mocks["signature"].call_args_list] == [SIGNATURE_PATH]  # not even fetched
+        assert len(stamped(content, "Gen Bk")) == 1
+        assert openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]["S60"].value == "Resident Engineer's Signature"
+
+    def test_a_draft_export_of_a_once_approved_idr_carries_neither_signature(self):
+        with patched_export(idr={**APPROVED_IDR, "status": "draft"}, signature=signature_png(),
+                            re_signature=signature_png()) as mocks:
+            content = generate_idr_export(IDR_ID).content
+        mocks["signature"].assert_not_called()
+        book = openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]
+        assert stamped(content, "Gen Bk") == [] and book["S60"].value == "Resident Engineer's Signature"
+        assert book["B1"].value == "DRAFT - Not for Submission"
+
+    def test_an_approved_idr_without_an_re_signature_keeps_the_printed_captions(self):
+        content = export_bytes(idr={**APPROVED_IDR, "re_signature_path": None}, signature=signature_png())
+        assert len(stamped(content, "Gen Bk")) == 1
+        assert openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]["S60"].value == "Resident Engineer's Signature"
+
+    @pytest.mark.parametrize("failure", [None, TimeoutError("read timed out"), b"not a png at all"])
+    def test_an_re_signature_that_cant_be_used_leaves_its_line_as_printed_and_is_logged(self, failure, caplog):
+        content = export_bytes(idr=APPROVED_IDR, signature=signature_png(), re_signature=failure,
+                               users={RE_UUID: RE_USER})
+        assert len(stamped(content, "Gen Bk")) == 1  # the inspector's still prints, and the export completes
+        book = openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]
+        assert (book["S60"].value, book["AE59"].value) == ("Resident Engineer's Signature", SIGNED_ON)
+        assert RE_SIGNATURE_PATH in caplog.text and "unavailable for the export" in caplog.text
+
+    def test_the_res_signature_prints_even_when_the_inspectors_cant_be_fetched(self):
+        content = export_bytes(idr=APPROVED_IDR, signature=None, re_signature=signature_png((300, 90)),
+                               users={RE_UUID: RE_USER})
+        (only,) = stamped(content, "Gen Bk")
+        assert only["size"] == (300, 90) and only["col"] == 20
+        assert openpyxl.load_workbook(io.BytesIO(content))["Gen Bk"]["S60"].value == RE_CAPTION
+
+    def test_an_approver_who_cant_be_found_leaves_just_the_date(self):
+        unknown = {**APPROVED_IDR, "re_reviewer_uuid": None}
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=unknown, signature=signature_png(),
+                                                               re_signature=signature_png())))
+        assert book["Gen Bk"]["S60"].value == "RE: 10/6/26"
+
+    def test_the_approvers_email_stands_in_for_a_missing_name(self):
+        nameless = {**RE_USER, "first_name": None, "last_name": None}
+        book = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=APPROVED_IDR, signature=signature_png(),
+                                                               re_signature=signature_png(),
+                                                               users={RE_UUID: nameless})))
+        assert book["Gen Bk"]["S60"].value == "RE: rex@icid.local, 10/6/26"
+
+    def test_the_two_pictures_are_told_apart_in_the_file(self):
+        _, _, anchors = added_anchors(export_bytes(idr=APPROVED_IDR, signature=signature_png(),
+                                                   re_signature=signature_png(), users={RE_UUID: RE_USER}), "Gen Bk")
+        assert len(anchors) == 2
+        assert sum('descr="Inspector\'s signature"' in a for a in anchors) == 1
+        assert sum('descr="Resident Engineer\'s signature"' in a for a in anchors) == 1
+
+    def test_the_tab_order_and_page_numbers_are_what_they_were(self):
+        approved, submitted = approved_export(), full_signed_export()
+        assert tab_order(approved) == tab_order(submitted)
+        assert print_order_page_numbers(approved) == print_order_page_numbers(submitted)
+
+
+class TestReSignatureLayouts:
+    layouts = {"Gen Bk": export.RE_SIGNATURE_LAYOUTS["Gen Bk"], "Conc Bk": export.RE_SIGNATURE_LAYOUTS["Conc Bk"],
+               "AC Bk": export.RE_SIGNATURE_LAYOUTS["AC Bk"], "Conc Mix": export.RE_SIGNATURE_LAYOUTS["Conc Mix"],
+               "Report Cont": export.RE_SIGNATURE_LAYOUTS["Report Cont"],
+               "Sketch Cont": export.RE_SIGNATURE_LAYOUTS["Attachments"]}
+
+    def test_every_page_the_inspector_signs_has_an_re_layout_too(self):
+        assert set(export.RE_SIGNATURE_LAYOUTS) == set(export.SIGNATURE_LAYOUTS)
+        assert set(self.layouts) == set(RE_LINES)
+
+    @pytest.mark.parametrize("sheet", sorted(RE_LINES))
+    def test_the_layout_matches_the_template(self, sheet):
+        from openpyxl.utils import get_column_letter, range_boundaries
+        layout, inspector = self.layouts[sheet], TestSignatureLayouts.layouts[sheet]
+        template = openpyxl.load_workbook(export.TEMPLATE_PATH)[sheet]
+        line, caption, printed = RE_LINES[sheet]
+        left, top, right, bottom = range_boundaries(layout.signature_cells)
+        merged = {str(m) for m in template.merged_cells.ranges}
+        # the box is the RE's ruled line plus the one row above it, on the inspector's own two rows
+        assert (f"{get_column_letter(left)}{bottom}", top) == (line, bottom - 1)
+        assert range_boundaries(inspector.signature_cells)[1::2] == (top, bottom) and layout.row_px == inspector.row_px
+        ruled = [bool(template.cell(bottom, column).border.bottom.style) for column in range(left - 1, right + 2)]
+        assert ruled == [False] + [True] * (right - left + 1) + [False]  # the whole line, and no more
+        assert range_boundaries(inspector.signature_cells)[2] < left  # to the right of the inspector's, not over it
+        # nothing is in the box for the image to cover
+        assert all(template.cell(row, column).value is None for row in (top, bottom) for column in range(left, right + 1))
+        # the caption is the cell under the line, spanning it
+        assert layout.caption_cells == f"{caption}:{get_column_letter(right)}{bottom + 1}"
+        assert template[caption].value == printed
+        assert (layout.caption_cells in merged) is layout.caption_is_merged
+        assert layout.date_cell is None  # the page's Date cell is the inspector's
+        # and the measured size is the template's own: Excel shows a column 7 px a character
+        widths = []
+        for column in range(left, right + 1):
+            (width,) = {round(d.width * 7) for d in template.column_dimensions.values() if d.min <= column <= d.max}
+            widths.append(width)
+        assert tuple(widths) == (layout.column_widths_px or (layout.column_px,) * len(widths))
+        assert layout.signature_cx_emu == sum(widths) * 9525
+        assert layout.signature_cy_emu == sum(layout.row_px) * 9525
+
+    def test_only_conc_mix_has_columns_of_different_widths(self):
+        uneven = {sheet for sheet, layout in self.layouts.items() if layout.column_widths_px}
+        assert uneven == {"Conc Mix"} and self.layouts["Conc Mix"].column_widths_px == (16, 11) + (16,) * 11
+
+    def test_a_copys_name_finds_its_originals_layout(self):
+        find = lambda page: export._signature_layout(page, export.RE_SIGNATURE_LAYOUTS)  # noqa: E731
+        assert find("Conc Bk 2") is export.RE_SIGNATURE_LAYOUTS["Conc Bk"]
+        assert find("Attachments 17") is export.RE_SIGNATURE_LAYOUTS["Attachments"]
+        assert find("Gen Fr") is None and find("Conc Fr 2") is None
+
+
+class TestReSignatureHelpers:
+    def test_the_caption_wording(self):
+        from api.services.export_common import re_signature_caption
+        signed = datetime(2026, 10, 7, 3, 15, tzinfo=timezone.utc)
+        assert re_signature_caption("Rex Resident", signed) == "RE: Rex Resident, 10/6/26"
+        assert re_signature_caption(None, signed) == "RE: 10/6/26"
+        assert re_signature_caption("Rex Resident", None) == "RE: Rex Resident"
+        assert re_signature_caption(None, None) == "RE:"
+
+    def test_stamping_no_signature_changes_nothing(self):
+        from api.services.export_common import stamp_re_signature
+        workbook = WorkbookTemplate(export.TEMPLATE_PATH)
+        before = workbook.to_bytes()
+        stamp_re_signature(workbook, "Gen Bk", export.RE_SIGNATURE_LAYOUTS["Gen Bk"], None, "Rex Resident",
+                           datetime(2026, 10, 7, tzinfo=timezone.utc))
+        after = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))
+        assert after["Gen Bk"]["S60"].value == "Resident Engineer's Signature"
+        assert len(workbook.to_bytes()) == len(before)
+
+    def test_a_point_is_placed_by_each_columns_own_width(self):
+        from api.services.export_common import _column_at
+        conc_mix = export.RE_SIGNATURE_LAYOUTS["Conc Mix"]  # W is column 23: 16 px, then X 11 px, then 16 px each
+        assert [_column_at(conc_mix, 23, px) for px in (0, 15, 16, 26, 27, 43, 202)] == [
+            (23, 0), (23, 15), (24, 0), (24, 10), (25, 0), (26, 0), (35, 15)]
+        even = export.RE_SIGNATURE_LAYOUTS["Gen Bk"]
+        assert [_column_at(even, 19, px) for px in (0, 18, 19, 48)] == [(19, 0), (19, 18), (20, 0), (21, 10)]
 
 
 class TestSignatureLayouts:

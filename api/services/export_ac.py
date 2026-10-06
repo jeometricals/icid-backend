@@ -35,6 +35,9 @@ AC_BACK = "AC Bk"
 # AC Bk's signature line is row 55 (C55:M55), its date AE55:AH55; the image also takes the blank row above
 SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C54:M55", signature_cx_emu=209 * EMU_PER_PIXEL,
                                    signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AE55")
+# The Resident Engineer's line is S55:AC55, its caption S56:AC56
+RE_SIGNATURE_LAYOUT = SignatureLayout(signature_cells="S54:AC55", signature_cx_emu=209 * EMU_PER_PIXEL,
+                                      signature_cy_emu=34 * EMU_PER_PIXEL, caption_cells="S56:AC56")
 
 # The header: the same cells as Conc Fr's, cell for cell. The date cell is General-formatted (the date goes in as
 # m/d/yy text), and each weather box is one merged area whose "AM" / "PM" label sits at its top left.

@@ -25,6 +25,11 @@ CONC_MIX = "Conc Mix"
 SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C59:P60", signature_cx_emu=224 * EMU_PER_PIXEL,
                                    signature_cy_emu=32 * EMU_PER_PIXEL, date_cell="AK60", column_px=16,
                                    row_px=(15, 17))
+# The Resident Engineer's line is W60:AI60, its caption W61:AI61. Column X is 11 px, the other twelve 16 px, so the
+# box is 203 px wide.
+RE_SIGNATURE_LAYOUT = SignatureLayout(signature_cells="W59:AI60", signature_cx_emu=203 * EMU_PER_PIXEL,
+                                      signature_cy_emu=32 * EMU_PER_PIXEL, row_px=(15, 17),
+                                      column_widths_px=(16, 11) + (16,) * 11, caption_cells="W61:AI61")
 
 # The header. HeaderLayout doesn't fit (it requires the day, times, temperatures and weather this form lacks), so it
 # is stamped here, as Report Cont's is. The template has formulas reading Contract Info in the project cells, replaced

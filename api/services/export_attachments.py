@@ -40,6 +40,10 @@ ATTACHMENTS = "Attachments"
 # the image also takes the blank row above
 SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C60:M61", signature_cx_emu=209 * EMU_PER_PIXEL,
                                    signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AF61")
+# The Resident Engineer's line is S61:AD61 (twelve columns), its caption S62; Sketch Cont leaves both unmerged
+RE_SIGNATURE_LAYOUT = SignatureLayout(signature_cells="S60:AD61", signature_cx_emu=228 * EMU_PER_PIXEL,
+                                      signature_cy_emu=34 * EMU_PER_PIXEL, caption_cells="S62:AD62",
+                                      caption_is_merged=False)
 PDF = "application/pdf"
 
 MAX_PHOTOS = 50

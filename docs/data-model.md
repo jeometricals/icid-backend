@@ -147,8 +147,8 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `idr_number` | TEXT | Free text, set when a reviewer picks the IDR up at Stage 1 |
 | `stage1_reviewer_uuid` | UUID | FK → `users.uuid`. Who picked it up at Stage 1 |
 | `stage1_reviewed_at` | TIMESTAMPTZ | |
-| `re_reviewer_uuid` | UUID | FK → `users.uuid`. The RE who picked it up at Stage 2 |
-| `re_signature_path`, `re_signed_at` | TEXT, TIMESTAMPTZ | The RE's signature stamped at approval, like the inspector's pair |
+| `re_reviewer_uuid` | UUID | FK → `users.uuid`. The RE who picked it up at Stage 2; set again at final approval to whoever approved, so it always names the signer |
+| `re_signature_path`, `re_signed_at` | TEXT, TIMESTAMPTZ | The approver's signature stamped at final approval, like the inspector's pair. The export prints it while the IDR is `approved` |
 | `return_reason` | TEXT | The latest return comment |
 | `returned_from` | TEXT | `stage1` or `stage2`; CHECK `chk_idrs_returned_from` |
 | `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete: when and by whom (FK → `users.uuid`). The row is kept |

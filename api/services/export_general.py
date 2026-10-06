@@ -28,6 +28,9 @@ GEN_BACK = "Gen Bk"
 # Gen Bk's signature line is row 59 (C59:M59), its date AE59:AH59; the image also takes the blank row above
 SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C58:M59", signature_cx_emu=209 * EMU_PER_PIXEL,
                                    signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AE59")
+# The Resident Engineer's line is S59:AC59, its caption S60:AC60
+RE_SIGNATURE_LAYOUT = SignatureLayout(signature_cells="S58:AC59", signature_cx_emu=209 * EMU_PER_PIXEL,
+                                      signature_cy_emu=34 * EMU_PER_PIXEL, caption_cells="S60:AC60")
 
 # ---- Gen Fr -----------------------------------------------------------------
 
