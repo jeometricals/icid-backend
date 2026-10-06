@@ -31,8 +31,10 @@ IDR_COLUMNS = """
     inspector_signed_at,
     idr_number,
     stage1_reviewer_uuid,
+    stage1_accepted_at,
     stage1_reviewed_at,
     re_reviewer_uuid,
+    stage2_accepted_at,
     re_signature_path,
     re_signed_at,
     return_reason,
@@ -387,11 +389,12 @@ def find_idr_by_number(project_id: str, idr_number: str, except_idr_id: UUID) ->
 
 def accept_stage1(idr_id: UUID, actor_uuid: UUID, idr_number: Optional[str]) -> Optional[list[dict[str, Any]]]:
     """
-    Pick a submitted IDR up for Stage 1: move it to stage1_review with the actor as its Stage 1 reviewer, and give it the IDR number unless it already has one (a number is kept across resubmits).
+    Pick a submitted IDR up for Stage 1: move it to stage1_review with the actor as its Stage 1 reviewer, stamp stage1_accepted_at, clear stage2_accepted_at, and give it the IDR number unless it already has one (a number is kept across resubmits).
     Takes the IDR uuid, the reviewer's uuid and the IDR number to set (ignored when the IDR has one).
     Returns a one-row list with the IDR, an empty list if it isn't submitted, or None on failure; raises IdrNumberTakenError when another IDR on the project holds the number.
     """
-    assignments = "stage1_reviewer_uuid = %s, stage1_reviewed_at = NULL, idr_number = COALESCE(i.idr_number, %s)"
+    assignments = ("stage1_reviewer_uuid = %s, stage1_reviewed_at = NULL, stage1_accepted_at = now(), "
+                   "stage2_accepted_at = NULL, idr_number = COALESCE(i.idr_number, %s)")
     try:
         return _move_idr(idr_id, actor_uuid, "accept_stage1", "submitted", "stage1_review", assignments,
                          (actor_uuid, idr_number))
@@ -412,12 +415,12 @@ def approve_stage1(idr_id: UUID, actor_uuid: UUID, as_reviewer: bool) -> Optiona
 
 def accept_stage2(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Pick an IDR up for Stage 2: it stays in stage2_review and the actor becomes its RE reviewer (the last to accept wins).
+    Pick an IDR up for Stage 2: it stays in stage2_review, the actor becomes its RE reviewer (the last to accept wins) and stage2_accepted_at is stamped. stage1_accepted_at is left alone.
     Takes the IDR uuid and the RE's uuid.
     Returns a one-row list with the IDR, an empty list if it isn't in Stage 2 review, or None on failure.
     """
-    return _move_idr(idr_id, actor_uuid, "accept_stage2", "stage2_review", "stage2_review", "re_reviewer_uuid = %s",
-                     (actor_uuid,))
+    return _move_idr(idr_id, actor_uuid, "accept_stage2", "stage2_review", "stage2_review",
+                     "re_reviewer_uuid = %s, stage2_accepted_at = now()", (actor_uuid,))
 
 
 def approve_stage2(
@@ -438,14 +441,18 @@ def return_idr(
     idr_id: UUID, actor_uuid: UUID, from_status: str, to: str, comment: str, as_reviewer: bool
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Send an IDR back from review with a comment: to its inspector (it becomes a draft again) or, from Stage 2, to the OE (back to stage1_review). Sets return_reason and returned_from, and logs the comment.
+    Send an IDR back from review with a comment: to its inspector (it becomes a draft again) or, from Stage 2, to the OE (back to stage1_review). Sets return_reason and returned_from, clears stage2_accepted_at (and stage1_accepted_at too when it goes to the inspector), clears the RE reviewer when it comes from Stage 2 so an RE has to accept it again, and logs the comment.
     Takes the IDR uuid, the acting user's uuid, the review status it is in ('stage1_review' or 'stage2_review'), who it goes to ('inspector' or 'oe'), the comment, and whether the actor must be that stage's reviewer (False for an admin).
     Returns a one-row list with the IDR, an empty list if it isn't in that status under that reviewer, or None on failure.
     """
     stage_two = from_status == "stage2_review"
+    to_inspector = to == "inspector"
+    accepted = "stage1_accepted_at = NULL, stage2_accepted_at = NULL" if to_inspector else "stage2_accepted_at = NULL"
+    if stage_two:
+        accepted += ", re_reviewer_uuid = NULL"
     return _move_idr(
-        idr_id, actor_uuid, f"return_to_{to}", from_status, "draft" if to == "inspector" else "stage1_review",
-        "return_reason = %s, returned_from = %s", (comment, "stage2" if stage_two else "stage1"),
+        idr_id, actor_uuid, f"return_to_{to}", from_status, "draft" if to_inspector else "stage1_review",
+        f"return_reason = %s, returned_from = %s, {accepted}", (comment, "stage2" if stage_two else "stage1"),
         reviewer_column=("re_reviewer_uuid" if stage_two else "stage1_reviewer_uuid") if as_reviewer else None,
         note=comment,
     )
@@ -457,11 +464,11 @@ UNLOCKABLE_STATUSES = ["approved", "stage2_review"]
 
 def admin_unlock_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer so an RE has to accept it again. Its number and the inspector's signature stay.
+    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again. Its number, the inspector's signature and stage1_accepted_at stay.
     Takes the IDR uuid and the admin's uuid.
     Returns a one-row list with the IDR, an empty list if it isn't in one of UNLOCKABLE_STATUSES (or is deleted), or None on failure.
     """
-    assignments = "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL"
+    assignments = "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL"
     return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments)
 
 

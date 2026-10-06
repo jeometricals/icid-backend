@@ -395,20 +395,3 @@ class TestLogPayItemApproval:
     def test_it_is_audited_in_the_same_statement(self):
         statement, _ = run(log_pay_item_approval, *self.args)
         assert statement.index("INSERT INTO icid.idr_field_edits") < statement.index("INSERT INTO icid.idr_audit")
-
-
-class TestLastActionTime:
-    def test_it_reads_the_latest_time_an_action_was_logged(self):
-        from api.queries import idr_audit
-        at = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
-        with patch.object(idr_audit, "run_query", return_value=[{"at": at}]) as query:
-            assert idr_audit.last_action_time(IDR_ID, "accept_stage1") == at
-        statement, params = flat(query.call_args.args[0]), query.call_args.args[1]
-        assert statement == "SELECT max(created_at) AS at FROM icid.idr_audit WHERE idr_id = %s AND action = %s;"
-        assert params == (IDR_ID, "accept_stage1")
-
-    def test_never_logged_or_a_failed_lookup_is_none(self):
-        from api.queries import idr_audit
-        for result in ([{"at": None}], [], None):
-            with patch.object(idr_audit, "run_query", return_value=result):
-                assert idr_audit.last_action_time(IDR_ID, "accept_stage2") is None

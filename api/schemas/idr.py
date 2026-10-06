@@ -42,8 +42,10 @@ class Idr(BaseModel):
     inspector_signed_at: Optional[datetime] = None
     idr_number: Optional[str] = None
     stage1_reviewer_uuid: Optional[UUID] = None
+    stage1_accepted_at: Optional[datetime] = None
     stage1_reviewed_at: Optional[datetime] = None
     re_reviewer_uuid: Optional[UUID] = None
+    stage2_accepted_at: Optional[datetime] = None
     re_signature_path: Optional[str] = None
     re_signed_at: Optional[datetime] = None
     return_reason: Optional[str] = None

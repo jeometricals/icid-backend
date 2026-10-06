@@ -60,16 +60,16 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
 - `POST /v1/idrs/{idr_id}/submit` — submit a draft, signed by the signed-in user (locks it, numbers pages, sets `total_pages`, stamps `inspector_signature_path` and `inspector_signed_at`, clears any return); 400 `Signature required before submitting` when they have no signature, 502 when it can't be copied, 403 `Demo mode: submit is disabled` for a demo user, 403 `Role required: inspector` for a user who isn't an inspector on the project
 - `GET /v1/idrs/queue?status=submitted|stage1_review|stage2_review` — one review queue, oldest submission first, on the projects where the signed-in user works it (OE or RE; RE only for `stage2_review`); an admin sees every project
-- `POST /v1/idrs/{idr_id}/accept-stage1` — OE or RE picks a submitted IDR up: `submitted` → `stage1_review`, sets `stage1_reviewer_uuid`. Body `{idr_number}`, needed the first time (400 without it); an IDR that has a number keeps it. 409 with `existing_idr_id` when the number is in use on the project
+- `POST /v1/idrs/{idr_id}/accept-stage1` — OE or RE picks a submitted IDR up: `submitted` → `stage1_review`, sets `stage1_reviewer_uuid` and `stage1_accepted_at` (and clears `stage2_accepted_at`). Body `{idr_number}`, needed the first time (400 without it); an IDR that has a number keeps it. 409 with `existing_idr_id` when the number is in use on the project
 - `POST /v1/idrs/{idr_id}/approve-stage1` — `stage1_review` → `stage2_review`; only the Stage 1 reviewer (403 for another OE or RE), and only once they have approved, revised or added every pay item at this stage: otherwise 400 `{detail, untouched: [{pay_item_id, report_id, item_no, budget_code}]}`
-- `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid`; the status stays `stage2_review`, and the last to accept wins
+- `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid` and `stage2_accepted_at` is stamped; the status stays `stage2_review`, and the last to accept wins
 - `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`; only the RE reviewer, and only once they have attested to every pay item at Stage 2 (the same 400 with `untouched`); 400 `Signature required before approving`, 502 when the signature can't be copied
-- `POST /v1/idrs/{idr_id}/return` — body `{to: "inspector" | "oe", comment}`; back to `draft` (inspector) or, from Stage 2, to `stage1_review` (OE), with `return_reason` and `returned_from`; only the current stage's reviewer; 400 for a blank comment
+- `POST /v1/idrs/{idr_id}/return` — body `{to: "inspector" | "oe", comment}`; back to `draft` (inspector) or, from Stage 2, to `stage1_review` (OE), with `return_reason` and `returned_from`; clears `stage2_accepted_at`, and `stage1_accepted_at` too when it goes to the inspector; a return from Stage 2 also clears `re_reviewer_uuid`, so an RE has to accept the IDR again when it comes back; only the current stage's reviewer; 400 for a blank comment
 - `PATCH /v1/idrs/{idr_id}/field` — the current stage's reviewer (or an admin) edits one field of an IDR in review: body `{report_id, field_path, new_value}` (`report_id` left out for `header.<column>`). The new value is written into the IDR and the old one logged. Returns the IDR with its reports and `field_edits`. 400 when the IDR isn't in review, the path isn't a field of the report, the value doesn't fit, or nothing changes; 403 for anyone but that reviewer; 409 if the field changed meanwhile
 - `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/revise` — same caller: body `{revised_quantity}`; the pay item is found by its id in whichever report holds it. 404 when no report of the IDR holds it
 - `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/approve` — same caller, no body: logs their approval of the item as it stands (nothing in the report changes) and returns the IDR with `field_edits`. Approving an item they have already attested to at this stage is a 200 that logs nothing
 - `POST /v1/idrs/{idr_id}/pay-items/add` — same caller: body `{report_id, item_no, budget_code, quantity, unit, description}`; appends a pay item to that report (General, SWCB or AC), logged as added by the reviewer
-- `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at` and `re_reviewer_uuid` cleared, so an RE must accept and approve again; the IDR number stays. 400 for a draft, submitted, Stage 1 or deleted IDR
+- `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at`, `re_reviewer_uuid` and `stage2_accepted_at` cleared, so an RE must accept and approve again; the IDR number stays. 400 for a draft, submitted, Stage 1 or deleted IDR
 - `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept). Deleting an IDR already deleted is a 200 that changes nothing
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
@@ -218,10 +218,21 @@ Any change must follow these.
     its quantity, or the edit that added it.
     - **For the quantity the item has now.** An approval or a revision of a quantity the item no longer holds
       doesn't count, so a later change by anyone puts the item back on the list.
-    - **Since the stage was last accepted.** Only edits made after the latest `accept_stage1` / `accept_stage2`
-      row in `idr_audit` count, so an IDR that went back to its inspector and was accepted again is attested to
-      afresh. An IDR the RE sent back to the OE was not accepted again, so the OE's attestations stand where
-      the quantities do.
+    - **Since the stage was last accepted.** Only edits made at or after the IDR's `stage1_accepted_at` (at
+      Stage 1) or `stage2_accepted_at` (at Stage 2) count, so an IDR that went back to its inspector and was
+      accepted again is attested to afresh. An IDR the RE sent back to the OE was not accepted again, so the
+      OE's attestations stand where the quantities do. Both times are on every IDR response, so a client can
+      work out the same list; `idr_audit` is not read for this.
+    - **The two times** (migration 022): accept-stage1 stamps `stage1_accepted_at` and clears
+      `stage2_accepted_at`; accept-stage2 stamps `stage2_accepted_at`; a return to the inspector clears both; a
+      return to the OE and an admin unlock clear `stage2_accepted_at` only.
+    - **The RE accepts again after every return.** A return from Stage 2, to the inspector or the OE, clears
+      `re_reviewer_uuid` in the same statement (as admin unlock does), so when the IDR is back in Stage 2
+      nobody can approve it until an RE accepts, which starts a new round. A return from Stage 1 doesn't
+      touch the column.
+    - **NULL means "not known", and then every attestation at the stage counts**, whenever it was made. That
+      is only the case for an IDR accepted before migration 022, or one an admin approves at Stage 2 without
+      any RE having accepted. The quantity rule above still applies.
     - **Per stage, per person.** The RE attests again at Stage 2 whatever the OE did. An admin standing in is
       held to the same, with their own edits; the reviewer's don't count for them.
     - Items without an `id` are skipped (there are none after submit).

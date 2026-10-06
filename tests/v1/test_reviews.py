@@ -39,9 +39,10 @@ SUBMITTED_IDR = {
     "inspector_signature_path": f"idrs/{IDR_ID}/inspector_0123456789abcdef0123456789abcdef.png",
     "inspector_signed_at": NOW, "idr_number": None, "stage1_reviewer_uuid": None, "stage1_reviewed_at": None,
     "re_reviewer_uuid": None, "re_signature_path": None, "re_signed_at": None, "return_reason": None,
-    "returned_from": None, "deleted_at": None, "deleted_by": None,
+    "returned_from": None, "deleted_at": None, "deleted_by": None, "stage1_accepted_at": None,
+    "stage2_accepted_at": None,
 }
-STAGE1_IDR = {**SUBMITTED_IDR, "status": "stage1_review", "idr_number": "005", "stage1_reviewer_uuid": REVIEWER["uuid"]}
+STAGE1_IDR ={**SUBMITTED_IDR, "status": "stage1_review", "idr_number": "005", "stage1_reviewer_uuid": REVIEWER["uuid"]}
 STAGE2_IDR = {**STAGE1_IDR, "status": "stage2_review", "stage1_reviewed_at": NOW, "re_reviewer_uuid": REVIEWER["uuid"]}
 UNACCEPTED_STAGE2_IDR = {**STAGE2_IDR, "re_reviewer_uuid": None}
 RE_SIGNATURE_COPY = f"idrs/{IDR_ID}/re_0123456789abcdef0123456789abcdef.png"
@@ -64,10 +65,13 @@ def url(action: str) -> str:
 def review(idr=SUBMITTED_IDR, roles=("oe",), moved="same", number_holder=None, reports=(), edits=(), accepted_at=None):
     """
     Patch the query layer under the review routes: the IDR read, the caller's roles on its project, the number lookup and the statement that moves the IDR; and, for the pay-item gate on the two approve routes, the IDR's reports, its edits and when its stage was last accepted.
-    Takes the IDR row the reads return (None: no such IDR), the roles the caller holds on its project, what the moving statement returns ("same": the IDR row; or [] / None / an exception to raise), the uuid of an IDR already holding the number asked for, the IDR's report rows (none: no pay items to attest to), its field edits and the time of the stage's last acceptance.
+    Takes the IDR row the reads return (None: no such IDR), the roles the caller holds on its project, what the moving statement returns ("same": the IDR row; or [] / None / an exception to raise), the uuid of an IDR already holding the number asked for, the IDR's report rows (none: no pay items to attest to), its field edits and the time its current stage was accepted (set on the row as stage1_accepted_at or stage2_accepted_at).
     Yields a dict: "moves" is the list of (sql, params) of every moving statement run, "lookups" the number lookups, "signature" the mock of the signature copy (it returns RE_SIGNATURE_COPY).
     """
     seen = {"moves": [], "lookups": []}
+    if idr and accepted_at is not None:
+        column = "stage2_accepted_at" if idr["status"] == "stage2_review" else "stage1_accepted_at"
+        idr = {**idr, column: accepted_at}
 
     def idrs_query(sql, params=None):
         """Stand in for run_query in api.queries.idrs."""
@@ -85,7 +89,6 @@ def review(idr=SUBMITTED_IDR, roles=("oe",), moved="same", number_holder=None, r
          patch("api.queries.projects.run_query", return_value=[{"role": role} for role in roles]) as projects, \
          patch("api.queries.idr_reports.run_query", return_value=list(reports)), \
          patch("api.queries.idr_field_edits.run_query", return_value=list(edits)), \
-         patch("api.queries.idr_audit.run_query", return_value=[{"at": accepted_at}]), \
          patch("api.v1.reviews.snapshot_signature_for_idr", return_value=RE_SIGNATURE_COPY) as signature:
         seen["projects"] = projects
         seen["signature"] = signature
@@ -178,6 +181,13 @@ class TestAcceptStage1:
         assert "stage1_reviewer_uuid = %s" in sql and "idr_number = COALESCE(i.idr_number, %s)" in sql
         assert params == (UUID(IDR_ID), "submitted", "stage1_review", REVIEWER["uuid"], "005",
                           REVIEWER["uuid"], "accept_stage1", None)
+
+    def test_it_starts_stage_ones_round_and_clears_stage_twos(self):
+        accepted = {**STAGE1_IDR, "stage1_accepted_at": NOW}
+        with signed_in(REVIEWER) as client, review(moved=[accepted]) as seen:
+            data = client.post(self.url, json={"idr_number": "005"}).json()["data"]
+        assert (data["stage1_accepted_at"], data["stage2_accepted_at"]) == ("2026-10-06T14:00:00Z", None)
+        assert "stage1_accepted_at = now(), stage2_accepted_at = NULL" in seen["moves"][0][0]
 
     def test_an_re_can_take_stage_one_too(self):
         with signed_in(REVIEWER) as client, review(roles=("re",), moved=[STAGE1_IDR]):
@@ -326,6 +336,15 @@ class TestAcceptStage2:
         assert params == (UUID(IDR_ID), "stage2_review", "stage2_review", REVIEWER["uuid"],
                           REVIEWER["uuid"], "accept_stage2", None)
 
+    def test_it_starts_stage_twos_round_and_leaves_stage_ones(self):
+        accepted = {**STAGE2_IDR, "stage1_accepted_at": NOW, "stage2_accepted_at": NOW}
+        with signed_in(REVIEWER) as client, review(idr=UNACCEPTED_STAGE2_IDR, roles=("re",), moved=[accepted]) as seen:
+            data = client.post(self.url).json()["data"]
+        assert data["stage2_accepted_at"] == "2026-10-06T14:00:00Z"
+        sql = flat(seen["moves"][0][0])
+        assert "SET status = %s, updated_at = now(), re_reviewer_uuid = %s, stage2_accepted_at = now() FROM target" in sql
+        assert "stage1_accepted_at" not in sql.split("RETURNING")[0]
+
     def test_accepting_again_is_allowed_and_the_last_to_accept_wins(self):
         taken = {**STAGE2_IDR, "re_reviewer_uuid": OTHER_REVIEWER["uuid"]}
         with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",), moved=[taken]) as seen:
@@ -465,6 +484,41 @@ class TestReturn:
         assert "AND re_reviewer_uuid = %s" in sql
         assert params == (UUID(IDR_ID), "stage2_review", REVIEWER["uuid"], status, "check the station", "stage2",
                           REVIEWER["uuid"], action, "check the station")
+
+    @pytest.mark.parametrize("idr,to,cleared", [
+        (STAGE1_IDR, "inspector", "stage1_accepted_at = NULL, stage2_accepted_at = NULL"),
+        (STAGE2_IDR, "inspector", "stage1_accepted_at = NULL, stage2_accepted_at = NULL, re_reviewer_uuid = NULL"),
+        (STAGE2_IDR, "oe", "stage2_accepted_at = NULL, re_reviewer_uuid = NULL"),   # the OE's acceptance stands
+    ])
+    def test_a_return_ends_the_rounds_of_whoever_has_to_accept_again(self, idr, to, cleared):
+        with signed_in(REVIEWER) as client, review(idr=idr, roles=("re",)) as seen:
+            assert client.post(self.url, json={"to": to, "comment": "check the station"}).status_code == 200
+        sql = flat(seen["moves"][0][0])
+        assert f"return_reason = %s, returned_from = %s, {cleared} FROM target" in sql
+
+    def test_a_stage_one_return_leaves_the_re_reviewer_column_alone(self):
+        with signed_in(REVIEWER) as client, review(idr=STAGE1_IDR) as seen:
+            client.post(self.url, json={"to": "inspector", "comment": "fix it"})
+        assert "re_reviewer_uuid" not in seen["moves"][0][0].split("RETURNING")[0]
+
+    def test_after_the_re_returns_it_the_same_re_must_accept_again_when_it_comes_back(self):
+        # the RE returns it to the inspector: the statement checks they are the RE reviewer, then clears them
+        returned = {**STAGE2_IDR, "status": "draft", "return_reason": "check the station", "returned_from": "stage2",
+                    "re_reviewer_uuid": None}
+        with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",), moved=[returned]) as seen:
+            response = client.post(self.url, json={"to": "inspector", "comment": "check the station"})
+        assert response.status_code == 200 and response.json()["data"]["re_reviewer_uuid"] is None
+        sql = flat(seen["moves"][0][0])
+        assert "AND re_reviewer_uuid = %s FOR UPDATE" in sql and "re_reviewer_uuid = NULL FROM target" in sql
+        # resubmitted, accepted and approved by the OE: back in Stage 2 with the times and the RE reviewer as each
+        # statement left them
+        back = {**STAGE2_IDR, "stage1_accepted_at": NOW, "stage2_accepted_at": None, "re_reviewer_uuid": None}
+        with signed_in(REVIEWER) as client, review(idr=back, roles=("re",)) as seen:
+            refused = client.post(url("approve-stage2"))
+            assert seen["moves"] == []
+            accepted = client.post(url("accept-stage2"))
+        assert refused.status_code == 403 and refused.json() == NOT_THE_REVIEWER
+        assert accepted.status_code == 200 and "stage2_accepted_at = now()" in seen["moves"][0][0]
 
     def test_stage_one_cant_return_to_the_oe(self):
         with signed_in(REVIEWER) as client, review(idr=STAGE1_IDR) as seen:
@@ -642,7 +696,8 @@ class TestAdminUnlock:
         assert data["idr_number"] == "005"  # the number stays
         assert data["inspector_signature_path"] == APPROVED_IDR["inspector_signature_path"]  # and so does the inspector's
         sql, params = seen["moves"][0]
-        assert "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL" in sql
+        assert "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL" in sql
+        assert "stage1_accepted_at" not in sql.split("RETURNING")[0]  # the OE's acceptance stands
         assert "idr_number" not in sql.split("RETURNING")[0] and "inspector_signature_path" not in sql.split("RETURNING")[0]
         assert "WHERE idr_id = %s AND status = ANY(%s) AND deleted_at IS NULL" in flat(sql)
         assert params == (UUID(IDR_ID), ["approved", "stage2_review"], "stage2_review", ADMIN_USER_ROW["uuid"],
@@ -936,9 +991,27 @@ class TestPayItemGate:
         fresh = [attest("approve", "item-1", "60.00"), attest("approve", "item-2", "29.00")]
         assert self.approve(reports=TWO_ITEMS, edits=old + fresh)[0].status_code == 200
 
-    def test_with_no_acceptance_on_record_every_attestation_at_the_stage_counts(self):
+    def test_with_no_acceptance_time_on_the_idr_every_attestation_at_the_stage_counts(self):
         edits = [attest("approve", "item-1", "60.00", at=BEFORE), attest("approve", "item-2", "29.00", at=BEFORE)]
         assert self.approve(reports=TWO_ITEMS, edits=edits, accepted_at=None)[0].status_code == 200
+
+    def test_the_round_starts_at_the_idrs_own_acceptance_time_for_its_stage(self):
+        # Stage 1 was accepted after these edits, Stage 2 before them: only the Stage 2 time is read at Stage 2
+        edits = [attest("approve", "item-1", "60.00", stage="stage2", at=ACCEPTED_AT),
+                 attest("approve", "item-2", "29.00", stage="stage2", at=ACCEPTED_AT)]
+        in_round = {**STAGE2_IDR, "stage1_accepted_at": AFTER, "stage2_accepted_at": BEFORE}
+        assert self.approve(idr=in_round, reports=TWO_ITEMS, edits=edits, accepted_at=None)[0].status_code == 200
+        earlier_round = {**STAGE2_IDR, "stage1_accepted_at": BEFORE, "stage2_accepted_at": AFTER}
+        refused, _ = self.approve(idr=earlier_round, reports=TWO_ITEMS, edits=edits, accepted_at=None)
+        assert refused.status_code == 400 and len(refused.json()["untouched"]) == 2
+
+    def test_an_edit_made_at_the_moment_of_acceptance_is_in_the_round(self):
+        edits = [attest("approve", "item-1", "60.00", at=ACCEPTED_AT), attest("approve", "item-2", "29.00", at=ACCEPTED_AT)]
+        assert self.approve(reports=TWO_ITEMS, edits=edits)[0].status_code == 200
+
+    def test_the_audit_log_is_no_longer_read_for_it(self):
+        import api.queries.idr_audit as idr_audit
+        assert not hasattr(idr_audit, "run_query") and not hasattr(idr_audit, "last_action_time")
 
     def test_an_admin_standing_in_is_held_to_the_same(self, admin_client):
         with review(idr=STAGE1_IDR, roles=(), reports=TWO_ITEMS, accepted_at=ACCEPTED_AT) as seen:

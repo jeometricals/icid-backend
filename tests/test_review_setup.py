@@ -200,3 +200,27 @@ class TestMigration019:
     def test_the_api_reads_only_idr_columns_that_exist(self):
         from api.queries.idrs import IDR_COLUMNS
         assert {name.strip() for name in IDR_COLUMNS.split(",")} <= set(table_columns("idrs"))
+
+
+class TestMigration022:
+    migration = "migrations/022_stage_accepted_at.sql"
+    columns = {"stage1_accepted_at": "TIMESTAMPTZ", "stage2_accepted_at": "TIMESTAMPTZ"}
+
+    def test_the_file_exists_and_adds_what_schema_sql_declares(self):
+        assert (ROOT / self.migration).is_file()
+        assert added_columns(sql(self.migration), "idrs") == self.columns
+        declared = table_columns("idrs")
+        assert {name: declared[name] for name in self.columns} == self.columns  # nullable, no default
+
+    def test_it_is_one_transaction_safe_to_rerun_and_touches_no_rows(self):
+        migration = sql(self.migration)
+        assert migration.count("BEGIN;") == migration.count("COMMIT;") == 1
+        assert migration.index("BEGIN;") < migration.index("ALTER TABLE") < migration.rindex("COMMIT;")
+        assert migration.count("ADD COLUMN") == migration.count("ADD COLUMN IF NOT EXISTS") == 2
+        assert "UPDATE" not in migration and "DELETE" not in migration and "NOT NULL" not in migration
+
+    def test_the_api_reads_and_returns_both(self):
+        from api.queries.idrs import IDR_COLUMNS
+        from api.schemas.idr import Idr
+        read = {name.strip() for name in IDR_COLUMNS.split(",")}
+        assert set(self.columns) <= read and set(self.columns) <= set(Idr.model_fields)

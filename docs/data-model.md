@@ -147,8 +147,10 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `inspector_signed_at` | TIMESTAMPTZ | When that signature was stamped |
 | `idr_number` | TEXT | Free text, set when a reviewer picks the IDR up at Stage 1 |
 | `stage1_reviewer_uuid` | UUID | FK → `users.uuid`. Who picked it up at Stage 1 |
+| `stage1_accepted_at` | TIMESTAMPTZ | When Stage 1 was last accepted: set by accept-stage1, cleared by a return to the inspector. Starts the Stage 1 round for pay-item attestations; NULL (accepted before migration 022) means not known |
 | `stage1_reviewed_at` | TIMESTAMPTZ | |
-| `re_reviewer_uuid` | UUID | FK → `users.uuid`. The RE who picked it up at Stage 2; set again at final approval to whoever approved, so it always names the signer |
+| `stage2_accepted_at` | TIMESTAMPTZ | When the RE last accepted: set by accept-stage2; cleared by accept-stage1, any return and an admin unlock. Starts the Stage 2 round; NULL means not known |
+| `re_reviewer_uuid` | UUID | FK → `users.uuid`. The RE who picked it up at Stage 2; set again at final approval to whoever approved, so it always names the signer. Cleared by a return from Stage 2 and by an admin unlock, so an RE accepts again |
 | `re_signature_path`, `re_signed_at` | TEXT, TIMESTAMPTZ | The approver's signature stamped at final approval, like the inspector's pair. The export prints it while the IDR is `approved` |
 | `return_reason` | TEXT | The latest return comment |
 | `returned_from` | TEXT | `stage1` or `stage2`; CHECK `chk_idrs_returned_from` |
@@ -473,6 +475,7 @@ content as TEXT, linked to a report and a form template).
 | 019 | `019_idr_audit.sql` | J1 | Created `idr_audit` (FK to `idrs` with ON DELETE CASCADE, FK to `users`) and `idx_idr_audit_idr_created`. |
 | 020 | `020_field_edits.sql` | K0 | Created `idr_field_edits` (FKs to `idrs` and `idr_reports` with ON DELETE CASCADE, FK to `users`, three CHECKs) and its two indexes. Gave every existing pay item in `idr_reports.report_data` an `id`; nothing else in any report changed. |
 | 021 | `021_pay_item_approve.sql` | K2.5 | Widened `chk_idr_field_edits_type` to allow `pay_item_approve`. No row changed. |
+| 022 | `022_stage_accepted_at.sql` | K2.6 | Added `idrs.stage1_accepted_at` and `stage2_accepted_at` (TIMESTAMPTZ, nullable, no backfill). |
 
 Where each current column came from:
 
@@ -484,6 +487,7 @@ Where each current column came from:
 | `users` | `signature_path`, `signature_type`, `signature_set_at`, `chk_users_signature_type` | 015 |
 | `idrs` | `inspector_signature_path`, `inspector_signed_at` | 015 |
 | `idrs` | the review columns, `chk_idrs_returned_from`, `idx_idrs_status`, `uq_idrs_project_number`; the wider `chk_idrs_status`, the partial `idx_idrs_project_status`, and `uq_idrs_project_reporter_date` as a partial unique index | 017 |
+| `idrs` | `stage1_accepted_at`, `stage2_accepted_at` | 022 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

@@ -5,28 +5,6 @@ A row is written by the statement that changes the IDR, never on its own: there 
 so the insert rides along as a data-modifying CTE.
 """
 
-from datetime import datetime
-from typing import Optional
-from uuid import UUID
-
-from api.db.runner import run_query
-
-
-def last_action_time(idr_id: UUID, action: str) -> Optional[datetime]:
-    """
-    Find when an action was last logged for an IDR, e.g. when it was last accepted at a stage.
-    Takes the IDR uuid and the action ('accept_stage1', 'accept_stage2', ...).
-    Returns the time of the latest such row, or None when there is none (or the lookup fails).
-    """
-    sql = """
-        SELECT max(created_at) AS at
-        FROM icid.idr_audit
-        WHERE idr_id = %s AND action = %s;
-    """
-    rows = run_query(sql, (idr_id, action))
-    return rows[0]["at"] if rows else None
-
-
 # Appended to a statement's WITH list. The statement must define two CTEs before it: target (the IDR before the
 # change: idr_id, from_status) and moved (the IDR after it: idr_id, status). Takes three parameters, in this order:
 # the actor's uuid, the action, and a note (or None).

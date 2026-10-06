@@ -38,7 +38,7 @@ STAGE1_IDR = {
     "inspector_signature_path": None, "inspector_signed_at": None, "idr_number": "005",
     "stage1_reviewer_uuid": OLIVE["uuid"], "stage1_reviewed_at": None, "re_reviewer_uuid": None,
     "re_signature_path": None, "re_signed_at": None, "return_reason": None, "returned_from": None,
-    "deleted_at": None, "deleted_by": None,
+    "deleted_at": None, "deleted_by": None, "stage1_accepted_at": None, "stage2_accepted_at": None,
 }
 STAGE2_IDR = {**STAGE1_IDR, "status": "stage2_review", "re_reviewer_uuid": REX["uuid"]}
 
@@ -111,10 +111,13 @@ def backend(idr=STAGE1_IDR, reports=(GENERAL, SWCB, CONC_MIX), roles=("oe",), ap
             accepted_at=None):
     """
     Patch the query layer under the edit routes.
-    Takes the IDR row every read returns (None: no such IDR), the IDR's reports, the roles the caller holds on its project, what an edit statement returns ("edit": one edit row; or [] / None), the edits the list returns and when the IDR's stage was last accepted.
+    Takes the IDR row every read returns (None: no such IDR), the IDR's reports, the roles the caller holds on its project, what an edit statement returns ("edit": one edit row; or [] / None), the edits the list returns and when the IDR's current stage was accepted (set on the row as stage1_accepted_at or stage2_accepted_at).
     Yields a dict: "writes" is the list of (sql on one line, params with JSON opened) of every edit statement run, "regen" the mock of the auto-General rebuild.
     """
     seen = {"writes": []}
+    if idr and accepted_at is not None:
+        column = "stage2_accepted_at" if idr["status"] == "stage2_review" else "stage1_accepted_at"
+        idr = {**idr, column: accepted_at}
 
     def reports_query(sql, params=None):
         """Stand in for run_query in api.queries.idr_reports."""
@@ -136,7 +139,6 @@ def backend(idr=STAGE1_IDR, reports=(GENERAL, SWCB, CONC_MIX), roles=("oe",), ap
          patch("api.queries.projects.run_query", return_value=[{"role": role} for role in roles]), \
          patch("api.queries.idr_reports.run_query", side_effect=reports_query), \
          patch("api.queries.idr_field_edits.run_query", side_effect=edits_query), \
-         patch("api.queries.idr_audit.run_query", return_value=[{"at": accepted_at}]), \
          patch("api.services.field_edits.regenerate_auto_general") as regen:
         seen["regen"] = regen
         yield seen

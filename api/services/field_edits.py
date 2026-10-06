@@ -18,7 +18,6 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
-from api.queries.idr_audit import last_action_time
 from api.queries.idr_field_edits import (
     EDIT_STAGES,
     append_pay_item,
@@ -37,9 +36,10 @@ from api.services.auto_general import regenerate_auto_general
 # The report types whose form has a Pay Items table
 PAY_ITEM_REPORT_TYPES = frozenset({ReportType.GEN.value, ReportType.SWCB.value, ReportType.AC.value})
 
-# What starts a stage's round of review: the acceptance logged for it. Attestations made before the latest one
-# belong to an earlier round and no longer count.
-STAGE_ACCEPT_ACTIONS = {"stage1": "accept_stage1", "stage2": "accept_stage2"}
+# What starts a stage's round of review: when the IDR was last accepted at it, kept on the IDR. Attestations made
+# before that belong to an earlier round and no longer count. NULL (accepted before the columns existed, or not
+# accepted since they were last cleared) means the time isn't known, and every attestation at the stage counts.
+STAGE_ACCEPTED_AT = {"stage1": "stage1_accepted_at", "stage2": "stage2_accepted_at"}
 
 HEADER_PREFIX = "header."
 PAY_ITEMS = "payItems"
@@ -308,7 +308,7 @@ def _touched(item: dict[str, Any], report_id: UUID, edits: list[dict[str, Any]])
 
 def _attestations(idr: dict[str, Any], user: UserOut) -> Optional[list[dict[str, Any]]]:
     """
-    List the edits by which a user has attested to pay items at the IDR's current stage, in its current round: theirs, stamped with this stage, made since the stage was last accepted.
+    List the edits by which a user has attested to pay items at the IDR's current stage, in its current round: theirs, stamped with this stage, made since the stage was last accepted (the IDR's stage1_accepted_at or stage2_accepted_at; all of them when that is NULL).
     Takes the IDR row (in review) and the user.
     Returns the edits, or None if the IDR's edits can't be read.
     """
@@ -316,7 +316,7 @@ def _attestations(idr: dict[str, Any], user: UserOut) -> Optional[list[dict[str,
     if edits is None:
         return None
     stage = EDIT_STAGES[idr["status"]][0]
-    since = last_action_time(idr["idr_id"], STAGE_ACCEPT_ACTIONS[stage])
+    since = idr[STAGE_ACCEPTED_AT[stage]]
     return [edit for edit in edits
             if edit["editor_uuid"] == user.uuid and edit["editor_stage"] == stage
             and (since is None or edit["edited_at"] >= since)]
