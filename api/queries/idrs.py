@@ -6,6 +6,7 @@ from psycopg.errors import UniqueViolation
 
 from api.db.runner import run_query
 from api.queries.idr_audit import AUDIT_CTE
+from api.queries.idr_reports import REPORT_DATA_WITH_PAY_ITEM_IDS
 
 IDR_COLUMNS = """
     idr_id,
@@ -267,7 +268,7 @@ def list_review_queue(status: str, user_uuid: UUID, is_admin: bool) -> Optional[
 
 def submit_idr(idr_id: UUID, signature_path: str, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Submit a draft IDR in one statement: lock it, number its reports, set total_pages, status, submitted_at and updated_at, stamp the inspector's signature (its path, and now as when it was signed), clear any return, and log the submit in icid.idr_audit.
+    Submit a draft IDR in one statement: lock it, number its reports, set total_pages, status, submitted_at and updated_at, give every pay item that has none an id, stamp the inspector's signature (its path, and now as when it was signed), clear any return, and log the submit in icid.idr_audit.
     Takes the IDR uuid, the object path of the IDR's own copy of the signature, and the uuid of the user submitting. Pages run General's group first, then other main reports by creation, each followed by its addendums, then standalone addendums.
     Returns a one-row list with the submitted IDR, an empty list if it is not a draft or has no reports, or None on failure.
     """
@@ -297,7 +298,8 @@ def submit_idr(idr_id: UUID, signature_path: str, actor_uuid: UUID) -> Optional[
         ),
         numbered AS (
             UPDATE icid.idr_reports r
-            SET page_number = o.page_number, updated_at = now()
+            SET page_number = o.page_number, updated_at = now(),
+                report_data = {REPORT_DATA_WITH_PAY_ITEM_IDS}
             FROM ordered o
             WHERE r.report_id = o.report_id
         ),

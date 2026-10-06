@@ -154,7 +154,8 @@ Any change must follow these.
       and writes its `icid.idr_audit` row in a single statement (`_move_idr` in `api/queries/idrs.py`, with
       `AUDIT_CTE` from `api/queries/idr_audit.py`). A move that finds the IDR changed returns 409. Submit logs
       the same way.
-    - Reviewers can't edit an IDR: the edit routes still take drafts only. Admin edits are not built yet.
+    - Reviewers can't edit an IDR yet: the edit routes still take drafts only. The groundwork for reviewer edits
+      is in (see "Reviewer edits" below); no route uses it. Admin edits outside review are not built.
     - **Admin unlock** sends an approved IDR back to `stage2_review` and clears the RE's signature and the RE
       reviewer, so the export stops printing the old signature and an RE has to accept it before approving
       again. The admin does not approve. Logged as `admin_unlock`.
@@ -169,6 +170,33 @@ Any change must follow these.
     `create_idr` uses `ON CONFLICT DO NOTHING` with no target.
   - Endpoint tests use the `admin_client` fixture (signed in as `ADMIN_USER_ROW`, `tests/conftest.py`); the plain
     `client` is for testing what happens without a token.
+- **Reviewer edits (groundwork; no route yet).** A reviewer's change to an IDR in review is applied and logged.
+  - **Applied and logged, not overlaid.** One statement locks the IDR, writes the new value into it (a header
+    column, or the report's `report_data`), adds an `icid.idr_field_edits` row holding the old and new value, and
+    adds the `idr_audit` row. The IDR always holds the current value, so the export, the auto-General and the
+    lists need to know nothing about edits. The value before a field's first edit is that edit's `old_value`;
+    edit rows are only ever added.
+  - **A write only lands over the value the caller read** (`#> path = old`, `IS NOT DISTINCT FROM old`), and only
+    while the IDR is still in that stage under that reviewer. Otherwise the statement returns no row.
+  - **`field_path`** uses the keys as `report_data` stores them: `header.<column>` (no `report_id`);
+    `description`, `workforce.foremen`, `safetyChecks.plates`; a list row by position, `additionalWorkforce[0].count`;
+    a pay item by its id, `payItems[<id>].payQuantity` (`pay_item_revision`); `payItems[<id>]` for an item a
+    reviewer added (`pay_item_add`, the whole item as `new_value`).
+  - **Pay items carry an `id`.** They are entries in `report_data`, not rows of a table. Migration 020 gave every
+    existing one an id, and submit gives one to any item without it (`REPORT_DATA_WITH_PAY_ITEM_IDS`, in the same
+    UPDATE that numbers the pages). A client that saves a report must send each item's `id` back.
+  - **Known limitation: other lists are addressed by position** (`additionalWorkforce`, `additionalEquipment`,
+    Conc Mix trucks, AC courses and tickets). That is exact while an IDR is in review, since nothing else can
+    change it. Once it is back with its inspector (returned, or unlocked and then returned) and they insert,
+    remove or reorder rows, the edit history of those lists can attach to the wrong row. The values themselves
+    are never affected. Revisit if it ever bites.
+  - **The audit note is a pointer**, `{"edit_id", "field_path"}`, not a copy of the values (`EDIT_AUDIT_CTE`);
+    actions are `field_edit`, `pay_item_revise` and `pay_item_add`.
+  - **`stage_reviewer`** (`api/services/auth.py`) is the dependency for the edit routes: the caller must be the
+    IDR's `stage1_reviewer_uuid` in `stage1_review` or its `re_reviewer_uuid` in `stage2_review`, and still hold
+    a role that reviews at that stage; an admin stands in. 400 for an IDR that isn't in review, 403 otherwise.
+    It is tighter than `require_project_role`, which any holder of the role passes.
+  - The inspector's own changes to a returned draft are ordinary saves and are not logged as edits.
 - **Demo mode.** `POST /v1/auth/demo` is public: it makes a throwaway user (`is_demo`, `demo-<uuid>@icid.local`,
   no password, no role, client `C00001`) and their one `project_users` row on `DEMO01` in a single statement, and
   signs them in. Since anyone can get a demo token, a demo user is kept to their own data:

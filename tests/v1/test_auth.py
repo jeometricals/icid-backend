@@ -18,7 +18,7 @@ from api.schemas.auth import UserOut
 from api.queries.projects import get_user_roles_on_project
 from api.services.auth import (
     PROJECT_ROLES, AuthProvider, DemoUnavailableError, LocalAuthProvider, auth_provider, current_admin, current_user,
-    optional_user, require_full_user, require_project_role,
+    optional_user, require_full_user, require_project_role, stage_reviewer,
 )
 from api.services.demo import delete_demo_user_cascade
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW
@@ -389,6 +389,123 @@ class TestRequireProjectRole:
             assert test_client.post("/idrs/not-a-uuid/approve", headers=headers).status_code == 422
         assert (refused.status_code, refused.json()) == (403, {"detail": "Role required: oe/re"})
         assert (allowed.status_code, allowed.json()) == (200, {"email": "KhanG@magnoleng.pc"})
+
+
+# ---------------------------------------------------------------------------
+# stage_reviewer: the one reviewer who accepted an IDR at the stage it is in
+# ---------------------------------------------------------------------------
+
+OTHER_REVIEWER = UUID("f0000000-0000-4000-8000-000000000007")
+
+
+class TestStageReviewer:
+    me = INSPECTOR_ROW["uuid"]
+
+    def check(self, idr: dict, held: tuple = ("oe", "re"), user_row: dict = INSPECTOR_ROW) -> UserOut:
+        """
+        Run the dependency for a user against an IDR.
+        Takes the IDR's fields over ROLE_IDR_ROW, the roles the user holds on its project and the user's row.
+        Returns what the dependency returns (the user), or raises its HTTPException.
+        """
+        row = {**ROLE_IDR_ROW, "stage1_reviewer_uuid": None, "re_reviewer_uuid": None, "deleted_at": None, **idr}
+        with patch(IDRS_QUERY, return_value=[row]), patch(PROJECTS_QUERY, return_value=role_rows(*held)):
+            return stage_reviewer(ROLE_IDR_ID, UserOut.model_validate(user_row))
+
+    def refused(self, idr: dict, **kwargs) -> tuple:
+        """
+        Run the dependency expecting a refusal.
+        Takes what check takes.
+        Returns (status code, detail).
+        """
+        with pytest.raises(HTTPException) as raised:
+            self.check(idr, **kwargs)
+        return raised.value.status_code, raised.value.detail
+
+    def test_the_stage_one_reviewer_passes_in_stage_one_review(self):
+        for held in (("oe",), ("re",), ("inspector", "oe")):
+            user = self.check({"status": "stage1_review", "stage1_reviewer_uuid": self.me}, held=held)
+            assert user.uuid == self.me
+
+    def test_the_re_reviewer_passes_in_stage_two_review(self):
+        idr = {"status": "stage2_review", "stage1_reviewer_uuid": OTHER_REVIEWER, "re_reviewer_uuid": self.me}
+        assert self.check(idr, held=("re",)).uuid == self.me
+
+    def test_holding_the_role_is_not_enough(self):
+        # unlike require_project_role: another OE or RE on the project is refused
+        for idr in ({"status": "stage1_review", "stage1_reviewer_uuid": OTHER_REVIEWER},
+                    {"status": "stage2_review", "re_reviewer_uuid": OTHER_REVIEWER},
+                    {"status": "stage2_review", "re_reviewer_uuid": None}):
+            assert self.refused(idr) == (403, "Only the reviewer who accepted this IDR can edit it")
+
+    def test_each_stage_looks_at_its_own_reviewer(self):
+        # the Stage 1 reviewer can't edit once the IDR is with the RE, nor the RE reviewer of an IDR sent back to Stage 1
+        assert self.refused({"status": "stage2_review", "stage1_reviewer_uuid": self.me, "re_reviewer_uuid": OTHER_REVIEWER})[0] == 403
+        assert self.refused({"status": "stage1_review", "stage1_reviewer_uuid": OTHER_REVIEWER, "re_reviewer_uuid": self.me})[0] == 403
+
+    def test_a_reviewer_who_lost_the_role_is_refused(self):
+        assert self.refused({"status": "stage1_review", "stage1_reviewer_uuid": self.me}, held=("inspector",))[0] == 403
+        assert self.refused({"status": "stage1_review", "stage1_reviewer_uuid": self.me}, held=())[0] == 403
+        # Stage 2 is the RE's: an OE role doesn't carry over
+        assert self.refused({"status": "stage2_review", "re_reviewer_uuid": self.me}, held=("oe",))[0] == 403
+
+    @pytest.mark.parametrize("status", ["draft", "submitted", "approved", "deleted", "returned"])
+    def test_an_idr_that_isnt_in_review_is_400_for_everyone(self, status):
+        detail = "Only an IDR in review can be edited by a reviewer"
+        mine = {"status": status, "stage1_reviewer_uuid": self.me, "re_reviewer_uuid": self.me}
+        assert self.refused(mine) == (400, detail)
+        assert self.refused(mine, user_row=REZA_ROW) == (400, detail)  # an admin too: there is no stage to edit in
+
+    def test_a_deleted_idr_is_400_whatever_its_status_says(self):
+        deleted = {"status": "stage1_review", "stage1_reviewer_uuid": self.me, "deleted_at": "2026-10-06T14:00:00Z"}
+        assert self.refused(deleted)[0] == 400
+
+    def test_an_admin_stands_in_for_the_reviewer_without_a_role_lookup(self):
+        admin = UserOut.model_validate(REZA_ROW)
+        for status in ("stage1_review", "stage2_review"):
+            row = {**ROLE_IDR_ROW, "status": status, "stage1_reviewer_uuid": OTHER_REVIEWER,
+                   "re_reviewer_uuid": OTHER_REVIEWER, "deleted_at": None}
+            with patch(IDRS_QUERY, return_value=[row]), patch(PROJECTS_QUERY) as projects:
+                assert stage_reviewer(ROLE_IDR_ID, admin) is admin
+            projects.assert_not_called()
+
+    def test_an_idr_that_doesnt_exist_is_404(self):
+        with patch(IDRS_QUERY, return_value=[]), patch(PROJECTS_QUERY) as projects:
+            with pytest.raises(HTTPException) as raised:
+                stage_reviewer(ROLE_IDR_ID, UserOut.model_validate(INSPECTOR_ROW))
+        assert (raised.value.status_code, raised.value.detail) == (404, "IDR not found")
+        projects.assert_not_called()
+
+    def test_a_demo_user_is_never_a_reviewer(self):
+        assert self.refused({"status": "stage1_review", "stage1_reviewer_uuid": OTHER_REVIEWER},
+                            held=("inspector",), user_row=DEMO_USER_ROW)[0] == 403
+
+    def test_it_works_as_a_route_dependency(self):
+        from fastapi import Depends, FastAPI
+        from starlette.testclient import TestClient
+
+        app = FastAPI()
+
+        @app.patch("/idrs/{idr_id}/field")
+        def edit(user: UserOut = Depends(stage_reviewer)) -> dict:
+            """
+            A stand-in edit route.
+            Takes the user the dependency lets through.
+            Returns their email.
+            """
+            return {"email": user.email}
+
+        mine = {**ROLE_IDR_ROW, "status": "stage1_review", "stage1_reviewer_uuid": self.me, "re_reviewer_uuid": None,
+                "deleted_at": None}
+        headers = bearer(token(self.me))
+        with TestClient(app) as test_client, patch(QUERY, return_value=[INSPECTOR_ROW]), \
+                patch(PROJECTS_QUERY, return_value=role_rows("oe")):
+            with patch(IDRS_QUERY, return_value=[mine]):
+                allowed = test_client.patch(f"/idrs/{ROLE_IDR_ID}/field", headers=headers)
+            with patch(IDRS_QUERY, return_value=[{**mine, "stage1_reviewer_uuid": OTHER_REVIEWER}]):
+                refused = test_client.patch(f"/idrs/{ROLE_IDR_ID}/field", headers=headers)
+            assert test_client.patch(f"/idrs/{ROLE_IDR_ID}/field").status_code == 401
+        assert (allowed.status_code, allowed.json()) == (200, {"email": "KhanG@magnoleng.pc"})
+        assert refused.status_code == 403
 
 
 class TestProvider:

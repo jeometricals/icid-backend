@@ -190,6 +190,7 @@ CREATE INDEX idx_idr_audit_idr_created ON icid.idr_audit(idr_id, created_at DESC
 
 ------------------------------------------------------------
 -- IDR REPORT (typed report within an IDR; addenda link to a parent)
+-- report_data holds the report's form; each entry of its payItems list carries an "id" (migrations/020)
 ------------------------------------------------------------
 CREATE TABLE icid.idr_reports (
     report_id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -215,6 +216,28 @@ CREATE INDEX idx_idr_reports_parent ON icid.idr_reports(parent_report_id) WHERE 
 CREATE UNIQUE INDEX uq_idr_reports_one_gen_per_idr
     ON icid.idr_reports(idr_id)
     WHERE report_type = 'GEN' AND is_addendum = false;
+
+------------------------------------------------------------
+-- IDR FIELD EDIT (what a reviewer changed on an IDR; rows are only ever added; migrations/020)
+------------------------------------------------------------
+CREATE TABLE icid.idr_field_edits (
+    edit_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    idr_id        UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    report_id     UUID REFERENCES icid.idr_reports(report_id) ON DELETE CASCADE,
+    field_path    TEXT NOT NULL,
+    edit_type     TEXT NOT NULL,
+    old_value     JSONB,
+    new_value     JSONB NOT NULL,
+    editor_uuid   UUID NOT NULL REFERENCES icid.users(uuid),
+    editor_stage  TEXT NOT NULL,
+    edited_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_idr_field_edits_type CHECK (edit_type IN ('field_change', 'pay_item_revision', 'pay_item_add')),
+    CONSTRAINT chk_idr_field_edits_stage CHECK (editor_stage IN ('stage1', 'stage2')),
+    CONSTRAINT chk_idr_field_edits_old_value CHECK ((old_value IS NULL) = (edit_type = 'pay_item_add'))
+);
+
+CREATE INDEX idx_idr_field_edits_idr ON icid.idr_field_edits(idr_id, edited_at);
+CREATE INDEX idx_idr_field_edits_field ON icid.idr_field_edits(report_id, field_path);
 
 ------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)

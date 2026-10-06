@@ -19,6 +19,23 @@ IDR_REPORT_COLUMNS = """
 """
 
 
+# A report's report_data with an "id" on every pay item that has none (r is the idr_reports row). Pay items are
+# entries in report_data, not rows, and a reviewer's edit has to name one; position alone doesn't survive a re-save.
+# migrations/020_field_edits.sql runs the same expression over the reports that existed before it.
+REPORT_DATA_WITH_PAY_ITEM_IDS = """
+                CASE WHEN jsonb_typeof(r.report_data->'payItems') = 'array'
+                          AND jsonb_array_length(r.report_data->'payItems') > 0
+                     THEN jsonb_set(r.report_data, '{payItems}', (
+                              SELECT jsonb_agg(
+                                  CASE WHEN jsonb_typeof(e.item) = 'object' AND NOT (e.item ? 'id')
+                                       THEN e.item || jsonb_build_object('id', gen_random_uuid()::text)
+                                       ELSE e.item END
+                                  ORDER BY e.ord)
+                              FROM jsonb_array_elements(r.report_data->'payItems') WITH ORDINALITY AS e(item, ord)
+                          ))
+                     ELSE r.report_data END"""
+
+
 def list_reports_for_idr(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
     """
     List every report in an IDR, in page order once submitted and creation order before.

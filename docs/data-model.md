@@ -190,16 +190,51 @@ One row per thing done to an IDR in review. Written by the statement that change
 | `audit_id` | UUID PK | `gen_random_uuid()` |
 | `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
 | `actor_uuid` | UUID NOT NULL | FK → `users.uuid`. Who did it |
-| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`. No CHECK |
+| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`, and for reviewer edits `field_edit`, `pay_item_revise`, `pay_item_add`. No CHECK |
 | `from_status`, `to_status` | TEXT | The IDR's status before and after; nullable for actions that aren't a status change |
-| `note` | TEXT | The return comment |
+| `note` | TEXT | The return comment; for a reviewer edit, `{"edit_id", "field_path"}` as JSON text |
 | `created_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
 
 Index: `idx_idr_audit_idr_created (idr_id, created_at DESC)`.
 
+### idr_field_edits
+
+What reviewers changed on an IDR in review, one row per edit. Rows are only ever added. An edit is applied when it
+is logged: the same statement writes `new_value` into the IDR, so the IDR holds the current value and this table
+holds the history. The value before a field's first edit is that row's `old_value`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `edit_id` | UUID PK | `gen_random_uuid()` |
+| `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
+| `report_id` | UUID | FK → `idr_reports.report_id`, **ON DELETE CASCADE**. NULL for a header field |
+| `field_path` | TEXT NOT NULL | Which field; see below |
+| `edit_type` | TEXT NOT NULL | `field_change`, `pay_item_revision` or `pay_item_add`; CHECK `chk_idr_field_edits_type` |
+| `old_value` | JSONB | What was there. NULL only for `pay_item_add` (CHECK `chk_idr_field_edits_old_value`); a field that held JSON `null` stores JSON `null` |
+| `new_value` | JSONB NOT NULL | What the reviewer put; for `pay_item_add`, the whole item |
+| `editor_uuid` | UUID NOT NULL | FK → `users.uuid` |
+| `editor_stage` | TEXT NOT NULL | `stage1` or `stage2`, the stage the IDR was in; CHECK `chk_idr_field_edits_stage` |
+| `edited_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
+
+Indexes: `idx_idr_field_edits_idr (idr_id, edited_at)` and `idx_idr_field_edits_field (report_id, field_path)`.
+
+`field_path`, with the keys as `report_data` stores them:
+
+| Form | Example | Means |
+|---|---|---|
+| `header.<column>` | `header.work_start_time` | A header column of `idrs` (`report_id` NULL) |
+| `<key>.<key>…` | `description`, `workforce.foremen`, `safetyChecks.plasticBarrels` | A field of the report |
+| `<list>[<n>].<key>` | `additionalWorkforce[0].count` | A row of a list, by position from 0 |
+| `payItems[<id>].<key>` | `payItems[3f2a…].payQuantity` | A pay item's field, by the item's `id`; `payQuantity` is a `pay_item_revision` |
+| `payItems[<id>]` | `payItems[3f2a…]` | A pay item a reviewer added (`pay_item_add`) |
+
+Each edit also writes an `idr_audit` row (`field_edit`, `pay_item_revise` or `pay_item_add`) whose `note` is
+`{"edit_id", "field_path"}`.
+
 ### idr_reports
 
-The typed reports inside an IDR.
+The typed reports inside an IDR. Each entry of `report_data.payItems` carries an `id` (a uuid as text), given
+by migration 020 to the items that existed and by submit to any item without one.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -433,6 +468,7 @@ content as TEXT, linked to a report and a form template).
 | 017 | `017_review_workflow.sql` | J0 | Widened `chk_idrs_status` to the review statuses (`stage1_review`, `stage2_review`, `approved`, `returned`, `deleted`). Added the review columns on `idrs` (`idr_number`, the Stage 1 and RE reviewer columns, `re_signature_path`, `re_signed_at`, `return_reason`, `returned_from` with its CHECK, `deleted_at`, `deleted_by`), all nullable. Rebuilt `idx_idrs_project_status` as a partial index and added `idx_idrs_status` and the partial unique index `uq_idrs_project_number`. Replaced the constraint `uq_idrs_project_reporter_date` with a partial unique index of the same name (`WHERE deleted_at IS NULL`). |
 | 018 | `018_project_roles.sql` | J0 | Added `project_users.role` (`inspector` / `oe` / `re`, NOT NULL DEFAULT `inspector`, CHECK) and replaced the primary key `(project_id, user_uuid)` with `(project_id, user_uuid, role)`. |
 | 019 | `019_idr_audit.sql` | J1 | Created `idr_audit` (FK to `idrs` with ON DELETE CASCADE, FK to `users`) and `idx_idr_audit_idr_created`. |
+| 020 | `020_field_edits.sql` | K0 | Created `idr_field_edits` (FKs to `idrs` and `idr_reports` with ON DELETE CASCADE, FK to `users`, three CHECKs) and its two indexes. Gave every existing pay item in `idr_reports.report_data` an `id`; nothing else in any report changed. |
 
 Where each current column came from:
 
@@ -454,3 +490,5 @@ Where each current column came from:
 | `report_attachments` | `attachment_name`, `attachment_description`, `is_uploaded` | 009 |
 | `spec_items`, `contract_items` | all | 011 |
 | `idr_audit` | all | 019 |
+| `idr_field_edits` | all | 020 |
+| `idr_reports` | the `id` on each `report_data.payItems` entry | 020 |

@@ -16,3 +16,16 @@ AUDIT_CTE = """
             JOIN target t ON t.idr_id = m.idr_id
         )
 """
+
+# The same for a reviewer's edit of a field, which changes no status: the row's note points at the edit
+# ({"edit_id", "field_path"}) rather than repeating its old and new values. The statement must define target and,
+# before this, edit (the icid.idr_field_edits row just inserted). Takes one parameter: the action.
+EDIT_AUDIT_CTE = """
+        logged AS (
+            INSERT INTO icid.idr_audit (idr_id, actor_uuid, action, from_status, to_status, note)
+            SELECT e.idr_id, e.editor_uuid, %s, t.from_status, t.from_status,
+                   jsonb_build_object('edit_id', e.edit_id, 'field_path', e.field_path)::text
+            FROM edit e
+            JOIN target t ON t.idr_id = e.idr_id
+        )
+"""

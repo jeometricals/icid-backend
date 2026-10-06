@@ -189,6 +189,33 @@ def require_project_role(*roles: str) -> Callable[..., UserOut]:
     return dependency
 
 
+# The review statuses an IDR can be edited in: the column holding that stage's reviewer and the project roles that
+# may review at it
+_STAGE_REVIEWERS = {
+    "stage1_review": ("stage1_reviewer_uuid", ("oe", "re")),
+    "stage2_review": ("re_reviewer_uuid", ("re",)),
+}
+
+
+def stage_reviewer(idr_id: UUID, user: UserOut = Depends(current_user)) -> UserOut:
+    """
+    FastAPI dependency for editing an IDR in review: the signed-in user must be the reviewer who accepted it at the stage it is in now (stage1_reviewer_uuid in Stage 1 review, re_reviewer_uuid in Stage 2 review), and still hold a role that reviews at that stage on its project. Tighter than require_project_role, which any holder of the role passes. An admin stands in for the reviewer.
+    Takes the idr_id path parameter and the current user.
+    Returns the user; raises 404 for an IDR that doesn't exist, 400 for one that isn't in review (a deleted one included), and 403 for anyone but that reviewer.
+    """
+    idr = get_idr_by_id(idr_id)
+    if idr is None:
+        raise HTTPException(status_code=404, detail="IDR not found")
+    if idr["status"] not in _STAGE_REVIEWERS or idr.get("deleted_at") is not None:
+        raise HTTPException(status_code=400, detail="Only an IDR in review can be edited by a reviewer")
+    if user.role == "admin":
+        return user
+    column, roles = _STAGE_REVIEWERS[idr["status"]]
+    if idr[column] != user.uuid or not get_user_roles_on_project(user.uuid, idr["project_id"]) & set(roles):
+        raise HTTPException(status_code=403, detail="Only the reviewer who accepted this IDR can edit it")
+    return user
+
+
 def admin_or_cron(authorization: Optional[str] = Header(None)) -> Optional[UserOut]:
     """
     FastAPI dependency for scheduled jobs an admin may also run by hand: lets in the scheduler, which sends CRON_SECRET as its bearer token (as Vercel Cron does), or a signed-in admin.
