@@ -11,9 +11,10 @@ import io
 import re
 import textwrap
 from dataclasses import dataclass
-from datetime import date, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image
 
@@ -862,6 +863,10 @@ REPORT_CONT_RE_SIGNATURE = SignatureLayout(signature_cells="S48:AD49", signature
 # which still prints sharply
 SIGNATURE_MAX_PX = (836, 136)
 
+# The time zone the RE's approval date is printed in
+FORM_TIMEZONE = "America/New_York"
+
+
 def prepare_signature(data: bytes) -> SignatureImage:
     """
     Read a signature image and shrink it for the workbook: at most SIGNATURE_MAX_PX, as PNG (transparency kept).
@@ -874,6 +879,19 @@ def prepare_signature(data: bytes) -> SignatureImage:
         output = io.BytesIO()
         image.save(output, "PNG", optimize=True)
         return SignatureImage(output.getvalue(), image.width, image.height)
+
+
+def signed_date(signed_at: datetime) -> date:
+    """
+    Work out the calendar day a signing time falls on in FORM_TIMEZONE.
+    Takes the time (taken as UTC when it carries no zone).
+    Returns the date; in UTC if the zone's data isn't available.
+    """
+    moment = signed_at if signed_at.tzinfo else signed_at.replace(tzinfo=timezone.utc)
+    try:
+        return moment.astimezone(ZoneInfo(FORM_TIMEZONE)).date()
+    except ZoneInfoNotFoundError:
+        return moment.astimezone(timezone.utc).date()
 
 
 def _column_letters(number: int) -> str:
@@ -950,25 +968,26 @@ def stamp_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLay
         workbook.set_cell(sheet, layout.date_cell, short_date(work_date))
 
 
-def re_signature_caption(name: Optional[str], work_date: Optional[date]) -> str:
+def re_signature_caption(name: Optional[str], signed_at: Optional[datetime]) -> str:
     """
     Word the caption under the Resident Engineer's signature.
-    Takes the approver's name and the IDR's report date (either may be None).
-    Returns "RE: <name>, <m/d/yy>", with whichever part is known ("RE:" alone when neither is).
+    Takes the approver's name and when they signed (either may be None).
+    Returns "RE: <name>, <m/d/yy>" with the day they signed in FORM_TIMEZONE, with whichever part is known ("RE:"
+    alone when neither is).
     """
-    parts = [name, short_date(work_date) if work_date is not None else None]
+    parts = [name, short_date(signed_date(signed_at)) if signed_at is not None else None]
     return " ".join(["RE:", ", ".join(part for part in parts if part)]).strip()
 
 
 def stamp_re_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
                        signature: Optional[SignatureImage], name: Optional[str],
-                       work_date: Optional[date]) -> None:
+                       signed_at: Optional[datetime]) -> None:
     """
     Stamp the Resident Engineer's signature on one page: the image fitted to the layout's signature cells, and
-    "RE: <name>, <date>" in place of the caption under the line, shrunk to fit if it is long. The date is the IDR's
-    work date, like the inspector's.
+    "RE: <name>, <date>" in place of the caption under the line, shrunk to fit if it is long. The date is the day
+    the RE approved, not the IDR's work date.
     Takes the workbook, the sheet, its RE SignatureLayout, the signature (None leaves the page as it is: no image and
-    the printed caption), the approver's name and the IDR's report date.
+    the printed caption), the approver's name and when they signed.
     Returns nothing.
     """
     if signature is None:
@@ -977,5 +996,5 @@ def stamp_re_signature(workbook: WorkbookTemplate, sheet: str, layout: Signature
     caption = layout.caption_cells.split(":")[0]
     if not layout.caption_is_merged:
         workbook.merge_cells(sheet, layout.caption_cells)  # so the text shrinks to the line's width, not one column's
-    workbook.set_cell(sheet, caption, re_signature_caption(name, work_date))
+    workbook.set_cell(sheet, caption, re_signature_caption(name, signed_at))
     workbook.shrink_to_fit_cell(sheet, caption)

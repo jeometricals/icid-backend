@@ -223,9 +223,11 @@ Any change must follow these.
     form with a signature line adds a layout and an entry in `SIGNATURE_LAYOUTS`.
     - The image is letterboxed into the signature line's cell plus the blank row above it (209 x 34 px; Conc
       Mix 224 x 32), since the line alone is one 17 px row.
-    - **Every date on a page is the work date.** The line's Date cell takes the IDR's `report_date` as m/d/yy,
-      the same day as the date at the top of the page, and so does the RE's caption. `inspector_signed_at` and
-      `re_signed_at` stay on the IDR as the record of when each signed; the export doesn't print them.
+    - **The inspector's Date cell is the work date; the RE's caption is the approval date.** The line's Date
+      cell takes the IDR's `report_date` as m/d/yy, the same day as the date at the top of the page.
+      `inspector_signed_at` stays on the IDR as the record of when the inspector signed and isn't printed. The
+      RE's caption prints the day of `re_signed_at` in `FORM_TIMEZONE` (America/New_York; `signed_date` in
+      `export_common.py`), so work done on 10/3 and approved on 10/6 reads 10/6.
     - A draft is never signed, a returned one included, and its signature isn't even fetched; only a draft
       carries the "DRAFT - Not for Submission" marker. An IDR submitted before signatures (no path), or one
       whose file can't be fetched or read, exports with blank lines; the failure is logged and the export
@@ -235,7 +237,7 @@ Any change must follow these.
       (`RE_SIGNATURE_LAYOUTS` in `export.py`). The image is fitted to that line plus the row above, as the
       inspector's is. The page has one Date cell and it is the inspector's, so the caption under the RE's line
       ("Resident Engineer's Name") is replaced by `RE: <name>, <m/d/yy>`: the approver's name (`re_reviewer_uuid`)
-      and the IDR's work date, in the caption's own style, set to shrink to fit.
+      and the day they approved, in the caption's own style, set to shrink to fit.
     - The RE's signature is stamped only when `status = 'approved'` and `re_signature_path` is set, so a path
       left on an IDR that is no longer approved never prints. Without it, or when its file can't be used, the
       printed caption stays and the line is blank.

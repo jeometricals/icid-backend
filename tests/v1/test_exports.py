@@ -3828,10 +3828,11 @@ class TestSignedThroughReview:
 RE_SIGNATURE_PATH = f"idrs/{IDR_ID}/re_fedcba9876543210fedcba9876543210.png"
 RE_UUID = UUID("f0000000-0000-4000-8000-000000000006")
 RE_USER = {"user_id": RE_UUID, "email": "rex@icid.local", "first_name": "Rex", "last_name": "Resident"}
-# Approved a week after the work date; the caption shows the work date all the same
+# Approved a week after the work date, at 11:15 pm on Oct 6 in New York (already Oct 7 in UTC); the caption shows
+# the day it was approved there
 APPROVED_IDR = {**SIGNED_IDR, "status": "approved", "idr_number": "005", "re_reviewer_uuid": RE_UUID,
                 "re_signature_path": RE_SIGNATURE_PATH, "re_signed_at": datetime(2026, 10, 7, 3, 15, tzinfo=timezone.utc)}
-RE_CAPTION = "RE: Rex Resident, 9/30/26"
+RE_CAPTION = "RE: Rex Resident, 10/6/26"
 # Each signed page: the RE line's first cell, the caption under it, and what the template prints there
 RE_LINES = {
     "Gen Bk": ("S59", "S60", "Resident Engineer's Signature"), "Conc Bk": ("S59", "S60", "Resident Engineer's Name"),
@@ -3921,7 +3922,7 @@ class TestReSignatureExport:
     def test_a_long_name_is_printed_whole(self):
         long_name = {**RE_USER, "first_name": "Maximiliana-Guadalupe", "last_name": "Featherstonehaugh-Cholmondeley"}
         book = openpyxl.load_workbook(io.BytesIO(approved_export(users={RE_UUID: long_name})))
-        assert book["Gen Bk"]["S60"].value == "RE: Maximiliana-Guadalupe Featherstonehaugh-Cholmondeley, 9/30/26"
+        assert book["Gen Bk"]["S60"].value == "RE: Maximiliana-Guadalupe Featherstonehaugh-Cholmondeley, 10/6/26"
         assert book["Gen Bk"]["S60"].alignment.shrink_to_fit is True
 
     def test_copies_of_a_page_carry_it_too(self):
@@ -3990,14 +3991,14 @@ class TestReSignatureExport:
         unknown = {**APPROVED_IDR, "re_reviewer_uuid": None}
         book = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=unknown, signature=signature_png(),
                                                                re_signature=signature_png())))
-        assert book["Gen Bk"]["S60"].value == "RE: 9/30/26"
+        assert book["Gen Bk"]["S60"].value == "RE: 10/6/26"
 
     def test_the_approvers_email_stands_in_for_a_missing_name(self):
         nameless = {**RE_USER, "first_name": None, "last_name": None}
         book = openpyxl.load_workbook(io.BytesIO(export_bytes(idr=APPROVED_IDR, signature=signature_png(),
                                                                re_signature=signature_png(),
                                                                users={RE_UUID: nameless})))
-        assert book["Gen Bk"]["S60"].value == "RE: rex@icid.local, 9/30/26"
+        assert book["Gen Bk"]["S60"].value == "RE: rex@icid.local, 10/6/26"
 
     def test_the_two_pictures_are_told_apart_in_the_file(self):
         _, _, anchors = added_anchors(export_bytes(idr=APPROVED_IDR, signature=signature_png(),
@@ -4012,8 +4013,8 @@ class TestReSignatureExport:
         assert print_order_page_numbers(approved) == print_order_page_numbers(submitted)
 
 
-class TestOneDateOnEveryPage:
-    def test_the_header_the_signature_date_and_the_re_caption_all_show_the_work_date(self):
+class TestTheDatesBesideTheSignatures:
+    def test_the_inspectors_date_is_the_work_date_and_the_re_caption_the_approval_date(self):
         book = openpyxl.load_workbook(io.BytesIO(approved_export()))
         for sheet, signed, caption in (("Gen Bk", "AE59", "S60"), ("Conc Bk", "AE59", "S60"), ("AC Bk", "AE55", "S56"),
                                        ("Conc Mix", "AK60", "W61"), ("Report Cont", "AF49", "S50"),
@@ -4023,19 +4024,27 @@ class TestOneDateOnEveryPage:
         header = book["Gen Fr"]["AI4"].value
         assert (header.year, header.month, header.day) == (2026, 9, 30)
 
-    def test_neither_signing_time_is_printed_anywhere(self):
+    def test_the_only_signing_day_printed_is_the_res_in_new_york(self):
         content = approved_export()
         package = zipfile.ZipFile(io.BytesIO(content))
         sheets = "".join(package.read(name).decode() for name in package.namelist()
                          if name.startswith("xl/worksheets/sheet"))
-        for signing_day in ("10/3/26", "10/6/26", "10/7/26"):
-            assert signing_day not in sheets
+        assert "10/6/26" in sheets
+        # neither the day the inspector signed nor the UTC day of the approval
+        for other_day in ("10/3/26", "10/7/26"):
+            assert other_day not in sheets
 
-    def test_a_different_work_date_changes_all_of_them_together(self):
+    def test_a_different_work_date_moves_the_inspectors_date_and_leaves_the_re_caption(self):
         moved = {**APPROVED_IDR, "report_date": date(2026, 2, 3), "total_pages": 4}
         book = openpyxl.load_workbook(io.BytesIO(approved_export(idr=moved)))
-        assert book["Gen Bk"]["AE59"].value == "2/3/26" and book["Gen Bk"]["S60"].value == "RE: Rex Resident, 2/3/26"
-        assert book["Conc Mix"]["AK60"].value == "2/3/26"
+        assert book["Gen Bk"]["AE59"].value == "2/3/26" and book["Gen Bk"]["S60"].value == RE_CAPTION
+        assert book["Conc Mix"]["AK60"].value == "2/3/26" and book["Conc Mix"]["W61"].value == RE_CAPTION
+
+    def test_work_done_on_the_3rd_and_approved_on_the_6th_reads_the_6th(self):
+        idr = {**APPROVED_IDR, "report_date": date(2026, 10, 3), "total_pages": 4,
+               "re_signed_at": datetime(2026, 10, 6, 15, 0, tzinfo=timezone.utc)}
+        book = openpyxl.load_workbook(io.BytesIO(approved_export(idr=idr)))
+        assert book["Gen Bk"]["AE59"].value == "10/3/26" and book["Gen Bk"]["S60"].value == "RE: Rex Resident, 10/6/26"
 
 
 # ---------------------------------------------------------------------------
@@ -4145,11 +4154,17 @@ class TestReSignatureLayouts:
 class TestReSignatureHelpers:
     def test_the_caption_wording(self):
         from api.services.export_common import re_signature_caption
-        signed = date(2026, 9, 30)  # the IDR's work date
-        assert re_signature_caption("Rex Resident", signed) == "RE: Rex Resident, 9/30/26"
-        assert re_signature_caption(None, signed) == "RE: 9/30/26"
+        signed = datetime(2026, 10, 6, 15, 0, tzinfo=timezone.utc)  # when the RE approved
+        assert re_signature_caption("Rex Resident", signed) == "RE: Rex Resident, 10/6/26"
+        assert re_signature_caption(None, signed) == "RE: 10/6/26"
         assert re_signature_caption("Rex Resident", None) == "RE: Rex Resident"
         assert re_signature_caption(None, None) == "RE:"
+
+    def test_the_caption_date_is_the_day_in_new_york(self):
+        from api.services.export_common import re_signature_caption
+        late_evening = datetime(2026, 10, 7, 3, 15, tzinfo=timezone.utc)  # 11:15 pm on Oct 6 in New York
+        assert re_signature_caption("Rex Resident", late_evening) == "RE: Rex Resident, 10/6/26"
+        assert re_signature_caption("Rex Resident", late_evening.replace(tzinfo=None)) == "RE: Rex Resident, 10/6/26"
 
     def test_stamping_no_signature_changes_nothing(self):
         from api.services.export_common import stamp_re_signature
