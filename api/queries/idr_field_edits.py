@@ -39,7 +39,8 @@ EDIT_STAGES = {
 }
 
 # What each kind of edit is logged as in icid.idr_audit
-AUDIT_ACTIONS = {"field_change": "field_edit", "pay_item_revision": "pay_item_revise", "pay_item_add": "pay_item_add"}
+AUDIT_ACTIONS = {"field_change": "field_edit", "pay_item_revision": "pay_item_revise", "pay_item_add": "pay_item_add",
+                 "pay_item_approve": "pay_item_approve"}
 
 
 def _target_cte(as_reviewer: bool, status: str) -> str:
@@ -194,6 +195,31 @@ def append_pay_item(idr_id: UUID, report_id: UUID, pay_item: dict[str, Any], edi
     return run_query(sql, (
         idr_id, status, *locked_by, Jsonb(pay_item), report_id,
         *_log_values(report_id, f"payItems[{pay_item['id']}]", "pay_item_add", None, pay_item, editor_uuid, status),
+    ))
+
+
+def log_pay_item_approval(idr_id: UUID, report_id: UUID, field_path: str, quantity_path: list[str], quantity: Any,
+                          editor_uuid: UUID, status: str, as_reviewer: bool) -> Optional[list[dict[str, Any]]]:
+    """
+    Log a reviewer's approval of a pay item as it stands, for an IDR in review, in one statement. Nothing in the report changes: the edit row holds the quantity approved as both its old and its new value.
+    Takes the IDR and report uuids, the field_path to record (payItems[<item id>]), where the item's quantity is in report_data (e.g. ['payItems', '2', 'payQuantity']), the quantity the reviewer saw, the editor's uuid, the review status the IDR is in, and whether the editor must be that stage's reviewer (False for an admin).
+    Returns a one-row list with the edit; an empty list if the IDR left that status, changed reviewer, the report isn't in it, or the item no longer holds that quantity; None on failure.
+    """
+    sql = f"""
+        WITH {_target_cte(as_reviewer, status)},
+        moved AS (
+            SELECT t.idr_id
+            FROM target t
+            WHERE EXISTS (
+                SELECT 1 FROM icid.idr_reports r
+                WHERE r.idr_id = t.idr_id AND r.report_id = %s AND r.report_data #> %s = %s
+            )
+        ),
+        {_log_ctes()}"""
+    locked_by = (editor_uuid,) if as_reviewer else ()
+    return run_query(sql, (
+        idr_id, status, *locked_by, report_id, quantity_path, Jsonb(quantity),
+        *_log_values(report_id, field_path, "pay_item_approve", quantity, quantity, editor_uuid, status),
     ))
 
 

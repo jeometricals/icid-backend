@@ -11,7 +11,7 @@ class FieldEdit(BaseModel):
     edit_id: UUID
     report_id: Optional[UUID] = None   # None for a header field
     field_path: str
-    edit_type: str                     # 'field_change', 'pay_item_revision' or 'pay_item_add'
+    edit_type: str                     # 'field_change', 'pay_item_revision', 'pay_item_add' or 'pay_item_approve'
     old_value: Any = None              # None for 'pay_item_add', where there was nothing
     new_value: Any = None
     editor_uuid: UUID
@@ -44,3 +44,19 @@ class PayItemAdd(BaseModel):
     quantity: Union[str, int, float]
     unit: str = ""
     description: str = ""
+
+
+class UntouchedPayItem(BaseModel):
+    """A pay item the stage's reviewer has not yet approved, revised or added."""
+
+    pay_item_id: str
+    report_id: UUID
+    item_no: Optional[str] = None
+    budget_code: Optional[str] = None
+
+
+class PayItemsUntouched(BaseModel):
+    """Why a stage can't be approved yet: the pay items still waiting on its reviewer."""
+
+    detail: str
+    untouched: list[UntouchedPayItem]

@@ -61,10 +61,10 @@ def url(action: str) -> str:
 
 
 @contextmanager
-def review(idr=SUBMITTED_IDR, roles=("oe",), moved="same", number_holder=None):
+def review(idr=SUBMITTED_IDR, roles=("oe",), moved="same", number_holder=None, reports=(), edits=(), accepted_at=None):
     """
-    Patch the query layer under the review routes: the IDR read, the caller's roles on its project, the number lookup and the statement that moves the IDR.
-    Takes the IDR row the reads return (None: no such IDR), the roles the caller holds on its project, what the moving statement returns ("same": the IDR row; or [] / None / an exception to raise) and the uuid of an IDR already holding the number asked for.
+    Patch the query layer under the review routes: the IDR read, the caller's roles on its project, the number lookup and the statement that moves the IDR; and, for the pay-item gate on the two approve routes, the IDR's reports, its edits and when its stage was last accepted.
+    Takes the IDR row the reads return (None: no such IDR), the roles the caller holds on its project, what the moving statement returns ("same": the IDR row; or [] / None / an exception to raise), the uuid of an IDR already holding the number asked for, the IDR's report rows (none: no pay items to attest to), its field edits and the time of the stage's last acceptance.
     Yields a dict: "moves" is the list of (sql, params) of every moving statement run, "lookups" the number lookups, "signature" the mock of the signature copy (it returns RE_SIGNATURE_COPY).
     """
     seen = {"moves": [], "lookups": []}
@@ -83,6 +83,9 @@ def review(idr=SUBMITTED_IDR, roles=("oe",), moved="same", number_holder=None):
 
     with patch("api.queries.idrs.run_query", side_effect=idrs_query), \
          patch("api.queries.projects.run_query", return_value=[{"role": role} for role in roles]) as projects, \
+         patch("api.queries.idr_reports.run_query", return_value=list(reports)), \
+         patch("api.queries.idr_field_edits.run_query", return_value=list(edits)), \
+         patch("api.queries.idr_audit.run_query", return_value=[{"at": accepted_at}]), \
          patch("api.v1.reviews.snapshot_signature_for_idr", return_value=RE_SIGNATURE_COPY) as signature:
         seen["projects"] = projects
         seen["signature"] = signature
@@ -793,3 +796,189 @@ class TestADeletedIdrIsOutOfReview:
                 admin_client.post(url(action), json=body)
             for sql, _ in seen["moves"]:
                 assert "AND deleted_at IS NULL" in flat(sql)
+
+
+# ---------------------------------------------------------------------------
+# The pay-item gate: a stage is approved only once its reviewer has attested to every pay item
+# ---------------------------------------------------------------------------
+
+SWCB_REPORT = UUID("e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091")
+GEN_REPORT = UUID("4e5f6071-8293-4a41-b5c6-d7e8f9a0b1c2")
+ACCEPTED_AT = datetime(2026, 10, 6, 15, 0, tzinfo=timezone.utc)  # when the stage was last accepted
+BEFORE, AFTER = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc), datetime(2026, 10, 6, 16, 0, tzinfo=timezone.utc)
+
+
+def pay_report(report_id: UUID, *items: dict, **columns) -> dict:
+    """
+    Build an idr_reports row holding pay items.
+    Takes the report uuid, its pay items and any column overrides.
+    Returns the row.
+    """
+    return {"report_id": report_id, "idr_id": UUID(IDR_ID), "report_type": "SWCB", "is_addendum": False,
+            "parent_report_id": None, "page_number": 1, "report_data": {"payItems": list(items)},
+            "is_auto_generated": False, "created_at": NOW, "updated_at": NOW, **columns}
+
+
+def item(item_id: str, quantity: str = "60.00", **fields) -> dict:
+    """
+    Build a pay item.
+    Takes its id, its quantity and any other fields.
+    Returns the item dict.
+    """
+    return {"id": item_id, "itemNo": f"4.{item_id[-1]}0 A", "budgetCode": "12345", "payQuantity": quantity,
+            "unit": "S.F.", "description": "Work", **fields}
+
+
+def attest(kind: str, item_id: str, value, by: dict = REVIEWER, stage: str = "stage1", at: datetime = AFTER,
+           report_id: UUID = SWCB_REPORT) -> dict:
+    """
+    Build an idr_field_edits row attesting to a pay item: an approval, a revision or an add.
+    Takes the kind ('approve' | 'revise' | 'add'), the item's id, the quantity (for an add, the whole item), who made it, at which stage, when, and on which report.
+    Returns the edit row as list_field_edits returns it.
+    """
+    path = f"payItems[{item_id}].payQuantity" if kind == "revise" else f"payItems[{item_id}]"
+    edit_type = {"approve": "pay_item_approve", "revise": "pay_item_revision", "add": "pay_item_add"}[kind]
+    return {"edit_id": UUID(int=hash((kind, item_id, str(value), stage)) % 2**64), "idr_id": UUID(IDR_ID),
+            "report_id": report_id, "field_path": path, "edit_type": edit_type,
+            "old_value": None if kind == "add" else value, "new_value": value, "editor_uuid": by["uuid"],
+            "editor_stage": stage, "edited_at": at, "editor_first_name": by["first_name"],
+            "editor_last_name": by["last_name"]}
+
+
+TWO_ITEMS = (pay_report(SWCB_REPORT, item("item-1", "60.00"), item("item-2", "29.00")),)
+STAGE1_APPROVE, STAGE2_APPROVE = url("approve-stage1"), url("approve-stage2")
+
+
+class TestPayItemGate:
+    def approve(self, idr=STAGE1_IDR, user=REVIEWER, **backend) -> tuple:
+        """
+        Call the approve route for the IDR's stage.
+        Takes the IDR row, the caller and review()'s keyword arguments (reports, edits, accepted_at...).
+        Returns (the response, the moving statements run).
+        """
+        route = STAGE1_APPROVE if idr["status"] == "stage1_review" else STAGE2_APPROVE
+        backend.setdefault("roles", ("oe", "re"))
+        backend.setdefault("accepted_at", ACCEPTED_AT)
+        with signed_in(user) as client, review(idr=idr, **backend) as seen:
+            return client.post(route), seen["moves"]
+
+    def test_untouched_pay_items_refuse_the_approval_and_are_named(self):
+        response, moves = self.approve(reports=TWO_ITEMS)
+        assert response.status_code == 400 and moves == []
+        assert response.json() == {
+            "detail": "2 pay items still need your approval or revision before you can approve this IDR",
+            "untouched": [
+                {"pay_item_id": "item-1", "report_id": str(SWCB_REPORT), "item_no": "4.10 A", "budget_code": "12345"},
+                {"pay_item_id": "item-2", "report_id": str(SWCB_REPORT), "item_no": "4.20 A", "budget_code": "12345"},
+            ]}
+
+    def test_one_left_is_worded_in_the_singular(self):
+        response, _ = self.approve(reports=TWO_ITEMS, edits=[attest("approve", "item-1", "60.00")])
+        assert response.status_code == 400
+        assert response.json()["detail"] == "1 pay item still needs your approval or revision before you can approve this IDR"
+        assert [u["pay_item_id"] for u in response.json()["untouched"]] == ["item-2"]
+
+    @pytest.mark.parametrize("second", [
+        attest("approve", "item-2", "29.00"),
+        attest("revise", "item-2", "29.00"),   # their revision is the quantity the item now has
+        attest("add", "item-2", item("item-2", "29.00")),   # they added it themselves
+    ])
+    def test_an_approval_a_revision_or_an_add_each_counts(self, second):
+        response, moves = self.approve(reports=TWO_ITEMS, edits=[attest("approve", "item-1", "60.00"), second])
+        assert response.status_code == 200 and len(moves) == 1
+
+    def test_no_pay_items_means_nothing_to_attest_to(self):
+        assert self.approve(reports=())[0].status_code == 200
+        assert self.approve(reports=(pay_report(SWCB_REPORT),))[0].status_code == 200
+
+    def test_an_auto_generated_generals_items_are_not_asked_for(self):
+        auto = pay_report(GEN_REPORT, item("merged-1"), report_type="GEN", is_auto_generated=True)
+        response, _ = self.approve(reports=(auto, *TWO_ITEMS),
+                                   edits=[attest("approve", "item-1", "60.00"), attest("approve", "item-2", "29.00")])
+        assert response.status_code == 200
+
+    def test_an_inspectors_own_generals_items_are(self):
+        own = pay_report(GEN_REPORT, item("gen-1"), report_type="GEN")
+        response, _ = self.approve(reports=(own,))
+        assert response.status_code == 400 and response.json()["untouched"][0]["report_id"] == str(GEN_REPORT)
+
+    def test_someone_elses_attestation_doesnt_count(self):
+        theirs = [attest("approve", "item-1", "60.00", by=OTHER_REVIEWER), attest("approve", "item-2", "29.00", by=OTHER_REVIEWER)]
+        response, _ = self.approve(reports=TWO_ITEMS, edits=theirs)
+        assert response.status_code == 400 and len(response.json()["untouched"]) == 2
+
+    def test_stage_two_needs_the_res_own_attestations_whatever_was_done_at_stage_one(self):
+        at_stage_one = [attest("approve", "item-1", "60.00"), attest("approve", "item-2", "29.00")]  # the same person, as OE
+        refused, _ = self.approve(idr=STAGE2_IDR, reports=TWO_ITEMS, edits=at_stage_one)
+        assert refused.status_code == 400 and len(refused.json()["untouched"]) == 2
+        at_stage_two = [attest("approve", "item-1", "60.00", stage="stage2"), attest("revise", "item-2", "29.00", stage="stage2")]
+        approved, moves = self.approve(idr=STAGE2_IDR, reports=TWO_ITEMS, edits=at_stage_one + at_stage_two)
+        assert approved.status_code == 200 and len(moves) == 1
+
+    def test_an_attestation_to_a_quantity_the_item_no_longer_has_doesnt_count(self):
+        # approved at 60.00, then the quantity became 55.00 (their own later revision does count)
+        changed = (pay_report(SWCB_REPORT, item("item-1", "55.00")),)
+        stale, _ = self.approve(reports=changed, edits=[attest("approve", "item-1", "60.00")])
+        assert stale.status_code == 400
+        revised, _ = self.approve(reports=changed, edits=[attest("approve", "item-1", "60.00"), attest("revise", "item-1", "55.00")])
+        assert revised.status_code == 200
+
+    def test_the_same_amount_written_differently_is_the_same_quantity(self):
+        response, _ = self.approve(reports=(pay_report(SWCB_REPORT, item("item-1", "55")),),
+                                   edits=[attest("approve", "item-1", "55.00")])
+        assert response.status_code == 200
+
+    def test_attestations_from_before_the_stage_was_last_accepted_dont_count(self):
+        # an earlier round: the IDR went back to its inspector and was accepted again since
+        old = [attest("approve", "item-1", "60.00", at=BEFORE), attest("approve", "item-2", "29.00", at=BEFORE)]
+        refused, _ = self.approve(reports=TWO_ITEMS, edits=old)
+        assert refused.status_code == 400 and len(refused.json()["untouched"]) == 2
+        fresh = [attest("approve", "item-1", "60.00"), attest("approve", "item-2", "29.00")]
+        assert self.approve(reports=TWO_ITEMS, edits=old + fresh)[0].status_code == 200
+
+    def test_with_no_acceptance_on_record_every_attestation_at_the_stage_counts(self):
+        edits = [attest("approve", "item-1", "60.00", at=BEFORE), attest("approve", "item-2", "29.00", at=BEFORE)]
+        assert self.approve(reports=TWO_ITEMS, edits=edits, accepted_at=None)[0].status_code == 200
+
+    def test_an_admin_standing_in_is_held_to_the_same(self, admin_client):
+        with review(idr=STAGE1_IDR, roles=(), reports=TWO_ITEMS, accepted_at=ACCEPTED_AT) as seen:
+            refused = admin_client.post(STAGE1_APPROVE)
+        assert refused.status_code == 400 and len(refused.json()["untouched"]) == 2 and seen["moves"] == []
+        # the reviewer's own attestations are not the admin's
+        theirs = [attest("approve", "item-1", "60.00"), attest("approve", "item-2", "29.00")]
+        with review(idr=STAGE1_IDR, roles=(), reports=TWO_ITEMS, edits=theirs, accepted_at=ACCEPTED_AT):
+            assert admin_client.post(STAGE1_APPROVE).status_code == 400
+        admin = {"uuid": ADMIN_USER_ROW["uuid"], "first_name": "Ada", "last_name": "Admin"}
+        mine = [attest("approve", "item-1", "60.00", by=admin), attest("approve", "item-2", "29.00", by=admin)]
+        with review(idr=STAGE1_IDR, roles=(), reports=TWO_ITEMS, edits=mine, accepted_at=ACCEPTED_AT) as seen:
+            assert admin_client.post(STAGE1_APPROVE).status_code == 200
+        assert len(seen["moves"]) == 1
+
+    def test_the_gate_comes_before_the_signature_at_stage_two(self):
+        unsigned = {**REVIEWER, "signature_path": None, "signature_type": None, "signature_set_at": None}
+        with signed_in(unsigned) as client, review(idr=STAGE2_IDR, roles=("re",), reports=TWO_ITEMS,
+                                                   accepted_at=ACCEPTED_AT) as seen:
+            response = client.post(STAGE2_APPROVE)
+        assert response.status_code == 400 and "untouched" in response.json()
+        seen["signature"].assert_not_called()
+
+    def test_the_reviewer_check_comes_before_the_gate(self):
+        with signed_in(OTHER_REVIEWER) as client, review(idr=STAGE1_IDR, roles=("oe", "re"), reports=TWO_ITEMS) as seen:
+            response = client.post(STAGE1_APPROVE)
+        assert response.status_code == 403 and response.json() == NOT_THE_REVIEWER and seen["moves"] == []
+
+    def test_reports_or_edits_that_cant_be_read_are_500_not_an_approval(self):
+        with signed_in(REVIEWER) as client, review(idr=STAGE1_IDR, roles=("oe",)) as seen, \
+                patch("api.queries.idr_reports.run_query", return_value=None):
+            response = client.post(STAGE1_APPROVE)
+        assert response.status_code == 500 and seen["moves"] == []
+
+    def test_items_without_an_id_and_malformed_entries_are_skipped(self):
+        odd = pay_report(SWCB_REPORT, {"itemNo": "no id", "payQuantity": "1"}, "not an item", item("item-1"))
+        response, _ = self.approve(reports=(odd,), edits=[attest("approve", "item-1", "60.00")])
+        assert response.status_code == 200
+
+    def test_accept_and_return_are_not_gated(self):
+        with signed_in(REVIEWER) as client, review(idr=STAGE1_IDR, roles=("oe",), reports=TWO_ITEMS) as seen:
+            returned = client.post(url("return"), json={"to": "inspector", "comment": "fix the quantities"})
+        assert returned.status_code == 200 and len(seen["moves"]) == 1

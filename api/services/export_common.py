@@ -952,42 +952,47 @@ def _stamp_signature_image(workbook: WorkbookTemplate, sheet: str, layout: Signa
 
 
 def stamp_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
-                    signature: Optional[SignatureImage], work_date: Optional[date]) -> None:
+                    signature: Optional[SignatureImage]) -> None:
     """
-    Stamp the inspector's signature on one page: the image fitted to the layout's signature cells, and the IDR's
-    work date (m/d/yy) in the Date cell, so every date on the page is the same day. When it was signed is kept on
-    the IDR, not printed.
-    Takes the workbook, the sheet, its SignatureLayout, the signature (None leaves the page as it is: no image, no
-    date) and the IDR's report date (None leaves the date blank).
+    Stamp the inspector's signature on one page: the image fitted to the layout's signature cells. The line's Date
+    cell is stamped separately (stamp_signature_date), since it belongs to whichever signature is the latest.
+    Takes the workbook, the sheet, its SignatureLayout and the signature (None leaves the page as it is).
     Returns nothing.
     """
     if signature is None:
         return
     _stamp_signature_image(workbook, sheet, layout, signature, "Inspector's signature")
-    if work_date is not None:
-        workbook.set_cell(sheet, layout.date_cell, short_date(work_date))
 
 
-def re_signature_caption(name: Optional[str], signed_at: Optional[datetime]) -> str:
+def stamp_signature_date(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
+                         signed_at: Optional[datetime]) -> None:
+    """
+    Stamp the signature line's Date cell, the one Date a page has, with the day a signature was made: m/d/yy, the day
+    it was in FORM_TIMEZONE.
+    Takes the workbook, the sheet, the inspector's SignatureLayout (it names the Date cell) and the signing time
+    (None leaves the cell blank).
+    Returns nothing.
+    """
+    if signed_at is not None:
+        workbook.set_cell(sheet, layout.date_cell, short_date(signed_date(signed_at)))
+
+
+def re_signature_caption(name: Optional[str]) -> str:
     """
     Word the caption under the Resident Engineer's signature.
-    Takes the approver's name and when they signed (either may be None).
-    Returns "RE: <name>, <m/d/yy>" with the day they signed in FORM_TIMEZONE, with whichever part is known ("RE:"
-    alone when neither is).
+    Takes the approver's name (None when it isn't known).
+    Returns "RE: <name>", or "RE:" alone. The day they signed goes in the page's Date cell, not here.
     """
-    parts = [name, short_date(signed_date(signed_at)) if signed_at is not None else None]
-    return " ".join(["RE:", ", ".join(part for part in parts if part)]).strip()
+    return f"RE: {name}" if name else "RE:"
 
 
 def stamp_re_signature(workbook: WorkbookTemplate, sheet: str, layout: SignatureLayout,
-                       signature: Optional[SignatureImage], name: Optional[str],
-                       signed_at: Optional[datetime]) -> None:
+                       signature: Optional[SignatureImage], name: Optional[str]) -> None:
     """
     Stamp the Resident Engineer's signature on one page: the image fitted to the layout's signature cells, and
-    "RE: <name>, <date>" in place of the caption under the line, shrunk to fit if it is long. The date is the day
-    the RE approved, not the IDR's work date.
+    "RE: <name>" in place of the caption under the line, shrunk to fit if it is long.
     Takes the workbook, the sheet, its RE SignatureLayout, the signature (None leaves the page as it is: no image and
-    the printed caption), the approver's name and when they signed.
+    the printed caption) and the approver's name.
     Returns nothing.
     """
     if signature is None:
@@ -996,5 +1001,5 @@ def stamp_re_signature(workbook: WorkbookTemplate, sheet: str, layout: Signature
     caption = layout.caption_cells.split(":")[0]
     if not layout.caption_is_merged:
         workbook.merge_cells(sheet, layout.caption_cells)  # so the text shrinks to the line's width, not one column's
-    workbook.set_cell(sheet, caption, re_signature_caption(name, signed_at))
+    workbook.set_cell(sheet, caption, re_signature_caption(name))
     workbook.shrink_to_fit_cell(sheet, caption)

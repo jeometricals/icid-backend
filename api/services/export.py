@@ -31,6 +31,7 @@ from api.services import export_general
 from api.services.export_common import (
     REPORT_CONT, REPORT_CONT_RE_SIGNATURE, REPORT_CONT_SIGNATURE, SignatureImage, SignatureLayout, allocate_copies,
     pay_item_page_count, prepare_signature, section, stamp_draft_marker, stamp_re_signature, stamp_signature,
+    stamp_signature_date,
 )
 from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, stamp_general
 from api.services.xlsx_template import WorkbookTemplate
@@ -431,16 +432,23 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     re_name = None
     if re_signature is not None and idr.get("re_reviewer_uuid"):
         re_name = _inspector_name(get_user_by_id(idr["re_reviewer_uuid"]))
+    # The page's one Date cell goes with the latest signature printed: the RE's on an approved IDR, else the
+    # inspector's. A draft has neither, and a signature that couldn't be printed brings no date.
+    if re_signature is not None and idr.get("re_signed_at"):
+        signed_at = idr["re_signed_at"]
+    elif signature is not None:
+        signed_at = idr.get("inspector_signed_at")
+    else:
+        signed_at = None
     for page in pages:
         workbook.fit_to_letter_page(page)
         if idr["status"] == "draft":
             stamp_draft_marker(workbook, page)
         layout = _signature_layout(page)
         if layout is not None:
-            # The inspector's Date cell takes the IDR's work date; the RE's caption, the day the RE approved
-            stamp_signature(workbook, page, layout, signature, idr["report_date"])
-            stamp_re_signature(workbook, page, _signature_layout(page, RE_SIGNATURE_LAYOUTS), re_signature, re_name,
-                               idr.get("re_signed_at"))
+            stamp_signature(workbook, page, layout, signature)
+            stamp_re_signature(workbook, page, _signature_layout(page, RE_SIGNATURE_LAYOUTS), re_signature, re_name)
+            stamp_signature_date(workbook, page, layout, signed_at)
     workbook.show_only(pages)
 
     return IdrExport(

@@ -190,7 +190,7 @@ One row per thing done to an IDR in review. Written by the statement that change
 | `audit_id` | UUID PK | `gen_random_uuid()` |
 | `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
 | `actor_uuid` | UUID NOT NULL | FK → `users.uuid`. Who did it |
-| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`, and for reviewer edits `field_edit`, `pay_item_revise`, `pay_item_add`. No CHECK |
+| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`, and for reviewer edits `field_edit`, `pay_item_revise`, `pay_item_add`, `pay_item_approve`. No CHECK |
 | `from_status`, `to_status` | TEXT | The IDR's status before and after; nullable for actions that aren't a status change |
 | `note` | TEXT | The return comment; for a reviewer edit, `{"edit_id", "field_path"}` as JSON text |
 | `created_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
@@ -209,7 +209,7 @@ holds the history. The value before a field's first edit is that row's `old_valu
 | `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
 | `report_id` | UUID | FK → `idr_reports.report_id`, **ON DELETE CASCADE**. NULL for a header field |
 | `field_path` | TEXT NOT NULL | Which field; see below |
-| `edit_type` | TEXT NOT NULL | `field_change`, `pay_item_revision` or `pay_item_add`; CHECK `chk_idr_field_edits_type` |
+| `edit_type` | TEXT NOT NULL | `field_change`, `pay_item_revision`, `pay_item_add` or `pay_item_approve`; CHECK `chk_idr_field_edits_type` |
 | `old_value` | JSONB | What was there. NULL only for `pay_item_add` (CHECK `chk_idr_field_edits_old_value`); a field that held JSON `null` stores JSON `null` |
 | `new_value` | JSONB NOT NULL | What the reviewer put; for `pay_item_add`, the whole item |
 | `editor_uuid` | UUID NOT NULL | FK → `users.uuid` |
@@ -226,12 +226,12 @@ Indexes: `idx_idr_field_edits_idr (idr_id, edited_at)` and `idx_idr_field_edits_
 | `<key>.<key>…` | `description`, `workforce.foremen`, `safetyChecks.plasticBarrels` | A field of the report |
 | `<list>[<n>].<key>` | `additionalWorkforce[0].count` | A row of a list, by position from 0 |
 | `payItems[<id>].<key>` | `payItems[3f2a…].payQuantity` | A pay item's field, by the item's `id`; `payQuantity` is a `pay_item_revision` |
-| `payItems[<id>]` | `payItems[3f2a…]` | A pay item a reviewer added (`pay_item_add`) |
+| `payItems[<id>]` | `payItems[3f2a…]` | A pay item a reviewer added (`pay_item_add`), or approved as it stands (`pay_item_approve`: `old_value` and `new_value` are both the quantity approved, and nothing in the report changes) |
 
 The routes that write these rows are `PATCH /v1/idrs/{id}/field`, `POST /v1/idrs/{id}/pay-items/{item id}/revise`
 and `POST /v1/idrs/{id}/pay-items/add`; `GET /v1/idrs/{id}` returns them as `field_edits`.
 
-Each edit also writes an `idr_audit` row (`field_edit`, `pay_item_revise` or `pay_item_add`) whose `note` is
+Each edit also writes an `idr_audit` row (`field_edit`, `pay_item_revise`, `pay_item_add` or `pay_item_approve`) whose `note` is
 `{"edit_id", "field_path"}`.
 
 ### idr_reports
@@ -472,6 +472,7 @@ content as TEXT, linked to a report and a form template).
 | 018 | `018_project_roles.sql` | J0 | Added `project_users.role` (`inspector` / `oe` / `re`, NOT NULL DEFAULT `inspector`, CHECK) and replaced the primary key `(project_id, user_uuid)` with `(project_id, user_uuid, role)`. |
 | 019 | `019_idr_audit.sql` | J1 | Created `idr_audit` (FK to `idrs` with ON DELETE CASCADE, FK to `users`) and `idx_idr_audit_idr_created`. |
 | 020 | `020_field_edits.sql` | K0 | Created `idr_field_edits` (FKs to `idrs` and `idr_reports` with ON DELETE CASCADE, FK to `users`, three CHECKs) and its two indexes. Gave every existing pay item in `idr_reports.report_data` an `id`; nothing else in any report changed. |
+| 021 | `021_pay_item_approve.sql` | K2.5 | Widened `chk_idr_field_edits_type` to allow `pay_item_approve`. No row changed. |
 
 Where each current column came from:
 

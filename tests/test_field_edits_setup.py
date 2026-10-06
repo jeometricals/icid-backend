@@ -16,7 +16,7 @@ from api.queries import idr_field_edits
 from api.queries.idr_audit import EDIT_AUDIT_CTE
 from api.queries.idr_field_edits import (
     AUDIT_ACTIONS, EDIT_STAGES, FIELD_EDIT_COLUMNS, append_pay_item, apply_header_edit, apply_report_edit,
-    list_field_edits,
+    list_field_edits, log_pay_item_approval,
 )
 from api.queries.idr_reports import REPORT_DATA_WITH_PAY_ITEM_IDS
 from api.queries.idrs import HEADER_COLUMNS, submit_idr
@@ -80,7 +80,8 @@ class TestFieldEditsSchema:
 
     def test_the_migration_and_schema_sql_declare_the_same_table(self):
         assert (ROOT / MIGRATION).is_file()
-        assert self.table(MIGRATION) == self.table("schema.sql")
+        # but for the edit type migration 021 added to the CHECK since
+        assert self.table(MIGRATION) == self.table("schema.sql").replace(", 'pay_item_approve'", "")
 
     def test_the_columns(self):
         assert table_columns("idr_field_edits") == {
@@ -334,3 +335,80 @@ class TestListFieldEdits:
         for result in ([], None):
             with patch.object(idr_field_edits, "run_query", return_value=result):
                 assert list_field_edits(IDR_ID) == result
+
+
+# ---------------------------------------------------------------------------
+# Migration 021 and the approval statement
+# ---------------------------------------------------------------------------
+
+MIGRATION_021 = "migrations/021_pay_item_approve.sql"
+TYPE_CHECK = ("CONSTRAINT chk_idr_field_edits_type CHECK (edit_type IN ('field_change', 'pay_item_revision', "
+              "'pay_item_add', 'pay_item_approve'))")
+
+
+class TestMigration021:
+    def test_it_widens_the_type_check_to_what_schema_sql_declares(self):
+        assert (ROOT / MIGRATION_021).is_file()
+        migration = flat(sql(MIGRATION_021))
+        drop = "ALTER TABLE icid.idr_field_edits DROP CONSTRAINT IF EXISTS chk_idr_field_edits_type;"
+        add = f"ALTER TABLE icid.idr_field_edits ADD {TYPE_CHECK};"
+        assert migration.index(drop) < migration.index(add)
+        assert f"{TYPE_CHECK}," in flat(sql("schema.sql"))
+
+    def test_it_touches_nothing_else(self):
+        migration = sql(MIGRATION_021)
+        assert migration.count("BEGIN;") == migration.count("COMMIT;") == 1
+        assert migration.count("ALTER TABLE") == 2 and "UPDATE" not in migration and "CREATE" not in migration
+        assert "chk_idr_field_edits_old_value" not in migration  # an approval has an old value, like every edit but an add
+
+    def test_the_api_logs_an_approval_under_its_own_action(self):
+        assert list(AUDIT_ACTIONS) == ["field_change", "pay_item_revision", "pay_item_add", "pay_item_approve"]
+        assert AUDIT_ACTIONS["pay_item_approve"] == "pay_item_approve"
+
+
+class TestLogPayItemApproval:
+    args = (IDR_ID, REPORT_ID, f"payItems[{ITEM_ID}]", ["payItems", "2", "payQuantity"], "60.00", EDITOR,
+            "stage1_review", True)
+
+    def test_nothing_in_the_report_or_the_idr_is_written(self):
+        statement, _ = run(log_pay_item_approval, *self.args)
+        assert "UPDATE icid." not in statement and "jsonb_set" not in statement
+        assert statement.count(";") == 1 and "FOR UPDATE" in statement  # still one statement, on a locked IDR
+
+    def test_it_only_goes_through_while_the_item_still_holds_the_quantity_approved(self):
+        statement, params = run(log_pay_item_approval, *self.args)
+        assert ("moved AS ( SELECT t.idr_id FROM target t WHERE EXISTS ( SELECT 1 FROM icid.idr_reports r WHERE "
+                "r.idr_id = t.idr_id AND r.report_id = %s AND r.report_data #> %s = %s ) )") in statement
+        assert unwrapped(params)[3:6] == [REPORT_ID, ["payItems", "2", "payQuantity"], ("json", "60.00")]
+
+    def test_the_row_holds_the_quantity_as_both_old_and_new(self):
+        _, params = run(log_pay_item_approval, *self.args)
+        assert unwrapped(params)[6:] == [REPORT_ID, f"payItems[{ITEM_ID}]", "pay_item_approve", ("json", "60.00"),
+                                         ("json", "60.00"), EDITOR, "stage1", "pay_item_approve"]
+
+    def test_it_is_held_to_the_stages_reviewer_like_any_edit(self):
+        statement, params = run(log_pay_item_approval, *self.args)
+        assert "AND stage1_reviewer_uuid = %s FOR UPDATE" in statement and params[:3] == (IDR_ID, "stage1_review", EDITOR)
+        statement, params = run(log_pay_item_approval, *self.args[:6], "stage2_review", False)
+        assert "reviewer_uuid = %s" not in statement and params[:2] == (IDR_ID, "stage2_review")
+
+    def test_it_is_audited_in_the_same_statement(self):
+        statement, _ = run(log_pay_item_approval, *self.args)
+        assert statement.index("INSERT INTO icid.idr_field_edits") < statement.index("INSERT INTO icid.idr_audit")
+
+
+class TestLastActionTime:
+    def test_it_reads_the_latest_time_an_action_was_logged(self):
+        from api.queries import idr_audit
+        at = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
+        with patch.object(idr_audit, "run_query", return_value=[{"at": at}]) as query:
+            assert idr_audit.last_action_time(IDR_ID, "accept_stage1") == at
+        statement, params = flat(query.call_args.args[0]), query.call_args.args[1]
+        assert statement == "SELECT max(created_at) AS at FROM icid.idr_audit WHERE idr_id = %s AND action = %s;"
+        assert params == (IDR_ID, "accept_stage1")
+
+    def test_never_logged_or_a_failed_lookup_is_none(self):
+        from api.queries import idr_audit
+        for result in ([{"at": None}], [], None):
+            with patch.object(idr_audit, "run_query", return_value=result):
+                assert idr_audit.last_action_time(IDR_ID, "accept_stage2") is None

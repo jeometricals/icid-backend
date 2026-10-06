@@ -61,12 +61,13 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/submit` — submit a draft, signed by the signed-in user (locks it, numbers pages, sets `total_pages`, stamps `inspector_signature_path` and `inspector_signed_at`, clears any return); 400 `Signature required before submitting` when they have no signature, 502 when it can't be copied, 403 `Demo mode: submit is disabled` for a demo user, 403 `Role required: inspector` for a user who isn't an inspector on the project
 - `GET /v1/idrs/queue?status=submitted|stage1_review|stage2_review` — one review queue, oldest submission first, on the projects where the signed-in user works it (OE or RE; RE only for `stage2_review`); an admin sees every project
 - `POST /v1/idrs/{idr_id}/accept-stage1` — OE or RE picks a submitted IDR up: `submitted` → `stage1_review`, sets `stage1_reviewer_uuid`. Body `{idr_number}`, needed the first time (400 without it); an IDR that has a number keeps it. 409 with `existing_idr_id` when the number is in use on the project
-- `POST /v1/idrs/{idr_id}/approve-stage1` — `stage1_review` → `stage2_review`; only the Stage 1 reviewer (403 for another OE or RE)
+- `POST /v1/idrs/{idr_id}/approve-stage1` — `stage1_review` → `stage2_review`; only the Stage 1 reviewer (403 for another OE or RE), and only once they have approved, revised or added every pay item at this stage: otherwise 400 `{detail, untouched: [{pay_item_id, report_id, item_no, budget_code}]}`
 - `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid`; the status stays `stage2_review`, and the last to accept wins
-- `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`; only the RE reviewer; 400 `Signature required before approving`, 502 when the signature can't be copied
+- `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`; only the RE reviewer, and only once they have attested to every pay item at Stage 2 (the same 400 with `untouched`); 400 `Signature required before approving`, 502 when the signature can't be copied
 - `POST /v1/idrs/{idr_id}/return` — body `{to: "inspector" | "oe", comment}`; back to `draft` (inspector) or, from Stage 2, to `stage1_review` (OE), with `return_reason` and `returned_from`; only the current stage's reviewer; 400 for a blank comment
 - `PATCH /v1/idrs/{idr_id}/field` — the current stage's reviewer (or an admin) edits one field of an IDR in review: body `{report_id, field_path, new_value}` (`report_id` left out for `header.<column>`). The new value is written into the IDR and the old one logged. Returns the IDR with its reports and `field_edits`. 400 when the IDR isn't in review, the path isn't a field of the report, the value doesn't fit, or nothing changes; 403 for anyone but that reviewer; 409 if the field changed meanwhile
 - `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/revise` — same caller: body `{revised_quantity}`; the pay item is found by its id in whichever report holds it. 404 when no report of the IDR holds it
+- `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/approve` — same caller, no body: logs their approval of the item as it stands (nothing in the report changes) and returns the IDR with `field_edits`. Approving an item they have already attested to at this stage is a 200 that logs nothing
 - `POST /v1/idrs/{idr_id}/pay-items/add` — same caller: body `{report_id, item_no, budget_code, quantity, unit, description}`; appends a pay item to that report (General, SWCB or AC), logged as added by the reviewer
 - `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at` and `re_reviewer_uuid` cleared, so an RE must accept and approve again; the IDR number stays. 400 for a draft, submitted, Stage 1 or deleted IDR
 - `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept). Deleting an IDR already deleted is a 200 that changes nothing
@@ -210,6 +211,21 @@ Any change must follow these.
     through. A reviewer-added item gets a fresh id, the keys the report form saves (`itemNo`, `budgetCode`,
     `payQuantity` as text, `unit`, `description`) and no marker of its own: that it was added, and by whom, is
     its `pay_item_add` edit row. An inspector adds items to a draft through the report form, not these routes.
+  - **Pay-item attestation.** A stage can only be approved once the user approving it has attested to every pay
+    item on every report but an auto-generated General (`untouched_pay_items` in `api/services/field_edits.py`).
+    An item is attested to by one of their own edits, stamped with the current stage: an approval
+    (`pay_item_approve`, on `payItems[<id>]`, the quantity as both `old_value` and `new_value`), a revision of
+    its quantity, or the edit that added it.
+    - **For the quantity the item has now.** An approval or a revision of a quantity the item no longer holds
+      doesn't count, so a later change by anyone puts the item back on the list.
+    - **Since the stage was last accepted.** Only edits made after the latest `accept_stage1` / `accept_stage2`
+      row in `idr_audit` count, so an IDR that went back to its inspector and was accepted again is attested to
+      afresh. An IDR the RE sent back to the OE was not accepted again, so the OE's attestations stand where
+      the quantities do.
+    - **Per stage, per person.** The RE attests again at Stage 2 whatever the OE did. An admin standing in is
+      held to the same, with their own edits; the reviewer's don't count for them.
+    - Items without an `id` are skipped (there are none after submit).
+    - Approving an item already attested to writes nothing. Nothing is rebuilt after an approval.
   - **The auto-General:** it can't be edited. After an edit to a main report it summarises, it is rebuilt
     (`regenerate_auto_general`) so its merged pay items and description show the reviewer's value; that
     rebuild is a second statement, not part of the edit's. Nothing is rebuilt, or created, when the IDR has an
@@ -268,11 +284,12 @@ Any change must follow these.
     form with a signature line adds a layout and an entry in `SIGNATURE_LAYOUTS`.
     - The image is letterboxed into the signature line's cell plus the blank row above it (209 x 34 px; Conc
       Mix 224 x 32), since the line alone is one 17 px row.
-    - **The inspector's Date cell is the work date; the RE's caption is the approval date.** The line's Date
-      cell takes the IDR's `report_date` as m/d/yy, the same day as the date at the top of the page.
-      `inspector_signed_at` stays on the IDR as the record of when the inspector signed and isn't printed. The
-      RE's caption prints the day of `re_signed_at` in `FORM_TIMEZONE` (America/New_York; `signed_date` in
-      `export_common.py`), so work done on 10/3 and approved on 10/6 reads 10/6.
+    - **The Date cell beside the signatures is the day of the latest signature printed.** A page has one, to
+      the right of both lines. On an approved IDR it takes the day of `re_signed_at`; from submission until
+      then, the day of `inspector_signed_at`; on a draft it is blank. Both are the day it was in
+      `FORM_TIMEZONE` (America/New_York; `signed_date` in `export_common.py`), written m/d/yy, never the UTC day
+      and never the work date, which is the date at the top of the page. A signature that couldn't be printed
+      brings no date: an approved IDR whose RE file is missing shows the inspector's day.
     - A draft is never signed, a returned one included, and its signature isn't even fetched; only a draft
       carries the "DRAFT - Not for Submission" marker. An IDR submitted before signatures (no path), or one
       whose file can't be fetched or read, exports with blank lines; the failure is logged and the export
@@ -281,8 +298,8 @@ Any change must follow these.
       "Reviewed by" line to the right of the inspector's; each module declares its `RE_SIGNATURE_LAYOUT`
       (`RE_SIGNATURE_LAYOUTS` in `export.py`). The image is fitted to that line plus the row above, as the
       inspector's is. The page has one Date cell and it is the inspector's, so the caption under the RE's line
-      ("Resident Engineer's Name") is replaced by `RE: <name>, <m/d/yy>`: the approver's name (`re_reviewer_uuid`)
-      and the day they approved, in the caption's own style, set to shrink to fit.
+      ("Resident Engineer's Name") is replaced by `RE: <name>`: the approver's name (`re_reviewer_uuid`), in the
+      caption's own style, set to shrink to fit. It carries no date; the Date cell does.
     - The RE's signature is stamped only when `status = 'approved'` and `re_signature_path` is set, so a path
       left on an IDR that is no longer approved never prints. Without it, or when its file can't be used, the
       printed caption stays and the line is blank.

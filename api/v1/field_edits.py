@@ -12,6 +12,7 @@ from api.services.auth import current_user, demo_idr_fence, stage_reviewer
 from api.services.field_edits import (
     FieldEditError,
     add_pay_item,
+    approve_pay_item,
     edit_field,
     editable_idr,
     field_edits_for,
@@ -24,10 +25,10 @@ router = APIRouter(prefix="/v1/idrs", tags=["Reviewer edits"],
                    dependencies=[Depends(current_user), Depends(demo_idr_fence)])
 
 
-def _edited(idr_id: UUID, edit: Callable[[], dict[str, Any]], message: str) -> IdrWithReportsResponse:
+def _edited(idr_id: UUID, edit: Callable[[], Any], message: str) -> IdrWithReportsResponse:
     """
     Run one edit and answer with the IDR as it now stands, its reports and all its edits.
-    Takes the IDR uuid, the edit to run (it returns the edit row or raises FieldEditError) and the success message.
+    Takes the IDR uuid, the edit to run (it raises FieldEditError when it can't be made) and the success message.
     Returns an IdrWithReportsResponse; raises the edit's own HTTP error, or 500 if the IDR can't be read back.
     """
     try:
@@ -80,3 +81,13 @@ def revise_idr_pay_item(idr_id: UUID, pay_item_id: str, body: PayItemRevision,
     """
     return _edited(idr_id, lambda: revise_pay_item(editable_idr(idr_id), pay_item_id, body.revised_quantity, user),
                    "Pay item revised")
+
+
+@router.post("/{idr_id}/pay-items/{pay_item_id}/approve", response_model=IdrWithReportsResponse)
+def approve_idr_pay_item(idr_id: UUID, pay_item_id: str, user: UserOut = Depends(stage_reviewer)) -> IdrWithReportsResponse:
+    """
+    Record a reviewer's approval of one pay item of an IDR in review, as it stands: the item is unchanged and the approval is logged with the quantity approved. A stage can only be approved once its reviewer has approved, revised or added every pay item. Approving an item they have already attested to succeeds and logs nothing new.
+    Takes the IDR uuid and the pay item's id as path parameters and the stage's reviewer (or an admin); no body.
+    Returns an IdrWithReportsResponse with the IDR, its reports and every edit; raises 400 (not in review, an auto-generated General's item), 403 (not the stage's reviewer), 404 (no IDR, or no such pay item in it) and 409 (the IDR or the quantity changed meanwhile).
+    """
+    return _edited(idr_id, lambda: approve_pay_item(editable_idr(idr_id), pay_item_id, user), "Pay item approved")

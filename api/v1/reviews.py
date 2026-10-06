@@ -29,7 +29,9 @@ from api.schemas.idr import (
     IdrReturn,
     StageOneAccept,
 )
+from api.schemas.field_edit import PayItemsUntouched
 from api.services.auth import current_admin, current_user, demo_idr_fence, require_project_role
+from api.services.field_edits import FieldEditError, untouched_message, untouched_pay_items
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,7 @@ stage_one_reviewer = require_project_role("oe", "re")
 resident_engineer = require_project_role("re")
 
 NUMBER_CONFLICT = {409: {"model": IdrConflict, "description": "The IDR number is in use on this project"}}
+PAY_ITEMS_WAITING = {400: {"model": PayItemsUntouched, "description": "Pay items still wait on the reviewer"}}
 
 
 def _load_idr(idr_id: UUID) -> dict[str, Any]:
@@ -85,6 +88,24 @@ def _moved(rows: Optional[list[dict[str, Any]]], message: str) -> IdrResponse:
         raise HTTPException(status_code=409, detail="IDR changed during review; reload and try again")
 
     return IdrResponse(status="success", message=message, data=Idr.model_validate(rows[0]))
+
+
+def _pay_items_waiting(idr: dict[str, Any], user: UserOut) -> Optional[JSONResponse]:
+    """
+    Check the user has attested to every pay item at the IDR's current stage, which approving the stage requires (of an admin standing in, too).
+    Takes the IDR dict (in review) and the user about to approve.
+    Returns a 400 response naming the untouched items (untouched: pay_item_id, report_id, item_no, budget_code), or None when none is left; raises 500 if the check can't be made.
+    """
+    try:
+        untouched = untouched_pay_items(idr, user)
+    except FieldEditError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    if not untouched:
+        return None
+
+    waiting = PayItemsUntouched(detail=untouched_message(len(untouched)), untouched=untouched)
+    return JSONResponse(status_code=400, content=waiting.model_dump(mode="json"))
 
 
 def _number_conflict(idr: dict[str, Any], idr_number: str) -> Optional[JSONResponse]:
@@ -165,12 +186,12 @@ def accept_for_stage1(
     return _moved(rows, "IDR accepted for Stage 1")
 
 
-@router.post("/{idr_id}/approve-stage1", response_model=IdrResponse)
-def approve_at_stage1(idr_id: UUID, user: UserOut = Depends(stage_one_reviewer)) -> IdrResponse:
+@router.post("/{idr_id}/approve-stage1", response_model=IdrResponse, responses=PAY_ITEMS_WAITING)
+def approve_at_stage1(idr_id: UUID, user: UserOut = Depends(stage_one_reviewer)) -> Union[IdrResponse, JSONResponse]:
     """
-    Pass an IDR from Stage 1 on to Stage 2. Only the reviewer who accepted it at Stage 1 (or an admin) can.
+    Pass an IDR from Stage 1 on to Stage 2. Only the reviewer who accepted it at Stage 1 (or an admin) can, and only once they have approved, revised or added every pay item at this stage.
     Takes the IDR uuid as a path parameter and the signed-in OE or RE; no body.
-    Returns an IdrResponse; raises 403 (not an OE or RE on the project, or not its Stage 1 reviewer), 404 (no IDR) and 409 (not in Stage 1 review).
+    Returns an IdrResponse; raises 403 (not an OE or RE on the project, or not its Stage 1 reviewer), 404 (no IDR), 409 (not in Stage 1 review) and 400 with the untouched pay items (untouched) when any is left.
     """
     idr = _load_idr(idr_id)
 
@@ -178,6 +199,11 @@ def approve_at_stage1(idr_id: UUID, user: UserOut = Depends(stage_one_reviewer))
         raise HTTPException(status_code=409, detail="Only an IDR in Stage 1 review can be approved for Stage 2")
 
     as_reviewer = _must_be_reviewer(idr, "stage1_reviewer_uuid", user)
+
+    waiting = _pay_items_waiting(idr, user)
+
+    if waiting is not None:
+        return waiting
 
     return _moved(approve_stage1(idr_id, user.uuid, as_reviewer), "IDR approved at Stage 1")
 
@@ -197,12 +223,12 @@ def accept_for_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
     return _moved(accept_stage2(idr_id, user.uuid), "IDR accepted for Stage 2")
 
 
-@router.post("/{idr_id}/approve-stage2", response_model=IdrResponse)
-def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) -> IdrResponse:
+@router.post("/{idr_id}/approve-stage2", response_model=IdrResponse, responses=PAY_ITEMS_WAITING)
+def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) -> Union[IdrResponse, JSONResponse]:
     """
-    Approve an IDR for good, signed by the signed-in user: copy their signature to the IDR, then mark it approved and stamp the signature. Only the RE who accepted it at Stage 2 (or an admin) can.
+    Approve an IDR for good, signed by the signed-in user: copy their signature to the IDR, then mark it approved and stamp the signature. Only the RE who accepted it at Stage 2 (or an admin) can, and only once they have approved, revised or added every pay item at this stage.
     Takes the IDR uuid as a path parameter and the signed-in RE; no body.
-    Returns an IdrResponse; raises 403 (not an RE on the project, or not its RE reviewer), 404 (no IDR), 409 (not in Stage 2 review), 400 (the user has no signature) and 502 (the signature couldn't be copied).
+    Returns an IdrResponse; raises 403 (not an RE on the project, or not its RE reviewer), 404 (no IDR), 409 (not in Stage 2 review), 400 with the untouched pay items (untouched) when any is left, 400 (the user has no signature) and 502 (the signature couldn't be copied).
     """
     idr = _load_idr(idr_id)
 
@@ -210,6 +236,11 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
         raise HTTPException(status_code=409, detail="Only an IDR in Stage 2 review can be approved")
 
     as_reviewer = _must_be_reviewer(idr, "re_reviewer_uuid", user)
+
+    waiting = _pay_items_waiting(idr, user)
+
+    if waiting is not None:
+        return waiting
 
     if user.signature_path is None:
         raise HTTPException(status_code=400, detail="Signature required before approving")

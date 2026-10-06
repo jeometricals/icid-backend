@@ -97,11 +97,21 @@ def revise_url(item_id: str = ITEM_1) -> str:
     return f"/v1/idrs/{IDR_ID}/pay-items/{item_id}/revise"
 
 
+def approve_url(item_id: str = ITEM_1) -> str:
+    """
+    Build the approve route's URL for a pay item.
+    Takes the item's id.
+    Returns the path.
+    """
+    return f"/v1/idrs/{IDR_ID}/pay-items/{item_id}/approve"
+
+
 @contextmanager
-def backend(idr=STAGE1_IDR, reports=(GENERAL, SWCB, CONC_MIX), roles=("oe",), applied="edit", edits=(LISTED_EDIT,)):
+def backend(idr=STAGE1_IDR, reports=(GENERAL, SWCB, CONC_MIX), roles=("oe",), applied="edit", edits=(LISTED_EDIT,),
+            accepted_at=None):
     """
     Patch the query layer under the edit routes.
-    Takes the IDR row every read returns (None: no such IDR), the IDR's reports, the roles the caller holds on its project, what an edit statement returns ("edit": one edit row; or [] / None) and the edits the list returns.
+    Takes the IDR row every read returns (None: no such IDR), the IDR's reports, the roles the caller holds on its project, what an edit statement returns ("edit": one edit row; or [] / None), the edits the list returns and when the IDR's stage was last accepted.
     Yields a dict: "writes" is the list of (sql on one line, params with JSON opened) of every edit statement run, "regen" the mock of the auto-General rebuild.
     """
     seen = {"writes": []}
@@ -126,6 +136,7 @@ def backend(idr=STAGE1_IDR, reports=(GENERAL, SWCB, CONC_MIX), roles=("oe",), ap
          patch("api.queries.projects.run_query", return_value=[{"role": role} for role in roles]), \
          patch("api.queries.idr_reports.run_query", side_effect=reports_query), \
          patch("api.queries.idr_field_edits.run_query", side_effect=edits_query), \
+         patch("api.queries.idr_audit.run_query", return_value=[{"at": accepted_at}]), \
          patch("api.services.field_edits.regenerate_auto_general") as regen:
         seen["regen"] = regen
         yield seen
@@ -530,6 +541,7 @@ EDIT_ROUTES = [
     ("PATCH", FIELD_URL, field("workforce.foremen", "3")),
     ("POST", revise_url(), {"revised_quantity": "55.00"}),
     ("POST", ADD_URL, NEW_ITEM),
+    ("POST", approve_url(), None),
 ]
 
 
@@ -593,7 +605,7 @@ class TestWhoMayEdit:
 # ---------------------------------------------------------------------------
 
 class TestAutoGeneral:
-    @pytest.mark.parametrize("method,url,body", EDIT_ROUTES)
+    @pytest.mark.parametrize("method,url,body", EDIT_ROUTES[:3])  # an approval changes nothing to rebuild from
     def test_it_is_rebuilt_after_an_edit_to_a_report_it_summarises(self, method, url, body):
         with signed_in(OLIVE) as client, backend(reports=(AUTO_GENERAL, SWCB, CONC_MIX)) as seen:
             assert client.request(method, url, json=body).status_code == 200
@@ -731,3 +743,113 @@ class TestInitials:
     ])
     def test_the_first_letter_of_each_name_in_capitals(self, first, last, initials):
         assert _initials(first, last) == initials
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/approve
+# ---------------------------------------------------------------------------
+
+def my_edit(kind: str, item_id: str, value, stage: str = "stage1", editor: dict = OLIVE, at: datetime = NOW) -> dict:
+    """
+    Build a listed edit attesting to a pay item of the SWCB report.
+    Takes the kind ('approve' | 'revise' | 'add'), the item's id, the quantity (for an add, the item), the stage, the editor and the time.
+    Returns the row as list_field_edits returns it.
+    """
+    path = f"payItems[{item_id}].payQuantity" if kind == "revise" else f"payItems[{item_id}]"
+    edit_type = {"approve": "pay_item_approve", "revise": "pay_item_revision", "add": "pay_item_add"}[kind]
+    return {**LISTED_EDIT, "field_path": path, "edit_type": edit_type, "old_value": None if kind == "add" else value,
+            "new_value": value, "editor_uuid": editor["uuid"], "editor_stage": stage, "edited_at": at,
+            "editor_first_name": editor["first_name"], "editor_last_name": editor["last_name"]}
+
+
+class TestApprovePayItem:
+    def test_the_reviewer_approves_an_item_as_it_stands_and_gets_the_idr_back(self):
+        with signed_in(OLIVE) as client, backend(edits=()) as seen:
+            response = client.post(approve_url(ITEM_2))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["message"] == "Pay item approved" and body["data"]["idr_id"] == IDR_ID
+        sql, params = seen["writes"][0]
+        assert "UPDATE icid." not in sql and "jsonb_set" not in sql  # the report is left exactly as it is
+        assert params == [UUID(IDR_ID), "stage1_review", OLIVE["uuid"], UUID(SWCB_ID), ["payItems", "1", "payQuantity"],
+                          ("json", "29.00"), UUID(SWCB_ID), f"payItems[{ITEM_2}]", "pay_item_approve", ("json", "29.00"),
+                          ("json", "29.00"), OLIVE["uuid"], "stage1", "pay_item_approve"]
+
+    def test_the_approval_comes_back_among_the_edits_with_the_reviewers_initials(self):
+        approval = my_edit("approve", ITEM_1, "60.00")
+        with signed_in(OLIVE) as client, backend(edits=()) as seen:
+            seen_before = client.get(f"/v1/idrs/{IDR_ID}").json()["data"]["field_edits"]
+        with signed_in(OLIVE) as client, backend(edits=(approval,)):
+            edit = client.get(f"/v1/idrs/{IDR_ID}").json()["data"]["field_edits"][0]
+        assert seen_before == []
+        assert (edit["edit_type"], edit["field_path"], edit["old_value"], edit["new_value"]) == (
+            "pay_item_approve", f"payItems[{ITEM_1}]", "60.00", "60.00")
+        assert (edit["editor_initials"], edit["editor_stage"]) == ("OE", "stage1")
+
+    def test_approving_again_at_the_same_stage_succeeds_and_logs_nothing(self):
+        with signed_in(OLIVE) as client, backend(edits=(my_edit("approve", ITEM_1, "60.00"),)) as seen:
+            response = client.post(approve_url(ITEM_1))
+        assert response.status_code == 200 and response.json()["message"] == "Pay item approved"
+        assert seen["writes"] == []
+
+    @pytest.mark.parametrize("kind,value", [("revise", "60.00"), ("add", {"id": ITEM_1, "payQuantity": "60.00"})])
+    def test_an_item_they_already_revised_or_added_needs_no_approval_row(self, kind, value):
+        with signed_in(OLIVE) as client, backend(edits=(my_edit(kind, ITEM_1, value),)) as seen:
+            assert client.post(approve_url(ITEM_1)).status_code == 200
+        assert seen["writes"] == []
+
+    def test_an_approval_of_an_older_quantity_doesnt_stand_in_for_this_one(self):
+        with signed_in(OLIVE) as client, backend(edits=(my_edit("approve", ITEM_1, "58.00"),)) as seen:
+            assert client.post(approve_url(ITEM_1)).status_code == 200
+        assert len(seen["writes"]) == 1 and seen["writes"][0][1][5] == ("json", "60.00")
+
+    def test_another_reviewers_approval_or_their_own_at_another_stage_doesnt_either(self):
+        others = (my_edit("approve", ITEM_1, "60.00", editor=REX), my_edit("approve", ITEM_1, "60.00", stage="stage2"))
+        with signed_in(OLIVE) as client, backend(edits=others) as seen:
+            assert client.post(approve_url(ITEM_1)).status_code == 200
+        assert len(seen["writes"]) == 1
+
+    def test_one_from_before_the_stage_was_last_accepted_doesnt_either(self):
+        earlier = my_edit("approve", ITEM_1, "60.00", at=datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc))
+        accepted = datetime(2026, 10, 6, 12, 0, tzinfo=timezone.utc)
+        with signed_in(OLIVE) as client, backend(edits=(earlier,), accepted_at=accepted) as seen:
+            assert client.post(approve_url(ITEM_1)).status_code == 200
+        assert len(seen["writes"]) == 1
+
+    def test_the_re_approves_at_stage_two_under_their_own_stage(self):
+        with signed_in(REX) as client, backend(idr=STAGE2_IDR, roles=("re",), edits=(my_edit("approve", ITEM_1, "60.00"),)) as seen:
+            assert client.post(approve_url(ITEM_1)).status_code == 200
+        sql, params = seen["writes"][0]
+        assert "AND re_reviewer_uuid = %s" in sql and params[-3:] == [REX["uuid"], "stage2", "pay_item_approve"]
+
+    def test_an_admin_approves_as_themselves(self, admin_client):
+        with backend(roles=(), edits=()) as seen:
+            assert admin_client.post(approve_url(ITEM_1)).status_code == 200
+        sql, params = seen["writes"][0]
+        assert "reviewer_uuid = %s" not in sql and params[-3] == ADMIN_USER_ROW["uuid"]
+
+    def test_an_item_no_report_of_the_idr_holds_is_404(self):
+        with signed_in(OLIVE) as client, backend(edits=()) as seen:
+            response = client.post(approve_url("no-such-item"))
+        assert response.status_code == 404 and response.json() == {"detail": "Pay item not found in this IDR"}
+        assert seen["writes"] == []
+
+    def test_an_auto_generated_generals_item_cant_be_approved(self):
+        merged = {**AUTO_GENERAL, "report_data": {"payItems": [{**SWCB_DATA["payItems"][0], "id": "merged-1"}]}}
+        with signed_in(OLIVE) as client, backend(reports=(merged, SWCB), edits=()) as seen:
+            response = client.post(approve_url("merged-1"))
+        assert response.status_code == 400 and seen["writes"] == []
+
+    def test_a_quantity_that_changed_meanwhile_is_409(self):
+        with signed_in(OLIVE) as client, backend(applied=[], edits=()):
+            response = client.post(approve_url(ITEM_1))
+        assert response.status_code == 409 and response.json() == CHANGED
+
+    def test_a_failed_statement_is_500(self):
+        with signed_in(OLIVE) as client, backend(applied=None, edits=()):
+            assert client.post(approve_url(ITEM_1)).status_code == 500
+
+    def test_it_takes_no_body(self):
+        with signed_in(OLIVE) as client, backend(edits=()) as seen:
+            assert client.post(approve_url(ITEM_1), json={"anything": 1}).status_code == 200
+        assert len(seen["writes"]) == 1

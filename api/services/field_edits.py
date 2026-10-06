@@ -18,7 +18,15 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
-from api.queries.idr_field_edits import EDIT_STAGES, append_pay_item, apply_header_edit, apply_report_edit, list_field_edits
+from api.queries.idr_audit import last_action_time
+from api.queries.idr_field_edits import (
+    EDIT_STAGES,
+    append_pay_item,
+    apply_header_edit,
+    apply_report_edit,
+    list_field_edits,
+    log_pay_item_approval,
+)
 from api.queries.idr_reports import get_general_report, get_idr_report, list_reports_for_idr
 from api.queries.idrs import HEADER_COLUMNS, get_idr_by_id
 from api.schemas.auth import UserOut
@@ -28,6 +36,10 @@ from api.services.auto_general import regenerate_auto_general
 
 # The report types whose form has a Pay Items table
 PAY_ITEM_REPORT_TYPES = frozenset({ReportType.GEN.value, ReportType.SWCB.value, ReportType.AC.value})
+
+# What starts a stage's round of review: the acceptance logged for it. Attestations made before the latest one
+# belong to an earlier round and no longer count.
+STAGE_ACCEPT_ACTIONS = {"stage1": "accept_stage1", "stage2": "accept_stage2"}
 
 HEADER_PREFIX = "header."
 PAY_ITEMS = "payItems"
@@ -241,6 +253,129 @@ def revise_pay_item(idr: dict[str, Any], pay_item_id: str, revised_quantity: Any
         if isinstance(items, list) and any(isinstance(item, dict) and item.get("id") == pay_item_id for item in items):
             return edit_report_field(idr, report["report_id"], f"{PAY_ITEMS}[{pay_item_id}].{PAY_QUANTITY}", quantity,
                                      user)
+    raise FieldEditError(404, "Pay item not found in this IDR")
+
+
+def _same_quantity(a: Any, b: Any) -> bool:
+    """
+    Tell whether two quantities are the same amount, however they are written ("55" and "55.00" are).
+    Takes the two values (text or numbers; None and blank count as nothing).
+    Returns True when both are nothing, or both parse to the same number, or their text is identical.
+    """
+    left, right = ("" if v is None else str(v).strip() for v in (a, b))
+    if left == right:
+        return True
+    try:
+        return float(left) == float(right)
+    except ValueError:
+        return False
+
+
+def _pay_items(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Read the pay items a reviewer attests to in a report: those of a report that isn't an auto-generated General, each carrying an id.
+    Takes the report row.
+    Returns the items, in the report's order (none for an auto-generated General, or a report without a payItems list).
+    """
+    data = report["report_data"]
+    items = data.get(PAY_ITEMS) if isinstance(data, dict) else None
+    if report["is_auto_generated"] or not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict) and item.get("id")]
+
+
+def _touched(item: dict[str, Any], report_id: UUID, edits: list[dict[str, Any]]) -> bool:
+    """
+    Tell whether one of a reviewer's edits attests to a pay item as it now stands: an approval or a revision whose quantity is the item's current one, or the edit that added it.
+    Takes the item, its report's uuid and the reviewer's edits at the stage, in the current round.
+    Returns True when one does. An attestation to a quantity the item no longer has doesn't count.
+    """
+    item_path = f"{PAY_ITEMS}[{item['id']}]"
+    quantity = item.get(PAY_QUANTITY)
+    for edit in edits:
+        if edit["report_id"] != report_id:
+            continue
+        kind, path, value = edit["edit_type"], edit["field_path"], edit["new_value"]
+        if kind == "pay_item_approve" and path == item_path and _same_quantity(value, quantity):
+            return True
+        if kind == "pay_item_revision" and path == f"{item_path}.{PAY_QUANTITY}" and _same_quantity(value, quantity):
+            return True
+        if kind == "pay_item_add" and path == item_path and isinstance(value, dict) \
+                and _same_quantity(value.get(PAY_QUANTITY), quantity):
+            return True
+    return False
+
+
+def _attestations(idr: dict[str, Any], user: UserOut) -> Optional[list[dict[str, Any]]]:
+    """
+    List the edits by which a user has attested to pay items at the IDR's current stage, in its current round: theirs, stamped with this stage, made since the stage was last accepted.
+    Takes the IDR row (in review) and the user.
+    Returns the edits, or None if the IDR's edits can't be read.
+    """
+    edits = list_field_edits(idr["idr_id"])
+    if edits is None:
+        return None
+    stage = EDIT_STAGES[idr["status"]][0]
+    since = last_action_time(idr["idr_id"], STAGE_ACCEPT_ACTIONS[stage])
+    return [edit for edit in edits
+            if edit["editor_uuid"] == user.uuid and edit["editor_stage"] == stage
+            and (since is None or edit["edited_at"] >= since)]
+
+
+def untouched_pay_items(idr: dict[str, Any], user: UserOut) -> list[dict[str, Any]]:
+    """
+    List the pay items a user still has to approve, revise or add before they can approve the IDR's current stage. Every pay item of every report but an auto-generated General needs one of the three from them, at this stage, since it was last accepted, for the quantity the item has now. An admin standing in for the reviewer is held to the same.
+    Takes the IDR row (in review) and the user about to approve the stage.
+    Returns one dict per untouched item (pay_item_id, report_id, item_no, budget_code), in report and item order; raises FieldEditError (500) if the reports or the edits can't be read.
+    """
+    reports = list_reports_for_idr(idr["idr_id"])
+    attestations = _attestations(idr, user)
+    if reports is None or attestations is None:
+        raise FieldEditError(500, "Failed to check the IDR's pay items")
+    return [
+        {"pay_item_id": item["id"], "report_id": report["report_id"], "item_no": item.get("itemNo") or None,
+         "budget_code": item.get("budgetCode") or None}
+        for report in reports for item in _pay_items(report)
+        if not _touched(item, report["report_id"], attestations)
+    ]
+
+
+def untouched_message(count: int) -> str:
+    """
+    Word the refusal to approve a stage with pay items still waiting on its reviewer.
+    Takes how many are waiting (at least one).
+    Returns the message.
+    """
+    items = "1 pay item still needs" if count == 1 else f"{count} pay items still need"
+    return f"{items} your approval or revision before you can approve this IDR"
+
+
+def approve_pay_item(idr: dict[str, Any], pay_item_id: str, user: UserOut) -> Optional[dict[str, Any]]:
+    """
+    Record a reviewer's approval of one pay item as it stands, found by its id in whichever of the IDR's reports holds it. Approving an item they have already approved, revised or added at this stage (for the quantity it has now) changes nothing.
+    Takes the IDR row, the pay item's id and the editor.
+    Returns the edit row, or None when the item was already attested to; raises FieldEditError: 404 when no report of the IDR holds the item, 400 for an item of an auto-generated General, 500 if the reports or edits can't be read, 409 or 500 from the statement.
+    """
+    reports = list_reports_for_idr(idr["idr_id"])
+    attestations = _attestations(idr, user)
+    if reports is None or attestations is None:
+        raise FieldEditError(500, "Failed to load IDR reports")
+    for report in reports:
+        data = report["report_data"]
+        items = data.get(PAY_ITEMS) if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            continue
+        for position, item in enumerate(items):
+            if not isinstance(item, dict) or item.get("id") != pay_item_id:
+                continue
+            if report["is_auto_generated"]:
+                raise FieldEditError(400, "An auto-generated General's pay items are approved on the reports they come from")
+            if _touched(item, report["report_id"], attestations):
+                return None
+            return _applied(log_pay_item_approval(
+                idr["idr_id"], report["report_id"], f"{PAY_ITEMS}[{pay_item_id}]",
+                [PAY_ITEMS, str(position), PAY_QUANTITY], item.get(PAY_QUANTITY), user.uuid, idr["status"],
+                _as_reviewer(user)))
     raise FieldEditError(404, "Pay item not found in this IDR")
 
 
