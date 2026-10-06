@@ -3,6 +3,7 @@ import os
 # The app won't start without a signing key; tests use a throwaway one unless the environment already has one
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-jwt-secret-key-not-for-any-deployment")
 
+from contextlib import contextmanager  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 from uuid import UUID  # noqa: E402
@@ -87,4 +88,17 @@ def unsigned_client(admin_token):
     """
     with patch("api.services.auth.get_user_by_uuid", return_value=UNSIGNED_USER_ROW):
         with TestClient(app, headers={"Authorization": f"Bearer {admin_token}"}) as c:
+            yield c
+
+
+@contextmanager
+def signed_in(user_row: dict):
+    """
+    A TestClient signed in as any user, for tests that need someone other than the fixtures' admin and demo user.
+    Takes the row get_user_by_uuid returns for them.
+    Yields the client; every request carries their bearer token.
+    """
+    token = auth_provider.issue_token(UserOut.model_validate(user_row))
+    with patch("api.services.auth.get_user_by_uuid", return_value=user_row):
+        with TestClient(app, headers={"Authorization": f"Bearer {token}"}) as c:
             yield c

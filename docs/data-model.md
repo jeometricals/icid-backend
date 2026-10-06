@@ -110,7 +110,8 @@ Assigns users to projects. `GET /v1/projects/?user_id=` reads through this table
 | `role` | TEXT NOT NULL | PK part. `inspector` (default), `oe` or `re`; CHECK `chk_project_users_role`. What the API checks |
 
 Primary key: `(project_id, user_uuid, role)`. Roles are additive: a user holding several roles on a
-project has one row per role. Admin is not a project role; it is `users.role`.
+project has one row per role. Admin is not a project role; it is `users.role`. An admin grants and revokes
+roles through `POST /v1/projects/{project_id}/roles`; a row made that way has no `user_role`.
 
 ### project_clients
 

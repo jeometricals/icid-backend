@@ -58,6 +58,57 @@ def get_user_roles_on_project(user_id: UUID, project_id: str) -> set[str]:
     return {row["role"] for row in rows or []}
 
 
+def list_project_roles(project_id: str) -> Optional[list[dict[str, Any]]]:
+    """
+    List who holds which role on a project, one row per user and role, demo users left out.
+    Takes the project id.
+    Returns a list of dicts (user_uuid, email, first_name, last_name, role, assigned_at) ordered by name then role, or None on failure.
+    """
+    sql = """
+        SELECT
+            pu.user_uuid,
+            u.email,
+            u.first_name,
+            u.last_name,
+            pu.role,
+            pu.assigned_at
+        FROM icid.project_users pu
+        JOIN icid.users u ON u.uuid = pu.user_uuid
+        WHERE pu.project_id = %s AND u.is_demo = false
+        ORDER BY u.last_name NULLS LAST, u.first_name NULLS LAST, u.email, pu.role;
+    """
+    return run_query(sql, (project_id,))
+
+
+def grant_project_role(project_id: str, user_id: UUID, role: str) -> Optional[list[dict[str, Any]]]:
+    """
+    Give a user a role on a project, unless they already hold it.
+    Takes the project id, the user uuid and the role ('inspector', 'oe' or 're').
+    Returns a one-row list with the new assignment, an empty list if they already held the role, or None on failure.
+    """
+    sql = """
+        INSERT INTO icid.project_users (project_id, user_uuid, role)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (project_id, user_uuid, role) DO NOTHING
+        RETURNING project_id, user_uuid, role;
+    """
+    return run_query(sql, (project_id, user_id, role))
+
+
+def revoke_project_role(project_id: str, user_id: UUID, role: str) -> Optional[list[dict[str, Any]]]:
+    """
+    Take a role on a project away from a user. Their other roles there are untouched; without any they are off the project.
+    Takes the project id, the user uuid and the role.
+    Returns a one-row list with the removed assignment, an empty list if they didn't hold the role, or None on failure.
+    """
+    sql = """
+        DELETE FROM icid.project_users
+        WHERE project_id = %s AND user_uuid = %s AND role = %s
+        RETURNING project_id, user_uuid, role;
+    """
+    return run_query(sql, (project_id, user_id, role))
+
+
 def get_project_contractor_name(project_id: str) -> Optional[str]:
     """
     Fetch the name of the organisation on a project in the Contractor role.

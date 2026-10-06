@@ -49,6 +49,8 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/users/` — 403 for a demo user
 - `GET /v1/projects/` — the signed-in user's projects (through `project_users`), each once, with `roles` (the project roles they hold on it) and `user_role` (the label)
 - `GET /v1/projects/{project_id}`
+- `GET /v1/projects/{project_id}/roles` — admin only: who holds which role on the project, one entry per user and role (demo users left out)
+- `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count`, `has_general` and the names of the inspector and reviewers (all filters optional). Deleted IDRs and other people's drafts are never listed
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order
@@ -121,13 +123,18 @@ Any change must follow these.
   - **No ownership checks on reading and editing (yet).** Any signed-in user can read, edit or export any IDR by
     id, and list IDRs for any reporter (`?reporter_uuid=` is a filter, not an identity), except that nobody is
     listed another person's draft. An admin lists only the projects assigned to them in `project_users`, like
-    anyone else. Submitting and the review routes are the exception: they check project roles, below. The one
-    admin-only route is `/v1/admin/cleanup-demos`.
+    anyone else. Submitting and the review routes are the exception: they check project roles, below. The
+    admin-only routes are `/v1/admin/cleanup-demos` and the two under `/v1/projects/{project_id}/roles`.
   - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
     several on a project (migration 018). `require_project_role("oe", "re")` builds a dependency for a route with
     an `idr_id`: it passes a user holding one of those roles on the IDR's project, and any admin; 404 for an
     unknown IDR, 403 `Role required: oe/re` otherwise. Submit needs `inspector`; the review routes need `oe` or
     `re` (Stage 2: `re`). `user_role` on the same table is a display label and is never checked.
+    - Roles are granted and revoked by an admin through `POST /v1/projects/{project_id}/roles`, one row per
+      call. A row made that way has no `user_role` label. Revoking a user's last role on a project removes
+      their only `project_users` row there, so the project leaves their list; their IDRs stay. Nothing stops a
+      revoke while the user is the reviewer on an IDR in review: they then get 403 on it, and an admin (or a
+      direct update) has to move it on.
   - **Review.** `api/v1/reviews.py`, a second router under `/v1/idrs`, registered before the IDRs router so
     `/v1/idrs/queue` isn't read as an `idr_id`.
     - The path: `draft` → `submitted` → `stage1_review` → `stage2_review` → `approved`. A return sends an IDR

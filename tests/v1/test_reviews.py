@@ -5,14 +5,10 @@ from uuid import UUID
 
 import pytest
 from psycopg.errors import UniqueViolation
-from starlette.testclient import TestClient
 
-from api.index import app
 from api.queries.idrs import IdrNumberTakenError, accept_stage1
-from api.schemas.auth import UserOut
-from api.services.auth import auth_provider
 from api.services.signatures import SignatureStorageError
-from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW
+from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 
 # ---------------------------------------------------------------------------
 # Mock data — dict rows, as run_query returns them under dict_row.
@@ -62,19 +58,6 @@ def url(action: str) -> str:
     Returns the path.
     """
     return f"/v1/idrs/{IDR_ID}/{action}"
-
-
-@contextmanager
-def signed_in(user_row: dict):
-    """
-    A TestClient signed in as a user, like the conftest fixtures but for any user row.
-    Takes the row get_user_by_uuid returns for them.
-    Yields the client; every request carries their bearer token.
-    """
-    token = auth_provider.issue_token(UserOut.model_validate(user_row))
-    with patch("api.services.auth.get_user_by_uuid", return_value=user_row):
-        with TestClient(app, headers={"Authorization": f"Bearer {token}"}) as client:
-            yield client
 
 
 @contextmanager
