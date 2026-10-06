@@ -154,3 +154,49 @@ class TestMigration018:
 
     def test_the_seed_upserts_on_the_new_key(self):
         assert "ON CONFLICT (project_id, user_uuid, role) DO NOTHING;" in sql("seed_auth_users.sql")
+
+
+class TestMigration019:
+    migration = "migrations/019_idr_audit.sql"
+
+    def table(self, name: str) -> str:
+        """
+        Cut the idr_audit table and its index out of a SQL file, on one line.
+        Takes the file's path under the repo root.
+        Returns the two statements with IF NOT EXISTS removed, so the migration and schema.sql can be compared.
+        """
+        text = flat(name).replace("IF NOT EXISTS ", "")
+        start = text.index("CREATE TABLE icid.idr_audit")
+        return text[start:text.index(";", text.index("CREATE INDEX idx_idr_audit_idr_created", start)) + 1]
+
+    def test_the_migration_and_schema_sql_declare_the_same_table(self):
+        assert (ROOT / self.migration).is_file()
+        assert self.table(self.migration) == self.table("schema.sql")
+
+    def test_the_columns(self):
+        assert table_columns("idr_audit") == {
+            "audit_id": "UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+            "idr_id": "UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE",
+            "actor_uuid": "UUID NOT NULL REFERENCES icid.users(uuid)",
+            "action": "TEXT NOT NULL", "from_status": "TEXT", "to_status": "TEXT", "note": "TEXT",
+            "created_at": "TIMESTAMPTZ NOT NULL DEFAULT now()",
+        }
+        assert "CHECK" not in self.table("schema.sql")  # a later slice can log new actions without a migration
+
+    def test_an_idrs_history_is_indexed_newest_first(self):
+        assert "CREATE INDEX idx_idr_audit_idr_created ON icid.idr_audit(idr_id, created_at DESC);" in self.table(
+            self.migration)
+
+    def test_it_is_one_transaction_and_safe_to_rerun(self):
+        migration = sql(self.migration)
+        assert migration.count("BEGIN;") == migration.count("COMMIT;") == 1
+        assert "CREATE TABLE IF NOT EXISTS icid.idr_audit" in migration and "CREATE INDEX IF NOT EXISTS" in migration
+
+    def test_the_api_writes_the_columns_the_table_has(self):
+        from api.queries.idr_audit import AUDIT_CTE
+        named = re.search(r"INSERT INTO icid\.idr_audit \(([^)]+)\)", AUDIT_CTE).group(1).split(", ")
+        assert set(named) <= set(table_columns("idr_audit")) and AUDIT_CTE.count("%s") == 3
+
+    def test_the_api_reads_only_idr_columns_that_exist(self):
+        from api.queries.idrs import IDR_COLUMNS
+        assert {name.strip() for name in IDR_COLUMNS.split(",")} <= set(table_columns("idrs"))

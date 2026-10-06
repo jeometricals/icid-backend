@@ -4,6 +4,7 @@ Signatures: a user's current signature, and the copy an IDR keeps from the momen
 Files live in the private signatures bucket (SIGNATURE_BUCKET_NAME):
     users/{user uuid}/signature.png                 the user's current signature; a new upload replaces it
     idrs/{idr id}/inspector_{random}.png            the copy stamped on one IDR at submit; never replaced or removed
+    idrs/{idr id}/re_{random}.png                   the RE's copy, stamped at final approval; the same rule
 
 Setting a signature takes two steps, like an attachment: ask for a signed upload URL, PUT the PNG to it, then
 confirm, which records the file on the user's row. Submitting copies the user's current file to the IDR's own path
@@ -43,13 +44,13 @@ def user_signature_path(user_uuid: UUID) -> str:
     return f"users/{user_uuid}/signature.png"
 
 
-def idr_signature_path(idr_id: UUID) -> str:
+def idr_signature_path(idr_id: UUID, signer: str = "inspector") -> str:
     """
-    Make a fresh object path for an IDR's own copy of its inspector's signature. Each call gives a new one, so a copy is never written over another.
-    Takes the IDR's uuid.
+    Make a fresh object path for an IDR's own copy of a signature. Each call gives a new one, so a copy is never written over another.
+    Takes the IDR's uuid and whose signature it is ('inspector' or 're').
     Returns the path within the signatures bucket.
     """
-    return f"idrs/{idr_id}/inspector_{uuid4().hex}.png"
+    return f"idrs/{idr_id}/{signer}_{uuid4().hex}.png"
 
 
 def request_user_signature_upload(user_uuid: UUID) -> dict[str, Any]:
@@ -85,13 +86,13 @@ def confirm_user_signature(user_uuid: UUID, signature_type: str) -> Optional[dic
     return set_user_signature(user_uuid, path, signature_type)
 
 
-def snapshot_signature_for_idr(signature_path: str, idr_id: UUID) -> str:
+def snapshot_signature_for_idr(signature_path: str, idr_id: UUID, signer: str = "inspector") -> str:
     """
-    Copy a user's current signature file to an IDR's own path, ahead of submitting that IDR.
-    Takes the signature's object path and the IDR's uuid.
+    Copy a user's current signature file to an IDR's own path, ahead of submitting or approving that IDR.
+    Takes the signature's object path, the IDR's uuid and whose signature it is ('inspector' or 're').
     Returns the copy's object path; raises SignatureStorageError if the copy fails.
     """
-    copy_path = idr_signature_path(idr_id)
+    copy_path = idr_signature_path(idr_id, signer)
     try:
         copy_file(SIGNATURE_BUCKET_NAME, signature_path, copy_path)
     except Exception as exc:

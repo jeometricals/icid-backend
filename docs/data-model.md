@@ -140,7 +140,7 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `weather_am`, `weather_pm` | TEXT | |
 | `total_pages` | INTEGER | NULL while draft; set on submit to the number of reports |
 | `has_dismissed_auto_general` | BOOLEAN NOT NULL | Default `false`. See [Auto-generated General](#auto-generated-general) |
-| `status` | TEXT NOT NULL | `draft` (default), `submitted`, `stage1_review`, `stage2_review`, `approved`, `returned` or `deleted`; CHECK `chk_idrs_status`. Only `draft` and `submitted` are set by the API so far |
+| `status` | TEXT NOT NULL | `draft` (default), `submitted`, `stage1_review`, `stage2_review`, `approved`, `returned` or `deleted`; CHECK `chk_idrs_status`. `returned` is unused (a returned IDR is a `draft` with `return_reason` set) and nothing sets `deleted` yet |
 | `submitted_at` | TIMESTAMPTZ | NULL until submitted |
 | `inspector_signature_path` | TEXT | The signature stamped at submit (object path in the `signatures` bucket); not changed afterwards. NULL on drafts and on IDRs submitted before signatures. |
 | `inspector_signed_at` | TIMESTAMPTZ | When that signature was stamped |
@@ -153,7 +153,8 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `returned_from` | TEXT | `stage1` or `stage2`; CHECK `chk_idrs_returned_from` |
 | `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete: when and by whom (FK → `users.uuid`). The row is kept |
 
-The review columns (from `idr_number` down) came with migration 017. Nothing reads or writes them yet.
+The review columns (from `idr_number` down) came with migration 017. `deleted_at` and `deleted_by` are not
+written yet.
 
 Constraints and indexes:
 - `uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date) WHERE deleted_at IS NULL`:
@@ -171,6 +172,29 @@ Lifecycle: an IDR is created as a `draft`, and its header and reports can be edi
 locks the IDR in one statement. It sets `status = 'submitted'`, `submitted_at`, `total_pages`,
 `inspector_signature_path` and `inspector_signed_at`, and numbers every report's `page_number`. After that the API
 refuses edits (409).
+
+Review: a submitted IDR is picked up at Stage 1 by an OE or RE (`accept-stage1`, which gives it its
+`idr_number`), passed to Stage 2 (`approve-stage1`), picked up by an RE (`accept-stage2`) and approved
+(`approve-stage2`, which stamps the RE's signature). `return` sends it back to its inspector as a `draft`, or
+from Stage 2 to the OE as `stage1_review`, with `return_reason` and `returned_from`; resubmitting and
+approve-stage1 clear them. The number is kept through returns. Every one of these moves is a single statement
+that also writes a row to `idr_audit`.
+
+### idr_audit
+
+One row per thing done to an IDR in review. Written by the statement that changes the IDR; nothing reads it yet.
+
+| Column | Type | Notes |
+|---|---|---|
+| `audit_id` | UUID PK | `gen_random_uuid()` |
+| `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
+| `actor_uuid` | UUID NOT NULL | FK → `users.uuid`. Who did it |
+| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`. No CHECK |
+| `from_status`, `to_status` | TEXT | The IDR's status before and after; nullable for actions that aren't a status change |
+| `note` | TEXT | The return comment |
+| `created_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
+
+Index: `idx_idr_audit_idr_created (idr_id, created_at DESC)`.
 
 ### idr_reports
 
@@ -407,6 +431,7 @@ content as TEXT, linked to a report and a form template).
 | 016 | `016_users_email_lower.sql` | Housekeeping | Created the unique index `idx_users_email_lower` on `lower(email)`; dropped `uq_users_email` (case-sensitive, from 013) and the baseline's plain `idx_users_email`. |
 | 017 | `017_review_workflow.sql` | J0 | Widened `chk_idrs_status` to the review statuses (`stage1_review`, `stage2_review`, `approved`, `returned`, `deleted`). Added the review columns on `idrs` (`idr_number`, the Stage 1 and RE reviewer columns, `re_signature_path`, `re_signed_at`, `return_reason`, `returned_from` with its CHECK, `deleted_at`, `deleted_by`), all nullable. Rebuilt `idx_idrs_project_status` as a partial index and added `idx_idrs_status` and the partial unique index `uq_idrs_project_number`. Replaced the constraint `uq_idrs_project_reporter_date` with a partial unique index of the same name (`WHERE deleted_at IS NULL`). |
 | 018 | `018_project_roles.sql` | J0 | Added `project_users.role` (`inspector` / `oe` / `re`, NOT NULL DEFAULT `inspector`, CHECK) and replaced the primary key `(project_id, user_uuid)` with `(project_id, user_uuid, role)`. |
+| 019 | `019_idr_audit.sql` | J1 | Created `idr_audit` (FK to `idrs` with ON DELETE CASCADE, FK to `users`) and `idx_idr_audit_idr_created`. |
 
 Where each current column came from:
 
@@ -427,3 +452,4 @@ Where each current column came from:
 | `report_attachments` | everything except the three below | 008 (`storage_path` UNIQUE dropped in 010) |
 | `report_attachments` | `attachment_name`, `attachment_description`, `is_uploaded` | 009 |
 | `spec_items`, `contract_items` | all | 011 |
+| `idr_audit` | all | 019 |

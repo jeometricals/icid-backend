@@ -1149,29 +1149,58 @@ class TestListIdrs:
         assert "i.project_id = %s" in sql
         assert "i.status = %s" in sql
         assert "i.reporter_uuid = %s" in sql
-        assert query_params == ("HWS0023", "draft", UUID(REPORTER_UUID))
+        assert query_params == ("HWS0023", "draft", UUID(REPORTER_UUID), ADMIN_USER_ROW["uuid"])
 
     def test_each_filter_is_optional(self, admin_client):
         with patched(idrs=[]) as mocks:
             admin_client.get(self.url, params={"status": "submitted"})
         sql, query_params = mocks["idrs"].call_args.args
         assert "i.project_id = %s" not in sql
-        assert "i.reporter_uuid = %s" not in sql
-        assert query_params == ("submitted",)
+        assert sql.count("i.reporter_uuid = %s") == 1  # the drafts rule only
+        assert query_params == ("submitted", ADMIN_USER_ROW["uuid"])
 
-    def test_no_filters_lists_everything(self, admin_client):
+    def test_no_filters_lists_everything_but_deleted_idrs_and_other_peoples_drafts(self, admin_client):
         with patched(idrs=[]) as mocks:
             response = admin_client.get(self.url)
         assert response.status_code == 200
         sql, query_params = mocks["idrs"].call_args.args
-        assert "WHERE" not in sql.split("FROM icid.idrs i")[1]
-        assert query_params == ()
+        where = sql.split("FROM icid.idrs i")[1].split("ORDER BY")[0]
+        assert where.split() == "WHERE i.deleted_at IS NULL AND (i.status <> 'draft' OR i.reporter_uuid = %s)".split()
+        assert query_params == (ADMIN_USER_ROW["uuid"],)  # whose drafts stay listed: the signed-in user's
+
+    def test_the_two_standing_filters_apply_with_every_other_filter(self, admin_client):
+        for params in ({"status": "draft"}, {"project_id": "HWS0023"}, {"reporter_uuid": REPORTER_UUID}):
+            with patched(idrs=[]) as mocks:
+                admin_client.get(self.url, params=params)
+            sql, query_params = mocks["idrs"].call_args.args
+            assert "i.deleted_at IS NULL AND (i.status <> 'draft' OR i.reporter_uuid = %s)" in sql
+            assert query_params[-1] == ADMIN_USER_ROW["uuid"] and len(query_params) == 2
+
+    def test_every_review_status_can_be_filtered_on(self, admin_client):
+        for status in ("draft", "submitted", "stage1_review", "stage2_review", "approved"):
+            with patched(idrs=[]) as mocks:
+                assert admin_client.get(self.url, params={"status": status}).status_code == 200
+            assert mocks["idrs"].call_args.args[1][0] == status
+
+    def test_items_carry_the_review_fields_and_names(self, admin_client):
+        row = {**MOCK_LIST_SUBMITTED_ROW, "status": "stage2_review", "idr_number": "005",
+               "stage1_reviewer_uuid": UUID(REPORTER_UUID), "reporter_name": "Genghis Khan",
+               "stage1_reviewer_name": "Olive Engineer", "re_reviewer_name": None}
+        with patched(idrs=[row]) as mocks:
+            item = admin_client.get(self.url).json()["data"][0]
+        assert (item["idr_number"], item["stage1_reviewer_uuid"]) == ("005", REPORTER_UUID)
+        assert (item["reporter_name"], item["stage1_reviewer_name"], item["re_reviewer_name"]) == (
+            "Genghis Khan", "Olive Engineer", None)
+        assert item["return_reason"] is None and item["re_signed_at"] is None
+        sql = mocks["idrs"].call_args.args[0]
+        for name in ("reporter_name", "stage1_reviewer_name", "re_reviewer_name"):
+            assert f") AS {name}" in sql
 
     def test_drafts_without_reporter_are_allowed(self, admin_client):
         with patched(idrs=[]) as mocks:
             response = admin_client.get(self.url, params={"project_id": "HWS0023", "status": "draft"})
         assert response.status_code == 200
-        assert mocks["idrs"].call_args.args[1] == ("HWS0023", "draft")
+        assert mocks["idrs"].call_args.args[1] == ("HWS0023", "draft", ADMIN_USER_ROW["uuid"])
 
     def test_single_sort_by_updated_at_with_tiebreakers(self, admin_client):
         for status in ("draft", "submitted"):
@@ -1204,8 +1233,9 @@ class TestListIdrs:
         mocks["idr_reports"].assert_not_called()
 
     def test_invalid_status_returns_422(self, admin_client):
-        response = admin_client.get(self.url, params={"status": "approved"})
-        assert response.status_code == 422
+        for status in ("returned", "deleted", "bogus"):  # never listed by status
+            response = admin_client.get(self.url, params={"status": status})
+            assert response.status_code == 422
 
     def test_non_uuid_reporter_returns_422(self, admin_client):
         response = admin_client.get(self.url, params={"reporter_uuid": "28"})
@@ -1265,9 +1295,23 @@ class TestSubmitIdr:
         assert [r["page_number"] for r in idr["reports"]] == [1, 2]
         assert idr["reports"][1]["parent_report_id"] == GEN_REPORT_ID
 
-    def test_submit_statement_takes_the_idr_id_and_the_signature_copy(self, admin_client):
+    def test_submit_statement_takes_the_idr_id_the_signature_copy_and_who_submitted(self, admin_client):
         _, params = self.submit_sql(admin_client)
-        assert params == (UUID(IDR_ID), SIGNATURE_COPY)
+        assert params == (UUID(IDR_ID), SIGNATURE_COPY, ADMIN_USER_ROW["uuid"], "submit", None)
+
+    def test_submit_is_logged_in_the_same_statement(self, admin_client):
+        sql, _ = self.submit_sql(admin_client)
+        assert "INSERT INTO icid.idr_audit (idr_id, actor_uuid, action, from_status, to_status, note)" in sql
+        assert sql.count(";") == 1 and sql.index("UPDATE icid.idrs") < sql.index("INSERT INTO icid.idr_audit")
+
+    def test_submitting_clears_a_return(self, admin_client):
+        sql, _ = self.submit_sql(admin_client)
+        assert "return_reason = NULL" in sql and "returned_from = NULL" in sql
+        assert "idr_number" not in sql.split("RETURNING")[0]  # a resubmitted IDR keeps its number
+
+    def test_a_deleted_idr_cant_be_submitted(self, admin_client):
+        sql, _ = self.submit_sql(admin_client)
+        assert "WHERE idr_id = %s AND status = 'draft' AND deleted_at IS NULL" in sql
 
     def test_locks_draft_row_before_numbering(self, admin_client):
         sql, _ = self.submit_sql(admin_client)
@@ -1757,20 +1801,20 @@ class TestDemoUserIdrs:
                 response = demo_client.get(self.list_url, params=params)
             assert response.status_code == 200
             sql, query_params = mocks["idrs"].call_args.args
-            assert "i.reporter_uuid = %s" in sql and query_params == (DEMO_USER_ROW["uuid"],)
+            assert "i.reporter_uuid = %s" in sql and query_params == (DEMO_USER_ROW["uuid"], DEMO_USER_ROW["uuid"])
 
     def test_a_demo_users_other_filters_still_apply(self, demo_client):
         with patched(idrs=[]) as mocks:
             demo_client.get(self.list_url, params={"project_id": "DEMO01", "status": "draft"})
-        assert mocks["idrs"].call_args.args[1] == ("DEMO01", "draft", DEMO_USER_ROW["uuid"])
+        assert mocks["idrs"].call_args.args[1] == ("DEMO01", "draft", DEMO_USER_ROW["uuid"], DEMO_USER_ROW["uuid"])
 
     def test_everyone_else_keeps_the_optional_reporter_filter(self, admin_client):
         with patched(idrs=[]) as mocks:
             admin_client.get(self.list_url)
-        assert "i.reporter_uuid = %s" not in mocks["idrs"].call_args.args[0]
+        assert mocks["idrs"].call_args.args[0].count("i.reporter_uuid = %s") == 1  # the drafts rule only
         with patched(idrs=[]) as mocks:
             admin_client.get(self.list_url, params={"reporter_uuid": REPORTER_UUID})
-        assert mocks["idrs"].call_args.args[1] == (UUID(REPORTER_UUID),)
+        assert mocks["idrs"].call_args.args[1] == (UUID(REPORTER_UUID), ADMIN_USER_ROW["uuid"])
 
     def test_a_demo_user_can_create_a_draft_on_their_project(self, demo_client):
         with patched(idrs=[DEMO_IDR_ROW], projects=ASSIGNED) as mocks:
@@ -1822,7 +1866,7 @@ class TestSubmitSignature:
         assert "status = 'submitted'" in sql and sql.count("UPDATE icid.idrs") == 1  # still one statement
         returning = sql.split("RETURNING")[1]
         assert "inspector_signature_path" in returning and "inspector_signed_at" in returning
-        assert params == (UUID(IDR_ID), SIGNATURE_COPY)
+        assert params[:2] == (UUID(IDR_ID), SIGNATURE_COPY)
 
     def test_the_response_carries_the_signature_and_when_it_was_signed(self, admin_client):
         with patched(idrs=([MOCK_IDR_ROW], [MOCK_SIGNED_IDR_ROW]), idr_reports=REPORTS_THEN_NUMBERED):

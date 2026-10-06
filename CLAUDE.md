@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -47,16 +47,22 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
 - `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
 - `GET /v1/users/` — 403 for a demo user
-- `GET /v1/projects/` — the signed-in user's projects (through `project_users`)
+- `GET /v1/projects/` — the signed-in user's projects (through `project_users`), each once, with `roles` (the project roles they hold on it) and `user_role` (the label)
 - `GET /v1/projects/{project_id}`
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
-- `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count` and `has_general` (all filters optional)
+- `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count`, `has_general` and the names of the inspector and reviewers (all filters optional). Deleted IDRs and other people's drafts are never listed
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order
 - `PUT /v1/idrs/{idr_id}/header` — partial update of the shared header fields on a draft
 - `POST /v1/idrs/{idr_id}/reports` — add a report (typed by `ReportType`; addendums may name a parent)
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
-- `POST /v1/idrs/{idr_id}/submit` — submit a draft, signed by the signed-in user (locks it, numbers pages, sets `total_pages`, stamps `inspector_signature_path` and `inspector_signed_at`); 400 `Signature required before submitting` when they have no signature, 502 when it can't be copied, 403 `Demo mode: submit is disabled` for a demo user
+- `POST /v1/idrs/{idr_id}/submit` — submit a draft, signed by the signed-in user (locks it, numbers pages, sets `total_pages`, stamps `inspector_signature_path` and `inspector_signed_at`, clears any return); 400 `Signature required before submitting` when they have no signature, 502 when it can't be copied, 403 `Demo mode: submit is disabled` for a demo user, 403 `Role required: inspector` for a user who isn't an inspector on the project
+- `GET /v1/idrs/queue?status=submitted|stage1_review|stage2_review` — one review queue, oldest submission first, on the projects where the signed-in user works it (OE or RE; RE only for `stage2_review`); an admin sees every project
+- `POST /v1/idrs/{idr_id}/accept-stage1` — OE or RE picks a submitted IDR up: `submitted` → `stage1_review`, sets `stage1_reviewer_uuid`. Body `{idr_number}`, needed the first time (400 without it); an IDR that has a number keeps it. 409 with `existing_idr_id` when the number is in use on the project
+- `POST /v1/idrs/{idr_id}/approve-stage1` — `stage1_review` → `stage2_review`; only the Stage 1 reviewer (403 for another OE or RE)
+- `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid`; the status stays `stage2_review`, and the last to accept wins
+- `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`; only the RE reviewer; 400 `Signature required before approving`, 502 when the signature can't be copied
+- `POST /v1/idrs/{idr_id}/return` — body `{to: "inspector" | "oe", comment}`; back to `draft` (inspector) or, from Stage 2, to `stage1_review` (OE), with `return_reason` and `returned_from`; only the current stage's reviewer; 400 for a blank comment
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — replace an attachment's name and description; draft only
@@ -112,16 +118,34 @@ Any change must follow these.
     the id the frontend sent for everyone before sign-in existed. H0 mistook the row for a placeholder and
     renamed it `legacy-demo@icid.local`; his email (`KhanG@magnoleng.pc`) has been put back, and
     `seed_auth_users.sql` no longer touches the row except to undo that rename. He has no password.
-  - **No admin bypass, no ownership checks (yet).** `role == "admin"` changes nothing: an admin lists only the
-    projects assigned to them in `project_users`, like anyone else, and `current_admin` guards nothing but the demo cleanup. Any
-    signed-in user can read, edit, submit or export any IDR by id, and list IDRs for any reporter
-    (`?reporter_uuid=` is a filter, not an identity). Role and ownership enforcement are Phase 2. The one
+  - **No ownership checks on reading and editing (yet).** Any signed-in user can read, edit or export any IDR by
+    id, and list IDRs for any reporter (`?reporter_uuid=` is a filter, not an identity), except that nobody is
+    listed another person's draft. An admin lists only the projects assigned to them in `project_users`, like
+    anyone else. Submitting and the review routes are the exception: they check project roles, below. The one
     admin-only route is `/v1/admin/cleanup-demos`.
-  - **Project roles (groundwork, not yet enforced).** `project_users.role` is `inspector`, `oe` or `re`, one row
-    per role, so a user can hold several on a project (migration 018). `require_project_role("oe", "re")` builds a
-    dependency for a route with an `idr_id`: it passes a user holding one of those roles on the IDR's project, and
-    any admin; 404 for an unknown IDR, 403 `Role required: oe/re` otherwise. No route uses it yet. `user_role` on
-    the same table is a display label and is never checked.
+  - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
+    several on a project (migration 018). `require_project_role("oe", "re")` builds a dependency for a route with
+    an `idr_id`: it passes a user holding one of those roles on the IDR's project, and any admin; 404 for an
+    unknown IDR, 403 `Role required: oe/re` otherwise. Submit needs `inspector`; the review routes need `oe` or
+    `re` (Stage 2: `re`). `user_role` on the same table is a display label and is never checked.
+  - **Review.** `api/v1/reviews.py`, a second router under `/v1/idrs`, registered before the IDRs router so
+    `/v1/idrs/queue` isn't read as an `idr_id`.
+    - The path: `draft` → `submitted` → `stage1_review` → `stage2_review` → `approved`. A return sends an IDR
+      back to `draft` (to the inspector) or, from Stage 2, to `stage1_review` (to the OE). The `returned` status
+      is unused: a returned draft is `status = 'draft'` with `return_reason` set. Submit and approve-stage1
+      clear the return.
+    - **Only the reviewer who accepted acts.** Approving or returning at Stage 1 takes the user in
+      `stage1_reviewer_uuid`; at Stage 2, the one in `re_reviewer_uuid`. Anyone else with the role gets 403. An
+      admin stands in for either, and signs a Stage 2 approval with their own signature. Reassigning a reviewer
+      is a direct database update for now.
+    - **The IDR number** is given at the first accept-stage1 and kept from then on, through returns and
+      resubmits. It is unique per project among IDRs that aren't deleted (409 with `existing_idr_id`).
+    - **One statement per move.** Each transition locks the IDR, checks its status (and its reviewer), updates it
+      and writes its `icid.idr_audit` row in a single statement (`_move_idr` in `api/queries/idrs.py`, with
+      `AUDIT_CTE` from `api/queries/idr_audit.py`). A move that finds the IDR changed returns 409. Submit logs
+      the same way.
+    - Reviewers can't edit an IDR: the edit routes still take drafts only. Admin unlock, soft delete and admin
+      edits are not built yet.
   - **Unique rules on `idrs` are partial indexes** (`WHERE deleted_at IS NULL`, migration 017):
     `uq_idrs_project_reporter_date` (one IDR per reporter, project and day) and `uq_idrs_project_number`. A
     soft-deleted IDR frees its day and its number. An INSERT can't name either with a bare column list, so
@@ -168,7 +192,10 @@ Any change must follow these.
     available`, and they can't submit anyway.
   - `UserOut` carries `signature_path` internally for the submit flow but never serialises it; responses show
     `has_signature` and `signature_set_at` only. IDR responses do carry `inspector_signature_path`.
-  - The signer is whoever submits, not necessarily the IDR's reporter (there are no ownership checks yet).
+  - The signer is whoever submits, not necessarily the IDR's reporter: any inspector on the project, or an admin.
+  - **Approving signs too.** approve-stage2 copies the approver's current file to `idrs/{idr id}/re_{random}.png`
+    and stamps `re_signature_path` and `re_signed_at`, with the same copy-before-UPDATE rule (400 without a
+    signature, 502 when the copy fails). The export does not print it yet.
   - **The export prints it.** For a submitted IDR with `inspector_signature_path`, `export.py` downloads that
     file once and stamps it, with the signed date, on every printed page that has an "Inspector's Signature"
     line: Gen Bk, Conc Bk, AC Bk, Conc Mix, Report Cont and every attachment page, copies included. Front pages

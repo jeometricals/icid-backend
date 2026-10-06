@@ -8,6 +8,8 @@ class ProjectListItem(BaseModel):
     borough: Optional[str] = None
     status: Optional[str] = None
     user_role: Optional[str] = None
+    # The roles the user holds on the project: any of 'inspector', 'oe', 're'
+    roles: list[str] = []
 
 
 class ProjectListResponse(BaseModel):

@@ -462,13 +462,16 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 24
+        assert len(PROTECTED_ROUTES) == 30
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
                          ("POST", "/v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request"),
                          ("POST", "/v1/signatures/upload-request"), ("POST", "/v1/signatures/confirm"),
-                         ("GET", "/v1/admin/cleanup-demos"), ("POST", "/v1/admin/cleanup-demos")):
+                         ("GET", "/v1/admin/cleanup-demos"), ("POST", "/v1/admin/cleanup-demos"),
+                         ("GET", "/v1/idrs/queue"), ("POST", "/v1/idrs/{idr_id}/accept-stage1"),
+                         ("POST", "/v1/idrs/{idr_id}/approve-stage1"), ("POST", "/v1/idrs/{idr_id}/accept-stage2"),
+                         ("POST", "/v1/idrs/{idr_id}/approve-stage2"), ("POST", "/v1/idrs/{idr_id}/return")):
             assert expected in PROTECTED_ROUTES
 
     @pytest.mark.parametrize("method,path", PROTECTED_ROUTES)
@@ -618,7 +621,8 @@ class TestDemoFences:
         attachments.assert_not_called()
 
     def test_the_fence_covers_every_route_under_an_idr(self):
-        assert len(IDR_ROUTES) == 13
+        assert len(IDR_ROUTES) == 18
+        assert ("POST", "/v1/idrs/{idr_id}/approve-stage2") in IDR_ROUTES  # the review routes too
         assert ("GET", "/v1/idrs/{idr_id}/export") in IDR_ROUTES
         assert ("GET", "/v1/idrs/{idr_id}/reports/{report_id}/attachments") in IDR_ROUTES
 

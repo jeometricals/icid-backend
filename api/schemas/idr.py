@@ -1,11 +1,15 @@
 from datetime import date, datetime, time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic_core import PydanticCustomError
 
 from api.schemas.idr_report import IdrReport
+
+
+# The statuses an IDR can be listed by ('returned' is unused and deleted IDRs are never listed)
+IdrStatus = Literal["draft", "submitted", "stage1_review", "stage2_review", "approved"]
 
 
 class IdrCreate(BaseModel):
@@ -34,6 +38,14 @@ class Idr(BaseModel):
     updated_at: datetime
     inspector_signature_path: Optional[str] = None
     inspector_signed_at: Optional[datetime] = None
+    idr_number: Optional[str] = None
+    stage1_reviewer_uuid: Optional[UUID] = None
+    stage1_reviewed_at: Optional[datetime] = None
+    re_reviewer_uuid: Optional[UUID] = None
+    re_signature_path: Optional[str] = None
+    re_signed_at: Optional[datetime] = None
+    return_reason: Optional[str] = None
+    returned_from: Optional[str] = None
 
 
 class IdrResponse(BaseModel):
@@ -45,6 +57,9 @@ class IdrResponse(BaseModel):
 class IdrListItem(Idr):
     report_count: int
     has_general: bool
+    reporter_name: Optional[str] = None
+    stage1_reviewer_name: Optional[str] = None
+    re_reviewer_name: Optional[str] = None
 
 
 class IdrListResponse(BaseModel):
@@ -113,3 +128,16 @@ class IdrWithReportsResponse(BaseModel):
 class IdrConflict(BaseModel):
     detail: str
     existing_idr_id: UUID
+
+
+class StageOneAccept(BaseModel):
+    """What a reviewer sends when picking an IDR up for Stage 1. The number is needed only the first time through."""
+
+    idr_number: Optional[str] = None
+
+
+class IdrReturn(BaseModel):
+    """Sending an IDR back from review: who it goes to, and why."""
+
+    to: Literal["inspector", "oe"]
+    comment: str

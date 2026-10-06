@@ -29,6 +29,7 @@ def include_routers(app: FastAPI):
     from api.v1.auth import router as auth_router
     from api.v1.users import router as users_router
     from api.v1.projects import router as projects_router
+    from api.v1.reviews import router as reviews_router
     from api.v1.idrs import router as idrs_router
     from api.v1.attachments import router as attachments_router
     from api.v1.contract_items import router as contract_items_router
@@ -39,6 +40,8 @@ def include_routers(app: FastAPI):
     app.include_router(auth_router)
     app.include_router(users_router)
     app.include_router(projects_router)
+    # Before the IDRs router, so /v1/idrs/queue isn't read as /v1/idrs/{idr_id}
+    app.include_router(reviews_router)
     app.include_router(idrs_router)
     app.include_router(attachments_router)
     app.include_router(contract_items_router)

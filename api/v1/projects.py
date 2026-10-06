@@ -35,6 +35,7 @@ def list_projects_for_user(user: UserOut = Depends(current_user)) -> ProjectList
             borough=row["borough"],
             status=row["status"],
             user_role=row["user_role"],
+            roles=row["roles"],
         )
         for row in rows
     ]

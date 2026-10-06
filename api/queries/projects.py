@@ -6,9 +6,9 @@ from api.db.runner import run_query
 
 def get_projects_for_user(user_id: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch every project assigned to a user, including their role on it.
+    Fetch every project assigned to a user, once each, with the roles they hold on it and their label there.
     Takes the user uuid.
-    Returns a list of project dicts ordered by project name, or None on failure.
+    Returns a list of project dicts ordered by project name (roles is a sorted list; user_role is the label of their earliest assignment that has one), or None on failure.
     """
     sql = """
         SELECT
@@ -16,10 +16,12 @@ def get_projects_for_user(user_id: UUID) -> Optional[list[dict[str, Any]]]:
             p.project_name,
             p.borough,
             p.status,
-            pu.user_role
+            (array_agg(pu.user_role ORDER BY pu.assigned_at) FILTER (WHERE pu.user_role IS NOT NULL))[1] AS user_role,
+            array_agg(pu.role ORDER BY pu.role) AS roles
         FROM icid.projects p
         JOIN icid.project_users pu ON p.project_id = pu.project_id
         WHERE pu.user_uuid = %s
+        GROUP BY p.project_id
         ORDER BY p.project_name;
     """
     return run_query(sql, (user_id,))

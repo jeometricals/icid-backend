@@ -15,6 +15,7 @@ MOCK_PROJECT_ROWS = [
         "borough": "Brooklyn",
         "status": "active",
         "user_role": "inspector",
+        "roles": ["inspector"],
     },
     {
         "project_id": "P002",
@@ -22,13 +23,15 @@ MOCK_PROJECT_ROWS = [
         "borough": "Queens",
         "status": "active",
         "user_role": "supervisor",
+        "roles": ["inspector", "oe", "re"],
     },
     {
         "project_id": "P003",
         "project_name": "Bronx Transit Hub",
         "borough": "Bronx",
         "status": "pending",
-        "user_role": "inspector",
+        "user_role": None,
+        "roles": ["re"],
     },
 ]
 
@@ -69,6 +72,19 @@ class TestListProjectsForUser:
             assert "borough" in p
             assert "status" in p
             assert "user_role" in p
+
+    def test_each_project_carries_the_users_roles_on_it(self, admin_client):
+        with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS):
+            projects = admin_client.get("/v1/projects/").json()["data"]
+        assert [p["roles"] for p in projects] == [["inspector"], ["inspector", "oe", "re"], ["re"]]
+        assert [p["user_role"] for p in projects] == ["inspector", "supervisor", None]  # the label, unchanged
+
+    def test_a_project_is_listed_once_however_many_roles_the_user_holds(self, admin_client):
+        with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS) as run:
+            admin_client.get("/v1/projects/")
+        sql = " ".join(run.call_args.args[0].split())
+        assert "array_agg(pu.role ORDER BY pu.role) AS roles" in sql and "GROUP BY p.project_id" in sql
+        assert "(array_agg(pu.user_role ORDER BY pu.assigned_at) FILTER (WHERE pu.user_role IS NOT NULL))[1]" in sql
 
     def test_returns_correct_count(self, admin_client):
         with patch("api.queries.projects.run_query", return_value=MOCK_PROJECT_ROWS):

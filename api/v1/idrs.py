@@ -1,5 +1,5 @@
 import logging
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -25,7 +25,7 @@ from api.queries.idrs import (
 )
 from api.queries.projects import get_project_by_id, is_user_on_project
 from api.services.attachments import delete_all_storage_files_for_report
-from api.services.auth import current_user, demo_idr_fence, require_full_user
+from api.services.auth import current_user, demo_idr_fence, require_full_user, require_project_role
 from api.services.auto_general import regenerate_auto_general
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 from api.schemas.auth import UserOut
@@ -37,6 +37,7 @@ from api.schemas.idr import (
     IdrListItem,
     IdrListResponse,
     IdrResponse,
+    IdrStatus,
     IdrWithReports,
     IdrWithReportsResponse,
 )
@@ -303,19 +304,19 @@ def delete_report(idr_id: UUID, report_id: UUID) -> Response:
 @router.get("/", response_model=IdrListResponse)
 def list_project_idrs(
     project_id: Optional[str] = None,
-    status: Optional[Literal["draft", "submitted"]] = None,
+    status: Optional[IdrStatus] = None,
     reporter_uuid: Optional[UUID] = None,
     user: UserOut = Depends(current_user),
 ) -> IdrListResponse:
     """
-    List IDRs most recently edited first, each with report_count and has_general; every filter is optional. A demo user is always listed their own IDRs only, whatever reporter_uuid says.
+    List IDRs most recently edited first, each with report_count, has_general and the names of its inspector and reviewers; every filter is optional. Deleted IDRs and other people's drafts are never listed. A demo user is always listed their own IDRs only, whatever reporter_uuid says.
     Takes optional project_id, status and reporter_uuid query parameters, and the signed-in user.
     Returns an IdrListResponse (empty data list when nothing matches), or raises 500 on a query failure.
     """
     if user.is_demo:
         reporter_uuid = user.uuid
 
-    rows = list_idrs(project_id, status, reporter_uuid)
+    rows = list_idrs(user.uuid, project_id, status, reporter_uuid)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to list IDRs")
@@ -327,12 +328,17 @@ def list_project_idrs(
     )
 
 
-@router.post("/{idr_id}/submit", response_model=IdrWithReportsResponse)
+@router.post(
+    "/{idr_id}/submit",
+    response_model=IdrWithReportsResponse,
+    # In this order: a demo user is turned away before their role is looked up
+    dependencies=[Depends(require_full_user), Depends(require_project_role("inspector"))],
+)
 def submit_draft_idr(idr_id: UUID, user: UserOut = Depends(require_full_user)) -> IdrWithReportsResponse:
     """
-    Submit a draft IDR, signed by the signed-in user: copy their signature to the IDR, then lock it, stamp submitted_at and the signature, number every report and set total_pages. Not open to demo users.
+    Submit a draft IDR, signed by the signed-in user: copy their signature to the IDR, then lock it, stamp submitted_at and the signature, number every report, set total_pages and clear any return. Open to an inspector on the IDR's project (or an admin), never to a demo user.
     Takes the IDR uuid as a path parameter and the signed-in user; no body.
-    Returns an IdrWithReportsResponse with the reports in page order; raises 403 (demo user), 404 (no IDR), 409 (not draft), 400 (no reports, or the user has no signature) and 502 (the signature couldn't be copied).
+    Returns an IdrWithReportsResponse with the reports in page order; raises 403 (demo user, or not an inspector on the project), 404 (no IDR), 409 (not draft), 400 (no reports, or the user has no signature) and 502 (the signature couldn't be copied).
     """
     idr = get_idr_by_id(idr_id)
 
@@ -361,7 +367,7 @@ def submit_draft_idr(idr_id: UUID, user: UserOut = Depends(require_full_user)) -
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
-        rows = submit_idr(idr_id, signature_copy)
+        rows = submit_idr(idr_id, signature_copy, user.uuid)
     except Exception:
         logger.warning("Submit of IDR %s failed after its signature was copied; %s is left orphaned", idr_id, signature_copy)
         raise

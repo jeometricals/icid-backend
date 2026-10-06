@@ -173,6 +173,22 @@ CREATE UNIQUE INDEX uq_idrs_project_number
     WHERE idr_number IS NOT NULL AND deleted_at IS NULL;
 
 ------------------------------------------------------------
+-- IDR AUDIT (what was done to an IDR in review; migrations/019)
+------------------------------------------------------------
+CREATE TABLE icid.idr_audit (
+    audit_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    idr_id       UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    actor_uuid   UUID NOT NULL REFERENCES icid.users(uuid),
+    action       TEXT NOT NULL,
+    from_status  TEXT,
+    to_status    TEXT,
+    note         TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_idr_audit_idr_created ON icid.idr_audit(idr_id, created_at DESC);
+
+------------------------------------------------------------
 -- IDR REPORT (typed report within an IDR; addenda link to a parent)
 ------------------------------------------------------------
 CREATE TABLE icid.idr_reports (
