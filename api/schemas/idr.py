@@ -8,8 +8,9 @@ from pydantic_core import PydanticCustomError
 from api.schemas.idr_report import IdrReport
 
 
-# The statuses an IDR can be listed by ('returned' is unused and deleted IDRs are never listed)
-IdrStatus = Literal["draft", "submitted", "stage1_review", "stage2_review", "approved"]
+# The statuses an IDR can be listed by ('returned' is unused; 'deleted' matches nothing unless an admin asks for
+# deleted IDRs)
+IdrStatus = Literal["draft", "submitted", "stage1_review", "stage2_review", "approved", "deleted"]
 
 
 class IdrCreate(BaseModel):
@@ -46,6 +47,8 @@ class Idr(BaseModel):
     re_signed_at: Optional[datetime] = None
     return_reason: Optional[str] = None
     returned_from: Optional[str] = None
+    deleted_at: Optional[datetime] = None
+    deleted_by: Optional[UUID] = None
 
 
 class IdrResponse(BaseModel):

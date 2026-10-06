@@ -306,17 +306,22 @@ def list_project_idrs(
     project_id: Optional[str] = None,
     status: Optional[IdrStatus] = None,
     reporter_uuid: Optional[UUID] = None,
+    include_deleted: bool = False,
+    include_all_drafts: bool = False,
     user: UserOut = Depends(current_user),
 ) -> IdrListResponse:
     """
-    List IDRs most recently edited first, each with report_count, has_general and the names of its inspector and reviewers; every filter is optional. Deleted IDRs and other people's drafts are never listed. A demo user is always listed their own IDRs only, whatever reporter_uuid says.
-    Takes optional project_id, status and reporter_uuid query parameters, and the signed-in user.
-    Returns an IdrListResponse (empty data list when nothing matches), or raises 500 on a query failure.
+    List IDRs most recently edited first, each with report_count, has_general and the names of its inspector and reviewers; every filter is optional. Deleted IDRs and other people's drafts are left out unless an admin asks for them. A demo user is always listed their own IDRs only, whatever reporter_uuid says.
+    Takes optional project_id, status and reporter_uuid query parameters, include_deleted and include_all_drafts (admin only), and the signed-in user.
+    Returns an IdrListResponse (empty data list when nothing matches); raises 400 when someone who isn't an admin asks for deleted IDRs or all drafts, and 500 on a query failure.
     """
+    if (include_deleted or include_all_drafts) and user.role != "admin":
+        raise HTTPException(status_code=400, detail="include_deleted and include_all_drafts are for admins only")
+
     if user.is_demo:
         reporter_uuid = user.uuid
 
-    rows = list_idrs(user.uuid, project_id, status, reporter_uuid)
+    rows = list_idrs(user.uuid, project_id, status, reporter_uuid, include_deleted, include_all_drafts)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to list IDRs")

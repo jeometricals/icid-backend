@@ -7,8 +7,11 @@ from fastapi.responses import JSONResponse
 
 from api.queries.idrs import (
     IdrNumberTakenError,
+    UNLOCKABLE_STATUSES,
     accept_stage1,
     accept_stage2,
+    admin_delete_idr,
+    admin_unlock_idr,
     approve_stage1,
     approve_stage2,
     find_idr_by_number,
@@ -26,7 +29,7 @@ from api.schemas.idr import (
     IdrReturn,
     StageOneAccept,
 )
-from api.services.auth import current_user, demo_idr_fence, require_project_role
+from api.services.auth import current_admin, current_user, demo_idr_fence, require_project_role
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 
 logger = logging.getLogger(__name__)
@@ -256,3 +259,42 @@ def return_from_review(idr_id: UUID, body: IdrReturn, user: UserOut = Depends(st
     rows = return_idr(idr_id, user.uuid, idr["status"], body.to, comment, as_reviewer)
 
     return _moved(rows, "IDR returned to the inspector" if body.to == "inspector" else "IDR returned to the OE")
+
+
+@router.post("/{idr_id}/admin/unlock", response_model=IdrResponse)
+def unlock_idr(idr_id: UUID, user: UserOut = Depends(current_admin)) -> IdrResponse:
+    """
+    Unlock an approved IDR (or one already back in Stage 2 review) for the RE to review again: it moves to stage2_review with the RE's signature and the RE reviewer cleared, so an RE must accept it and approve it afresh. Its IDR number stays. Admins only; the admin does not approve it.
+    Takes the IDR uuid as a path parameter and the signed-in admin; no body.
+    Returns an IdrResponse; raises 403 (not an admin), 404 (no IDR), 400 (a draft, submitted, Stage 1 or deleted IDR: nothing to unlock) and 409 (it changed meanwhile).
+    """
+    idr = _load_idr(idr_id)
+
+    if idr["deleted_at"] is not None or idr["status"] not in UNLOCKABLE_STATUSES:
+        raise HTTPException(status_code=400, detail="Only an approved IDR, or one in Stage 2 review, can be unlocked")
+
+    return _moved(admin_unlock_idr(idr_id, user.uuid), "IDR unlocked for RE review")
+
+
+@router.post("/{idr_id}/admin/delete", response_model=IdrResponse)
+def delete_idr(idr_id: UUID, user: UserOut = Depends(current_admin)) -> IdrResponse:
+    """
+    Soft-delete an IDR, whatever its status: it is marked deleted, with when and by whom, and kept. It leaves every list (an admin can still ask for deleted IDRs) and frees its day and its IDR number. Admins only. Deleting an IDR that is already deleted succeeds and changes nothing.
+    Takes the IDR uuid as a path parameter and the signed-in admin; no body.
+    Returns an IdrResponse with the deleted IDR; raises 403 (not an admin), 404 (no IDR) and 500 if the delete fails.
+    """
+    idr = _load_idr(idr_id)
+
+    if idr["deleted_at"] is not None:
+        return IdrResponse(status="success", message="IDR was already deleted", data=Idr.model_validate(idr))
+
+    rows = admin_delete_idr(idr_id, user.uuid)
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to delete IDR")
+
+    if not rows:
+        # Deleted by someone else between the read and the statement: the same outcome
+        return IdrResponse(status="success", message="IDR was already deleted", data=Idr.model_validate(_load_idr(idr_id)))
+
+    return IdrResponse(status="success", message="IDR deleted", data=Idr.model_validate(rows[0]))

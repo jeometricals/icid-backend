@@ -8,7 +8,9 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW
+import pytest
+
+from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 from api.services.signatures import SignatureStorageError
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, TYPE_LABELS, label_for
 from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
@@ -1177,7 +1179,7 @@ class TestListIdrs:
             assert query_params[-1] == ADMIN_USER_ROW["uuid"] and len(query_params) == 2
 
     def test_every_review_status_can_be_filtered_on(self, admin_client):
-        for status in ("draft", "submitted", "stage1_review", "stage2_review", "approved"):
+        for status in ("draft", "submitted", "stage1_review", "stage2_review", "approved", "deleted"):
             with patched(idrs=[]) as mocks:
                 assert admin_client.get(self.url, params={"status": status}).status_code == 200
             assert mocks["idrs"].call_args.args[1][0] == status
@@ -1233,7 +1235,7 @@ class TestListIdrs:
         mocks["idr_reports"].assert_not_called()
 
     def test_invalid_status_returns_422(self, admin_client):
-        for status in ("returned", "deleted", "bogus"):  # never listed by status
+        for status in ("returned", "bogus"):  # never listed by status
             response = admin_client.get(self.url, params={"status": status})
             assert response.status_code == 422
 
@@ -1245,6 +1247,90 @@ class TestListIdrs:
         with patched(idrs=None):
             response = admin_client.get(self.url, params={"project_id": "HWS0023"})
         assert response.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/idrs/: include_deleted and include_all_drafts (admins only)
+# ---------------------------------------------------------------------------
+
+STANDING_DELETED = "i.deleted_at IS NULL"
+STANDING_DRAFTS = "(i.status <> 'draft' OR i.reporter_uuid = %s)"
+
+
+class TestListIdrsAdminOptions:
+    url = "/v1/idrs/"
+
+    def where(self, client, **params) -> tuple[str, tuple]:
+        """
+        List through the endpoint and capture the query.
+        Takes the client and the query parameters.
+        Returns (the SQL after FROM icid.idrs i, on one line, and its params).
+        """
+        with patched(idrs=[]) as mocks:
+            assert client.get(self.url, params=params).status_code == 200
+        sql, query_params = mocks["idrs"].call_args.args
+        return " ".join(sql.split("FROM icid.idrs i")[1].split("ORDER BY")[0].split()), query_params
+
+    def test_both_default_to_off(self, admin_client):
+        where, params = self.where(admin_client)
+        assert where == f"WHERE {STANDING_DELETED} AND {STANDING_DRAFTS}" and params == (ADMIN_USER_ROW["uuid"],)
+        assert self.where(admin_client, include_deleted="false", include_all_drafts="false") == (where, params)
+
+    def test_include_deleted_lists_deleted_idrs_too(self, admin_client):
+        where, params = self.where(admin_client, include_deleted="true")
+        assert where == f"WHERE {STANDING_DRAFTS}" and params == (ADMIN_USER_ROW["uuid"],)
+
+    def test_include_all_drafts_lists_other_peoples_drafts_too(self, admin_client):
+        where, params = self.where(admin_client, include_all_drafts="true")
+        assert where == f"WHERE {STANDING_DELETED}" and params == ()
+
+    def test_both_together_list_every_idr(self, admin_client):
+        assert self.where(admin_client, include_deleted="true", include_all_drafts="true") == ("", ())
+
+    def test_they_combine_with_the_other_filters(self, admin_client):
+        where, params = self.where(admin_client, project_id="HWS0023", status="deleted", include_deleted="true",
+                                   include_all_drafts="true")
+        assert where == "WHERE i.project_id = %s AND i.status = %s" and params == ("HWS0023", "deleted")
+
+    def test_a_deleted_item_carries_when_and_by_whom(self, admin_client):
+        row = {**MOCK_LIST_SUBMITTED_ROW, "status": "deleted", "deleted_at": NOW, "deleted_by": ADMIN_USER_ROW["uuid"]}
+        with patched(idrs=[row]):
+            item = admin_client.get(self.url, params={"include_deleted": "true"}).json()["data"][0]
+        assert (item["status"], item["deleted_at"], item["deleted_by"]) == (
+            "deleted", "2026-09-25T15:30:00Z", str(ADMIN_USER_ROW["uuid"]))
+
+    @pytest.mark.parametrize("params", [{"include_deleted": "true"}, {"include_all_drafts": "true"},
+                                        {"include_deleted": "true", "include_all_drafts": "true"}])
+    def test_someone_who_isnt_an_admin_asking_for_either_is_400(self, params):
+        inspector = {**ADMIN_USER_ROW, "role": None}
+        with signed_in(inspector) as client, patched(idrs=[]) as mocks:
+            response = client.get(self.url, params=params)
+        assert response.status_code == 400
+        assert response.json() == {"detail": "include_deleted and include_all_drafts are for admins only"}
+        mocks["idrs"].assert_not_called()
+
+    def test_someone_who_isnt_an_admin_can_send_them_as_false(self):
+        inspector = {**ADMIN_USER_ROW, "role": None}
+        with signed_in(inspector) as client, patched(idrs=[]) as mocks:
+            response = client.get(self.url, params={"include_deleted": "false", "include_all_drafts": "false"})
+        assert response.status_code == 200
+        assert f"{STANDING_DELETED} AND {STANDING_DRAFTS}" in " ".join(mocks["idrs"].call_args.args[0].split())
+
+    def test_a_demo_user_asking_is_400_too(self, demo_client):
+        with patched(idrs=[]) as mocks:
+            assert demo_client.get(self.url, params={"include_deleted": "true"}).status_code == 400
+        mocks["idrs"].assert_not_called()
+
+    def test_a_value_that_isnt_a_boolean_is_422(self, admin_client):
+        assert admin_client.get(self.url, params={"include_deleted": "maybe"}).status_code == 422
+
+
+class TestDeletedIdrsFreeTheirDay:
+    def test_the_days_existing_idr_lookup_skips_deleted_idrs(self, admin_client):
+        with patched(idrs=COLLISION, projects=ASSIGNED) as mocks:
+            admin_client.post("/v1/idrs/", json=CREATE_BODY)
+        lookup = " ".join(mocks["idrs"].call_args.args[0].split())
+        assert lookup.endswith("AND report_date = %s AND deleted_at IS NULL;")
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from uuid import UUID
 
 from psycopg.errors import UniqueViolation
@@ -35,7 +35,9 @@ IDR_COLUMNS = """
     re_signature_path,
     re_signed_at,
     return_reason,
-    returned_from
+    returned_from,
+    deleted_at,
+    deleted_by
 """
 
 # What the IDR lists add to each row (FROM icid.idrs i): its report count, whether it holds a General, and the
@@ -112,14 +114,14 @@ def get_idr_id_for_day(
     project_id: str, reporter_uuid: UUID, report_date: date
 ) -> Optional[UUID]:
     """
-    Look up the IDR a reporter already has on a project for a given date.
+    Look up the IDR a reporter already has on a project for a given date, deleted IDRs left out (a deleted one no longer holds its day).
     Takes the project id, the reporter's user uuid and the report date.
     Returns that IDR's uuid, or None if there is none.
     """
     sql = """
         SELECT idr_id
         FROM icid.idrs
-        WHERE project_id = %s AND reporter_uuid = %s AND report_date = %s;
+        WHERE project_id = %s AND reporter_uuid = %s AND report_date = %s AND deleted_at IS NULL;
     """
     rows = run_query(sql, (project_id, reporter_uuid, report_date))
     return rows[0]["idr_id"] if rows else None
@@ -192,10 +194,12 @@ def list_idrs(
     project_id: Optional[str] = None,
     status: Optional[str] = None,
     reporter_uuid: Optional[UUID] = None,
+    include_deleted: bool = False,
+    include_all_drafts: bool = False,
 ) -> Optional[list[dict[str, Any]]]:
     """
-    List IDRs, most recently edited first, each with its report count, whether it holds a General, and the names of its inspector and reviewers. Deleted IDRs are left out, and so are other people's drafts.
-    Takes the uuid of the user the list is for, and optional project id, status and reporter uuid filters; any left as None is not applied.
+    List IDRs, most recently edited first, each with its report count, whether it holds a General, and the names of its inspector and reviewers. Deleted IDRs are left out, and so are other people's drafts, unless asked for.
+    Takes the uuid of the user the list is for; optional project id, status and reporter uuid filters (any left as None is not applied); and whether to include deleted IDRs and other people's drafts (the endpoint allows an admin only).
     Returns a list of IDR dicts with the extra columns (empty if none match), or None on failure.
     """
     conditions: list[str] = []
@@ -213,16 +217,21 @@ def list_idrs(
         conditions.append("i.reporter_uuid = %s")
         params.append(reporter_uuid)
 
-    conditions.append("i.deleted_at IS NULL")
-    conditions.append("(i.status <> 'draft' OR i.reporter_uuid = %s)")
-    params.append(viewer_uuid)
+    if not include_deleted:
+        conditions.append("i.deleted_at IS NULL")
+
+    if not include_all_drafts:
+        conditions.append("(i.status <> 'draft' OR i.reporter_uuid = %s)")
+        params.append(viewer_uuid)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     sql = f"""
         SELECT
             {IDR_COLUMNS},
             {IDR_LIST_EXTRAS}
         FROM icid.idrs i
-        WHERE {' AND '.join(conditions)}
+        {where}
         ORDER BY i.updated_at DESC, i.created_at DESC, i.idr_id;
     """
     return run_query(sql, tuple(params))
@@ -317,7 +326,7 @@ def _move_idr(
     idr_id: UUID,
     actor_uuid: UUID,
     action: str,
-    from_status: str,
+    from_status: Union[str, list[str], None],
     to_status: str,
     assignments: str,
     values: tuple = (),
@@ -326,15 +335,21 @@ def _move_idr(
 ) -> Optional[list[dict[str, Any]]]:
     """
     Move an IDR from one review status to another in one statement: lock it, set the status, updated_at and the given columns, and log the move in icid.idr_audit.
-    Takes the IDR uuid, the acting user's uuid, the action to log, the status it must be in and the one it moves to, the extra SET assignments (written here, never from a request) with their values, an optional reviewer column that must hold the actor, and an optional note for the log.
+    Takes the IDR uuid, the acting user's uuid, the action to log, the status it must be in (one, a list of them, or None for any) and the one it moves to, the extra SET assignments (written here, never from a request) with their values, an optional reviewer column that must hold the actor, and an optional note for the log. A deleted IDR is never moved.
     Returns a one-row list with the moved IDR, an empty list if it wasn't in that status (or the actor isn't that reviewer), or None on failure.
     """
     reviewer = f"AND {reviewer_column} = %s" if reviewer_column else ""
+    if from_status is None:
+        in_status, status_values = "", ()
+    elif isinstance(from_status, str):
+        in_status, status_values = "AND status = %s", (from_status,)
+    else:
+        in_status, status_values = "AND status = ANY(%s)", (list(from_status),)
     sql = f"""
         WITH target AS (
             SELECT idr_id, status AS from_status
             FROM icid.idrs
-            WHERE idr_id = %s AND status = %s AND deleted_at IS NULL {reviewer}
+            WHERE idr_id = %s {in_status} AND deleted_at IS NULL {reviewer}
             FOR UPDATE
         ),
         moved AS (
@@ -349,7 +364,7 @@ def _move_idr(
         FROM moved;
     """
     locked_by = (actor_uuid,) if reviewer_column else ()
-    return run_query(sql, (idr_id, from_status, *locked_by, to_status, *values, actor_uuid, action, note))
+    return run_query(sql, (idr_id, *status_values, *locked_by, to_status, *values, actor_uuid, action, note))
 
 
 def find_idr_by_number(project_id: str, idr_number: str, except_idr_id: UUID) -> Optional[UUID]:
@@ -432,3 +447,27 @@ def return_idr(
         reviewer_column=("re_reviewer_uuid" if stage_two else "stage1_reviewer_uuid") if as_reviewer else None,
         note=comment,
     )
+
+
+# The statuses an admin can unlock an IDR from: approved, or already back with the RE
+UNLOCKABLE_STATUSES = ["approved", "stage2_review"]
+
+
+def admin_unlock_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer so an RE has to accept it again. Its number and the inspector's signature stay.
+    Takes the IDR uuid and the admin's uuid.
+    Returns a one-row list with the IDR, an empty list if it isn't in one of UNLOCKABLE_STATUSES (or is deleted), or None on failure.
+    """
+    assignments = "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL"
+    return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments)
+
+
+def admin_delete_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Soft-delete an IDR, whatever its status: mark it deleted with when and by whom. The row and everything under it are kept; its day and its IDR number become free again.
+    Takes the IDR uuid and the admin's uuid.
+    Returns a one-row list with the IDR, an empty list if it was already deleted, or None on failure.
+    """
+    return _move_idr(idr_id, actor_uuid, "admin_delete", None, "deleted", "deleted_at = now(), deleted_by = %s",
+                     (actor_uuid,))

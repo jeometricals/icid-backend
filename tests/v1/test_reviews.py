@@ -39,7 +39,7 @@ SUBMITTED_IDR = {
     "inspector_signature_path": f"idrs/{IDR_ID}/inspector_0123456789abcdef0123456789abcdef.png",
     "inspector_signed_at": NOW, "idr_number": None, "stage1_reviewer_uuid": None, "stage1_reviewed_at": None,
     "re_reviewer_uuid": None, "re_signature_path": None, "re_signed_at": None, "return_reason": None,
-    "returned_from": None,
+    "returned_from": None, "deleted_at": None, "deleted_by": None,
 }
 STAGE1_IDR = {**SUBMITTED_IDR, "status": "stage1_review", "idr_number": "005", "stage1_reviewer_uuid": REVIEWER["uuid"]}
 STAGE2_IDR = {**STAGE1_IDR, "status": "stage2_review", "stage1_reviewed_at": NOW, "re_reviewer_uuid": REVIEWER["uuid"]}
@@ -612,3 +612,184 @@ class TestSubmitNeedsTheInspectorRole:
             response = demo_client.post(self.url)
         assert response.status_code == 403 and response.json() == {"detail": "Demo mode: submit is disabled"}
         seen["projects"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/idrs/{idr_id}/admin/unlock
+# ---------------------------------------------------------------------------
+
+UNLOCKED_IDR = {**APPROVED_IDR, "status": "stage2_review", "re_signature_path": None, "re_signed_at": None,
+                "re_reviewer_uuid": None}
+DELETED_IDR = {**APPROVED_IDR, "status": "deleted", "deleted_at": NOW, "deleted_by": ADMIN_USER_ROW["uuid"]}
+NOTHING_TO_UNLOCK = {"detail": "Only an approved IDR, or one in Stage 2 review, can be unlocked"}
+
+
+class TestAdminUnlock:
+    url = url("admin/unlock")
+
+    def test_an_admin_sends_an_approved_idr_back_to_stage_two_unsigned_and_unaccepted(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[UNLOCKED_IDR]) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["message"] == "IDR unlocked for RE review"
+        data = body["data"]
+        assert (data["status"], data["re_signature_path"], data["re_signed_at"], data["re_reviewer_uuid"]) == (
+            "stage2_review", None, None, None)
+        assert data["idr_number"] == "005"  # the number stays
+        assert data["inspector_signature_path"] == APPROVED_IDR["inspector_signature_path"]  # and so does the inspector's
+        sql, params = seen["moves"][0]
+        assert "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL" in sql
+        assert "idr_number" not in sql.split("RETURNING")[0] and "inspector_signature_path" not in sql.split("RETURNING")[0]
+        assert "WHERE idr_id = %s AND status = ANY(%s) AND deleted_at IS NULL" in flat(sql)
+        assert params == (UUID(IDR_ID), ["approved", "stage2_review"], "stage2_review", ADMIN_USER_ROW["uuid"],
+                          "admin_unlock", None)
+        seen["signature"].assert_not_called()  # the admin does not approve, so nothing is signed
+
+    def test_it_is_logged_in_the_same_statement_as_admin_unlock(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[UNLOCKED_IDR]) as seen:
+            admin_client.post(self.url)
+        sql, params = seen["moves"][0]
+        assert "INSERT INTO icid.idr_audit (idr_id, actor_uuid, action, from_status, to_status, note)" in flat(sql)
+        assert sql.count(";") == 1 and params[-3:] == (ADMIN_USER_ROW["uuid"], "admin_unlock", None)
+
+    def test_an_idr_already_in_stage_two_review_can_be_unlocked_to_clear_its_reviewer(self, admin_client):
+        with review(idr=STAGE2_IDR, roles=(), moved=[UNLOCKED_IDR]) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 200 and response.json()["data"]["re_reviewer_uuid"] is None
+        assert len(seen["moves"]) == 1
+
+    @pytest.mark.parametrize("idr", [{**SUBMITTED_IDR, "status": "draft"}, SUBMITTED_IDR, STAGE1_IDR, DELETED_IDR])
+    def test_there_is_nothing_to_unlock_before_stage_two_or_once_deleted(self, admin_client, idr):
+        with review(idr=idr, roles=()) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 400 and response.json() == NOTHING_TO_UNLOCK
+        assert seen["moves"] == []
+
+    def test_an_idr_that_doesnt_exist_is_404(self, admin_client):
+        with review(idr=None) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 404 and response.json() == {"detail": "IDR not found"}
+        assert seen["moves"] == []
+
+    @pytest.mark.parametrize("roles", [("inspector",), ("oe",), ("re",), ("inspector", "oe", "re")])
+    def test_no_project_role_is_enough(self, roles):
+        with signed_in(REVIEWER) as client, review(idr=APPROVED_IDR, roles=roles) as seen:
+            response = client.post(self.url)
+        assert response.status_code == 403 and response.json() == {"detail": "Admin access required"}
+        assert seen["moves"] == []
+
+    def test_a_demo_user_is_refused(self, demo_client):
+        own = {**APPROVED_IDR, "reporter_uuid": DEMO_USER_ROW["uuid"]}
+        with review(idr=own) as seen:
+            assert demo_client.post(self.url).status_code == 403
+        assert seen["moves"] == []
+
+    def test_an_idr_that_moved_meanwhile_is_409(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[]):
+            response = admin_client.post(self.url)
+        assert response.status_code == 409 and response.json() == CHANGED
+
+    def test_a_failed_statement_is_500(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=None):
+            assert admin_client.post(self.url).status_code == 500
+
+    def test_after_unlocking_an_re_must_accept_again_before_approving(self):
+        # the unlocked IDR has no RE reviewer, so approve-stage2 refuses even the RE who approved it before
+        with signed_in(REVIEWER) as client, review(idr=UNLOCKED_IDR, roles=("re",)) as seen:
+            refused = client.post(url("approve-stage2"))
+            accepted = client.post(url("accept-stage2"))
+        assert refused.status_code == 403 and refused.json() == NOT_THE_REVIEWER
+        assert accepted.status_code == 200 and len(seen["moves"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/idrs/{idr_id}/admin/delete
+# ---------------------------------------------------------------------------
+
+class TestAdminDelete:
+    url = url("admin/delete")
+
+    def test_an_admin_soft_deletes_an_idr(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[DELETED_IDR]) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["message"] == "IDR deleted"
+        assert (body["data"]["status"], body["data"]["deleted_at"], body["data"]["deleted_by"]) == (
+            "deleted", "2026-10-06T14:00:00Z", str(ADMIN_USER_ROW["uuid"]))
+        sql, params = seen["moves"][0]
+        assert "UPDATE icid.idrs i" in sql and "DELETE FROM" not in sql  # the row is kept
+        assert "SET status = %s, updated_at = now(), deleted_at = now(), deleted_by = %s" in flat(sql)
+        assert "WHERE idr_id = %s AND deleted_at IS NULL FOR UPDATE" in flat(sql)  # whatever its status
+        assert params == (UUID(IDR_ID), "deleted", ADMIN_USER_ROW["uuid"], ADMIN_USER_ROW["uuid"], "admin_delete", None)
+
+    def test_it_is_logged_in_the_same_statement_as_admin_delete(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[DELETED_IDR]) as seen:
+            admin_client.post(self.url)
+        sql, params = seen["moves"][0]
+        assert "INSERT INTO icid.idr_audit" in sql and "t.from_status, m.status" in sql and sql.count(";") == 1
+        assert params[-2] == "admin_delete"
+
+    @pytest.mark.parametrize("idr", [{**SUBMITTED_IDR, "status": "draft"}, SUBMITTED_IDR, STAGE1_IDR, STAGE2_IDR,
+                                     APPROVED_IDR])
+    def test_an_idr_at_any_status_can_be_deleted(self, admin_client, idr):
+        with review(idr=idr, roles=(), moved=[{**idr, "status": "deleted", "deleted_at": NOW,
+                                               "deleted_by": ADMIN_USER_ROW["uuid"]}]) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 200 and response.json()["data"]["status"] == "deleted"
+        assert len(seen["moves"]) == 1
+
+    def test_deleting_again_succeeds_and_changes_nothing(self, admin_client):
+        with review(idr=DELETED_IDR, roles=()) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["message"] == "IDR was already deleted" and body["data"]["status"] == "deleted"
+        assert seen["moves"] == []  # no second update, no second audit row
+
+    def test_losing_a_race_to_delete_is_the_same_success(self, admin_client):
+        reads = iter([APPROVED_IDR, DELETED_IDR])  # live at the first read, deleted by the time of the statement
+
+        def idrs_query(sql, params=None):
+            """Stand in for run_query: the statement finds nothing left to delete."""
+            return [] if "UPDATE icid.idrs" in sql else [next(reads)]
+
+        with patch("api.queries.idrs.run_query", side_effect=idrs_query):
+            response = admin_client.post(self.url)
+        assert response.status_code == 200 and response.json()["message"] == "IDR was already deleted"
+        assert response.json()["data"]["deleted_at"] == "2026-10-06T14:00:00Z"
+
+    def test_an_idr_that_doesnt_exist_is_404(self, admin_client):
+        with review(idr=None) as seen:
+            response = admin_client.post(self.url)
+        assert response.status_code == 404 and seen["moves"] == []
+
+    @pytest.mark.parametrize("roles", [("inspector",), ("oe", "re")])
+    def test_no_project_role_is_enough(self, roles):
+        with signed_in(REVIEWER) as client, review(idr=APPROVED_IDR, roles=roles) as seen:
+            response = client.post(self.url)
+        assert response.status_code == 403 and response.json() == {"detail": "Admin access required"}
+        assert seen["moves"] == []
+
+    def test_the_inspector_cant_delete_their_own_idr(self):
+        own_draft = {**SUBMITTED_IDR, "status": "draft"}
+        with signed_in(INSPECTOR) as client, review(idr=own_draft, roles=("inspector",)) as seen:
+            assert client.post(self.url).status_code == 403
+        assert seen["moves"] == []
+
+    def test_a_failed_statement_is_500(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=None):
+            response = admin_client.post(self.url)
+        assert response.status_code == 500 and response.json() == {"detail": "Failed to delete IDR"}
+
+
+class TestADeletedIdrIsOutOfReview:
+    @pytest.mark.parametrize("action,body", [(a, b) for a, b, _ in REVIEW_ROUTES])
+    def test_every_move_leaves_a_deleted_idr_alone(self, admin_client, action, body):
+        # each statement only ever matches a row with deleted_at IS NULL, whatever the endpoint let through
+        for status in ("submitted", "stage1_review", "stage2_review"):
+            with review(idr={**STAGE2_IDR, "status": status, "idr_number": "005"}, roles=()) as seen:
+                admin_client.post(url(action), json=body)
+            for sql, _ in seen["moves"]:
+                assert "AND deleted_at IS NULL" in flat(sql)

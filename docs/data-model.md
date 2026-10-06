@@ -141,7 +141,7 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `weather_am`, `weather_pm` | TEXT | |
 | `total_pages` | INTEGER | NULL while draft; set on submit to the number of reports |
 | `has_dismissed_auto_general` | BOOLEAN NOT NULL | Default `false`. See [Auto-generated General](#auto-generated-general) |
-| `status` | TEXT NOT NULL | `draft` (default), `submitted`, `stage1_review`, `stage2_review`, `approved`, `returned` or `deleted`; CHECK `chk_idrs_status`. `returned` is unused (a returned IDR is a `draft` with `return_reason` set) and nothing sets `deleted` yet |
+| `status` | TEXT NOT NULL | `draft` (default), `submitted`, `stage1_review`, `stage2_review`, `approved`, `returned` or `deleted`; CHECK `chk_idrs_status`. `returned` is unused (a returned IDR is a `draft` with `return_reason` set); `deleted` is a soft delete by an admin |
 | `submitted_at` | TIMESTAMPTZ | NULL until submitted |
 | `inspector_signature_path` | TEXT | The signature stamped at submit (object path in the `signatures` bucket); not changed afterwards. NULL on drafts and on IDRs submitted before signatures. |
 | `inspector_signed_at` | TIMESTAMPTZ | When that signature was stamped |
@@ -154,8 +154,8 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `returned_from` | TEXT | `stage1` or `stage2`; CHECK `chk_idrs_returned_from` |
 | `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete: when and by whom (FK → `users.uuid`). The row is kept |
 
-The review columns (from `idr_number` down) came with migration 017. `deleted_at` and `deleted_by` are not
-written yet.
+The review columns (from `idr_number` down) came with migration 017. `deleted_at` and `deleted_by` are set by
+`POST /v1/idrs/{id}/admin/delete`, together with `status = 'deleted'`.
 
 Constraints and indexes:
 - `uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date) WHERE deleted_at IS NULL`:
@@ -190,7 +190,7 @@ One row per thing done to an IDR in review. Written by the statement that change
 | `audit_id` | UUID PK | `gen_random_uuid()` |
 | `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
 | `actor_uuid` | UUID NOT NULL | FK → `users.uuid`. Who did it |
-| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`. No CHECK |
+| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`. No CHECK |
 | `from_status`, `to_status` | TEXT | The IDR's status before and after; nullable for actions that aren't a status change |
 | `note` | TEXT | The return comment |
 | `created_at` | TIMESTAMPTZ NOT NULL | Default `now()` |

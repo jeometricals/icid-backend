@@ -52,7 +52,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/projects/{project_id}/roles` — admin only: who holds which role on the project, one entry per user and role (demo users left out)
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
-- `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count`, `has_general` and the names of the inspector and reviewers (all filters optional). Deleted IDRs and other people's drafts are never listed
+- `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count`, `has_general` and the names of the inspector and reviewers (all filters optional). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true)
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order
 - `PUT /v1/idrs/{idr_id}/header` — partial update of the shared header fields on a draft
 - `POST /v1/idrs/{idr_id}/reports` — add a report (typed by `ReportType`; addendums may name a parent)
@@ -65,6 +65,8 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid`; the status stays `stage2_review`, and the last to accept wins
 - `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`; only the RE reviewer; 400 `Signature required before approving`, 502 when the signature can't be copied
 - `POST /v1/idrs/{idr_id}/return` — body `{to: "inspector" | "oe", comment}`; back to `draft` (inspector) or, from Stage 2, to `stage1_review` (OE), with `return_reason` and `returned_from`; only the current stage's reviewer; 400 for a blank comment
+- `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at` and `re_reviewer_uuid` cleared, so an RE must accept and approve again; the IDR number stays. 400 for a draft, submitted, Stage 1 or deleted IDR
+- `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept). Deleting an IDR already deleted is a 200 that changes nothing
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — replace an attachment's name and description; draft only
@@ -124,7 +126,8 @@ Any change must follow these.
     id, and list IDRs for any reporter (`?reporter_uuid=` is a filter, not an identity), except that nobody is
     listed another person's draft. An admin lists only the projects assigned to them in `project_users`, like
     anyone else. Submitting and the review routes are the exception: they check project roles, below. The
-    admin-only routes are `/v1/admin/cleanup-demos` and the two under `/v1/projects/{project_id}/roles`.
+    admin-only routes are `/v1/admin/cleanup-demos`, the two under `/v1/projects/{project_id}/roles`, and
+    `/v1/idrs/{idr_id}/admin/unlock` and `/admin/delete`.
   - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
     several on a project (migration 018). `require_project_role("oe", "re")` builds a dependency for a route with
     an `idr_id`: it passes a user holding one of those roles on the IDR's project, and any admin; 404 for an
@@ -151,8 +154,15 @@ Any change must follow these.
       and writes its `icid.idr_audit` row in a single statement (`_move_idr` in `api/queries/idrs.py`, with
       `AUDIT_CTE` from `api/queries/idr_audit.py`). A move that finds the IDR changed returns 409. Submit logs
       the same way.
-    - Reviewers can't edit an IDR: the edit routes still take drafts only. Admin unlock, soft delete and admin
-      edits are not built yet.
+    - Reviewers can't edit an IDR: the edit routes still take drafts only. Admin edits are not built yet.
+    - **Admin unlock** sends an approved IDR back to `stage2_review` and clears the RE's signature and the RE
+      reviewer, so the export stops printing the old signature and an RE has to accept it before approving
+      again. The admin does not approve. Logged as `admin_unlock`.
+    - **Admin delete is a soft delete**: `status = 'deleted'` with `deleted_at` and `deleted_by`, logged as
+      `admin_delete`; nothing is removed, attachments and audit rows included. Every review statement and
+      submit match only rows with `deleted_at IS NULL`, the lists leave deleted IDRs out, and the day and the
+      IDR number are free again. There is no undelete. `GET /v1/idrs/{idr_id}` and the export still answer for
+      a deleted IDR by id, for anyone signed in; the edit routes refuse it, as it isn't a draft.
   - **Unique rules on `idrs` are partial indexes** (`WHERE deleted_at IS NULL`, migration 017):
     `uq_idrs_project_reporter_date` (one IDR per reporter, project and day) and `uq_idrs_project_number`. A
     soft-deleted IDR frees its day and its number. An INSERT can't name either with a bare column list, so
