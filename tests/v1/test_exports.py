@@ -4599,10 +4599,12 @@ class TestPayItemRedlinesOnTheForm:
         assert marks(sheet["N43"]) == [("45", BLUE, False), ("SF", BLUE, False)]
         assert (marks(sheet["S42"]), marks(sheet["S43"])) == ([("RM", BLUE, False)], [("MK", BLUE, False)])
 
-    def test_an_added_item_has_its_item_number_and_quantity_in_blue(self, redlined):
+    def test_every_filled_cell_of_an_added_item_is_blue(self, redlined):
         sheet = redlined["Gen Fr"]
-        assert sheet["B44"].font.color.rgb == BLUE
-        assert sheet["G44"].font.color is None or sheet["G44"].font.color.rgb != BLUE  # the budget code stays black
+        assert [sheet[f"{column}44"].font.color.rgb for column in "BGX"] == [BLUE] * 3
+        assert (sheet["G44"].value, sheet["X44"].value) == ("12345", "Sidewalk 3")
+        black = lambda cell: cell.font.color is None or cell.font.color.rgb != BLUE
+        assert all(black(sheet[f"{column}45"]) for column in "BGX")  # the inspector's next row is untouched
         assert marks(sheet["N44"]) == [("8", BLUE, False), ("SF", BLUE, False)]
         assert marks(sheet["S44"]) == [("RM", BLUE, False)]
 
@@ -4814,3 +4816,149 @@ class TestSetCellRuns:
         cell = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))["Gen Fr"]["AD17"]
         assert (cell.alignment.shrink_to_fit, cell.alignment.wrap_text) == (True, False)
         assert (cell.alignment.horizontal, cell.alignment.vertical) == ("center", "top")  # the rest is kept
+
+
+MIX_REPORT_ID = UUID(int=0xC0C0)
+MIX_DATA = {
+    "locationOfUse": {"curb": False, "sidewalk": True, "concreteBase": True, "structural": False},
+    "mixerType": {"type": "other", "otherLabel": "Volumetric mixer"},
+    "trucks": [{"truckOrTicketNo": "T-101", "slump": "4.5", "airContent": "6.0", "inspectionSticker": "N"},
+               {"truckOrTicketNo": "T-102", "slump": "4", "airContent": "5.5", "inspectionSticker": "Y"}],
+    "concreteSpecs": {"classOfConcrete": "B-32", "slumpMin": "3", "slumpMax": "5"},
+    "materialUsage": {"batchReportNo": "BR-77", "quantityUsed": "19"},
+    "remarks": "Second truck arrived 20 minutes late.",
+}
+
+
+def mix_edit(path: str, old, new, initials: str) -> dict:
+    """
+    Build a reviewer's edit of one Conc Mix field.
+    Takes the field_path, the old and new values and the editor's initials.
+    Returns the edit row.
+    """
+    return redline_edit(path, "field_change", old, new, initials, MIX_REPORT_ID)
+
+
+MIX_EDITS = [
+    mix_edit("locationOfUse.curb", True, False, "RM"),
+    mix_edit("locationOfUse.sidewalk", False, True, "RM"),
+    mix_edit("mixerType.type", "readyMix", "other", "MK"),
+    mix_edit("mixerType.otherLabel", "Volumetric", "Volumetric mixer", "MK"),
+    mix_edit("trucks[0].slump", "5", "4.5", "RM"),
+    mix_edit("trucks[0].inspectionSticker", "Y", "N", "RM"),
+    mix_edit("trucks[1].airContent", "6.5", "6", "RM"),
+    mix_edit("trucks[1].airContent", "6", "5.5", "MK"),
+    mix_edit("concreteSpecs.classOfConcrete", "B-25", "B-32", "RM"),
+    mix_edit("concreteSpecs.slumpMax", "4", "5", "RM"),
+    mix_edit("materialUsage.quantityUsed", "20", "19", "MK"),
+    mix_edit("remarks", "Second truck arrived late.", MIX_DATA["remarks"], "RM"),
+]
+
+
+def redlined_mix(data: dict = MIX_DATA, edits: list = MIX_EDITS) -> openpyxl.Workbook:
+    """
+    Render a CONC_MIX report with reviewer edits and load it with its text runs.
+    Takes the report_data and the report's edits.
+    Returns the workbook, fully loaded with rich_text=True.
+    """
+    from api.services.export_redlines import Redlines
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_conc_mix.render(workbook, SUBMITTED_IDR, PROJECT, "Benny Bowers Contracting Co.", inspector="Genghis Khan",
+                           page_number=3, report_data=data, redlines=Redlines(edits, MIX_REPORT_ID))
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), rich_text=True)
+
+
+@pytest.fixture(scope="module")
+def mix_sheet():
+    """
+    The Conc Mix page of a report whose every section a reviewer edited, rendered once.
+    Takes nothing.
+    Returns the worksheet, with its text runs.
+    """
+    return redlined_mix()["Conc Mix"]
+
+
+class TestConcMixRedlines:
+    def test_a_box_a_reviewer_ticked_is_blue_with_their_initials_right_after_it(self, mix_sheet):
+        assert marks(mix_sheet["N22"]) == [("X", BLUE, False)]
+        assert runs(mix_sheet["P22"]) == [("RM", BLUE, False, 6, False)]
+
+    def test_a_box_a_reviewer_unticked_keeps_a_struck_black_x(self, mix_sheet):
+        assert marks(mix_sheet["F22"]) == [("X", None, True)]
+        assert marks(mix_sheet["H22"]) == [("RM", BLUE, False)]
+
+    def test_boxes_nobody_changed_are_ticked_as_before(self, mix_sheet):
+        assert mix_sheet["X22"].value == "X" and mix_sheet["AF22"].value is None
+        assert (mix_sheet["Z22"].value, mix_sheet["AH22"].value) == (None, None)
+
+    def test_a_changed_mixer_type_strikes_the_old_box_and_marks_the_new_one(self, mix_sheet):
+        assert marks(mix_sheet["O25"]) == [("X", None, True)]   # Ready Mix, the inspector's
+        assert marks(mix_sheet["T25"]) == [("X", BLUE, False)]  # Other, the reviewer's
+        assert mix_sheet["Q25"].value is None
+
+    def test_others_initials_open_its_write_in_cell_before_the_labels_chain(self, mix_sheet):
+        cell = mix_sheet["X25"]
+        assert marks(cell) == [("MK", BLUE, False), ("Volumetric", None, True), ("Volumetric mixer", BLUE, False),
+                               ("MK", BLUE, False)]
+        assert cell.alignment.shrink_to_fit is True
+
+    def test_a_mixer_type_changed_to_ready_mix_puts_the_initials_after_its_box(self):
+        data = {**MIX_DATA, "mixerType": {"type": "readyMix", "otherLabel": "Volumetric"}}
+        sheet = redlined_mix(data, [mix_edit("mixerType.type", "other", "readyMix", "RM")])["Conc Mix"]
+        assert marks(sheet["O25"]) == [("X", BLUE, False)]
+        assert marks(sheet["T25"]) == [("X", None, True)]
+        assert marks(sheet["Q25"]) == [("RM", BLUE, False)]
+        assert sheet["X25"].value is None  # the write-in only prints while the type is Other
+
+    def test_a_trucks_edited_value_prints_as_its_chain(self, mix_sheet):
+        assert marks(mix_sheet["Z28"]) == [("5", None, True), ("4.5", BLUE, False), ("RM", BLUE, False)]
+        assert marks(mix_sheet["AC29"]) == [("6.5", None, True), ("6", BLUE, True), ("RM", BLUE, False),
+                                            ("5.5", BLUE, False), ("MK", BLUE, False)]
+        assert mix_sheet["Z29"].value == "4" and mix_sheet["B28"].value == "T-101"
+
+    def test_a_changed_sticker_answer_is_struck_where_it_was_and_blue_where_it_is(self, mix_sheet):
+        assert marks(mix_sheet["G28"]) == [("X", None, True)]
+        assert marks(mix_sheet["I28"]) == [("X", BLUE, False), ("RM", BLUE, False)]
+        assert (mix_sheet["G29"].value, mix_sheet["I29"].value) == ("X", "N")  # an unedited truck
+        assert (mix_sheet["G30"].value, mix_sheet["I30"].value) == ("Y", "N")  # an empty row keeps its letters
+
+    def test_a_truck_is_found_by_its_place_in_the_list_on_whichever_sheet_it_prints(self):
+        trucks = [{"truckOrTicketNo": f"T-{n}", "slump": "4"} for n in range(13)]
+        book = redlined_mix({"trucks": trucks}, [mix_edit("trucks[12].slump", "3", "4", "RM")])
+        assert marks(book["Conc Mix 2"]["Z29"]) == [("3", None, True), ("4", BLUE, False), ("RM", BLUE, False)]
+        assert book["Conc Mix"]["Z29"].value == "4"
+
+    def test_specifications_and_material_usage_print_as_chains(self, mix_sheet):
+        assert marks(mix_sheet["B41"]) == [("Class of Concrete:", None, False), ("B-25", None, True),
+                                           ("B-32", BLUE, False), ("RM", BLUE, False)]
+        assert marks(mix_sheet["L43"]) == [("4", None, True), ("5", BLUE, False), ("RM", BLUE, False)]
+        assert marks(mix_sheet["AL43"]) == [("20", None, True), ("19", BLUE, False), ("MK", BLUE, False)]
+        assert mix_sheet["H43"].value == "3" and mix_sheet["W41"].value == "BR-77"
+
+    def test_edited_remarks_flow_struck_then_blue(self, mix_sheet):
+        assert marks(mix_sheet["H49"]) == [("Second truck arrived late.", None, True)]
+        assert marks(mix_sheet["C50"]) == [("Second truck arrived 20 minutes late.", BLUE, False), ("RM", BLUE, False)]
+
+    def test_a_box_the_inspector_changed_after_the_edit_shows_as_it_stands(self):
+        data = {**MIX_DATA, "locationOfUse": {"curb": True}}
+        sheet = redlined_mix(data, [mix_edit("locationOfUse.curb", True, False, "RM")])["Conc Mix"]
+        assert sheet["F22"].value == "X" and sheet["H22"].value is None
+
+    def test_the_export_gives_each_conc_mix_its_own_edits(self):
+        swcb = swcb_row(1, 2, description="Pour")
+        mix = {**conc_mix_row(1, swcb["report_id"], 3), "report_id": MIX_REPORT_ID, "report_data": MIX_DATA}
+        other = conc_mix_row(2, swcb["report_id"], 4, trucks=1)
+        book = redlined_book(general=GENERAL, reports=[swcb, mix, other], main_reports=[swcb], edits=MIX_EDITS)
+        assert marks(book["Conc Mix"]["Z28"]) == [("5", None, True), ("4.5", BLUE, False), ("RM", BLUE, False)]
+        second = book["Conc Mix 2"]["Z28"].value
+        assert second is None or isinstance(second, str)  # the other report's truck carries no chain
+
+    def test_a_report_nobody_edited_is_stamped_exactly_as_before(self):
+        plain = WorkbookTemplate(TEMPLATE)
+        export_conc_mix.render(plain, SUBMITTED_IDR, PROJECT, "Benny Bowers Contracting Co.", page_number=3,
+                               report_data=MIX_DATA)
+        sheet = openpyxl.load_workbook(io.BytesIO(plain.to_bytes()), rich_text=True)["Conc Mix"]
+        assert (sheet["F22"].value, sheet["N22"].value, sheet["T25"].value) == (None, "X", "X")
+        assert (sheet["X25"].value, sheet["Z28"].value, sheet["B41"].value) == (
+            "Volumetric mixer", "4.5", "Class of Concrete: B-32")
+        assert (sheet["G28"].value, sheet["I28"].value) == ("Y", "X")

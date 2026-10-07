@@ -355,7 +355,7 @@ Any change must follow these.
   - **Pay items take a row per revision.** The item's own row keeps the quantity it had, struck; each revision
     follows on a row of its own with the item number, budget code and quantity in blue (the description stays on
     the first row). A quantity the inspector changed afterwards gets a last, black row. An item a reviewer added
-    is one row with its item number and quantity in blue.
+    is one row with every cell it fills in blue: item number, budget code, quantity, description and initials.
   - **Initials go in "Quantity Chk (Initials)", never in the Pay Quantity cell**, which holds only the quantity
     and its unit. Each row's cell holds the initials of whoever added or revised that row's quantity, in blue,
     shrunk to fit. The inspector's own rows (the struck original, a quantity changed after a return) have none.
@@ -373,9 +373,20 @@ Any change must follow these.
     initials open the row's Remarks. AC Bk has no remarks column, so there the initials follow the X.
   - **An auto-generated General shows the header's redlines only.** Its pay items are sums across reports and it
     can't be edited; the edits print on the reports they were made on. So does a General composed for the export.
-  - **Not redlined:** the report-specific sections (SWCB's operation, activity and matrix, AC's own sections,
-    Conc Mix), which reviewers can't edit; and AC Bk's safety remarks, which print inside its remarks text as
-    they stand.
+  - **Conc Mix is redlined too** (`export_conc_mix.py`), by the keys its `report_data` stores:
+    `locationOfUse.curb` / `.sidewalk` / `.concreteBase` / `.structural` (true / false), `mixerType.type`
+    (`readyMix` / `other`) and `mixerType.otherLabel`, `trucks[n].<field>` (`slump`, `airContent`,
+    `inspectionSticker`, ...), `concreteSpecs.<field>`, `materialUsage.<field>` and `remarks`. `locationOfUse`
+    and `mixerType` on their own are objects, which the edit endpoint refuses.
+    - A box a reviewer ticked gets a blue X; one they unticked keeps a struck X; their initials go in the cell
+      right after the box (`LOCATION_INITIALS`, `MIXER_INITIALS`). Other's box is followed by its label, so its
+      initials open the write-in cell.
+    - `trucks[n]` is the truck's place in the saved list, whichever Conc Mix sheet it prints on. A sticker answer
+      changes like a safety answer, the initials after the X.
+    - A box the inspector changed after the last edit shows as it stands, with no marks.
+  - **Not redlined:** SWCB's operation, activity and matrix and AC's own sections (the K2 edit UI doesn't reach
+    them); AC Bk's safety remarks, which print inside its remarks text as they stand; and Concrete Cylinder
+    Data, which the export doesn't print at all (the template has no cylinder form; Phase 1b backlog).
   - Lists addressed by position (`additionalWorkforce[0].count`) are matched by position, with the limitation
     noted under "Reviewer edits".
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the

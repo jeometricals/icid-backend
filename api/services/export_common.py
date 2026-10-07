@@ -660,9 +660,9 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
     needs two lines gets a row tall enough for them (lines x the font's line height). A quantity is followed by its
     unit, smaller. The Item No. and Pay Quantity cells shrink to fit, so a wide code or a long number is scaled down
     rather than cut off. A reviewer's marks print with the items (see pay_item_group and _stamp_pay_quantity): a
-    revision's row has its item number and budget code in the redline colour, an added item its item number, and
-    the Quantity Chk cell holds the row's initials in the redline colour (PAY_REDLINE_INITIALS_FONT_PT), shrunk to
-    fit.
+    reviewer's row (a revision's, or an item a reviewer added) has every cell it fills in the redline colour, the
+    description of an added item included, and the Quantity Chk cell holds the row's initials in the redline colour
+    (PAY_REDLINE_INITIALS_FONT_PT), shrunk to fit.
     Takes the workbook, sheet name, the table's layout, the sheet's payItems (no more than fit), whether they
     continue on another sheet (the last row then says "Pay items continued on next page") and the report's redlines
     (none unless given).
@@ -676,8 +676,9 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
             workbook.set_cell(sheet, f"{column}{row}", values.get(field))
         if values.get("itemNo"):
             workbook.shrink_to_fit_cell(sheet, f"{layout.columns['itemNo']}{row}")
-        if line is not None and line.by_reviewer:
-            for field in ("itemNo",) if line.item_row else ("itemNo", "budgetCode"):
+        by_reviewer = line is not None and line.by_reviewer
+        if by_reviewer:
+            for field in ("itemNo", "budgetCode"):
                 workbook.set_font_color(sheet, f"{layout.columns[field]}{row}", PAY_REDLINE_COLOR)
         _stamp_pay_quantity(workbook, sheet, f"{layout.columns['payQuantity']}{row}", values)
         if values.get("quantityChk"):
@@ -695,6 +696,8 @@ def stamp_pay_items(workbook: WorkbookTemplate, sheet: str, layout: PayItemsLayo
                 workbook.set_font_size(sheet, cell, font_size)
             if lines > 1:
                 workbook.set_row_height(sheet, row, lines * LINE_HEIGHT[font_size])
+            if by_reviewer:
+                workbook.set_font_color(sheet, cell, PAY_REDLINE_COLOR)
 
 
 def pay_item_page_count(pay_items: Any, layout: PayItemsLayout, redlines: Redlines = NO_REDLINES) -> int:
@@ -846,7 +849,7 @@ def _overflow_label(placed: list[tuple[int, int, dict[str, Any], bool]], free_ro
     return [p for p in placed if not (p[3] and p[0] == free_rows[-1])]
 
 
-def _with_paths(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
+def rows_with_paths(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
     """
     Read a list of added rows (extra trades or equipment), each with the field_path an edit names it by.
     Takes the report_data and the list's key, e.g. "additionalWorkforce".
@@ -856,10 +859,10 @@ def _with_paths(data: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return [{**row, "_path": f"{key}[{index}]"} for index, row in enumerate(rows) if isinstance(row, dict)]
 
 
-def _entry_edits(redlines: Redlines, entry: dict[str, Any], field: str) -> list[dict[str, Any]]:
+def entry_edits(redlines: Redlines, entry: dict[str, Any], field: str) -> list[dict[str, Any]]:
     """
     Find the edits made to one field of an added row.
-    Takes the report's redlines, the row (see _with_paths) and the field's key, e.g. "count".
+    Takes the report's redlines, the row (see rows_with_paths) and the field's key, e.g. "count".
     Returns its edits, oldest first (empty for a row without a path, or a field never edited).
     """
     return redlines.field(f"{entry['_path']}.{field}") if entry.get("_path") else []
@@ -882,15 +885,15 @@ def stamp_workforce(workbook: WorkbookTemplate, sheet: str, layout: WorkforceLay
         stamp_field(workbook, sheet, f"{layout.count_column}{row}", saved.get(key), edits, count_value)
         wrote = wrote or count_value(saved.get(key)) is not None or bool(edits)
 
-    extras = _with_paths(data, "additionalWorkforce")
+    extras = rows_with_paths(data, "additionalWorkforce")
     placed, missing = _place_extras(extras, layout.trade_rows, layout.free_rows, 1)
     placed = _overflow_label(placed, layout.free_rows, missing)
     for row, _, entry, needs_label in placed:
         if needs_label:
             stamp_field(workbook, sheet, f"{layout.label_column}{row}", entry.get("label"),
-                        _entry_edits(redlines, entry, "label"))
+                        entry_edits(redlines, entry, "label"))
         stamp_field(workbook, sheet, f"{layout.count_column}{row}", entry.get("count"),
-                    _entry_edits(redlines, entry, "count"), count_value)
+                    entry_edits(redlines, entry, "count"), count_value)
         wrote = True
     if missing:
         workbook.set_cell(sheet, f"{layout.label_column}{layout.free_rows[-1]}", f"+{missing + 1} more (see ICID)")
@@ -925,13 +928,13 @@ def stamp_equipment(workbook: WorkbookTemplate, sheet: str, layout: EquipmentLay
             without_row.append({"label": label, "model": entry.get("model"), "number": entry.get("number"),
                                 "_path": path, "_standard": True})
 
-    extras = without_row + _with_paths(data, "additionalEquipment")
+    extras = without_row + rows_with_paths(data, "additionalEquipment")
     placed, missing = _place_extras(extras, layout.extra_rows, layout.free_rows, len(layout.slots))
     placed = _overflow_label(placed, layout.free_rows, missing)
     for row, slot, entry, needs_label in placed:
         label = text_value(entry.get("label"))
         # A standard type's name is the form's, not a field; an added row's label is one a reviewer can edit
-        label_edits = [] if entry.get("_standard") else _entry_edits(redlines, entry, "label")
+        label_edits = [] if entry.get("_standard") else entry_edits(redlines, entry, "label")
         prefix = None
         if needs_label:
             stamp_field(workbook, sheet, f"{layout.label_column}{row}", entry.get("label"), label_edits)
@@ -940,9 +943,9 @@ def stamp_equipment(workbook: WorkbookTemplate, sheet: str, layout: EquipmentLay
             prefix = label
         model_column, number_column = layout.slots[slot]
         stamp_field(workbook, sheet, f"{model_column}{row}", entry.get("model"),
-                    _entry_edits(redlines, entry, "model"), prefix=prefix)
+                    entry_edits(redlines, entry, "model"), prefix=prefix)
         stamp_field(workbook, sheet, f"{number_column}{row}", entry.get("number"),
-                    _entry_edits(redlines, entry, "number"), count_value)
+                    entry_edits(redlines, entry, "number"), count_value)
         wrote = True
     if missing:
         workbook.set_cell(sheet, f"{layout.label_column}{layout.free_rows[-1]}", f"+{missing + 1} more (see ICID)")
@@ -991,13 +994,14 @@ def stamp_safety(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, d
                            edits)
 
 
-def _stamp_answer_box(workbook: WorkbookTemplate, sheet: str, cell: str, option: str, chain: list[RedlineEntry],
-                      initials: Optional[str]) -> None:
+def stamp_answer_box(workbook: WorkbookTemplate, sheet: str, cell: str, option: str, chain: list[RedlineEntry],
+                     initials: Optional[str], blank: Optional[str] = None) -> None:
     """
     Mark one box (Y or N) of an answer a reviewer edited: an X in the redline colour when it is the reviewer's
     answer that stands, a struck X where an answer was replaced (black for the inspector's), nothing otherwise.
-    Takes the workbook, sheet, the box's cell, the answer it stands for, the answer's chain and the initials to
-    print after a standing X (None where the row's remarks take them).
+    Takes the workbook, sheet, the box's cell, the answer it stands for, the answer's chain, the initials to
+    print after a standing X (None where the row's remarks take them) and what an unmarked box holds (nothing,
+    unless the form pre-prints a letter there).
     Returns nothing.
     """
     standing = chain[-1]
@@ -1015,7 +1019,7 @@ def _stamp_answer_box(workbook: WorkbookTemplate, sheet: str, cell: str, option:
         color = PAY_REDLINE_COLOR if replaced[-1].by_reviewer else None
         workbook.set_cell_runs(sheet, cell, [TextRun(CHECK_MARK, color=color, strike=True)])
     else:
-        workbook.set_cell(sheet, cell, None)
+        workbook.set_cell(sheet, cell, blank)
 
 
 def stamp_checklist(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, answers: dict[str, tuple[Any, Any]],
@@ -1040,7 +1044,7 @@ def stamp_checklist(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout
         initials = " ".join(dict.fromkeys(entry.initials for entry in chain if entry.initials)) or None
         for column, option in ((layout.yes_column, "Y"), (layout.no_column, "N")):
             if chain:
-                _stamp_answer_box(workbook, sheet, f"{column}{row}", option, chain,
+                stamp_answer_box(workbook, sheet, f"{column}{row}", option, chain,
                                   initials if layout.remarks_column is None else None)
             else:
                 workbook.set_cell(sheet, f"{column}{row}", CHECK_MARK if answer == option else None)

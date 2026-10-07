@@ -13,10 +13,12 @@ from typing import Any, Optional
 
 from api.services.export_common import (
     SignatureLayout,
-    CHECK_MARK, TextArea, allocate_copies, fill_lines, ir_number, mark_truncated, object_rows, paragraphs, section,
-    short_date, text_value, write_lines,
+    CHECK_MARK, PAY_REDLINE_COLOR, REDLINE_INITIALS_FONT_PT, TextArea, allocate_copies, checklist_answer,
+    entry_edits, fill_lines, ir_number, mark_truncated, redline_paragraphs, redline_runs,
+    rows_with_paths, section, short_date, stamp_answer_box, stamp_field, text_value, write_lines,
 )
-from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
+from api.services.export_redlines import NO_REDLINES, RedlineEntry, Redlines, redline_chain
+from api.services.xlsx_template import EMU_PER_PIXEL, TextRun, WorkbookTemplate
 
 CONC_MIX = "Conc Mix"
 
@@ -53,6 +55,10 @@ LOCATION_BOXES = {"curb": ("F22", "G22"), "sidewalk": ("N22", "O22"), "concreteB
 MIXER_BOXES = {"readyMix": ("O25", "P25"), "other": ("T25",)}
 CHECK_MARK_FONT_PT = 7
 MIXER_OTHER_LABEL = "X25"  # X25:AO25, after the "Other" box and label
+# Where the initials of a reviewer who changed a box go: the blank cell right after it (each box is followed by two
+# or more before the next label). Other's box is followed by its label, so its initials open the write-in cell.
+LOCATION_INITIALS = {"curb": "H22", "sidewalk": "P22", "concreteBase": "Z22", "structural": "AH22"}
+MIXER_INITIALS = {"readyMix": "Q25", "other": MIXER_OTHER_LABEL}
 
 # The Trucks table: rows 28-38, one merged area per column. The Inspection Sticker's "Y" (G:H) and "N" (I:J) are
 # pre-printed in every row; the answer's letter is replaced by an "X". N/A has no box, so it leaves both letters.
@@ -91,9 +97,10 @@ def truck_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Read the Trucks table from report_data, tolerating a missing list or malformed rows.
     Takes the report_data.
-    Returns the trucks (each a dict), in the inspector's order.
+    Returns the trucks (each a dict), in the inspector's order, each with "_path": the field_path an edit names it
+    by ("trucks[0]", its place in the saved list, whichever sheet it prints on).
     """
-    return object_rows(data, "trucks")
+    return rows_with_paths(data, "trucks")
 
 
 def sheet_count(report_data: Any) -> int:
@@ -151,51 +158,141 @@ def _tick(workbook: WorkbookTemplate, sheet: str, box: tuple[str, ...], ticked: 
         workbook.center_across(sheet, list(box))
 
 
-def _stamp_location_and_mixer(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any]) -> None:
+def _stamp_choice(workbook: WorkbookTemplate, sheet: str, boxes: dict[str, tuple[str, ...]],
+                  chain: list[RedlineEntry]) -> Optional[str]:
     """
-    Tick the Location of Use and Mixer Type boxes, and write the mixer type when it's Other.
-    Takes the workbook, the sheet and the report_data.
+    Mark the boxes of a choice a reviewer edited: an X in the box of the value that stands (in the redline colour
+    when it is a reviewer's), a struck X in each box a value left (black for the inspector's), the others empty.
+    Takes the workbook, the sheet, each value's box (the cells it covers) and the choice's chain.
+    Returns the value whose box the editors' initials go beside: the one that stands, else the last one struck;
+    None when the inspector changed the choice after the last edit (the boxes then show it plainly) or no box is
+    marked.
+    """
+    standing = chain[-1]
+    beside = None
+    for value, box in boxes.items():
+        replaced = [entry for entry in chain[:-1] if entry.text == value]
+        if standing.revised or (standing.text != value and not replaced):
+            _tick(workbook, sheet, box, standing.text == value)
+            continue
+        entry = standing if standing.text == value else replaced[-1]
+        mark = TextRun(CHECK_MARK, color=PAY_REDLINE_COLOR if entry.by_reviewer else None, points=CHECK_MARK_FONT_PT,
+                       strike=standing.text != value)
+        workbook.set_cell_runs(sheet, box[0], [mark])
+        workbook.center_across(sheet, list(box))
+        if standing.text == value or beside is None:
+            beside = value
+    return None if standing.revised else beside
+
+
+def _chain_initials(chain: list[RedlineEntry]) -> Optional[str]:
+    """
+    Collect the initials of everyone who edited a field.
+    Takes the field's chain.
+    Returns them in order, each once, space-separated; None when there are none.
+    """
+    return " ".join(dict.fromkeys(entry.initials for entry in chain if entry.initials)) or None
+
+
+def _stamp_box_initials(workbook: WorkbookTemplate, sheet: str, cell: str, initials: Optional[str]) -> None:
+    """
+    Write the initials of whoever changed a box in the cell right after it, small and in the redline colour.
+    Takes the workbook, the sheet, the cell and the initials (None writes nothing).
+    Returns nothing.
+    """
+    if initials:
+        workbook.set_cell_runs(sheet, cell, [TextRun(initials, color=PAY_REDLINE_COLOR,
+                                                     points=REDLINE_INITIALS_FONT_PT)])
+        workbook.align_left(sheet, cell)
+
+
+def _stamp_location_and_mixer(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any],
+                              redlines: Redlines = NO_REDLINES) -> None:
+    """
+    Tick the Location of Use and Mixer Type boxes, and write the mixer type when it's Other. A box a reviewer
+    changed is marked (see _stamp_choice) with their initials right after it; Other's go at the start of its
+    write-in cell, whose text prints as its chain when a reviewer edited it.
+    Takes the workbook, the sheet, the report_data and the report's redlines (none unless given).
     Returns nothing.
     """
     location = section(data, "locationOfUse")
     for key, box in LOCATION_BOXES.items():
-        _tick(workbook, sheet, box, location.get(key) is True)
+        chain = redline_chain(redlines.field(f"locationOfUse.{key}"), location.get(key),
+                              lambda value: CHECK_MARK if value is True else None)
+        if not chain:
+            _tick(workbook, sheet, box, location.get(key) is True)
+        elif _stamp_choice(workbook, sheet, {CHECK_MARK: box}, chain):
+            _stamp_box_initials(workbook, sheet, LOCATION_INITIALS[key], _chain_initials(chain))
+
     mixer = section(data, "mixerType")
-    for kind, box in MIXER_BOXES.items():
-        _tick(workbook, sheet, box, mixer.get("type") == kind)
-    other = text_value(mixer.get("otherLabel")) if mixer.get("type") == "other" else None
-    workbook.set_cell(sheet, MIXER_OTHER_LABEL, other)
+    chain = redline_chain(redlines.field("mixerType.type"), mixer.get("type"),
+                          lambda value: value if value in MIXER_BOXES else None)
+    beside = _stamp_choice(workbook, sheet, MIXER_BOXES, chain) if chain else None
+    if not chain:
+        for kind, box in MIXER_BOXES.items():
+            _tick(workbook, sheet, box, mixer.get("type") == kind)
+    initials = _chain_initials(chain) if beside else None
+    if beside is not None and beside != "other":
+        _stamp_box_initials(workbook, sheet, MIXER_INITIALS[beside], initials)
+
+    is_other = mixer.get("type") == "other"
+    label_edits = redlines.field("mixerType.otherLabel") if is_other else []
+    opening = initials if beside == "other" else None
+    if not label_edits and not opening:
+        workbook.set_cell(sheet, MIXER_OTHER_LABEL, text_value(mixer.get("otherLabel")) if is_other else None)
+        return
+    label = text_value(mixer.get("otherLabel")) if is_other else None
+    runs = [TextRun(f"{opening} ", color=PAY_REDLINE_COLOR, points=REDLINE_INITIALS_FONT_PT)] if opening else []
+    runs += redline_runs(redline_chain(label_edits, mixer.get("otherLabel"))) or ([TextRun(label)] if label else [])
+    workbook.set_cell_runs(sheet, MIXER_OTHER_LABEL, runs)
+    workbook.shrink_on_one_line(sheet, MIXER_OTHER_LABEL)
 
 
-def _stamp_trucks(workbook: WorkbookTemplate, sheet: str, trucks: list[dict[str, Any]]) -> None:
+def _stamp_trucks(workbook: WorkbookTemplate, sheet: str, trucks: list[dict[str, Any]],
+                  redlines: Redlines = NO_REDLINES) -> None:
     """
-    Fill the Trucks table, one truck per row, and mark each one's inspection sticker.
-    Takes the workbook, the sheet and its trucks (at most 11; rows past them stay blank, their Y / N letters kept).
+    Fill the Trucks table, one truck per row, and mark each one's inspection sticker. A value a reviewer edited
+    prints as its chain; a sticker answer they changed keeps a struck X where it was and gets an X in the redline
+    colour, followed by their initials.
+    Takes the workbook, the sheet, its trucks (at most 11, each with the path edits name it by, see truck_rows; rows
+    past them stay blank, their Y / N letters kept) and the report's redlines (none unless given).
     Returns nothing.
     """
     for index, row in enumerate(TRUCK_ROWS):
         truck = trucks[index] if index < len(trucks) else {}
         for field, column in TRUCK_COLUMNS.items():
-            workbook.set_cell(sheet, f"{column}{row}", text_value(truck.get(field)))
+            stamp_field(workbook, sheet, f"{column}{row}", truck.get(field), entry_edits(redlines, truck, field))
         sticker = truck.get("inspectionSticker")
+        chain = redline_chain(entry_edits(redlines, truck, "inspectionSticker"), sticker, checklist_answer)
         for answer, column in STICKER_CELLS.items():
-            workbook.set_cell(sheet, f"{column}{row}", CHECK_MARK if sticker == answer else answer)
+            if chain:
+                stamp_answer_box(workbook, sheet, f"{column}{row}", answer, chain, _chain_initials(chain), blank=answer)
+            else:
+                workbook.set_cell(sheet, f"{column}{row}", CHECK_MARK if sticker == answer else answer)
 
 
-def _stamp_specs_and_materials(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any]) -> None:
+def _stamp_specs_and_materials(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any],
+                               redlines: Redlines = NO_REDLINES) -> None:
     """
-    Write Concrete Specifications (class of concrete, slump and air ranges) and Material Usage.
-    Takes the workbook, the sheet and the report_data.
+    Write Concrete Specifications (class of concrete, slump and air ranges) and Material Usage. A value a reviewer
+    edited prints as its chain; the class of concrete's follows its label.
+    Takes the workbook, the sheet, the report_data and the report's redlines (none unless given).
     Returns nothing.
     """
     specs = section(data, "concreteSpecs")
-    concrete_class = text_value(specs.get("classOfConcrete")) or CLASS_OF_CONCRETE_BLANK
-    workbook.set_cell(sheet, CLASS_OF_CONCRETE, f"{CLASS_OF_CONCRETE_LABEL} {concrete_class}")
+    class_chain = redline_chain(redlines.field("concreteSpecs.classOfConcrete"), specs.get("classOfConcrete"))
+    if class_chain:
+        workbook.set_cell_runs(sheet, CLASS_OF_CONCRETE,
+                               [TextRun(f"{CLASS_OF_CONCRETE_LABEL} ")] + redline_runs(class_chain))
+        workbook.shrink_on_one_line(sheet, CLASS_OF_CONCRETE)
+    else:
+        concrete_class = text_value(specs.get("classOfConcrete")) or CLASS_OF_CONCRETE_BLANK
+        workbook.set_cell(sheet, CLASS_OF_CONCRETE, f"{CLASS_OF_CONCRETE_LABEL} {concrete_class}")
     for field, cell in SPEC_CELLS.items():
-        workbook.set_cell(sheet, cell, text_value(specs.get(field)))
+        stamp_field(workbook, sheet, cell, specs.get(field), redlines.field(f"concreteSpecs.{field}"))
     materials = section(data, "materialUsage")
     for field, cell in MATERIAL_CELLS.items():
-        workbook.set_cell(sheet, cell, text_value(materials.get(field)))
+        stamp_field(workbook, sheet, cell, materials.get(field), redlines.field(f"materialUsage.{field}"))
 
 
 def remarks_lines(text: list[str], continued: bool) -> tuple[list[str], list[str]]:
@@ -227,9 +324,12 @@ def _stamp_remarks(workbook: WorkbookTemplate, sheet: str, text: list[str], cont
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
-           report_data: Optional[dict[str, Any]] = None, sheets: Optional[list[str]] = None) -> list[str]:
+           report_data: Optional[dict[str, Any]] = None, sheets: Optional[list[str]] = None,
+           redlines: Redlines = NO_REDLINES) -> list[str]:
     """
     Stamp a CONC_MIX report onto its Conc Mix sheets: the full form on every one, the trucks split 11 a sheet.
+    What reviewers edited (the location and mixer boxes, the trucks, the specifications, material usage and the
+    remarks) prints with its redlines; pass them as redlines (none unless given).
     Takes the workbook, the IDR row (its total_pages fills OF), the project row, the contractor's and inspector's names,
     the report's page number (its later sheets take the numbers after it; None leaves PAGE / OF blank), its
     report_data (None stamps the header and an empty body) and the sheets to use, from allocate_sheets (None
@@ -246,10 +346,11 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     for index, sheet in enumerate(sheets):
         page = page_number + index if page_number is not None else None
         _stamp_header(workbook, sheet, idr, project, contractor, inspector, page)
-        _stamp_location_and_mixer(workbook, sheet, data)
-        _stamp_trucks(workbook, sheet, trucks[index * len(TRUCK_ROWS):(index + 1) * len(TRUCK_ROWS)])
-        _stamp_specs_and_materials(workbook, sheet, data)
-        text = paragraphs(data.get("remarks")) if index == 0 else [CONTINUED_FROM]
+        _stamp_location_and_mixer(workbook, sheet, data, redlines)
+        _stamp_trucks(workbook, sheet, trucks[index * len(TRUCK_ROWS):(index + 1) * len(TRUCK_ROWS)], redlines)
+        _stamp_specs_and_materials(workbook, sheet, data, redlines)
+        remarks = redline_paragraphs(data.get("remarks"), redlines.field("remarks"))
+        text = remarks if index == 0 else [CONTINUED_FROM]
         _stamp_remarks(workbook, sheet, text, continued=index < len(sheets) - 1)
         workbook.fit_to_letter_page(sheet)
     return sheets

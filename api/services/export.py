@@ -432,7 +432,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     for conc_mix, names in zip(conc_mixes, sheets.conc_mixes):
         export_conc_mix.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
                                page_number=_page_after_clones(conc_mix["page_number"], extras),
-                               report_data=conc_mix["report_data"], sheets=names)
+                               report_data=conc_mix["report_data"], sheets=names,
+                               redlines=redlines.for_report(conc_mix.get("report_id")))
 
     # Attachments print after their report's last page; a report that isn't printed (SWR, CONC_CYL, ...) has its
     # attachments at the end, followed by the page counting photos past the cap
