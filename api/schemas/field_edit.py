@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -11,8 +11,8 @@ class FieldEdit(BaseModel):
     edit_id: UUID
     report_id: Optional[UUID] = None   # None for a header field
     field_path: str
-    edit_type: str                     # 'field_change', 'pay_item_revision', 'pay_item_add' or 'pay_item_approve'
-    old_value: Any = None              # None for 'pay_item_add', where there was nothing
+    edit_type: str                     # 'field_change', 'pay_item_revision', 'pay_item_add', 'pay_item_approve' or 'truck_add'
+    old_value: Any = None              # None for 'pay_item_add' and 'truck_add', where there was nothing
     new_value: Any = None
     editor_uuid: UUID
     editor_stage: str                  # 'stage1' or 'stage2'
@@ -44,6 +44,22 @@ class PayItemAdd(BaseModel):
     quantity: Union[str, int, float]
     unit: str = ""
     description: str = ""
+
+
+class TruckAdd(BaseModel):
+    """A truck a reviewer adds to a Concrete Truck & Mix Info report: the fields the report form saves, all optional."""
+
+    truckOrTicketNo: Union[str, int, float, None] = None
+    inspectionSticker: Optional[Literal["Y", "N", "NA", ""]] = None
+    loadSizeCy: Union[str, int, float, None] = None
+    endBatch: Union[str, int, float, None] = None
+    mixingRevs: Union[str, int, float, None] = None
+    startDischTime: Union[str, int, float, None] = None
+    endDischTime: Union[str, int, float, None] = None
+    slump: Union[str, int, float, None] = None
+    airContent: Union[str, int, float, None] = None
+    concTemp: Union[str, int, float, None] = None
+    cylinderNumbers: Union[str, int, float, None] = None
 
 
 class UntouchedPayItem(BaseModel):

@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from api.queries.idr_field_edits import (
     EDIT_STAGES,
     append_pay_item,
+    append_truck,
     apply_header_edit,
     apply_report_edit,
     list_field_edits,
@@ -40,6 +41,12 @@ PAY_ITEM_REPORT_TYPES = frozenset({ReportType.GEN.value, ReportType.SWCB.value, 
 # before that belong to an earlier round and no longer count. NULL (accepted before the columns existed, or not
 # accepted since they were last cleared) means the time isn't known, and every attestation at the stage counts.
 STAGE_ACCEPTED_AT = {"stage1": "stage1_accepted_at", "stage2": "stage2_accepted_at"}
+
+# The report type with a Trucks table, and the text fields of a truck as the report form saves one (its
+# inspectionSticker is 'Y', 'N', 'NA' or nothing)
+TRUCK_REPORT_TYPE = ReportType.CONC_MIX.value
+TRUCK_TEXT_FIELDS = ("truckOrTicketNo", "loadSizeCy", "endBatch", "mixingRevs", "startDischTime", "endDischTime",
+                     "slump", "airContent", "concTemp", "cylinderNumbers")
 
 HEADER_PREFIX = "header."
 PAY_ITEMS = "payItems"
@@ -397,6 +404,25 @@ def add_pay_item(idr: dict[str, Any], report_id: UUID, item_no: str, budget_code
     edit = _applied(append_pay_item(idr["idr_id"], report_id, item, user.uuid, idr["status"], _as_reviewer(user)))
     _refresh_auto_general(idr["idr_id"], report)
     return edit
+
+
+def add_truck(idr: dict[str, Any], report_id: UUID, fields: dict[str, Any], user: UserOut) -> dict[str, Any]:
+    """
+    Add a truck to a Concrete Truck & Mix Info report of an IDR in review, on the reviewer's behalf.
+    Takes the IDR row, the report uuid, the truck's fields as sent (any of the keys the report form saves) and the editor. The truck gets a fresh id and every key the form saves, text trimmed, blank where nothing was sent.
+    Returns the edit row; raises FieldEditError: 404 for a report that isn't in the IDR; 400 for a report that isn't a Concrete Truck & Mix Info, or a truck with neither a truck or ticket number nor a slump; 409 or 500 from the statement.
+    """
+    report = _editable_report(idr, report_id)
+    if report["report_type"] != TRUCK_REPORT_TYPE:
+        raise FieldEditError(400, "This kind of report has no trucks")
+    truck: dict[str, Any] = {"id": str(uuid4())}
+    for key in TRUCK_TEXT_FIELDS:
+        truck[key] = str(fields[key]).strip() if fields.get(key) is not None else ""
+    truck["inspectionSticker"] = fields.get("inspectionSticker") or None
+    if not truck["truckOrTicketNo"] and not truck["slump"]:
+        raise FieldEditError(400, "A truck needs a truck or ticket number, or a slump")
+
+    return _applied(append_truck(idr["idr_id"], report_id, truck, user.uuid, idr["status"], _as_reviewer(user)))
 
 
 def edit_field(idr_id: UUID, report_id: Optional[UUID], field_path: str, new_value: Any, user: UserOut) -> dict[str, Any]:

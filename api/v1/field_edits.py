@@ -6,12 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from api.queries.idr_reports import list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.schemas.auth import UserOut
-from api.schemas.field_edit import FieldEditRequest, PayItemAdd, PayItemRevision
+from api.schemas.field_edit import FieldEditRequest, PayItemAdd, PayItemRevision, TruckAdd
 from api.schemas.idr import IdrWithReports, IdrWithReportsResponse
 from api.services.auth import current_user, demo_idr_fence, stage_reviewer
 from api.services.field_edits import (
     FieldEditError,
     add_pay_item,
+    add_truck,
     approve_pay_item,
     edit_field,
     editable_idr,
@@ -69,6 +70,17 @@ def add_idr_pay_item(idr_id: UUID, body: PayItemAdd, user: UserOut = Depends(sta
     return _edited(idr_id, lambda: add_pay_item(editable_idr(idr_id), body.report_id, body.item_no, body.budget_code,
                                                 body.quantity, body.unit, body.description, user),
                    "Pay item added")
+
+
+@router.post("/{idr_id}/reports/{report_id}/trucks/add", response_model=IdrWithReportsResponse)
+def add_idr_truck(idr_id: UUID, report_id: UUID, body: TruckAdd,
+                  user: UserOut = Depends(stage_reviewer)) -> IdrWithReportsResponse:
+    """
+    Add a truck to a Concrete Truck & Mix Info report of an IDR in review, on the reviewer's behalf: it joins the end of that report's trucks, with an id of its own, and is logged as added by them. (An inspector adds trucks to a draft through the report form.)
+    Takes the IDR and report uuids as path parameters, a TruckAdd body (any of the truck's fields) and the stage's reviewer (or an admin).
+    Returns an IdrWithReportsResponse with the IDR, its reports and every edit; raises 400 (not in review, a report that isn't a Concrete Truck & Mix Info, neither a truck or ticket number nor a slump), 403 (not the stage's reviewer), 404 (no IDR, or the report isn't in it) and 409 (the IDR changed meanwhile).
+    """
+    return _edited(idr_id, lambda: add_truck(editable_idr(idr_id), report_id, body.model_dump(), user), "Truck added")
 
 
 @router.post("/{idr_id}/pay-items/{pay_item_id}/revise", response_model=IdrWithReportsResponse)

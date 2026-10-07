@@ -166,4 +166,18 @@ class Redlines:
         return lines
 
 
+    def added_truck(self, truck: dict[str, Any]) -> Optional[str]:
+        """
+        Tell whether a reviewer added one of the report's trucks.
+        Takes the truck as the report holds it (with its id).
+        Returns the adder's initials ("" when they have none), or None for a truck the inspector entered.
+        """
+        truck_id = truck.get("id")
+        if not truck_id:
+            return None
+        added = next((e for e in self._report
+                      if e["edit_type"] == "truck_add" and e["field_path"] == f"trucks[{truck_id}]"), None)
+        return (_text(added.get("editor_initials")) or "") if added is not None else None
+
+
 NO_REDLINES = Redlines()

@@ -211,9 +211,9 @@ holds the history. The value before a field's first edit is that row's `old_valu
 | `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
 | `report_id` | UUID | FK → `idr_reports.report_id`, **ON DELETE CASCADE**. NULL for a header field |
 | `field_path` | TEXT NOT NULL | Which field; see below |
-| `edit_type` | TEXT NOT NULL | `field_change`, `pay_item_revision`, `pay_item_add` or `pay_item_approve`; CHECK `chk_idr_field_edits_type` |
-| `old_value` | JSONB | What was there. NULL only for `pay_item_add` (CHECK `chk_idr_field_edits_old_value`); a field that held JSON `null` stores JSON `null` |
-| `new_value` | JSONB NOT NULL | What the reviewer put; for `pay_item_add`, the whole item |
+| `edit_type` | TEXT NOT NULL | `field_change`, `pay_item_revision`, `pay_item_add`, `pay_item_approve` or `truck_add`; CHECK `chk_idr_field_edits_type` |
+| `old_value` | JSONB | What was there. NULL only for `pay_item_add` and `truck_add` (CHECK `chk_idr_field_edits_old_value`); a field that held JSON `null` stores JSON `null` |
+| `new_value` | JSONB NOT NULL | What the reviewer put; for `pay_item_add`, the whole item; for `truck_add`, the whole truck |
 | `editor_uuid` | UUID NOT NULL | FK → `users.uuid` |
 | `editor_stage` | TEXT NOT NULL | `stage1` or `stage2`, the stage the IDR was in; CHECK `chk_idr_field_edits_stage` |
 | `edited_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
@@ -222,8 +222,8 @@ Indexes: `idx_idr_field_edits_idr (idr_id, edited_at)` and `idx_idr_field_edits_
 
 The IDR export prints these rows as redlines (`api/services/export_redlines.py`): a field's first `old_value`
 struck, then each `new_value` in blue with the editor's initials; a `pay_item_revision` as a row of its own under
-the item; a `pay_item_add` as a blue row; a `pay_item_approve` as initials beside the quantity, when its
-`new_value` is still the item's quantity. Nothing is stored for this: the export reads the rows each time.
+the item; a `pay_item_add` as a blue row; a `pay_item_approve` as initials in Quantity Chk, when its
+`new_value` is still the item's quantity; a `truck_add` as a blue row of the Conc Mix trucks table. Nothing is stored for this: the export reads the rows each time.
 
 `field_path`, with the keys as `report_data` stores them:
 
@@ -234,6 +234,7 @@ the item; a `pay_item_add` as a blue row; a `pay_item_approve` as initials besid
 | `<list>[<n>].<key>` | `additionalWorkforce[0].count` | A row of a list, by position from 0 |
 | `payItems[<id>].<key>` | `payItems[3f2a…].payQuantity` | A pay item's field, by the item's `id`; `payQuantity` is a `pay_item_revision` |
 | `payItems[<id>]` | `payItems[3f2a…]` | A pay item a reviewer added (`pay_item_add`), or approved as it stands (`pay_item_approve`: `old_value` and `new_value` are both the quantity approved, and nothing in the report changes) |
+| `trucks[<id>]` | `trucks[9c1d…]` | A truck a reviewer added to a Concrete Truck & Mix Info report (`truck_add`; `new_value` is the whole truck). Every truck carries an `id` (migration 023, and submit), used only for this: a truck's own fields are named by position, `trucks[0].slump` |
 
 The routes that write these rows are `PATCH /v1/idrs/{id}/field`, `POST /v1/idrs/{id}/pay-items/{item id}/revise`
 and `POST /v1/idrs/{id}/pay-items/add`; `GET /v1/idrs/{id}` returns them as `field_edits`.
@@ -481,6 +482,7 @@ content as TEXT, linked to a report and a form template).
 | 020 | `020_field_edits.sql` | K0 | Created `idr_field_edits` (FKs to `idrs` and `idr_reports` with ON DELETE CASCADE, FK to `users`, three CHECKs) and its two indexes. Gave every existing pay item in `idr_reports.report_data` an `id`; nothing else in any report changed. |
 | 021 | `021_pay_item_approve.sql` | K2.5 | Widened `chk_idr_field_edits_type` to allow `pay_item_approve`. No row changed. |
 | 022 | `022_stage_accepted_at.sql` | K2.6 | Added `idrs.stage1_accepted_at` and `stage2_accepted_at` (TIMESTAMPTZ, nullable, no backfill). |
+| 023 | `023_truck_add.sql` | K3-fix2 | Widened `chk_idr_field_edits_type` to allow `truck_add`, and `chk_idr_field_edits_old_value` to let it (like `pay_item_add`) have no `old_value`. Gave every existing truck in `idr_reports.report_data` an `id`; nothing else in any report changed. |
 
 Where each current column came from:
 

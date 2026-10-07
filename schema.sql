@@ -233,9 +233,9 @@ CREATE TABLE icid.idr_field_edits (
     editor_uuid   UUID NOT NULL REFERENCES icid.users(uuid),
     editor_stage  TEXT NOT NULL,
     edited_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT chk_idr_field_edits_type CHECK (edit_type IN ('field_change', 'pay_item_revision', 'pay_item_add', 'pay_item_approve')),
+    CONSTRAINT chk_idr_field_edits_type CHECK (edit_type IN ('field_change', 'pay_item_revision', 'pay_item_add', 'pay_item_approve', 'truck_add')),
     CONSTRAINT chk_idr_field_edits_stage CHECK (editor_stage IN ('stage1', 'stage2')),
-    CONSTRAINT chk_idr_field_edits_old_value CHECK ((old_value IS NULL) = (edit_type = 'pay_item_add'))
+    CONSTRAINT chk_idr_field_edits_old_value CHECK ((old_value IS NULL) = (edit_type IN ('pay_item_add', 'truck_add')))
 );
 
 CREATE INDEX idx_idr_field_edits_idr ON icid.idr_field_edits(idr_id, edited_at);

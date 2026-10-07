@@ -40,7 +40,11 @@ EDIT_STAGES = {
 
 # What each kind of edit is logged as in icid.idr_audit
 AUDIT_ACTIONS = {"field_change": "field_edit", "pay_item_revision": "pay_item_revise", "pay_item_add": "pay_item_add",
-                 "pay_item_approve": "pay_item_approve"}
+                 "pay_item_approve": "pay_item_approve", "truck_add": "truck_add"}
+
+# The edits that add an entry to one of a report's lists, and the list each adds to. There was nothing before one,
+# so it has no old_value (chk_idr_field_edits_old_value).
+ADDED_TO = {"pay_item_add": "payItems", "truck_add": "trucks"}
 
 
 def _target_cte(as_reviewer: bool, status: str) -> str:
@@ -83,10 +87,10 @@ def _log_values(report_id: Optional[UUID], field_path: str, edit_type: str, old_
                 editor_uuid: UUID, status: str) -> tuple:
     """
     Line up the parameters _log_ctes takes.
-    Takes the edit's report (None for a header field), path, type, old and new values (old_value None with edit_type 'pay_item_add' means there was none), the editor and the IDR's status.
+    Takes the edit's report (None for a header field), path, type, old and new values (an edit that adds an entry, 'pay_item_add' or 'truck_add', has no old value), the editor and the IDR's status.
     Returns the parameter tuple.
     """
-    old = None if edit_type == "pay_item_add" else Jsonb(old_value)
+    old = None if edit_type in ADDED_TO else Jsonb(old_value)
     return (report_id, field_path, edit_type, old, Jsonb(new_value), editor_uuid, EDIT_STAGES[status][0],
             AUDIT_ACTIONS[edit_type])
 
@@ -161,24 +165,25 @@ def apply_report_edit(idr_id: UUID, report_id: UUID, field_path: str, json_path:
     ))
 
 
-def append_pay_item(idr_id: UUID, report_id: UUID, pay_item: dict[str, Any], editor_uuid: UUID, status: str,
-                    as_reviewer: bool) -> Optional[list[dict[str, Any]]]:
+def _append_entry(idr_id: UUID, report_id: UUID, edit_type: str, entry: dict[str, Any], editor_uuid: UUID, status: str,
+                  as_reviewer: bool) -> Optional[list[dict[str, Any]]]:
     """
-    Add a pay item to the end of a report's payItems, for an IDR in review, and log it as a 'pay_item_add' edit, in one statement.
-    Takes the IDR and report uuids, the item (it must carry its "id"), the editor's uuid, the review status the IDR is in, and whether the editor must be that stage's reviewer (False for an admin).
-    Returns a one-row list with the edit; an empty list if the IDR left that status, changed reviewer, or the report isn't in it; None on failure. Raises ValueError for an item without an id.
+    Add an entry to the end of one of a report's lists, for an IDR in review, and log it as an edit, in one statement.
+    Takes the IDR and report uuids, the edit type (it names the list, see ADDED_TO), the entry (it must carry its "id"), the editor's uuid, the review status the IDR is in, and whether the editor must be that stage's reviewer (False for an admin).
+    Returns a one-row list with the edit; an empty list if the IDR left that status, changed reviewer, or the report isn't in it; None on failure. Raises ValueError for an entry without an id.
     """
-    if not pay_item.get("id"):
-        raise ValueError("A pay item needs an id before it is added")
+    if not entry.get("id"):
+        raise ValueError("An entry needs an id before it is added")
+    key = ADDED_TO[edit_type]
 
     sql = f"""
         WITH {_target_cte(as_reviewer, status)},
         changed AS (
             UPDATE icid.idr_reports r
             SET report_data = jsonb_set(
-                    r.report_data, '{{payItems}}',
-                    (CASE WHEN jsonb_typeof(r.report_data->'payItems') = 'array'
-                          THEN r.report_data->'payItems' ELSE '[]'::jsonb END) || jsonb_build_array(%s::jsonb)),
+                    r.report_data, '{{{key}}}',
+                    (CASE WHEN jsonb_typeof(r.report_data->'{key}') = 'array'
+                          THEN r.report_data->'{key}' ELSE '[]'::jsonb END) || jsonb_build_array(%s::jsonb)),
                 updated_at = now()
             FROM target t
             WHERE r.idr_id = t.idr_id AND r.report_id = %s
@@ -193,9 +198,33 @@ def append_pay_item(idr_id: UUID, report_id: UUID, pay_item: dict[str, Any], edi
         {_log_ctes()}"""
     locked_by = (editor_uuid,) if as_reviewer else ()
     return run_query(sql, (
-        idr_id, status, *locked_by, Jsonb(pay_item), report_id,
-        *_log_values(report_id, f"payItems[{pay_item['id']}]", "pay_item_add", None, pay_item, editor_uuid, status),
+        idr_id, status, *locked_by, Jsonb(entry), report_id,
+        *_log_values(report_id, f"{key}[{entry['id']}]", edit_type, None, entry, editor_uuid, status),
     ))
+
+
+def append_pay_item(idr_id: UUID, report_id: UUID, pay_item: dict[str, Any], editor_uuid: UUID, status: str,
+                    as_reviewer: bool) -> Optional[list[dict[str, Any]]]:
+    """
+    Add a pay item to the end of a report's payItems, for an IDR in review, and log it as a 'pay_item_add' edit, in one statement.
+    Takes the IDR and report uuids, the item (it must carry its "id"), the editor's uuid, the review status the IDR is in, and whether the editor must be that stage's reviewer (False for an admin).
+    Returns a one-row list with the edit; an empty list if the IDR left that status, changed reviewer, or the report isn't in it; None on failure. Raises ValueError for an item without an id.
+    """
+    if not pay_item.get("id"):
+        raise ValueError("A pay item needs an id before it is added")
+    return _append_entry(idr_id, report_id, "pay_item_add", pay_item, editor_uuid, status, as_reviewer)
+
+
+def append_truck(idr_id: UUID, report_id: UUID, truck: dict[str, Any], editor_uuid: UUID, status: str,
+                 as_reviewer: bool) -> Optional[list[dict[str, Any]]]:
+    """
+    Add a truck to the end of a report's trucks, for an IDR in review, and log it as a 'truck_add' edit (field_path trucks[<truck id>]), in one statement.
+    Takes the IDR and report uuids, the truck (it must carry its "id"), the editor's uuid, the review status the IDR is in, and whether the editor must be that stage's reviewer (False for an admin).
+    Returns a one-row list with the edit; an empty list if the IDR left that status, changed reviewer, or the report isn't in it; None on failure. Raises ValueError for a truck without an id.
+    """
+    if not truck.get("id"):
+        raise ValueError("A truck needs an id before it is added")
+    return _append_entry(idr_id, report_id, "truck_add", truck, editor_uuid, status, as_reviewer)
 
 
 def log_pay_item_approval(idr_id: UUID, report_id: UUID, field_path: str, quantity_path: list[str], quantity: Any,

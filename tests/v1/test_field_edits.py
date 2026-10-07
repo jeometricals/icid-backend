@@ -855,3 +855,100 @@ class TestApprovePayItem:
         with signed_in(OLIVE) as client, backend(edits=()) as seen:
             assert client.post(approve_url(ITEM_1), json={"anything": 1}).status_code == 200
         assert len(seen["writes"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/idrs/{idr_id}/reports/{report_id}/trucks/add
+# ---------------------------------------------------------------------------
+
+TRUCK_URL = f"/v1/idrs/{IDR_ID}/reports/{MIX_ID}/trucks/add"
+NEW_TRUCK = {"truckOrTicketNo": "T-103", "slump": "4.5", "loadSizeCy": "10", "inspectionSticker": "Y"}
+TRUCK_KEYS = {"id", "truckOrTicketNo", "inspectionSticker", "loadSizeCy", "endBatch", "mixingRevs", "startDischTime",
+              "endDischTime", "slump", "airContent", "concTemp", "cylinderNumbers"}
+
+
+class TestAddTruck:
+    def test_the_truck_joins_the_end_of_the_reports_trucks_with_a_fresh_id(self):
+        with signed_in(OLIVE) as client, backend() as seen:
+            response = client.post(TRUCK_URL, json=NEW_TRUCK)
+        assert response.status_code == 200 and response.json()["message"] == "Truck added"
+        sql, params = seen["writes"][0]
+        assert "jsonb_set( r.report_data, '{trucks}'" in sql and "|| jsonb_build_array(%s::jsonb)" in sql
+        kind, truck = params[3]
+        assert kind == "json" and UUID(truck["id"])
+        assert set(truck) == TRUCK_KEYS  # every key the report form saves
+        assert (truck["truckOrTicketNo"], truck["slump"], truck["loadSizeCy"], truck["inspectionSticker"]) == (
+            "T-103", "4.5", "10", "Y")
+        assert (truck["endBatch"], truck["cylinderNumbers"]) == ("", "")  # blank where nothing was sent
+        assert params[4:] == [UUID(MIX_ID), UUID(MIX_ID), f"trucks[{truck['id']}]", "truck_add", None,
+                              ("json", truck), OLIVE["uuid"], "stage1", "truck_add"]
+
+    def test_it_answers_with_the_idr_its_reports_and_its_edits(self):
+        with signed_in(OLIVE) as client, backend():
+            data = client.post(TRUCK_URL, json=NEW_TRUCK).json()["data"]
+        assert data["idr_id"] == IDR_ID and len(data["reports"]) == 3 and len(data["field_edits"]) == 1
+
+    def test_two_added_trucks_get_different_ids(self):
+        with signed_in(OLIVE) as client, backend() as seen:
+            client.post(TRUCK_URL, json=NEW_TRUCK)
+            client.post(TRUCK_URL, json=NEW_TRUCK)
+        first, second = (write[1][3][1]["id"] for write in seen["writes"])
+        assert first != second
+
+    def test_text_is_trimmed_and_numbers_become_text(self):
+        with signed_in(OLIVE) as client, backend() as seen:
+            client.post(TRUCK_URL, json={"truckOrTicketNo": " T-9 ", "slump": 4.5, "mixingRevs": 90})
+        truck = seen["writes"][0][1][3][1]
+        assert (truck["truckOrTicketNo"], truck["slump"], truck["mixingRevs"]) == ("T-9", "4.5", "90")
+        assert truck["inspectionSticker"] is None
+
+    @pytest.mark.parametrize("body", [{"truckOrTicketNo": "T-9"}, {"slump": "4"}])
+    def test_a_truck_or_ticket_number_or_a_slump_is_enough(self, body):
+        with signed_in(OLIVE) as client, backend() as seen:
+            assert client.post(TRUCK_URL, json=body).status_code == 200
+        assert len(seen["writes"]) == 1
+
+    @pytest.mark.parametrize("body", [{}, {"truckOrTicketNo": " ", "slump": ""}, {"airContent": "6"}])
+    def test_a_truck_with_neither_is_400(self, body):
+        with signed_in(OLIVE) as client, backend() as seen:
+            response = client.post(TRUCK_URL, json=body)
+        assert response.status_code == 400
+        assert response.json() == {"detail": "A truck needs a truck or ticket number, or a slump"}
+        assert seen["writes"] == []
+
+    def test_a_sticker_answer_the_form_doesnt_have_is_422(self):
+        with signed_in(OLIVE) as client, backend() as seen:
+            assert client.post(TRUCK_URL, json={**NEW_TRUCK, "inspectionSticker": "maybe"}).status_code == 422
+        assert seen["writes"] == []
+
+    def test_a_report_that_isnt_a_conc_mix_is_400(self):
+        with signed_in(OLIVE) as client, backend() as seen:
+            response = client.post(f"/v1/idrs/{IDR_ID}/reports/{SWCB_ID}/trucks/add", json=NEW_TRUCK)
+        assert response.status_code == 400 and response.json() == {"detail": "This kind of report has no trucks"}
+        assert seen["writes"] == []
+
+    def test_a_report_that_isnt_in_the_idr_is_404(self):
+        other = "0a0b0c0d-0000-4000-8000-00000000000f"
+        with signed_in(OLIVE) as client, backend() as seen:
+            response = client.post(f"/v1/idrs/{IDR_ID}/reports/{other}/trucks/add", json=NEW_TRUCK)
+        assert response.status_code == 404 and seen["writes"] == []
+
+    def test_an_idr_that_isnt_in_review_is_400(self):
+        with signed_in(OLIVE) as client, backend(idr={**STAGE1_IDR, "status": "draft"}) as seen:
+            response = client.post(TRUCK_URL, json=NEW_TRUCK)
+        assert response.status_code == 400 and response.json() == NOT_IN_REVIEW
+        assert seen["writes"] == []
+
+    def test_an_idr_that_changed_meanwhile_is_409(self):
+        with signed_in(OLIVE) as client, backend(applied=[]):
+            response = client.post(TRUCK_URL, json=NEW_TRUCK)
+        assert response.status_code == 409 and response.json() == CHANGED
+
+    def test_a_failed_statement_is_500(self):
+        with signed_in(OLIVE) as client, backend(applied=None):
+            assert client.post(TRUCK_URL, json=NEW_TRUCK).status_code == 500
+
+    def test_nothing_is_rebuilt_for_an_addendum(self):
+        with signed_in(OLIVE) as client, backend() as seen:
+            client.post(TRUCK_URL, json=NEW_TRUCK)
+        seen["regen"].assert_not_called()

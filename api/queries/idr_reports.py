@@ -19,21 +19,40 @@ IDR_REPORT_COLUMNS = """
 """
 
 
-# A report's report_data with an "id" on every pay item that has none (r is the idr_reports row). Pay items are
-# entries in report_data, not rows, and a reviewer's edit has to name one; position alone doesn't survive a re-save.
-# migrations/020_field_edits.sql runs the same expression over the reports that existed before it.
-REPORT_DATA_WITH_PAY_ITEM_IDS = """
-                CASE WHEN jsonb_typeof(r.report_data->'payItems') = 'array'
-                          AND jsonb_array_length(r.report_data->'payItems') > 0
-                     THEN jsonb_set(r.report_data, '{payItems}', (
+def _report_data_with_ids(key: str) -> str:
+    """
+    Write the expression for a report's report_data with an "id" on every entry of one of its lists that has none.
+    Takes the list's key in report_data ("payItems" or "trucks"; never anything a caller sent).
+    Returns the SQL, in which r is the idr_reports row; a report without the list, or with an empty one, keeps its report_data as it is.
+    """
+    return f"""
+                CASE WHEN jsonb_typeof(r.report_data->'{key}') = 'array'
+                          AND jsonb_array_length(r.report_data->'{key}') > 0
+                     THEN jsonb_set(r.report_data, '{{{key}}}', (
                               SELECT jsonb_agg(
                                   CASE WHEN jsonb_typeof(e.item) = 'object' AND NOT (e.item ? 'id')
                                        THEN e.item || jsonb_build_object('id', gen_random_uuid()::text)
                                        ELSE e.item END
                                   ORDER BY e.ord)
-                              FROM jsonb_array_elements(r.report_data->'payItems') WITH ORDINALITY AS e(item, ord)
+                              FROM jsonb_array_elements(r.report_data->'{key}') WITH ORDINALITY AS e(item, ord)
                           ))
                      ELSE r.report_data END"""
+
+
+# A report's report_data with an "id" on every pay item that has none (r is the idr_reports row). Pay items are
+# entries in report_data, not rows, and a reviewer's edit has to name one; position alone doesn't survive a re-save.
+# migrations/020_field_edits.sql runs the same expression over the reports that existed before it.
+REPORT_DATA_WITH_PAY_ITEM_IDS = _report_data_with_ids("payItems")
+
+# The same for a Concrete Truck & Mix Info report's trucks, so the export can find a truck a reviewer added
+# (migrations/023_truck_add.sql gave the existing ones theirs).
+REPORT_DATA_WITH_TRUCK_IDS = _report_data_with_ids("trucks")
+
+# What submit writes as each report's report_data: ids on its trucks for a CONC_MIX, on its pay items otherwise
+# (no report holds both lists)
+REPORT_DATA_WITH_IDS = f"""
+                CASE WHEN r.report_type = 'CONC_MIX' THEN {REPORT_DATA_WITH_TRUCK_IDS}
+                     ELSE {REPORT_DATA_WITH_PAY_ITEM_IDS} END"""
 
 
 def list_reports_for_idr(idr_id: UUID) -> Optional[list[dict[str, Any]]]:

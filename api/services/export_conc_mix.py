@@ -253,22 +253,37 @@ def _stamp_trucks(workbook: WorkbookTemplate, sheet: str, trucks: list[dict[str,
     """
     Fill the Trucks table, one truck per row, and mark each one's inspection sticker. A value a reviewer edited
     prints as its chain; a sticker answer they changed keeps a struck X where it was and gets an X in the redline
-    colour, followed by their initials.
+    colour, followed by their initials. A truck a reviewer added has every cell it fills in the redline colour, its
+    sticker's X included, and the adder's initials after its truck or ticket number.
     Takes the workbook, the sheet, its trucks (at most 11, each with the path edits name it by, see truck_rows; rows
     past them stay blank, their Y / N letters kept) and the report's redlines (none unless given).
     Returns nothing.
     """
     for index, row in enumerate(TRUCK_ROWS):
         truck = trucks[index] if index < len(trucks) else {}
+        added_by = redlines.added_truck(truck)
         for field, column in TRUCK_COLUMNS.items():
-            stamp_field(workbook, sheet, f"{column}{row}", truck.get(field), entry_edits(redlines, truck, field))
+            cell, edits = f"{column}{row}", entry_edits(redlines, truck, field)
+            stamp_field(workbook, sheet, cell, truck.get(field), edits)
+            if added_by is not None and (edits or text_value(truck.get(field))):
+                workbook.set_font_color(sheet, cell, PAY_REDLINE_COLOR)
+        number = text_value(truck.get("truckOrTicketNo"))
+        if added_by and not entry_edits(redlines, truck, "truckOrTicketNo"):
+            cell = f"{TRUCK_COLUMNS['truckOrTicketNo']}{row}"
+            workbook.set_cell_runs(sheet, cell, [TextRun(number or "", color=PAY_REDLINE_COLOR),
+                                                 TextRun(f" {added_by}" if number else added_by,
+                                                         color=PAY_REDLINE_COLOR, points=REDLINE_INITIALS_FONT_PT)])
+            workbook.shrink_on_one_line(sheet, cell)
         sticker = truck.get("inspectionSticker")
         chain = redline_chain(entry_edits(redlines, truck, "inspectionSticker"), sticker, checklist_answer)
         for answer, column in STICKER_CELLS.items():
+            cell = f"{column}{row}"
             if chain:
-                stamp_answer_box(workbook, sheet, f"{column}{row}", answer, chain, _chain_initials(chain), blank=answer)
+                stamp_answer_box(workbook, sheet, cell, answer, chain, _chain_initials(chain), blank=answer)
+            elif sticker == answer and added_by is not None:
+                workbook.set_cell_runs(sheet, cell, [TextRun(CHECK_MARK, color=PAY_REDLINE_COLOR)])
             else:
-                workbook.set_cell(sheet, f"{column}{row}", CHECK_MARK if sticker == answer else answer)
+                workbook.set_cell(sheet, cell, CHECK_MARK if sticker == answer else answer)
 
 
 def _stamp_specs_and_materials(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any],

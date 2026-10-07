@@ -69,6 +69,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/revise` — same caller: body `{revised_quantity}`; the pay item is found by its id in whichever report holds it. 404 when no report of the IDR holds it
 - `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/approve` — same caller, no body: logs their approval of the item as it stands (nothing in the report changes) and returns the IDR with `field_edits`. Approving an item they have already attested to at this stage is a 200 that logs nothing
 - `POST /v1/idrs/{idr_id}/pay-items/add` — same caller: body `{report_id, item_no, budget_code, quantity, unit, description}`; appends a pay item to that report (General, SWCB or AC), logged as added by the reviewer
+- `POST /v1/idrs/{idr_id}/reports/{report_id}/trucks/add` — same caller: body is a truck with any of the keys the report form saves (`truckOrTicketNo`, `slump`, `loadSizeCy`, `endBatch`, `mixingRevs`, `startDischTime`, `endDischTime`, `airContent`, `concTemp`, `cylinderNumbers`, `inspectionSticker`); appends it to that Concrete Truck & Mix Info report's trucks, logged as added by the reviewer. 400 for a report that isn't a CONC_MIX, or a truck with neither a truck or ticket number nor a slump
 - `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at`, `re_reviewer_uuid` and `stage2_accepted_at` cleared, so an RE must accept and approve again; the IDR number stays. 400 for a draft, submitted, Stage 1 or deleted IDR
 - `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept). Deleting an IDR already deleted is a 200 that changes nothing
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
@@ -189,13 +190,19 @@ Any change must follow these.
   - **Pay items carry an `id`.** They are entries in `report_data`, not rows of a table. Migration 020 gave every
     existing one an id, and submit gives one to any item without it (`REPORT_DATA_WITH_PAY_ITEM_IDS`, in the same
     UPDATE that numbers the pages). A client that saves a report must send each item's `id` back.
+  - **Trucks carry an `id` too, but only to find an added one.** Migration 023 gave every existing truck an id,
+    and submit gives one to any truck without it (`REPORT_DATA_WITH_IDS`: trucks on a CONC_MIX, pay items on any
+    other report). A truck a reviewer adds is logged as `truck_add` on `trucks[<truck id>]`, its whole self as
+    `new_value` and no `old_value`, and the export finds its row by that id. A truck's own fields are still
+    named by position (`trucks[0].slump`). A client that saves a Conc Mix must send each truck's `id` back.
+    There is no approving, revising or removing a truck: a reviewer edits its fields like any other.
   - **Known limitation: other lists are addressed by position** (`additionalWorkforce`, `additionalEquipment`,
     Conc Mix trucks, AC courses and tickets). That is exact while an IDR is in review, since nothing else can
     change it. Once it is back with its inspector (returned, or unlocked and then returned) and they insert,
     remove or reorder rows, the edit history of those lists can attach to the wrong row. The values themselves
     are never affected. Revisit if it ever bites.
   - **The audit note is a pointer**, `{"edit_id", "field_path"}`, not a copy of the values (`EDIT_AUDIT_CTE`);
-    actions are `field_edit`, `pay_item_revise` and `pay_item_add`.
+    actions are `field_edit`, `pay_item_revise`, `pay_item_add`, `pay_item_approve` and `truck_add`.
   - **`stage_reviewer`** (`api/services/auth.py`) is the dependency for the edit routes: the caller must be the
     IDR's `stage1_reviewer_uuid` in `stage1_review` or its `re_reviewer_uuid` in `stage2_review`, and still hold
     a role that reviews at that stage; an admin stands in. 400 for an IDR that isn't in review, 403 otherwise.
@@ -384,6 +391,9 @@ Any change must follow these.
     - `trucks[n]` is the truck's place in the saved list, whichever Conc Mix sheet it prints on. A sticker answer
       changes like a safety answer, the initials after the X.
     - A box the inspector changed after the last edit shows as it stands, with no marks.
+    - A truck a reviewer added (`truck_add`) has every cell it fills in blue, its sticker's X included, and the
+      adder's initials after its truck or ticket number. Later edits of its fields chain on top, as for any
+      truck. A twelfth truck prints on another Conc Mix sheet, numbered and counted like any other.
   - **Not redlined:** SWCB's operation, activity and matrix and AC's own sections (the K2 edit UI doesn't reach
     them); AC Bk's safety remarks, which print inside its remarks text as they stand; and Concrete Cylinder
     Data, which the export doesn't print at all (the template has no cylinder form; Phase 1b backlog).

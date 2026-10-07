@@ -6,7 +6,7 @@ from psycopg.errors import UniqueViolation
 
 from api.db.runner import run_query
 from api.queries.idr_audit import AUDIT_CTE
-from api.queries.idr_reports import REPORT_DATA_WITH_PAY_ITEM_IDS
+from api.queries.idr_reports import REPORT_DATA_WITH_IDS
 
 IDR_COLUMNS = """
     idr_id,
@@ -301,7 +301,7 @@ def submit_idr(idr_id: UUID, signature_path: str, actor_uuid: UUID) -> Optional[
         numbered AS (
             UPDATE icid.idr_reports r
             SET page_number = o.page_number, updated_at = now(),
-                report_data = {REPORT_DATA_WITH_PAY_ITEM_IDS}
+                report_data = {REPORT_DATA_WITH_IDS}
             FROM ordered o
             WHERE r.report_id = o.report_id
         ),

@@ -4962,3 +4962,55 @@ class TestConcMixRedlines:
         assert (sheet["X25"].value, sheet["Z28"].value, sheet["B41"].value) == (
             "Volumetric mixer", "4.5", "Class of Concrete: B-32")
         assert (sheet["G28"].value, sheet["I28"].value) == ("Y", "X")
+
+
+class TestAddedTruckOnTheExport:
+    data = {"trucks": [
+        {"id": "t1", "truckOrTicketNo": "T-101", "slump": "4.5", "inspectionSticker": "Y"},
+        {"id": "t2", "truckOrTicketNo": "T-102", "slump": "4", "airContent": "", "inspectionSticker": "N"},
+    ]}
+    added = redline_edit("trucks[t2]", "truck_add", None, data["trucks"][1], "RM", MIX_REPORT_ID)
+
+    def test_every_filled_cell_of_an_added_truck_is_blue(self):
+        sheet = redlined_mix(self.data, [self.added])["Conc Mix"]
+        assert sheet["Z29"].value == "4" and sheet["Z29"].font.color.rgb == BLUE
+        assert marks(sheet["I29"]) == [("X", BLUE, False)]  # its sticker answer
+        assert sheet["G29"].value == "Y"                    # the pre-printed letter of the other answer stays
+        assert sheet["AC29"].value is None                  # nothing is put in a cell it left empty
+
+    def test_the_adders_initials_follow_its_truck_or_ticket_number_in_arial_6(self):
+        cell = redlined_mix(self.data, [self.added])["Conc Mix"]["B29"]
+        assert runs(cell) == [("T-102", BLUE, False, 8, False), (" RM", BLUE, False, 6, False)]
+        assert cell.alignment.shrink_to_fit is True
+
+    def test_the_inspectors_trucks_stay_black(self):
+        sheet = redlined_mix(self.data, [self.added])["Conc Mix"]
+        black = lambda cell: cell.font.color is None or cell.font.color.rgb != BLUE
+        assert sheet["B28"].value == "T-101" and black(sheet["B28"]) and black(sheet["Z28"])
+        assert sheet["G28"].value == "X"
+
+    def test_an_added_truck_is_found_by_its_id_wherever_it_now_is(self):
+        moved = {"trucks": list(reversed(self.data["trucks"]))}
+        sheet = redlined_mix(moved, [self.added])["Conc Mix"]
+        assert marks(sheet["B28"])[0] == ("T-102", BLUE, False)
+        assert sheet["B29"].value == "T-101"
+
+    def test_a_later_edit_of_an_added_trucks_field_chains_on_top(self):
+        edits = [self.added, mix_edit("trucks[1].slump", "3.5", "4", "MK")]
+        sheet = redlined_mix(self.data, edits)["Conc Mix"]
+        assert marks(sheet["Z29"]) == [("3.5", None, True), ("4", BLUE, False), ("MK", BLUE, False)]
+        assert marks(sheet["B29"]) == [("T-102", BLUE, False), ("RM", BLUE, False)]
+
+    def test_a_truck_without_an_id_or_an_add_is_not_marked(self):
+        from api.services.export_redlines import Redlines
+        redlines = Redlines([self.added], MIX_REPORT_ID)
+        assert redlines.added_truck({"truckOrTicketNo": "T-1"}) is None
+        assert redlines.added_truck(self.data["trucks"][0]) is None
+        assert redlines.added_truck(self.data["trucks"][1]) == "RM"
+        assert Redlines([self.added], UUID(int=9)).added_truck(self.data["trucks"][1]) is None
+
+    def test_a_twelfth_truck_added_by_a_reviewer_prints_on_another_sheet(self):
+        trucks = [{"id": f"t{n}", "truckOrTicketNo": f"T-{n}", "slump": "4"} for n in range(12)]
+        added = redline_edit("trucks[t11]", "truck_add", None, trucks[11], "RM", MIX_REPORT_ID)
+        book = redlined_mix({"trucks": trucks}, [added])
+        assert marks(book["Conc Mix 2"]["B28"]) == [("T-11", BLUE, False), ("RM", BLUE, False)]

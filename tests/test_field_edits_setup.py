@@ -15,10 +15,10 @@ from psycopg.types.json import Jsonb
 from api.queries import idr_field_edits
 from api.queries.idr_audit import EDIT_AUDIT_CTE
 from api.queries.idr_field_edits import (
-    AUDIT_ACTIONS, EDIT_STAGES, FIELD_EDIT_COLUMNS, append_pay_item, apply_header_edit, apply_report_edit,
-    list_field_edits, log_pay_item_approval,
+    AUDIT_ACTIONS, EDIT_STAGES, FIELD_EDIT_COLUMNS, append_pay_item, append_truck, apply_header_edit,
+    apply_report_edit, list_field_edits, log_pay_item_approval,
 )
-from api.queries.idr_reports import REPORT_DATA_WITH_PAY_ITEM_IDS
+from api.queries.idr_reports import REPORT_DATA_WITH_IDS, REPORT_DATA_WITH_PAY_ITEM_IDS, REPORT_DATA_WITH_TRUCK_IDS
 from api.queries.idrs import HEADER_COLUMNS, submit_idr
 from tests.test_auth_setup import sql, table_columns
 
@@ -80,8 +80,10 @@ class TestFieldEditsSchema:
 
     def test_the_migration_and_schema_sql_declare_the_same_table(self):
         assert (ROOT / MIGRATION).is_file()
-        # but for the edit type migration 021 added to the CHECK since
-        assert self.table(MIGRATION) == self.table("schema.sql").replace(", 'pay_item_approve'", "")
+        # but for the edit types migrations 021 and 023 added to the CHECKs since
+        as_first_made = self.table("schema.sql").replace(", 'pay_item_approve', 'truck_add'", "").replace(
+            "(edit_type IN ('pay_item_add', 'truck_add'))", "(edit_type = 'pay_item_add')")
+        assert self.table(MIGRATION) == as_first_made
 
     def test_the_columns(self):
         assert table_columns("idr_field_edits") == {
@@ -100,9 +102,8 @@ class TestFieldEditsSchema:
         assert re.findall(r"'(\w+)'", types) == list(AUDIT_ACTIONS)
         assert re.findall(r"'(\w+)'", stages) == [stage for stage, _ in EDIT_STAGES.values()]
 
-    def test_only_an_added_pay_item_has_no_old_value(self):
-        assert "chk_idr_field_edits_old_value CHECK ((old_value IS NULL) = (edit_type = 'pay_item_add'))" in self.table(
-            "schema.sql")
+    def test_only_an_added_pay_item_or_truck_has_no_old_value(self):
+        assert f"{OLD_VALUE_CHECK} );" in self.table("schema.sql")
 
     def test_an_idrs_edits_are_indexed_in_order_and_a_fields_together(self):
         table = self.table(MIGRATION)
@@ -170,6 +171,14 @@ class TestSubmitGivesPayItemsIds:
         statement = self.submit_sql()
         assert "SET page_number = o.page_number, updated_at = now(), report_data = CASE WHEN" in statement
         assert flat(REPORT_DATA_WITH_PAY_ITEM_IDS) in statement
+
+    def test_a_conc_mix_gets_ids_on_its_trucks_and_any_other_report_on_its_pay_items(self):
+        statement = self.submit_sql()
+        assert flat(REPORT_DATA_WITH_IDS) in statement
+        assert flat(REPORT_DATA_WITH_IDS) == (f"CASE WHEN r.report_type = 'CONC_MIX' THEN "
+                                              f"{flat(REPORT_DATA_WITH_TRUCK_IDS)} ELSE "
+                                              f"{flat(REPORT_DATA_WITH_PAY_ITEM_IDS)} END")
+        assert flat(REPORT_DATA_WITH_TRUCK_IDS) == flat(REPORT_DATA_WITH_PAY_ITEM_IDS).replace("payItems", "trucks")
         assert statement.count("UPDATE icid.idr_reports") == 1  # one update of each report, not two in one statement
 
     def test_a_report_without_pay_items_keeps_its_data_as_it_is(self):
@@ -321,6 +330,35 @@ class TestAppendPayItem:
         query.assert_not_called()
 
 
+class TestAppendTruck:
+    truck = {"id": ITEM_ID, "truckOrTicketNo": "T-103", "slump": "4", "inspectionSticker": "Y"}
+
+    def test_the_truck_goes_on_the_end_of_the_list_and_is_logged_as_an_add_under_its_id(self):
+        statement, params = run(append_truck, IDR_ID, REPORT_ID, self.truck, EDITOR, "stage1_review", True)
+        assert ("SET report_data = jsonb_set( r.report_data, '{trucks}', (CASE WHEN "
+                "jsonb_typeof(r.report_data->'trucks') = 'array' THEN r.report_data->'trucks' ELSE '[]'::jsonb END) "
+                "|| jsonb_build_array(%s::jsonb)), updated_at = now()") in statement
+        assert unwrapped(params) == [IDR_ID, "stage1_review", EDITOR, ("json", self.truck), REPORT_ID, REPORT_ID,
+                                     f"trucks[{ITEM_ID}]", "truck_add", None, ("json", self.truck), EDITOR,
+                                     "stage1", "truck_add"]
+
+    def test_it_is_one_statement_on_a_locked_idr_like_an_added_pay_item(self):
+        statement, _ = run(append_truck, IDR_ID, REPORT_ID, self.truck, EDITOR, "stage1_review", True)
+        item, _ = run(append_pay_item, IDR_ID, REPORT_ID, self.truck, EDITOR, "stage1_review", True)
+        assert statement == item.replace("payItems", "trucks")
+        assert statement.count(";") == 1 and "FOR UPDATE" in statement
+
+    def test_there_was_no_old_value(self):
+        _, params = run(append_truck, IDR_ID, REPORT_ID, self.truck, EDITOR, "stage2_review", False)
+        assert params[7] is None  # SQL NULL, as the table's CHECK requires of an add
+
+    def test_a_truck_without_an_id_is_refused_before_anything_runs(self):
+        with patch.object(idr_field_edits, "run_query") as query:
+            with pytest.raises(ValueError, match="needs an id"):
+                append_truck(IDR_ID, REPORT_ID, {"slump": "4"}, EDITOR, "stage1_review", True)
+        query.assert_not_called()
+
+
 class TestListFieldEdits:
     def test_an_idrs_edits_come_oldest_first_with_the_editors_name(self):
         named = {**EDIT_ROW, "editor_first_name": "Olive", "editor_last_name": "Engineer"}
@@ -353,7 +391,6 @@ class TestMigration021:
         drop = "ALTER TABLE icid.idr_field_edits DROP CONSTRAINT IF EXISTS chk_idr_field_edits_type;"
         add = f"ALTER TABLE icid.idr_field_edits ADD {TYPE_CHECK};"
         assert migration.index(drop) < migration.index(add)
-        assert f"{TYPE_CHECK}," in flat(sql("schema.sql"))
 
     def test_it_touches_nothing_else(self):
         migration = sql(MIGRATION_021)
@@ -362,7 +399,7 @@ class TestMigration021:
         assert "chk_idr_field_edits_old_value" not in migration  # an approval has an old value, like every edit but an add
 
     def test_the_api_logs_an_approval_under_its_own_action(self):
-        assert list(AUDIT_ACTIONS) == ["field_change", "pay_item_revision", "pay_item_add", "pay_item_approve"]
+        assert list(AUDIT_ACTIONS)[:4] == ["field_change", "pay_item_revision", "pay_item_add", "pay_item_approve"]
         assert AUDIT_ACTIONS["pay_item_approve"] == "pay_item_approve"
 
 
@@ -395,3 +432,60 @@ class TestLogPayItemApproval:
     def test_it_is_audited_in_the_same_statement(self):
         statement, _ = run(log_pay_item_approval, *self.args)
         assert statement.index("INSERT INTO icid.idr_field_edits") < statement.index("INSERT INTO icid.idr_audit")
+
+
+
+# ---------------------------------------------------------------------------
+# Migration 023: reviewer-added trucks
+# ---------------------------------------------------------------------------
+
+MIGRATION_023 = "migrations/023_truck_add.sql"
+TYPE_CHECK_023 = ("CONSTRAINT chk_idr_field_edits_type CHECK (edit_type IN ('field_change', 'pay_item_revision', "
+                  "'pay_item_add', 'pay_item_approve', 'truck_add'))")
+OLD_VALUE_CHECK = ("CONSTRAINT chk_idr_field_edits_old_value CHECK ((old_value IS NULL) = "
+                   "(edit_type IN ('pay_item_add', 'truck_add')))")
+
+
+class TestMigration023:
+    def test_it_widens_both_checks_to_what_schema_sql_declares(self):
+        assert (ROOT / MIGRATION_023).is_file()
+        migration, schema = flat(sql(MIGRATION_023)), flat(sql("schema.sql"))
+        for name, check in (("chk_idr_field_edits_type", TYPE_CHECK_023),
+                            ("chk_idr_field_edits_old_value", OLD_VALUE_CHECK)):
+            drop = f"ALTER TABLE icid.idr_field_edits DROP CONSTRAINT IF EXISTS {name};"
+            assert migration.index(drop) < migration.index(f"ALTER TABLE icid.idr_field_edits ADD {check};")
+            assert check in schema
+
+    def test_an_approval_still_needs_an_old_value(self):
+        assert "'pay_item_approve'" not in OLD_VALUE_CHECK and OLD_VALUE_CHECK.count("'") == 4
+
+    def test_it_gives_every_truck_an_id_the_way_submit_does(self):
+        per_truck = ("CASE WHEN jsonb_typeof(e.item) = 'object' AND NOT (e.item ? 'id') THEN e.item || "
+                     "jsonb_build_object('id', gen_random_uuid()::text) ELSE e.item END ORDER BY e.ord) FROM "
+                     "jsonb_array_elements(r.report_data->'trucks') WITH ORDINALITY AS e(item, ord)")
+        assert per_truck in flat(sql(MIGRATION_023)) and per_truck in flat(REPORT_DATA_WITH_TRUCK_IDS)
+
+    def test_the_backfill_is_the_pay_items_one_over_trucks(self):
+        def update(path: str) -> str:
+            text = sql(path)
+            return flat(text[text.index("UPDATE icid.idr_reports"):text.rindex("COMMIT;")])
+        assert update(MIGRATION_023) == update(MIGRATION).replace("payItems", "trucks")
+
+    def test_the_backfill_changes_nothing_else_and_a_second_run_changes_nothing(self):
+        migration = sql(MIGRATION_023)
+        update = migration[migration.index("UPDATE icid.idr_reports"):migration.rindex("COMMIT;")]
+        assert "updated_at" not in update and "SET report_data = jsonb_set(r.report_data, '{trucks}'" in flat(update)
+        assert "WHERE jsonb_typeof(e.item) = 'object' AND NOT (e.item ? 'id')" in flat(update)
+        assert "DELETE FROM" not in migration and migration.count("UPDATE") == 1
+        assert migration.count("BEGIN;") == migration.count("COMMIT;") == 1 and migration.count("ALTER TABLE") == 4
+
+    def test_it_carries_the_checks_that_no_truck_and_nothing_else_changed(self):
+        text = (ROOT / MIGRATION_023).read_text(encoding="utf-8")
+        assert "THEN e - 'id' ELSE e END)::text" in text and "(run pre-check 4 again)" in text
+        assert "(r.report_data - 'trucks')::text || r.updated_at::text" in text and "(run pre-check 5 again)" in text
+        assert "count(DISTINCT e->>'id') AS distinct_ids" in text and "(run pre-check 2 again)" in text
+
+    def test_the_api_logs_an_added_truck_under_its_own_action(self):
+        from api.queries.idr_field_edits import ADDED_TO
+        assert AUDIT_ACTIONS["truck_add"] == "truck_add"
+        assert ADDED_TO == {"pay_item_add": "payItems", "truck_add": "trucks"}
