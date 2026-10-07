@@ -407,7 +407,15 @@ Any change must follow these.
     for `otherCuringMethods`, text. The Curb, Sidewalk and Concrete Base operation boxes follow the matrix and
     are never marked. Only the columns an item takes are written (`MATRIX_ROWS`), so an edit naming
     `sidewalkFoundationPlaced.curb` or `roadwayStoneBasePlaced.sidewalk` / `.curb` prints nothing.
-  - **Not redlined:** AC's own sections (KC2); AC Bk's safety remarks, which print inside its remarks text as they stand; and Concrete Cylinder
+  - **AC's own sections are redlined too** (`export_ac.py`): `pavingContractor.<field>`, `temperature.<field>`,
+    `maxDensity.top` / `.binder`, `pavementCourses[n].<field>`, `materialUsageTop.<field>` and
+    `materialUsageBinder.<field>`, `tackCoat.<field>`, `deliveryTickets[n].<field>` (all chains), and
+    `acRequirements.<key>.value` / `.remarks`, which print like a safety row: struck X where the answer was, blue
+    X where it is, the initials opening the row's remarks, and the remarks as their own chain. `[n]` is the row's
+    place in the saved list, whichever sheet it prints on. There is no adding a course or a ticket.
+    - The paving contractor's name and the two max densities have no box of their own: their chain is centred
+      across a run of cells and can't shrink, so a long one is cut at the run's end.
+  - **Not redlined:** AC Bk's safety remarks, which print inside its remarks text as they stand; and Concrete Cylinder
     Data, which the export doesn't print at all (the template has no cylinder form; Phase 1b backlog).
   - Lists addressed by position (`additionalWorkforce[0].count`) are matched by position, with the limitation
     noted under "Reviewer edits".

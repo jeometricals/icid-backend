@@ -5195,3 +5195,159 @@ class TestAnswerBoxInitials:
         sheet = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), rich_text=True)["Gen Bk"]
         assert marks(sheet["N30"]) == [("X", None, True), ("RM", BLUE, False)]
         assert marks(sheet["N31"]) == [("X", None, True)]
+
+
+AC_REPORT_ID = UUID(int=0xAC01)
+AC_OWN_DATA = {
+    "pavingContractor": {"pavingContractorName": "Empire Paving Corp.", "subcontractor": "Metro Asphalt", "riceNo": "R-2291"},
+    "temperature": {"surfaceStart": "62", "surfaceFinish": "68", "ambientStart": "58", "ambientFinish": "64"},
+    "maxDensity": {"top": "152.4", "binder": "154.1"},
+    "pavementCourses": [{"itemNo": "4.02 CA", "stationTo": "3+50", "length": "250", "weight": "28.5"},
+                        {"itemNo": "4.02 CB", "stationTo": "3+50", "length": "250", "weight": "57.0"}],
+    "materialUsageTop": {"noOfTickets": "3", "qtyUsed": "28.5"},
+    "materialUsageBinder": {"noOfTickets": "5", "qtyWasted": "3"},
+    "acRequirements": {"subgradeCompacted": {"value": "Y", "remarks": ""},
+                       "roadwayCleanDry": {"value": "N", "remarks": "Standing water at STA 2+10"},
+                       "densityTestsTaken": {"value": "NA", "remarks": ""},
+                       "tackCoatOnEdges": {"value": "", "remarks": ""}},
+    "tackCoat": {"noOfGallons": "45", "gallonsPerSy": "0.08", "applicationMethod": "Distributor truck, RS-1"},
+    "deliveryTickets": [{"location": "STA 1+00 NB", "ticketNo": "88101", "temperature": "305"},
+                        {"location": "STA 2+00 NB", "ticketNo": "88102", "temperature": "298"}],
+}
+
+
+def ac_edit(path: str, old, new, initials: str) -> dict:
+    """
+    Build a reviewer's edit of one AC field.
+    Takes the field_path, the old and new values and the editor's initials.
+    Returns the edit row.
+    """
+    return redline_edit(path, "field_change", old, new, initials, AC_REPORT_ID)
+
+
+AC_OWN_EDITS = [
+    ac_edit("pavingContractor.pavingContractorName", "Empire Paving", "Empire Paving Corp.", "RM"),
+    ac_edit("pavingContractor.riceNo", "R-2219", "R-2291", "MK"),
+    ac_edit("temperature.surfaceStart", "60", "62", "RM"),
+    ac_edit("temperature.ambientFinish", "66", "65", "RM"),
+    ac_edit("temperature.ambientFinish", "65", "64", "MK"),
+    ac_edit("maxDensity.binder", "153.8", "154.1", "RM"),
+    ac_edit("pavementCourses[0].stationTo", "3+00", "3+50", "RM"),
+    ac_edit("pavementCourses[1].weight", "55.0", "57.0", "MK"),
+    ac_edit("materialUsageTop.qtyUsed", "29", "28.5", "RM"),
+    ac_edit("materialUsageBinder.qtyWasted", "2", "3", "MK"),
+    ac_edit("acRequirements.roadwayCleanDry.value", "Y", "N", "RM"),
+    ac_edit("acRequirements.roadwayCleanDry.remarks", "Standing water", "Standing water at STA 2+10", "RM"),
+    ac_edit("acRequirements.densityTestsTaken.value", "N", "NA", "MK"),
+    ac_edit("acRequirements.tackCoatOnEdges.value", "Y", "", "RM"),
+    ac_edit("tackCoat.noOfGallons", "40", "45", "RM"),
+    ac_edit("tackCoat.applicationMethod", "Distributor truck", "Distributor truck, RS-1", "MK"),
+    ac_edit("deliveryTickets[0].temperature", "310", "305", "RM"),
+    ac_edit("deliveryTickets[1].ticketNo", "88120", "88102", "MK"),
+]
+CHAIN_OF_ONE = lambda old, new, who: [(old, None, True), (new, BLUE, False), (who, BLUE, False)]
+
+
+def redlined_ac(data: dict = AC_OWN_DATA, edits: list = AC_OWN_EDITS) -> openpyxl.Workbook:
+    """
+    Render an AC report with reviewer edits and load it with its text runs.
+    Takes the report_data and the report's edits.
+    Returns the workbook, fully loaded with rich_text=True.
+    """
+    from api.services.export_redlines import Redlines
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_ac.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data=data, redlines=Redlines(edits, AC_REPORT_ID))
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), rich_text=True)
+
+
+@pytest.fixture(scope="module")
+def ac_book() -> openpyxl.Workbook:
+    """
+    An AC report whose own sections a reviewer edited, rendered once.
+    Takes nothing.
+    Returns the workbook, with its text runs.
+    """
+    return redlined_ac()
+
+
+class TestAcOwnSectionRedlines:
+    def test_the_paving_contractors_name_is_centred_across_its_run_as_a_chain(self, ac_book):
+        sheet = ac_book["AC Fr"]
+        assert marks(sheet["L20"]) == CHAIN_OF_ONE("Empire Paving", "Empire Paving Corp.", "RM")
+        assert sheet["L20"].alignment.horizontal == "centerContinuous"
+        assert marks(sheet["L22"]) == CHAIN_OF_ONE("R-2219", "R-2291", "MK")
+        assert sheet["L21"].value == "Metro Asphalt"  # nobody edited the subcontractor
+
+    def test_temperatures_and_max_density(self, ac_book):
+        sheet = ac_book["AC Fr"]
+        assert marks(sheet["AA23"]) == CHAIN_OF_ONE("60", "62", "RM")
+        assert marks(sheet["AM23"]) == [("66", None, True), ("65", BLUE, True), ("RM", BLUE, False),
+                                        ("64", BLUE, False), ("MK", BLUE, False)]
+        assert sheet["AA23"].alignment.shrink_to_fit is True
+        assert marks(sheet["AH25"]) == CHAIN_OF_ONE("153.8", "154.1", "RM")
+        assert (sheet["AE23"].value, sheet["Y25"].value) == ("68", "152.4")
+
+    def test_a_pavement_course_is_found_by_its_place_in_the_list(self, ac_book):
+        sheet = ac_book["AC Fr"]
+        assert marks(sheet["N28"]) == CHAIN_OF_ONE("3+00", "3+50", "RM")
+        assert marks(sheet["AM29"]) == CHAIN_OF_ONE("55.0", "57.0", "MK")
+        assert (sheet["N29"].value, sheet["AM28"].value, sheet["B28"].value) == ("3+50", "28.5", "4.02 CA")
+
+    def test_a_course_on_a_later_sheet_keeps_its_place_in_the_list(self):
+        courses = [{"itemNo": f"4.{n:02d}", "length": "100"} for n in range(6)]
+        book = redlined_ac({"pavementCourses": courses}, [ac_edit("pavementCourses[5].length", "90", "100", "RM")])
+        assert marks(book["AC Fr 2"]["T29"]) == CHAIN_OF_ONE("90", "100", "RM")
+        assert book["AC Fr"]["T29"].value == "100"
+
+    def test_material_usage_top_and_binder(self, ac_book):
+        sheet = ac_book["AC Fr"]
+        assert marks(sheet["S35"]) == CHAIN_OF_ONE("29", "28.5", "RM")
+        assert marks(sheet["AM36"]) == CHAIN_OF_ONE("2", "3", "MK")
+        assert (sheet["H34"].value, sheet["AB34"].value) == ("3", "5")
+
+    def test_a_changed_requirement_is_struck_where_it_was_and_blue_where_it_is(self, ac_book):
+        sheet = ac_book["AC Fr"]
+        assert marks(sheet["W52"]) == [("X", None, True)]
+        assert marks(sheet["Y52"]) == [("X", BLUE, False)]
+        assert sheet["W51"].value == "X" and sheet["Y51"].value is None  # an answer nobody edited
+
+    def test_the_initials_open_the_requirements_remarks_before_its_own_chain(self, ac_book):
+        cell = ac_book["AC Fr"]["AA52"]
+        assert marks(cell) == [("RM", BLUE, False), ("Standing water", None, True),
+                               ("Standing water at STA 2+10", BLUE, False), ("RM", BLUE, False)]
+        assert cell.alignment.shrink_to_fit is True and cell.alignment.horizontal == "left"
+
+    def test_a_requirement_changed_to_na_or_cleared_keeps_its_struck_x(self, ac_book):
+        sheet = ac_book["AC Fr"]
+        assert marks(sheet["Y54"]) == [("X", None, True)] and sheet["W54"].value is None
+        assert marks(sheet["AA54"]) == [("MK", BLUE, False), ("N/A", None, False)]  # N/A has no box: it opens the remarks
+        assert marks(sheet["W57"]) == [("X", None, True)]
+        assert marks(sheet["AA57"]) == [("RM", BLUE, False)]
+
+    def test_tack_coat(self, ac_book):
+        sheet = ac_book["AC Fr"]
+        assert marks(sheet["AA58"]) == CHAIN_OF_ONE("40", "45", "RM")
+        assert marks(sheet["Q61"]) == CHAIN_OF_ONE("Distributor truck", "Distributor truck, RS-1", "MK")
+        assert sheet["AL58"].value == "0.08"
+
+    def test_a_delivery_ticket_is_found_by_its_place_in_the_list(self, ac_book):
+        sheet = ac_book["AC Bk"]
+        assert marks(sheet["AG36"]) == CHAIN_OF_ONE("310", "305", "RM")
+        assert marks(sheet["AD37"]) == CHAIN_OF_ONE("88120", "88102", "MK")
+        assert (sheet["P36"].value, sheet["AD36"].value, sheet["AG37"].value) == ("STA 1+00 NB", "88101", "298")
+
+    def test_a_report_nobody_edited_is_stamped_exactly_as_before(self):
+        sheet = redlined_ac(edits=[])["AC Fr"]
+        assert (sheet["L20"].value, sheet["AA23"].value, sheet["N28"].value) == ("Empire Paving Corp.", "62", "3+50")
+        assert (sheet["Y52"].value, sheet["AA52"].value, sheet["AA54"].value) == ("X", "Standing water at STA 2+10", "N/A")
+
+    def test_numbers_saved_as_numbers_are_compared_as_they_print(self):
+        data = {"temperature": {"surfaceStart": 62}}
+        sheet = redlined_ac(data, [ac_edit("temperature.surfaceStart", 60, 62, "RM")])["AC Fr"]
+        assert marks(sheet["AA23"]) == CHAIN_OF_ONE("60", "62", "RM")
+
+    def test_the_export_gives_an_ac_report_its_own_edits(self):
+        ac = {**ac_row(1, 2, **AC_OWN_DATA), "report_id": AC_REPORT_ID}
+        book = redlined_book(general=GENERAL, reports=[ac], main_reports=[ac], edits=AC_OWN_EDITS)
+        assert marks(book["AC Fr"]["AA23"]) == CHAIN_OF_ONE("60", "62", "RM")
+        assert marks(book["AC Bk"]["AG36"]) == CHAIN_OF_ONE("310", "305", "RM")

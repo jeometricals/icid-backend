@@ -23,11 +23,12 @@ from typing import Any, Optional
 from api.services.export_common import (
     SignatureLayout,
     REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
-    WorkforceLayout, allocate_copies, checklist_answer, fill_lines, mark_truncated, object_rows,
-    pay_item_page_count, pay_item_slices, redline_paragraphs, section, stamp_checklist, stamp_common_header, stamp_equipment,
-    stamp_pay_items, stamp_report_cont, stamp_safety, stamp_workforce, text_value, tick_box, typed_value, write_lines,
+    WorkforceLayout, allocate_copies, checklist_answer, entry_edits, fill_lines, mark_truncated, object_rows,
+    pay_item_page_count, pay_item_slices, redline_paragraphs, redline_runs, rows_with_paths, section, stamp_checklist,
+    stamp_common_header, stamp_equipment, stamp_field, stamp_pay_items, stamp_report_cont, stamp_safety,
+    stamp_workforce, text_value, tick_box, typed_value, write_lines,
 )
-from api.services.export_redlines import NO_REDLINES, Redlines
+from api.services.export_redlines import NO_REDLINES, Redlines, redline_chain
 from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 AC_FRONT = "AC Fr"
@@ -183,33 +184,45 @@ MORE_TICKETS_NOTE = "[Note] {count} more delivery ticket{plural} — see ICID"
 ATTACHED_PAGES_BOX = "C48"
 
 
-def _centre_across(workbook: WorkbookTemplate, sheet: str, cells: list[str], value: Any) -> None:
+def _centre_across(workbook: WorkbookTemplate, sheet: str, cells: list[str], value: Any,
+                   edits: Optional[list[dict[str, Any]]] = None) -> None:
     """
-    Write a value centred across a run of cells that has no merged box of its own.
-    Takes the workbook, the sheet, the run's cells (left to right) and the value (None leaves the run blank).
+    Write a value centred across a run of cells that has no merged box of its own, or its chain when a reviewer
+    edited it.
+    Takes the workbook, the sheet, the run's cells (left to right), the value (None leaves the run blank) and the
+    field's edits, oldest first (none unless given).
     Returns nothing.
     """
-    workbook.set_cell(sheet, cells[0], value)
-    if value is not None:
+    chain = redline_chain(edits or [], value, typed_value)
+    if chain:
+        workbook.set_cell_runs(sheet, cells[0], redline_runs(chain))
+        workbook.center_across(sheet, cells)
+        return
+    workbook.set_cell(sheet, cells[0], typed_value(value))
+    if typed_value(value) is not None:
         workbook.center_across(sheet, cells)
 
 
-def _stamp_site_conditions(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def _stamp_site_conditions(workbook: WorkbookTemplate, front: str, data: dict[str, Any],
+                           redlines: Redlines = NO_REDLINES) -> None:
     """
-    Write the paving contractor, Rice No., the surface and ambient temperatures and the theoretical max density.
-    Takes the workbook, the front page and the report_data; numbers stay numbers, text is trimmed, blanks stay empty.
+    Write the paving contractor, Rice No., the surface and ambient temperatures and the theoretical max density. One
+    a reviewer edited prints as its chain.
+    Takes the workbook, the front page, the report_data (numbers stay numbers, text is trimmed, blanks stay empty)
+    and the report's redlines (none unless given).
     Returns nothing.
     """
     paving = section(data, "pavingContractor")
-    _centre_across(workbook, front, PAVING_NAME_CELLS, typed_value(paving.get("pavingContractorName")))
+    _centre_across(workbook, front, PAVING_NAME_CELLS, paving.get("pavingContractorName"),
+                   redlines.field("pavingContractor.pavingContractorName"))
     for field, cell in PAVING_CELLS.items():
-        workbook.set_cell(front, cell, typed_value(paving.get(field)))
+        stamp_field(workbook, front, cell, paving.get(field), redlines.field(f"pavingContractor.{field}"), typed_value)
     temperature = section(data, "temperature")
     for field, cell in TEMPERATURE_CELLS.items():
-        workbook.set_cell(front, cell, typed_value(temperature.get(field)))
+        stamp_field(workbook, front, cell, temperature.get(field), redlines.field(f"temperature.{field}"), typed_value)
     density = section(data, "maxDensity")
     for field, cells in MAX_DENSITY_CELLS.items():
-        _centre_across(workbook, front, cells, typed_value(density.get(field)))
+        _centre_across(workbook, front, cells, density.get(field), redlines.field(f"maxDensity.{field}"))
 
 
 def front_count(report_data: Any, redlines: Redlines = NO_REDLINES) -> int:
@@ -226,34 +239,45 @@ def front_count(report_data: Any, redlines: Redlines = NO_REDLINES) -> int:
     return max(1, course_sheets, pay_item_page_count(data.get("payItems"), AC_FRONT_PAY_ITEMS, redlines))
 
 
-def _stamp_pavement_courses(workbook: WorkbookTemplate, front: str, courses: list[dict[str, Any]]) -> None:
+def _stamp_pavement_courses(workbook: WorkbookTemplate, front: str, courses: list[dict[str, Any]],
+                            redlines: Redlines = NO_REDLINES) -> None:
     """
-    Fill the pavement course table's four rows, one course a row, blanking the rest.
-    Takes the workbook, the front page and this sheet's courses (at most four).
+    Fill the pavement course table's four rows, one course a row, blanking the rest. A value a reviewer edited
+    prints as its chain.
+    Takes the workbook, the front page, this sheet's courses (at most four, each with the path edits name it by:
+    "pavementCourses[0]", its place in the saved list, whichever sheet it prints on) and the report's redlines (none
+    unless given).
     Returns nothing.
     """
     for index, row in enumerate(PAVEMENT_ROWS):
         course = courses[index] if index < len(courses) else {}
         for field, column in PAVEMENT_COLUMNS.items():
-            workbook.set_cell(front, f"{column}{row}", typed_value(course.get(field)))
+            stamp_field(workbook, front, f"{column}{row}", course.get(field), entry_edits(redlines, course, field),
+                        typed_value)
 
 
-def _stamp_material_usage(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def _stamp_material_usage(workbook: WorkbookTemplate, front: str, data: dict[str, Any],
+                          redlines: Redlines = NO_REDLINES) -> None:
     """
-    Write material usage for the top and binder courses: tickets and quantities received, used and wasted.
-    Takes the workbook, the front page and the report_data.
+    Write material usage for the top and binder courses: tickets and quantities received, used and wasted. A value
+    a reviewer edited prints as its chain.
+    Takes the workbook, the front page, the report_data and the report's redlines (none unless given).
     Returns nothing.
     """
     for key, cells in MATERIAL_CELLS.items():
         usage = section(data, key)
         for field, cell in cells.items():
-            workbook.set_cell(front, cell, typed_value(usage.get(field)))
+            stamp_field(workbook, front, cell, usage.get(field), redlines.field(f"{key}.{field}"), typed_value)
 
 
-def _stamp_requirements(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def _stamp_requirements(workbook: WorkbookTemplate, front: str, data: dict[str, Any],
+                        redlines: Redlines = NO_REDLINES) -> None:
     """
-    Lay out the requirements' Y / N / Remarks boxes and fill them from the A/C requirements answers.
-    Takes the workbook, the front page and the report_data (each requirement is {value: 'Y'|'N'|'NA'|'', remarks}).
+    Lay out the requirements' Y / N / Remarks boxes and fill them from the A/C requirements answers. An answer a
+    reviewer changed keeps a struck X in the box it left and gets an X in the redline colour, with their initials
+    at the start of the row's remarks; edited remarks print as their chain (see stamp_checklist).
+    Takes the workbook, the front page, the report_data (each requirement is {value: 'Y'|'N'|'NA'|'', remarks}) and
+    the report's redlines (none unless given).
     Returns nothing.
     """
     for first, heading in REQUIREMENT_HEADINGS.items():
@@ -264,35 +288,42 @@ def _stamp_requirements(workbook: WorkbookTemplate, front: str, data: dict[str, 
     requirements = section(data, "acRequirements")
     answers = {key: (section(requirements, key).get("value"), section(requirements, key).get("remarks"))
                for key in AC_REQUIREMENTS.rows}
-    stamp_checklist(workbook, front, AC_REQUIREMENTS, answers)
+    edits = {key: (redlines.field(f"acRequirements.{key}.value"), redlines.field(f"acRequirements.{key}.remarks"))
+             for key in AC_REQUIREMENTS.rows}
+    stamp_checklist(workbook, front, AC_REQUIREMENTS, answers, edits)
     for row in AC_REQUIREMENTS.rows.values():
         cell = f"{AC_REQUIREMENTS.remarks_column}{row}"
         workbook.align_left(front, cell)
         workbook.shrink_to_fit_cell(front, cell)
 
 
-def _stamp_tack_coat(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def _stamp_tack_coat(workbook: WorkbookTemplate, front: str, data: dict[str, Any],
+                     redlines: Redlines = NO_REDLINES) -> None:
     """
-    Write the tack coat's gallons, gallons per S.Y. and application method / type.
-    Takes the workbook, the front page and the report_data.
+    Write the tack coat's gallons, gallons per S.Y. and application method / type. One a reviewer edited prints as
+    its chain.
+    Takes the workbook, the front page, the report_data and the report's redlines (none unless given).
     Returns nothing.
     """
     tack_coat = section(data, "tackCoat")
     for field, cell in TACK_COAT_CELLS.items():
-        workbook.set_cell(front, cell, typed_value(tack_coat.get(field)))
+        stamp_field(workbook, front, cell, tack_coat.get(field), redlines.field(f"tackCoat.{field}"), typed_value)
 
 
-def _stamp_delivery_tickets(workbook: WorkbookTemplate, back: str, data: dict[str, Any]) -> int:
+def _stamp_delivery_tickets(workbook: WorkbookTemplate, back: str, data: dict[str, Any],
+                            redlines: Redlines = NO_REDLINES) -> int:
     """
-    Fill the delivery ticket log's ten rows, one ticket a row, blanking the rest.
-    Takes the workbook, the back page and the report_data.
+    Fill the delivery ticket log's ten rows, one ticket a row, blanking the rest. A value a reviewer edited prints
+    as its chain; a ticket is named by its place in the saved list ("deliveryTickets[0]").
+    Takes the workbook, the back page, the report_data and the report's redlines (none unless given).
     Returns how many tickets didn't fit.
     """
-    tickets = object_rows(data, "deliveryTickets")
+    tickets = rows_with_paths(data, "deliveryTickets")
     for index, row in enumerate(TICKET_ROWS):
         ticket = tickets[index] if index < len(tickets) else {}
         for field, column in TICKET_COLUMNS.items():
-            workbook.set_cell(back, f"{column}{row}", typed_value(ticket.get(field)))
+            stamp_field(workbook, back, f"{column}{row}", ticket.get(field), entry_edits(redlines, ticket, field),
+                        typed_value)
     return max(0, len(tickets) - len(TICKET_ROWS))
 
 
@@ -365,8 +396,10 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     """
     Stamp an AC report onto its AC Fr sheets, AC Bk and, when its remarks run long, Report Cont. The "Attached Pages"
     box is the caller's to tick (see mark_attachments), as it knows the report's attachments. What reviewers edited
-    (the header, the comments, pay items, work force, equipment and the safety answers) prints with its redlines;
-    pass them as redlines (none unless given). Safety remarks, printed with the remarks here, show as they stand.
+    (the header, the paving contractor, temperatures, max density, pavement courses, material usage, requirements,
+    tack coat, pay items, the comments, delivery tickets, work force, equipment and the safety answers) prints with
+    its redlines; pass them as redlines (none unless given). Safety remarks, printed with the remarks here, show as
+    they stand.
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (its later fronts take the numbers after it; None leaves Sheet No. blank), its report_data, whether Report Cont
     is free (False when another report in the export already continues onto it; the remarks are then cut with a
@@ -381,7 +414,7 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     fronts = fronts or allocate_copies(workbook, AC_FRONT, needed)
     if len(fronts) != needed:
         raise ValueError(f"this AC report needs {needed} AC Fr sheets, got {len(fronts)}")
-    courses = object_rows(data, "pavementCourses")
+    courses = rows_with_paths(data, "pavementCourses")
     course_sheets = max(1, -(-len(courses) // len(PAVEMENT_ROWS)))  # the first sheet prints the table even when empty
     pay_slices = pay_item_slices(data.get("payItems"), len(AC_FRONT_PAY_ITEMS.rows), redlines)
     per_sheet = len(PAVEMENT_ROWS)
@@ -389,11 +422,11 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
         page = page_number + index if page_number is not None else None
         stamp_common_header(workbook, front, AC_FRONT_HEADER, idr, project, contractor, inspector, page, redlines)
         if index < course_sheets:
-            _stamp_site_conditions(workbook, front, data)
-            _stamp_pavement_courses(workbook, front, courses[index * per_sheet:(index + 1) * per_sheet])
-            _stamp_material_usage(workbook, front, data)
-            _stamp_requirements(workbook, front, data)
-            _stamp_tack_coat(workbook, front, data)
+            _stamp_site_conditions(workbook, front, data, redlines)
+            _stamp_pavement_courses(workbook, front, courses[index * per_sheet:(index + 1) * per_sheet], redlines)
+            _stamp_material_usage(workbook, front, data, redlines)
+            _stamp_requirements(workbook, front, data, redlines)
+            _stamp_tack_coat(workbook, front, data, redlines)
         if index < len(pay_slices):
             stamp_pay_items(workbook, front, AC_FRONT_PAY_ITEMS, pay_slices[index],
                             continued=index < len(pay_slices) - 1, redlines=redlines)
@@ -402,7 +435,7 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
         if index < course_sheets - 1:
             _write_note(workbook, front, COURSES_CONTINUED_CELL, COURSES_CONTINUED_NOTE)
 
-    more_tickets = _stamp_delivery_tickets(workbook, back, data)
+    more_tickets = _stamp_delivery_tickets(workbook, back, data, redlines)
     note = MORE_TICKETS_NOTE.format(count=more_tickets, plural="" if more_tickets == 1 else "s")
     comments = redline_paragraphs(data.get("comments"), redlines.field("comments"))
     queue = comments + ([note] if more_tickets else []) + safety_remarks(data)
