@@ -13,9 +13,10 @@ from typing import Any, Optional
 
 from api.services.export_common import (
     SignatureLayout,
-    CHECK_MARK, PAY_REDLINE_COLOR, REDLINE_INITIALS_FONT_PT, TextArea, allocate_copies, checklist_answer,
-    entry_edits, fill_lines, ir_number, mark_truncated, redline_paragraphs, redline_runs,
-    rows_with_paths, section, short_date, stamp_answer_box, stamp_field, text_value, write_lines,
+    CHECK_MARK, PAY_REDLINE_COLOR, REDLINE_INITIALS_FONT_PT, TextArea, allocate_copies, chain_initials,
+    checklist_answer, entry_edits, fill_lines, ir_number, mark_truncated, redline_paragraphs, redline_runs,
+    rows_with_paths, section, short_date, stamp_answer_box, stamp_box_initials, stamp_field, text_value,
+    write_lines,
 )
 from api.services.export_redlines import NO_REDLINES, RedlineEntry, Redlines, redline_chain
 from api.services.xlsx_template import EMU_PER_PIXEL, TextRun, WorkbookTemplate
@@ -185,27 +186,6 @@ def _stamp_choice(workbook: WorkbookTemplate, sheet: str, boxes: dict[str, tuple
     return None if standing.revised else beside
 
 
-def _chain_initials(chain: list[RedlineEntry]) -> Optional[str]:
-    """
-    Collect the initials of everyone who edited a field.
-    Takes the field's chain.
-    Returns them in order, each once, space-separated; None when there are none.
-    """
-    return " ".join(dict.fromkeys(entry.initials for entry in chain if entry.initials)) or None
-
-
-def _stamp_box_initials(workbook: WorkbookTemplate, sheet: str, cell: str, initials: Optional[str]) -> None:
-    """
-    Write the initials of whoever changed a box in the cell right after it, small and in the redline colour.
-    Takes the workbook, the sheet, the cell and the initials (None writes nothing).
-    Returns nothing.
-    """
-    if initials:
-        workbook.set_cell_runs(sheet, cell, [TextRun(initials, color=PAY_REDLINE_COLOR,
-                                                     points=REDLINE_INITIALS_FONT_PT)])
-        workbook.align_left(sheet, cell)
-
-
 def _stamp_location_and_mixer(workbook: WorkbookTemplate, sheet: str, data: dict[str, Any],
                               redlines: Redlines = NO_REDLINES) -> None:
     """
@@ -222,7 +202,7 @@ def _stamp_location_and_mixer(workbook: WorkbookTemplate, sheet: str, data: dict
         if not chain:
             _tick(workbook, sheet, box, location.get(key) is True)
         elif _stamp_choice(workbook, sheet, {CHECK_MARK: box}, chain):
-            _stamp_box_initials(workbook, sheet, LOCATION_INITIALS[key], _chain_initials(chain))
+            stamp_box_initials(workbook, sheet, LOCATION_INITIALS[key], chain_initials(chain))
 
     mixer = section(data, "mixerType")
     chain = redline_chain(redlines.field("mixerType.type"), mixer.get("type"),
@@ -231,9 +211,9 @@ def _stamp_location_and_mixer(workbook: WorkbookTemplate, sheet: str, data: dict
     if not chain:
         for kind, box in MIXER_BOXES.items():
             _tick(workbook, sheet, box, mixer.get("type") == kind)
-    initials = _chain_initials(chain) if beside else None
+    initials = chain_initials(chain) if beside else None
     if beside is not None and beside != "other":
-        _stamp_box_initials(workbook, sheet, MIXER_INITIALS[beside], initials)
+        stamp_box_initials(workbook, sheet, MIXER_INITIALS[beside], initials)
 
     is_other = mixer.get("type") == "other"
     label_edits = redlines.field("mixerType.otherLabel") if is_other else []
@@ -279,7 +259,7 @@ def _stamp_trucks(workbook: WorkbookTemplate, sheet: str, trucks: list[dict[str,
         for answer, column in STICKER_CELLS.items():
             cell = f"{column}{row}"
             if chain:
-                stamp_answer_box(workbook, sheet, cell, answer, chain, _chain_initials(chain), blank=answer)
+                stamp_answer_box(workbook, sheet, cell, answer, chain, chain_initials(chain), blank=answer)
             elif sticker == answer and added_by is not None:
                 workbook.set_cell_runs(sheet, cell, [TextRun(CHECK_MARK, color=PAY_REDLINE_COLOR)])
             else:

@@ -5057,3 +5057,141 @@ class TestHandwrittenHeaderCells:
         workbook.ensure_merged("Conc Fr", "AI4:AO4")
         assert workbook._sheet("Conc Fr").count('<mergeCell ref="AI4:AO4"/>') == 1
 
+
+SWCB_REPORT_ID = UUID(int=0x5C01)
+SWCB_OWN_DATA = {
+    "structural": True, "subcontractor": "Acme Concrete LLC",
+    "activity": {"excavation": {"fromStation": "1+00", "toStation": "2+50", "remarks": "Hand dug"},
+                 "pour": {"fromStation": "1+00", "toStation": "2+00", "remarks": ""}},
+    "inspectionMatrix": {
+        "subgradeCompacted": {"base": "Y", "sidewalk": "N", "curb": "Y"},
+        "compactionTestTaken": {"base": "NA", "sidewalk": None, "curb": "Y"},
+        "roadwayStoneBasePlaced": {"base": "N"},
+        "curingCompoundApplied": {"base": "Y", "sidewalk": "Y", "curb": "N"},
+        "otherCuringMethods": {"base": "", "sidewalk": "Wet burlap, 7 days", "curb": ""}},
+}
+
+
+def swcb_edit(path: str, old, new, initials: str) -> dict:
+    """
+    Build a reviewer's edit of one SWCB field.
+    Takes the field_path, the old and new values and the editor's initials.
+    Returns the edit row.
+    """
+    return redline_edit(path, "field_change", old, new, initials, SWCB_REPORT_ID)
+
+
+SWCB_OWN_EDITS = [
+    swcb_edit("structural", False, True, "RM"),
+    swcb_edit("subcontractor", "Acme Concrete", "Acme Concrete LLC", "RM"),
+    swcb_edit("activity.excavation.toStation", "2+00", "2+50", "RM"),
+    swcb_edit("activity.pour.toStation", "1+75", "1+90", "RM"),
+    swcb_edit("activity.pour.toStation", "1+90", "2+00", "MK"),
+    swcb_edit("inspectionMatrix.subgradeCompacted.sidewalk", "Y", "N", "RM"),
+    swcb_edit("inspectionMatrix.compactionTestTaken.base", "N", "NA", "MK"),
+    swcb_edit("inspectionMatrix.compactionTestTaken.sidewalk", "Y", None, "RM"),
+    swcb_edit("inspectionMatrix.curingCompoundApplied.curb", "Y", "NA", "RM"),
+    swcb_edit("inspectionMatrix.curingCompoundApplied.curb", "NA", "N", "MK"),
+    swcb_edit("inspectionMatrix.otherCuringMethods.sidewalk", "Wet burlap", "Wet burlap, 7 days", "RM"),
+    swcb_edit("inspectionMatrix.roadwayStoneBasePlaced.curb", None, "Y", "RM"),      # cells the form doesn't have
+    swcb_edit("inspectionMatrix.roadwayStoneBasePlaced.sidewalk", None, "Y", "RM"),
+    swcb_edit("inspectionMatrix.sidewalkFoundationPlaced.curb", None, "N", "RM"),
+]
+
+
+def redlined_swcb(data: dict = SWCB_OWN_DATA, edits: list = SWCB_OWN_EDITS):
+    """
+    Render an SWCB report with reviewer edits and load its front page with its text runs.
+    Takes the report_data and the report's edits.
+    Returns the Conc Fr worksheet.
+    """
+    from api.services.export_redlines import Redlines
+    workbook = WorkbookTemplate(TEMPLATE)
+    export_swcb.render(workbook, SUBMITTED_IDR, PROJECT, None, report_data=data,
+                       redlines=Redlines(edits, SWCB_REPORT_ID))
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), rich_text=True)["Conc Fr"]
+
+
+@pytest.fixture(scope="module")
+def swcb_sheet():
+    """
+    The Conc Fr page of an SWCB report whose own sections a reviewer edited, rendered once.
+    Takes nothing.
+    Returns the worksheet, with its text runs.
+    """
+    return redlined_swcb()
+
+
+class TestSwcbOwnSectionRedlines:
+    def test_structural_ticked_by_a_reviewer_is_a_blue_x_with_their_initials_after_the_box(self, swcb_sheet):
+        assert runs(swcb_sheet["Z29"]) == [("X", BLUE, False, 6, False)]
+        assert runs(swcb_sheet["AA29"]) == [("RM", BLUE, False, 6, False)]
+
+    def test_structural_unticked_by_a_reviewer_keeps_a_struck_black_x(self):
+        sheet = redlined_swcb({"structural": False}, [swcb_edit("structural", True, False, "MK")])
+        assert marks(sheet["Z29"]) == [("X", None, True)]
+        assert marks(sheet["AA29"]) == [("MK", BLUE, False)]
+
+    def test_structural_changed_again_by_the_inspector_shows_as_it_stands(self):
+        sheet = redlined_swcb({"structural": True}, [swcb_edit("structural", True, False, "MK")])
+        assert sheet["Z29"].value == "X" and sheet["AA29"].value is None
+
+    def test_the_boxes_that_follow_the_matrix_are_never_marked(self, swcb_sheet):
+        assert [swcb_sheet[cell].value for cell in ("S29", "K29", "E29")] == ["X", "X", "X"]
+
+    def test_an_edited_subcontractor_prints_as_its_chain(self, swcb_sheet):
+        cell = swcb_sheet["AJ29"]
+        assert marks(cell) == [("Acme Concrete", None, True), ("Acme Concrete LLC", BLUE, False), ("RM", BLUE, False)]
+        assert cell.alignment.shrink_to_fit is True
+
+    def test_edited_activity_cells_print_as_chains_and_the_rest_as_before(self, swcb_sheet):
+        assert marks(swcb_sheet["R33"]) == [("2+00", None, True), ("2+50", BLUE, False), ("RM", BLUE, False)]
+        assert marks(swcb_sheet["R35"]) == [("1+75", None, True), ("1+90", BLUE, True), ("RM", BLUE, False),
+                                            ("2+00", BLUE, False), ("MK", BLUE, False)]
+        assert (swcb_sheet["L33"].value, swcb_sheet["X33"].value, swcb_sheet["R34"].value) == ("1+00", "Hand dug", None)
+
+    def test_a_changed_matrix_answer_is_struck_where_it_was_and_blue_with_initials_where_it_is(self, swcb_sheet):
+        assert marks(swcb_sheet["AD40"]) == [("X", None, True)]                       # sidewalk Y, the inspector's
+        assert marks(swcb_sheet["AF40"]) == [("X", BLUE, False), ("RM", BLUE, False)]  # sidewalk N, the reviewer's
+        assert marks(swcb_sheet["Z41"]) == [("X", None, True)]
+        assert marks(swcb_sheet["AB41"]) == [("X", BLUE, False), ("MK", BLUE, False)]  # N/A has a box of its own here
+
+    def test_an_answer_a_reviewer_cleared_keeps_its_struck_x_with_their_initials(self, swcb_sheet):
+        assert marks(swcb_sheet["AD41"]) == [("X", None, True), ("RM", BLUE, False)]
+        assert (swcb_sheet["AF41"].value, swcb_sheet["AH41"].value) == (None, None)
+
+    def test_a_chain_of_answers_strikes_each_one_left(self, swcb_sheet):
+        assert marks(swcb_sheet["AJ44"]) == [("X", None, True)]                           # Y, the inspector's
+        assert marks(swcb_sheet["AN44"]) == [("X", BLUE, True)]                           # N/A, the first reviewer's
+        assert marks(swcb_sheet["AL44"]) == [("X", BLUE, False), ("RM MK", BLUE, False)]  # N, which stands
+
+    def test_answers_nobody_edited_are_plain(self, swcb_sheet):
+        assert (swcb_sheet["X40"].value, swcb_sheet["AJ40"].value, swcb_sheet["Z43"].value) == ("X", "X", "X")
+
+    def test_the_write_in_text_prints_as_its_chain(self, swcb_sheet):
+        assert marks(swcb_sheet["AD45"]) == [("Wet burlap", None, True), ("Wet burlap, 7 days", BLUE, False),
+                                             ("RM", BLUE, False)]
+        assert swcb_sheet["X45"].value is None
+
+    def test_cells_the_form_doesnt_have_stay_blank_whatever_was_edited(self, swcb_sheet):
+        # row 42 has no Curb boxes and row 43 only Base: the cells under those columns are never written
+        for cell in ("AJ42", "AL42", "AN42", "AD43", "AF43", "AH43", "AJ43", "AL43", "AN43"):
+            assert swcb_sheet[cell].value is None, cell
+
+    def test_the_export_gives_an_swcb_its_own_edits(self):
+        swcb = swcb_row(1, 2, **SWCB_OWN_DATA)
+        book = redlined_book(general=GENERAL, reports=[swcb], main_reports=[swcb], edits=SWCB_OWN_EDITS)
+        assert marks(book["Conc Fr"]["R33"]) == [("2+00", None, True), ("2+50", BLUE, False), ("RM", BLUE, False)]
+
+
+class TestAnswerBoxInitials:
+    def test_the_initials_follow_the_struck_x_only_when_no_box_stands(self):
+        from api.services.export_common import stamp_answer_box
+        from api.services.export_redlines import redline_chain
+        cleared = redline_chain([redline_edit("x", "field_change", "Y", None, "RM")], None)
+        workbook = WorkbookTemplate(TEMPLATE)
+        stamp_answer_box(workbook, "Gen Bk", "N30", "Y", cleared, "RM", options=("Y", "N"))
+        stamp_answer_box(workbook, "Gen Bk", "N31", "Y", cleared, "RM")  # a form whose remarks take the initials
+        sheet = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), rich_text=True)["Gen Bk"]
+        assert marks(sheet["N30"]) == [("X", None, True), ("RM", BLUE, False)]
+        assert marks(sheet["N31"]) == [("X", None, True)]

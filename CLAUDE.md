@@ -399,8 +399,15 @@ Any change must follow these.
     - A truck a reviewer added (`truck_add`) has every cell it fills in blue, its sticker's X included, and the
       adder's initials after its truck or ticket number. Later edits of its fields chain on top, as for any
       truck. A twelfth truck prints on another Conc Mix sheet, numbered and counted like any other.
-  - **Not redlined:** SWCB's operation, activity and matrix and AC's own sections (the K2 edit UI doesn't reach
-    them); AC Bk's safety remarks, which print inside its remarks text as they stand; and Concrete Cylinder
+  - **SWCB's own sections are redlined too** (`export_swcb.py`): `structural` (true / false; blue X when a
+    reviewer ticked it, struck X when they unticked it, initials in the cell after the box), `subcontractor`,
+    `activity.<excavation|formPrep|pour>.<fromStation|toStation|remarks>`, and
+    `inspectionMatrix.<item>.<base|sidewalk|curb>`: `Y` / `N` / `NA` (each has its own box: struck X where the
+    answer was, blue X followed by the initials where it is; after the struck X when a reviewer cleared it) or,
+    for `otherCuringMethods`, text. The Curb, Sidewalk and Concrete Base operation boxes follow the matrix and
+    are never marked. Only the columns an item takes are written (`MATRIX_ROWS`), so an edit naming
+    `sidewalkFoundationPlaced.curb` or `roadwayStoneBasePlaced.sidewalk` / `.curb` prints nothing.
+  - **Not redlined:** AC's own sections (KC2); AC Bk's safety remarks, which print inside its remarks text as they stand; and Concrete Cylinder
     Data, which the export doesn't print at all (the template has no cylinder form; Phase 1b backlog).
   - Lists addressed by position (`additionalWorkforce[0].count`) are matched by position, with the limitation
     noted under "Reviewer edits".

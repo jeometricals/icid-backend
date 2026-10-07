@@ -1005,14 +1005,36 @@ def stamp_safety(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout, d
                            edits)
 
 
+def chain_initials(chain: list[RedlineEntry]) -> Optional[str]:
+    """
+    Collect the initials of everyone who edited a field.
+    Takes the field's chain.
+    Returns them in order, each once, space-separated; None when there are none.
+    """
+    return " ".join(dict.fromkeys(entry.initials for entry in chain if entry.initials)) or None
+
+
+def stamp_box_initials(workbook: WorkbookTemplate, sheet: str, cell: str, initials: Optional[str]) -> None:
+    """
+    Write the initials of whoever changed a checkbox in the cell right after it, small and in the redline colour.
+    Takes the workbook, the sheet, the cell and the initials (None writes nothing).
+    Returns nothing.
+    """
+    if initials:
+        workbook.set_cell_runs(sheet, cell, [TextRun(initials, color=PAY_REDLINE_COLOR,
+                                                     points=REDLINE_INITIALS_FONT_PT)])
+        workbook.align_left(sheet, cell)
+
+
 def stamp_answer_box(workbook: WorkbookTemplate, sheet: str, cell: str, option: str, chain: list[RedlineEntry],
-                     initials: Optional[str], blank: Optional[str] = None) -> None:
+                     initials: Optional[str], blank: Optional[str] = None, options: tuple[str, ...] = ()) -> None:
     """
     Mark one box (Y or N) of an answer a reviewer edited: an X in the redline colour when it is the reviewer's
     answer that stands, a struck X where an answer was replaced (black for the inspector's), nothing otherwise.
     Takes the workbook, sheet, the box's cell, the answer it stands for, the answer's chain, the initials to
-    print after a standing X (None where the row's remarks take them) and what an unmarked box holds (nothing,
-    unless the form pre-prints a letter there).
+    print after a standing X (None where the row's remarks take them), what an unmarked box holds (nothing,
+    unless the form pre-prints a letter there) and the answers that have a box: when the answer that stands has
+    none (a reviewer cleared it), the initials follow the struck X of the last answer replaced.
     Returns nothing.
     """
     standing = chain[-1]
@@ -1028,7 +1050,14 @@ def stamp_answer_box(workbook: WorkbookTemplate, sheet: str, cell: str, option: 
         workbook.set_cell_runs(sheet, cell, runs)
     elif replaced:
         color = PAY_REDLINE_COLOR if replaced[-1].by_reviewer else None
-        workbook.set_cell_runs(sheet, cell, [TextRun(CHECK_MARK, color=color, strike=True)])
+        runs = [TextRun(CHECK_MARK, color=color, strike=True)]
+        last_boxed = next((entry.text for entry in reversed(chain[:-1]) if entry.text in options), None)
+        if initials and options and standing.text not in options and last_boxed == option:
+            runs.append(TextRun(f" {initials}", color=PAY_REDLINE_COLOR, points=REDLINE_INITIALS_FONT_PT))
+            workbook.set_cell_runs(sheet, cell, runs)
+            workbook.shrink_on_one_line(sheet, cell)
+            return
+        workbook.set_cell_runs(sheet, cell, runs)
     else:
         workbook.set_cell(sheet, cell, blank)
 
@@ -1052,7 +1081,7 @@ def stamp_checklist(workbook: WorkbookTemplate, sheet: str, layout: SafetyLayout
         answer_edits, remark_edits = (edits or {}).get(key, ([], []))
         answer, remark = checklist_answer(saved_answer), text_value(saved_remark)
         chain = redline_chain(answer_edits, saved_answer, checklist_answer)
-        initials = " ".join(dict.fromkeys(entry.initials for entry in chain if entry.initials)) or None
+        initials = chain_initials(chain)
         for column, option in ((layout.yes_column, "Y"), (layout.no_column, "N")):
             if chain:
                 stamp_answer_box(workbook, sheet, f"{column}{row}", option, chain,

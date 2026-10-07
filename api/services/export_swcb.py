@@ -12,13 +12,14 @@ Cell positions come from reading templates/report_forms.xlsx.
 from typing import Any, Optional
 
 from api.services.export_common import (
-    SignatureLayout,
-    CHECK_MARK, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
-    WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, section, stamp_common_header, stamp_equipment,
-    stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, text_value, tick_box, write_lines,
+    BOX_MARK_FONT_PT, CHECK_MARK, PAY_REDLINE_COLOR, REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout,
+    PayItemsLayout, SafetyLayout, SignatureLayout, TextArea, WorkforceLayout, allocate_copies, chain_initials,
+    flow_text, pay_item_page_count, section, stamp_answer_box, stamp_box_initials, stamp_common_header,
+    stamp_equipment, stamp_field, stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, text_value,
+    tick_box, write_lines,
 )
-from api.services.export_redlines import NO_REDLINES, Redlines
-from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
+from api.services.export_redlines import NO_REDLINES, Redlines, redline_chain
+from api.services.xlsx_template import EMU_PER_PIXEL, TextRun, WorkbookTemplate
 
 CONC_FRONT = "Conc Fr"
 CONC_BACK = "Conc Bk"
@@ -57,6 +58,9 @@ CONC_FRONT_TEXT = TextArea(rows=range(23, 28), column="B", line_chars=84)
 # 8 x 8 px box centred in each 16 x 17 px cell; a centred 6 pt "X" sits inside the outline.
 OPERATION_BOXES = {"curb": "E29", "sidewalk": "K29", "base": "S29", "structural": "Z29"}
 SUBCONTRACTOR_CELL = "AJ29"  # AJ29:AP29, a short underlined blank
+# Structural is the one operation box that is a field of its own (the others follow the Inspection Matrix), so the one
+# a reviewer can change: their initials go in the blank cell right after it, before the "Subcontractor" label
+STRUCTURAL_INITIALS_CELL = "AA29"
 
 # Detailed Activity: rows 33-35 (row 36 is a blank spare row), From L:Q, To R:W, Remarks X:AP
 ACTIVITY_ROWS = {"excavation": 33, "formPrep": 34, "pour": 35}
@@ -186,49 +190,79 @@ def mark_conc_mix_attached(workbook: WorkbookTemplate, back: str = CONC_BACK) ->
     tick_box(workbook, back, CONC_MIX_ATTACHED_BOX, True)
 
 
-def _stamp_operation(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def _stamp_operation(workbook: WorkbookTemplate, front: str, data: dict[str, Any],
+                     redlines: Redlines = NO_REDLINES) -> None:
     """
-    Tick the operation boxes and write the subcontractor.
-    Takes the workbook, the front page and the report_data.
+    Tick the operation boxes and write the subcontractor. Structural, when a reviewer changed it, gets an X in the
+    redline colour (ticked) or keeps a struck X (unticked), with their initials right after the box; once the
+    inspector has changed it again it shows as it stands. An edited subcontractor prints as its chain.
+    Takes the workbook, the front page, the report_data and the report's redlines (none unless given).
     Returns nothing.
     """
     for operation, ticked in operation_types(data).items():
         tick_box(workbook, front, OPERATION_BOXES[operation], ticked)
-    workbook.set_cell(front, SUBCONTRACTOR_CELL, text_value(data.get("subcontractor")))
+    chain = redline_chain(redlines.field("structural"), data.get("structural"),
+                          lambda value: CHECK_MARK if value is True else None)
+    if chain and not chain[-1].revised:
+        ticked = chain[-1].text == CHECK_MARK
+        was_ticked = [entry for entry in chain[:-1] if entry.text == CHECK_MARK]
+        if ticked or was_ticked:
+            entry = chain[-1] if ticked else was_ticked[-1]
+            cell = OPERATION_BOXES["structural"]
+            workbook.set_cell_runs(front, cell, [TextRun(CHECK_MARK, color=PAY_REDLINE_COLOR if entry.by_reviewer else None,
+                                                         points=BOX_MARK_FONT_PT, strike=not ticked)])
+            workbook.center_cell(front, cell)
+        stamp_box_initials(workbook, front, STRUCTURAL_INITIALS_CELL, chain_initials(chain))
+    stamp_field(workbook, front, SUBCONTRACTOR_CELL, data.get("subcontractor"), redlines.field("subcontractor"))
     workbook.shrink_to_fit_cell(front, SUBCONTRACTOR_CELL)
 
 
-def _stamp_activity(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def _stamp_activity(workbook: WorkbookTemplate, front: str, data: dict[str, Any],
+                    redlines: Redlines = NO_REDLINES) -> None:
     """
-    Write the Detailed Activity rows (Excavation, Form / Prep, Pour): from and to station, and remarks.
-    Takes the workbook, the front page and the report_data.
+    Write the Detailed Activity rows (Excavation, Form / Prep, Pour): from and to station, and remarks. One a
+    reviewer edited prints as its chain.
+    Takes the workbook, the front page, the report_data and the report's redlines (none unless given).
     Returns nothing.
     """
     activity = section(data, "activity")
     for key, row in ACTIVITY_ROWS.items():
         entry = activity.get(key) if isinstance(activity.get(key), dict) else {}
         for field, column in ACTIVITY_COLUMNS.items():
-            workbook.set_cell(front, f"{column}{row}", text_value(entry.get(field)))
+            stamp_field(workbook, front, f"{column}{row}", entry.get(field),
+                        redlines.field(f"activity.{key}.{field}"))
         workbook.shrink_to_fit_cell(front, f"{ACTIVITY_COLUMNS['remarks']}{row}")
 
 
-def _stamp_matrix(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) -> None:
+def _stamp_matrix(workbook: WorkbookTemplate, front: str, data: dict[str, Any],
+                  redlines: Redlines = NO_REDLINES) -> None:
     """
-    Write the Inspection Matrix: an X in the Y, N or N/A box of each answered column, and the write-in text.
-    Takes the workbook, the front page and the report_data.
+    Write the Inspection Matrix: an X in the Y, N or N/A box of each answered column, and the write-in text. An
+    answer a reviewer changed keeps a struck X in the box it left and gets an X in the redline colour in its new
+    one, followed by their initials (after the struck X, when they cleared the answer); edited write-in text prints
+    as its chain. Only the columns an item takes are written, so an edit naming any other cell prints nothing.
+    Takes the workbook, the front page, the report_data and the report's redlines (none unless given).
     Returns nothing.
     """
     answers = matrix_answers(data)
+    saved = section(data, "inspectionMatrix")
     for row, key, columns, is_text in MATRIX_ROWS:
+        line = saved.get(key) if isinstance(saved.get(key), dict) else {}
         for column in columns:
             value = answers[key][column]
+            edits = redlines.field(f"inspectionMatrix.{key}.{column}")
             if is_text:
                 cell = f"{MATRIX_TEXT_CELLS[column]}{row}"
-                workbook.set_cell(front, cell, value)
+                stamp_field(workbook, front, cell, line.get(column), edits)
                 workbook.shrink_to_fit_cell(front, cell)
                 continue
+            chain = redline_chain(edits, line.get(column), _answer)
             for option, letter in MATRIX_ANSWER_CELLS[column].items():
-                workbook.set_cell(front, f"{letter}{row}", CHECK_MARK if value == option else None)
+                if chain:
+                    stamp_answer_box(workbook, front, f"{letter}{row}", option, chain, chain_initials(chain),
+                                     options=tuple(MATRIX_ANSWER_CELLS[column]))
+                else:
+                    workbook.set_cell(front, f"{letter}{row}", CHECK_MARK if value == option else None)
 
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
@@ -238,8 +272,9 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
            redlines: Redlines = NO_REDLINES) -> list[str]:
     """
     Stamp an SWCB report onto a Conc Fr / Conc Bk pair, and onto Report Cont when its text runs past the Remarks.
-    What reviewers edited (the header, the description and comments, pay items, work force, equipment and the
-    safety checklist) prints with its redlines; pass them as redlines (none unless given).
+    What reviewers edited (the header, the description and comments, the structural box and subcontractor, the
+    Detailed Activity, the Inspection Matrix, pay items, work force, equipment and the safety checklist) prints with
+    its redlines; pass them as redlines (none unless given).
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (None leaves Sheet No. blank), its report_data (None stamps the header only), and whether Report Cont is free
     (False when another report in the export already continues onto it; the Remarks are then cut with a note), and
@@ -261,9 +296,9 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     write_lines(workbook, back, CONC_BACK_TEXT.rows, flow.back, CONC_BACK_TEXT.column)
     tick_box(workbook, back, ATTACHED_PAGES_BOX, bool(flow.report_cont))
 
-    _stamp_operation(workbook, front, data)
-    _stamp_activity(workbook, front, data)
-    _stamp_matrix(workbook, front, data)
+    _stamp_operation(workbook, front, data, redlines)
+    _stamp_activity(workbook, front, data, redlines)
+    _stamp_matrix(workbook, front, data, redlines)
     stamp_pay_item_pages(workbook, fronts, CONC_FRONT_HEADER, CONC_FRONT_PAY_ITEMS, CONC_FRONT_TEXT, idr, project,
                          contractor, inspector, page_number, data.get("payItems"), redlines)
     stamp_workforce(workbook, back, CONC_BACK_WORKFORCE, data, redlines)
