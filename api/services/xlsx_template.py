@@ -9,6 +9,7 @@ in place keeps everything else in the package byte-for-byte.
 import posixpath
 import re
 import zipfile
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
@@ -82,6 +83,19 @@ def _cell_xml(coordinate: str, style: Optional[str], value: CellValue) -> str:
         return f'<c r="{coordinate}"{style_attr}><v>{value}</v></c>'
     text = escape(_INVALID_XML_CHARS.sub("", str(value)))
     return f'<c r="{coordinate}"{style_attr} t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+
+
+@dataclass(frozen=True)
+class TextRun:
+    """One run of a cell's text and how it looks; whatever isn't set is the cell's own font."""
+
+    text: str
+    color: Optional[str] = None     # ARGB, e.g. "FF0070C0"
+    points: Optional[float] = None
+    strike: bool = False
+    italic: bool = False
+    superscript: bool = False
+    font: Optional[str] = None      # font name
 
 
 class WorkbookTemplate:
@@ -172,16 +186,60 @@ class WorkbookTemplate:
         superscript, and its font name.
         Returns nothing; the cell keeps its style, and is added when the template doesn't have it.
         """
+        self.set_cell_runs(sheet, coordinate, [TextRun(text),
+                                               TextRun(suffix, points=points, superscript=superscript, font=font)])
+
+    def cell_font(self, sheet: str, coordinate: str) -> tuple[str, float]:
+        """
+        Read the font a cell's style gives its text.
+        Takes the sheet name and cell reference.
+        Returns (the font's name, its size in points); Arial 10 for whichever the style's font doesn't say.
+        """
+        styles = self._text("xl/styles.xml")
+        cell_xfs = re.search(r"<cellXfs\b[^>]*>(.*?)</cellXfs>", styles, re.DOTALL)
+        xf = re.findall(r"<xf\b[^>]*?(?:/>|>.*?</xf>)", cell_xfs.group(1), re.DOTALL)[int(self.cell_style(sheet, coordinate) or 0)]
+        font_id = re.search(r'\sfontId="(\d+)"', xf)
+        fonts = re.search(r"<fonts\b[^>]*>(.*?)</fonts>", styles, re.DOTALL)
+        font = re.findall(r"<font\b[^>]*?(?:/>|>.*?</font>)", fonts.group(1), re.DOTALL)[int(font_id.group(1)) if font_id else 0]
+        name, size = re.search(r'<name val="([^"]*)"', font), re.search(r'<sz val="([\d.]+)"', font)
+        return (name.group(1) if name else "Arial"), (float(size.group(1)) if size else 10.0)
+
+    def set_cell_runs(self, sheet: str, coordinate: str, runs: list[TextRun]) -> None:
+        """
+        Write a cell's text as runs, each with its own look (colour, size, strikethrough, italic, superscript). Only
+        a first run that changes nothing is left to the cell's own font: Excel draws any other run without properties
+        in its default font, not the cell's, so each states its font in full, taking the cell's font name and size
+        for whatever it doesn't set.
+        Takes the sheet name, cell reference and the runs, in order (runs without text are dropped).
+        Returns nothing; the cell keeps its style, and is added when the template doesn't have it.
+        """
         def clean(value: str) -> str:
             return escape(_INVALID_XML_CHARS.sub("", value))
 
+        cell_font: Optional[tuple[str, float]] = None
+        parts = []
+        for run in runs:
+            if not run.text:
+                continue
+            properties = ""
+            if parts or run != TextRun(run.text):
+                if cell_font is None and (run.font is None or run.points is None):
+                    cell_font = self.cell_font(sheet, coordinate)
+                name = run.font if run.font is not None else cell_font[0]
+                points = run.points if run.points is not None else cell_font[1]
+                properties = ("<rPr>"
+                              + ('<vertAlign val="superscript"/>' if run.superscript else "")
+                              + ("<strike/>" if run.strike else "")
+                              + ("<i/>" if run.italic else "")
+                              + (f'<color rgb="{run.color}"/>' if run.color else "")
+                              + f'<sz val="{points:g}"/><rFont val="{escape(name)}"/><family val="2"/></rPr>')
+            parts.append(f'<r>{properties}<t xml:space="preserve">{clean(run.text)}</t></r>')
         style = self.cell_style(sheet, coordinate)
         style_attr = f' s="{style}"' if style is not None else ""
-        raised = '<vertAlign val="superscript"/>' if superscript else ""
-        suffix_font = f'<rPr>{raised}<sz val="{points:g}"/><rFont val="{escape(font)}"/><family val="2"/></rPr>'
-        runs = (f'<r><t xml:space="preserve">{clean(text)}</t></r>'
-                f'<r>{suffix_font}<t xml:space="preserve">{clean(suffix)}</t></r>')
-        self._put_cell(sheet, coordinate, f'<c r="{coordinate}"{style_attr} t="inlineStr"><is>{runs}</is></c>')
+        if not parts:
+            self._put_cell(sheet, coordinate, f'<c r="{coordinate}"{style_attr}/>')
+            return
+        self._put_cell(sheet, coordinate, f'<c r="{coordinate}"{style_attr} t="inlineStr"><is>{"".join(parts)}</is></c>')
 
     def _put_cell(self, sheet: str, coordinate: str, new_cell: str) -> None:
         """
@@ -387,6 +445,24 @@ class WorkbookTemplate:
         """
         style = self.cell_style(sheet, coordinate)
         self.set_style(sheet, coordinate, self._alignment_style("shrink", style, "shrinkToFit", "1"))
+
+    def shrink_on_one_line(self, sheet: str, coordinate: str) -> None:
+        """
+        Put one cell's text on a single line that shrinks to fit: Excel ignores "Shrink to fit" on a cell that wraps,
+        so its wrapping is turned off too. The rest of its style is kept.
+        Takes the sheet name and cell reference.
+        Returns nothing.
+        """
+        style = self._alignment_style("no-wrap", self.cell_style(sheet, coordinate), "wrapText", "0")
+        self.set_style(sheet, coordinate, self._alignment_style("shrink", style, "shrinkToFit", "1"))
+
+    def set_font_color(self, sheet: str, coordinate: str, rgb: str) -> None:
+        """
+        Change one cell's font colour, keeping the rest of its style.
+        Takes the sheet name, cell reference and an ARGB colour like "FF0070C0".
+        Returns nothing.
+        """
+        self.set_style(sheet, coordinate, self.font_style(self.cell_style(sheet, coordinate), rgb=rgb))
 
     def font_style(self, style: Optional[str], points: Optional[float] = None, bold: bool = False,
                    rgb: Optional[str] = None) -> str:

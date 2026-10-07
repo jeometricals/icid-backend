@@ -220,6 +220,11 @@ holds the history. The value before a field's first edit is that row's `old_valu
 
 Indexes: `idx_idr_field_edits_idr (idr_id, edited_at)` and `idx_idr_field_edits_field (report_id, field_path)`.
 
+The IDR export prints these rows as redlines (`api/services/export_redlines.py`): a field's first `old_value`
+struck, then each `new_value` in blue with the editor's initials; a `pay_item_revision` as a row of its own under
+the item; a `pay_item_add` as a blue row; a `pay_item_approve` as initials beside the quantity, when its
+`new_value` is still the item's quantity. Nothing is stored for this: the export reads the rows each time.
+
 `field_path`, with the keys as `report_data` stores them:
 
 | Form | Example | Means |

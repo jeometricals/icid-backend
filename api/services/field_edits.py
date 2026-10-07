@@ -256,7 +256,7 @@ def revise_pay_item(idr: dict[str, Any], pay_item_id: str, revised_quantity: Any
     raise FieldEditError(404, "Pay item not found in this IDR")
 
 
-def _same_quantity(a: Any, b: Any) -> bool:
+def same_quantity(a: Any, b: Any) -> bool:
     """
     Tell whether two quantities are the same amount, however they are written ("55" and "55.00" are).
     Takes the two values (text or numbers; None and blank count as nothing).
@@ -296,12 +296,12 @@ def _touched(item: dict[str, Any], report_id: UUID, edits: list[dict[str, Any]])
         if edit["report_id"] != report_id:
             continue
         kind, path, value = edit["edit_type"], edit["field_path"], edit["new_value"]
-        if kind == "pay_item_approve" and path == item_path and _same_quantity(value, quantity):
+        if kind == "pay_item_approve" and path == item_path and same_quantity(value, quantity):
             return True
-        if kind == "pay_item_revision" and path == f"{item_path}.{PAY_QUANTITY}" and _same_quantity(value, quantity):
+        if kind == "pay_item_revision" and path == f"{item_path}.{PAY_QUANTITY}" and same_quantity(value, quantity):
             return True
         if kind == "pay_item_add" and path == item_path and isinstance(value, dict) \
-                and _same_quantity(value.get(PAY_QUANTITY), quantity):
+                and same_quantity(value.get(PAY_QUANTITY), quantity):
             return True
     return False
 

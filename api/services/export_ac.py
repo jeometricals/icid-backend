@@ -23,10 +23,11 @@ from typing import Any, Optional
 from api.services.export_common import (
     SignatureLayout,
     REPORT_CONT, REPORT_CONT_TEXT, EquipmentLayout, HeaderLayout, PayItemsLayout, SafetyLayout, TextArea,
-    WorkforceLayout, allocate_copies, checklist_answer, fill_lines, mark_truncated, object_rows, paragraphs,
-    pay_item_page_count, pay_item_slices, section, stamp_checklist, stamp_common_header, stamp_equipment,
+    WorkforceLayout, allocate_copies, checklist_answer, fill_lines, mark_truncated, object_rows,
+    pay_item_page_count, pay_item_slices, redline_paragraphs, section, stamp_checklist, stamp_common_header, stamp_equipment,
     stamp_pay_items, stamp_report_cont, stamp_safety, stamp_workforce, text_value, tick_box, typed_value, write_lines,
 )
+from api.services.export_redlines import NO_REDLINES, Redlines
 from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 AC_FRONT = "AC Fr"
@@ -208,16 +209,18 @@ def _stamp_site_conditions(workbook: WorkbookTemplate, front: str, data: dict[st
         _centre_across(workbook, front, cells, typed_value(density.get(field)))
 
 
-def front_count(report_data: Any) -> int:
+def front_count(report_data: Any, redlines: Redlines = NO_REDLINES) -> int:
     """
     Count the AC Fr sheets a report prints on: enough for its pavement courses (four a sheet) and for its pay items
-    (ten on the last sheet, nine and a "continued" row on the others), and always at least one.
-    Takes the report_data (anything that isn't an object counts as empty).
+    (ten rows on the last sheet, nine and a "continued" row on the others; a revised item takes a row per revision),
+    and always at least one.
+    Takes the report_data (anything that isn't an object counts as empty) and the report's redlines (none unless
+    given).
     Returns the number of sheets.
     """
     data = report_data if isinstance(report_data, dict) else {}
     course_sheets = -(-len(object_rows(data, "pavementCourses")) // len(PAVEMENT_ROWS))
-    return max(1, course_sheets, pay_item_page_count(data.get("payItems"), AC_FRONT_PAY_ITEMS))
+    return max(1, course_sheets, pay_item_page_count(data.get("payItems"), AC_FRONT_PAY_ITEMS, redlines))
 
 
 def _stamp_pavement_courses(workbook: WorkbookTemplate, front: str, courses: list[dict[str, Any]]) -> None:
@@ -354,10 +357,13 @@ def mark_attachments(workbook: WorkbookTemplate, back: str = AC_BACK) -> None:
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
            report_data: Optional[dict[str, Any]] = None, report_cont_available: bool = True,
-           fronts: Optional[list[str]] = None, back: str = AC_BACK) -> list[str]:
+           fronts: Optional[list[str]] = None, back: str = AC_BACK,
+           redlines: Redlines = NO_REDLINES) -> list[str]:
     """
     Stamp an AC report onto its AC Fr sheets, AC Bk and, when its remarks run long, Report Cont. The "Attached Pages"
-    box is the caller's to tick (see mark_attachments), as it knows the report's attachments.
+    box is the caller's to tick (see mark_attachments), as it knows the report's attachments. What reviewers edited
+    (the header, the comments, pay items, work force, equipment and the safety answers) prints with its redlines;
+    pass them as redlines (none unless given). Safety remarks, printed with the remarks here, show as they stand.
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (its later fronts take the numbers after it; None leaves Sheet No. blank), its report_data, whether Report Cont
     is free (False when another report in the export already continues onto it; the remarks are then cut with a
@@ -368,16 +374,17 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     don't match front_count.
     """
     data = report_data if isinstance(report_data, dict) else {}
-    fronts = fronts or allocate_copies(workbook, AC_FRONT, front_count(data))
-    if len(fronts) != front_count(data):
-        raise ValueError(f"this AC report needs {front_count(data)} AC Fr sheets, got {len(fronts)}")
+    needed = front_count(data, redlines)
+    fronts = fronts or allocate_copies(workbook, AC_FRONT, needed)
+    if len(fronts) != needed:
+        raise ValueError(f"this AC report needs {needed} AC Fr sheets, got {len(fronts)}")
     courses = object_rows(data, "pavementCourses")
     course_sheets = max(1, -(-len(courses) // len(PAVEMENT_ROWS)))  # the first sheet prints the table even when empty
-    pay_slices = pay_item_slices(data.get("payItems"), len(AC_FRONT_PAY_ITEMS.rows))
+    pay_slices = pay_item_slices(data.get("payItems"), len(AC_FRONT_PAY_ITEMS.rows), redlines)
     per_sheet = len(PAVEMENT_ROWS)
     for index, front in enumerate(fronts):
         page = page_number + index if page_number is not None else None
-        stamp_common_header(workbook, front, AC_FRONT_HEADER, idr, project, contractor, inspector, page)
+        stamp_common_header(workbook, front, AC_FRONT_HEADER, idr, project, contractor, inspector, page, redlines)
         if index < course_sheets:
             _stamp_site_conditions(workbook, front, data)
             _stamp_pavement_courses(workbook, front, courses[index * per_sheet:(index + 1) * per_sheet])
@@ -386,7 +393,7 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
             _stamp_tack_coat(workbook, front, data)
         if index < len(pay_slices):
             stamp_pay_items(workbook, front, AC_FRONT_PAY_ITEMS, pay_slices[index],
-                            continued=index < len(pay_slices) - 1)
+                            continued=index < len(pay_slices) - 1, redlines=redlines)
         if index:
             _write_note(workbook, front, CONTINUED_FROM_CELL, CONTINUED_FROM_NOTE)
         if index < course_sheets - 1:
@@ -394,11 +401,12 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
 
     more_tickets = _stamp_delivery_tickets(workbook, back, data)
     note = MORE_TICKETS_NOTE.format(count=more_tickets, plural="" if more_tickets == 1 else "s")
-    queue = paragraphs(data.get("comments")) + ([note] if more_tickets else []) + safety_remarks(data)
+    comments = redline_paragraphs(data.get("comments"), redlines.field("comments"))
+    queue = comments + ([note] if more_tickets else []) + safety_remarks(data)
     continued = _stamp_remarks(workbook, back, idr, project, inspector, queue, report_cont_available)
-    stamp_workforce(workbook, back, AC_BACK_WORKFORCE, data)
-    stamp_equipment(workbook, back, AC_BACK_EQUIPMENT, data)
-    stamp_safety(workbook, back, AC_BACK_SAFETY, data)
+    stamp_workforce(workbook, back, AC_BACK_WORKFORCE, data, redlines)
+    stamp_equipment(workbook, back, AC_BACK_EQUIPMENT, data, redlines)
+    stamp_safety(workbook, back, AC_BACK_SAFETY, data, redlines)
     pages = fronts + [back] + ([REPORT_CONT] if continued else [])
     for sheet in pages:
         workbook.fit_to_letter_page(sheet)

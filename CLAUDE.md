@@ -22,7 +22,7 @@ every request to it.
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -334,6 +334,50 @@ Any change must follow these.
   its zeros): the header's "I.R. No." on Gen Fr, Conc Fr, AC Fr, Report Cont and the attachment pages, and
   "ATTACHMENT TO I.R. NO." on Conc Mix (`ir_number` in `export_common.py`). An IDR nobody has accepted yet has no
   number and the field stays blank; a returned draft keeps showing the one it was given.
+- **Redlines on the export.** What reviewers edited prints with its history, at any status (a returned draft
+  included). `export.py` reads the IDR's edits once (`field_edits_for`) and hands each report its own
+  (`Redlines.for_report`); `export_redlines.py` decides what prints and `export_common.py` draws it.
+  - **A field's chain** is the value before its first edit, struck, then each edit's new value in blue
+    (`PAY_REDLINE_COLOR`, `0070C0`) followed by the editor's initials as a small label. Only the last entry is
+    left standing: an edit a later one replaced is struck too, and keeps its initials. An edit that emptied a
+    field shows `(blank)`.
+  - **Revised after return.** When the field's current value isn't the last edit's (the inspector changed it
+    after a return), every edit is struck and the current value closes the chain in black, labelled `(revised)`
+    in small grey italic. Values are compared as they print, quantities as amounts (`same_quantity`).
+  - **Always one line, shrunk to fit.** Excel ignores shrink-to-fit on a cell that wraps, and no header box is
+    tall enough to stack two values, so a chain's cell has its wrapping turned off (`shrink_on_one_line`). A label
+    sharing the cell stays in front: `Low  41 45 MK`, `AM  Sunny Cloudy RM Rain MK`, `( Start 07:00 07:30 RM End … )`.
+  - **Initials** are Arial 6 (`REDLINE_INITIALS_FONT_PT`), and Arial 8 for a pay item's, in Quantity Chk
+    (`PAY_REDLINE_INITIALS_FONT_PT`).
+  - **Runs state their font.** `WorkbookTemplate.set_cell_runs` writes a cell as `TextRun`s. Excel draws a run
+    without properties in its default font, not the cell's, unless it is the first; so every other run carries
+    the cell's font name and size for whatever it doesn't set.
+  - **Pay items take a row per revision.** The item's own row keeps the quantity it had, struck; each revision
+    follows on a row of its own with the item number, budget code and quantity in blue (the description stays on
+    the first row). A quantity the inspector changed afterwards gets a last, black row. An item a reviewer added
+    is one row with its item number and quantity in blue.
+  - **Initials go in "Quantity Chk (Initials)", never in the Pay Quantity cell**, which holds only the quantity
+    and its unit. Each row's cell holds the initials of whoever added or revised that row's quantity, in blue,
+    shrunk to fit. The inspector's own rows (the struck original, a quantity changed after a return) have none.
+  - **Approvals** add the approver's initials to the Quantity Chk cell of the row that stands, after the
+    reviser's or adder's: `AD / RM / MK`. Only an approval of the quantity the item has now prints; each person
+    once. An item approved as it stands keeps its black quantity and gets the approvers' initials in blue.
+  - **Revision rows are table rows.** The tables don't grow (12 rows, 10 on AC Fr), so redlines can push pay items
+    onto another copy of the front page, which is numbered and counted in OF like any overflow page
+    (`pay_item_slices` counts rows, not items). An item and its revisions stay on one page; an item with more
+    rows than a page holds keeps its own row and its latest revisions.
+  - **Description and comments** flow through the same cascade as before, the replaced text struck and then the
+    new text in blue, the initials after its last line (`redline_paragraphs`, `RedlineText`). An edited text
+    takes that many more lines, so it can reach the back page or Report Cont.
+  - **Safety Y / N:** the box the answer left keeps a struck X, the new box gets a blue X, and the editor's
+    initials open the row's Remarks. AC Bk has no remarks column, so there the initials follow the X.
+  - **An auto-generated General shows the header's redlines only.** Its pay items are sums across reports and it
+    can't be edited; the edits print on the reports they were made on. So does a General composed for the export.
+  - **Not redlined:** the report-specific sections (SWCB's operation, activity and matrix, AC's own sections,
+    Conc Mix), which reviewers can't edit; and AC Bk's safety remarks, which print inside its remarks text as
+    they stand.
+  - Lists addressed by position (`additionalWorkforce[0].count`) are matched by position, with the limitation
+    noted under "Reviewer edits".
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.

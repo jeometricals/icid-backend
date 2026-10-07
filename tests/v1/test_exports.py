@@ -123,14 +123,15 @@ GENERAL = {
 @contextmanager
 def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers Contracting Co.", user=USER,
                    general=GENERAL, main_reports=None, reports=None, attachments=None, files=None, signature=None,
-                   re_signature=None, users=None):
+                   re_signature=None, users=None, edits=None):
     """
     Patch the queries generate_idr_export reads, and Storage, so it runs without a database or a bucket.
     Takes the IDR, project, contractor name, user, General report (or None), non-General main reports, all the
     IDR's reports (where the SWCB report is found), their uploaded attachment rows, {storage path: file bytes}
     (a path that's missing, or maps to an exception, fails its download), the inspector's signature file's bytes
     and the RE's (None, or an exception, fails that download), and {user uuid: users row} for anyone other than the
-    reporter (an unlisted uuid gets the reporter's row).
+    reporter (an unlisted uuid gets the reporter's row), and the IDR's reviewer edits, oldest first, each with
+    editor_initials (none unless given).
     Yields a dict of the mocks.
     """
     def download(path):
@@ -159,6 +160,7 @@ def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers 
         patch.object(export, "list_uploaded_attachments_for_reports", return_value=attachments or []) as la,
         patch.object(export_attachments, "download_file", side_effect=download) as df,
         patch.object(export, "download_file", side_effect=download_signature) as ds,
+        patch.object(export, "field_edits_for", return_value=edits or []),
     ):
         yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm, "reports": lr,
                "attachments": la, "download": df, "signature": ds}
@@ -4294,3 +4296,521 @@ class TestSignatureHelpers:
         assert workbook._ensure_drawing("Conc Bk") == existing
         created = workbook._ensure_drawing("Gen Bk")
         assert workbook._ensure_drawing("Gen Bk") == created and created != existing  # made once, then found
+
+
+# ---------------------------------------------------------------------------
+# Reviewer redlines (Slice K3)
+# ---------------------------------------------------------------------------
+
+BLUE = "FF0070C0"
+GREY = "FF808080"
+GEN_REPORT_ID = UUID(int=0x6E00)
+
+
+def redline_edit(path: str, kind: str, old, new, initials: str, report_id: Optional[UUID] = GEN_REPORT_ID) -> dict:
+    """
+    Build one reviewer edit as field_edits_for returns it.
+    Takes the field_path, the edit_type, the old and new values, the editor's initials and the report's uuid (None
+    for a header field).
+    Returns the edit row.
+    """
+    return {"report_id": report_id, "field_path": path, "edit_type": kind, "old_value": old, "new_value": new,
+            "editor_initials": initials}
+
+
+def own_general(**report_data) -> dict:
+    """
+    Build the inspector's own General, which reviewers can edit.
+    Takes report_data fields as keyword arguments.
+    Returns the row (page 1), with its id.
+    """
+    return {**general_with(**report_data), "report_id": GEN_REPORT_ID, "is_addendum": False,
+            "is_auto_generated": False}
+
+
+def runs(cell) -> list[tuple]:
+    """
+    Read a cell's text runs, to check how each is marked.
+    Takes a cell of a workbook loaded with rich_text=True.
+    Returns (text, colour, struck, size, italic) per run, spaces between values left out; a run in the cell's own
+    font has no colour or size.
+    """
+    from openpyxl.cell.rich_text import CellRichText
+    if not isinstance(cell.value, CellRichText):
+        return [(cell.value, None, False, None, False)]
+    found = []
+    for part in cell.value:
+        if isinstance(part, str):
+            found.append((part, None, False, None, False))
+            continue
+        font = part.font
+        found.append((part.text, font.color.rgb if font.color else None, bool(font.strike), font.sz, bool(font.i)))
+    return [run for run in found if run[0].strip()]
+
+
+def marks(cell) -> list[tuple]:
+    """
+    Read a cell's runs as (text, colour, struck) only.
+    Takes a cell of a workbook loaded with rich_text=True.
+    Returns one tuple per run, text trimmed.
+    """
+    return [(text.strip(), color, struck) for text, color, struck, _, _ in runs(cell)]
+
+
+REDLINED_ITEMS = [
+    pay_item(1, id="a", payQuantity="118"),   # revised once, then approved by two reviewers
+    pay_item(2, id="b", payQuantity="45"),    # revised twice
+    pay_item(3, id="c", payQuantity="8"),     # added by a reviewer
+    pay_item(4, id="d", payQuantity="12.5"),  # approved as it stands
+    pay_item(5, id="e", payQuantity="30"),    # revised, then changed by the inspector after a return
+    pay_item(6, id="f"),                      # untouched
+]
+REDLINED_DATA = {
+    "description": "Poured curb along Main St between 1st and 2nd Ave.",
+    "payItems": REDLINED_ITEMS,
+    "workforce": {"foremen": "2", "laborers": "6"},
+    "equipment": {"backhoe": {"model": "CAT 420", "number": "1"}},
+    "safetyChecks": {"plasticBarrels": "Y", "plates": "N", "fencing": "Y"},
+    "safetyRemarks": {"plates": "Plate missing", "fencing": "North side only"},
+}
+REDLINED_EDITS = [
+    redline_edit("header.weather_am", "field_change", "Sunny", "Cloudy", "RM", None),
+    redline_edit("header.weather_am", "field_change", "Cloudy", "Rain", "MK", None),
+    redline_edit("header.work_start_time", "field_change", "07:00:00", "07:30:00", "RM", None),
+    redline_edit("header.temp_low", "field_change", 41, 45, "MK", None),
+    redline_edit("payItems[a]", "pay_item_approve", "125", "125", "ZZ"),  # stale: the quantity has changed since
+    redline_edit("payItems[a].payQuantity", "pay_item_revision", "125", "118", "AD"),
+    redline_edit("payItems[a]", "pay_item_approve", "118", "118", "RM"),
+    redline_edit("payItems[a]", "pay_item_approve", "118", "118.00", "MK"),
+    redline_edit("payItems[b].payQuantity", "pay_item_revision", "40", "42", "RM"),
+    redline_edit("payItems[b].payQuantity", "pay_item_revision", "42", "45", "MK"),
+    redline_edit("payItems[c]", "pay_item_add", None, REDLINED_ITEMS[2], "RM"),
+    redline_edit("payItems[d]", "pay_item_approve", "12.5", "12.5", "RM"),
+    redline_edit("payItems[d]", "pay_item_approve", "12.5", "12.5", "MK"),
+    redline_edit("payItems[e].payQuantity", "pay_item_revision", "25", "28", "RM"),
+    redline_edit("safetyChecks.plates", "field_change", "Y", "N", "RM"),
+    redline_edit("safetyRemarks.fencing", "field_change", "All sides", "North side only", "MK"),
+    redline_edit("workforce.laborers", "field_change", "5", "6", "RM"),
+    redline_edit("equipment.backhoe.model", "field_change", "CAT 416", "CAT 420", "RM"),
+    redline_edit("description", "field_change", "Poured curb along Main St.", REDLINED_DATA["description"], "RM"),
+]
+REDLINED_IDR = {**SUBMITTED_IDR, "status": "stage2_review", "weather_am": "Rain", "work_start_time": time(7, 30)}
+
+
+def redlined_book(**overrides) -> openpyxl.Workbook:
+    """
+    Export an IDR with reviewer edits and load it with its text runs.
+    Takes patched_export's keyword overrides (the IDR in Stage 2 review and REDLINED_EDITS unless given).
+    Returns the workbook, fully loaded with rich_text=True.
+    """
+    overrides = {"idr": REDLINED_IDR, "general": own_general(**REDLINED_DATA), "edits": REDLINED_EDITS, **overrides}
+    return openpyxl.load_workbook(io.BytesIO(export_bytes(**overrides)), rich_text=True)
+
+
+@pytest.fixture(scope="module")
+def redlined() -> openpyxl.Workbook:
+    """
+    The export of an IDR whose header, pay items, description and back-page tables reviewers edited, loaded once.
+    Takes nothing.
+    Returns the workbook, with its text runs.
+    """
+    return redlined_book()
+
+
+class TestRedlineChain:
+    def test_a_field_never_edited_has_no_chain(self):
+        from api.services.export_redlines import redline_chain
+        assert redline_chain([], "Sunny") == []
+
+    def test_one_edit_strikes_the_original_and_leaves_the_reviewers_value_standing(self):
+        from api.services.export_redlines import redline_chain
+        chain = redline_chain([redline_edit("x", "field_change", "Sunny", "Rain", "RM")], "Rain")
+        assert [(e.text, e.by_reviewer, e.initials, e.struck) for e in chain] == [
+            ("Sunny", False, None, True), ("Rain", True, "RM", False)]
+
+    def test_only_the_last_entry_of_a_chain_is_left_standing(self):
+        from api.services.export_redlines import redline_chain
+        edits = [redline_edit("x", "field_change", "Sunny", "Cloudy", "RM"),
+                 redline_edit("x", "field_change", "Cloudy", "Rain", "MK")]
+        chain = redline_chain(edits, "Rain")
+        assert [(e.text, e.initials, e.struck) for e in chain] == [
+            ("Sunny", None, True), ("Cloudy", "RM", True), ("Rain", "MK", False)]
+
+    def test_a_value_the_inspector_changed_after_the_last_edit_closes_the_chain(self):
+        from api.services.export_redlines import redline_chain
+        chain = redline_chain([redline_edit("x", "field_change", "Sunny", "Rain", "RM")], "Showers")
+        assert [(e.text, e.struck, e.revised) for e in chain] == [
+            ("Sunny", True, False), ("Rain", True, False), ("Showers", False, True)]
+        assert chain[-1].by_reviewer is False
+
+    def test_a_blank_original_has_no_entry_and_an_edit_to_blank_says_so(self):
+        from api.services.export_redlines import REDLINE_BLANK, redline_chain
+        filled = redline_chain([redline_edit("x", "field_change", None, "Rain", "RM")], "Rain")
+        assert [e.text for e in filled] == ["Rain"]
+        emptied = redline_chain([redline_edit("x", "field_change", "Rain", None, "RM")], None)
+        assert [(e.text, e.struck) for e in emptied] == [("Rain", True), (REDLINE_BLANK, False)]
+
+    def test_values_are_compared_as_they_print(self):
+        from api.services.export_common import time_text
+        from api.services.export_redlines import redline_chain
+        edit = redline_edit("header.work_start_time", "field_change", "07:00:00", "07:30:00", "RM", None)
+        chain = redline_chain([edit], time(7, 30), time_text)  # the IDR holds a time, the edit its ISO text
+        assert [(e.text, e.struck) for e in chain] == [("07:00", True), ("07:30", False)]
+
+
+class TestPayItemRedlineRows:
+    def lines(self, item_id: str, edits: list = REDLINED_EDITS):
+        from api.services.export_redlines import Redlines
+        item = next(item for item in REDLINED_ITEMS if item["id"] == item_id)
+        return Redlines(edits, GEN_REPORT_ID).pay_item(item)
+
+    def test_a_revision_takes_a_row_under_the_items_own(self):
+        own, revision = self.lines("a")
+        assert (own.quantity, own.item_row, own.struck, own.by_reviewer, own.initials) == ("125", True, True, False, ())
+        assert (revision.quantity, revision.item_row, revision.struck, revision.by_reviewer) == ("118", False, False, True)
+
+    def test_approvals_of_the_current_quantity_follow_the_revisers_initials_and_stale_ones_dont_print(self):
+        assert self.lines("a")[-1].initials == ("AD", "RM", "MK")  # ZZ approved 125, which the item no longer holds
+
+    def test_each_revision_of_a_chain_has_its_row_and_only_the_last_stands(self):
+        assert [(line.quantity, line.struck, line.initials) for line in self.lines("b")] == [
+            ("40", True, ()), ("42", True, ("RM",)), ("45", False, ("MK",))]
+
+    def test_an_added_item_is_one_row_marked_as_the_reviewers(self):
+        (line,) = self.lines("c")
+        assert (line.item_row, line.by_reviewer, line.struck, line.initials) == (True, True, False, ("RM",))
+
+    def test_an_approved_item_keeps_its_row_and_gains_the_initials(self):
+        (line,) = self.lines("d")
+        assert (line.quantity, line.by_reviewer, line.struck, line.initials) == ("12.5", False, False, ("RM", "MK"))
+
+    def test_a_quantity_the_inspector_changed_after_a_revision_gets_a_last_row(self):
+        assert [(line.quantity, line.struck, line.revised, line.by_reviewer) for line in self.lines("e")] == [
+            ("25", True, False, False), ("28", True, False, True), ("30", False, True, False)]
+
+    def test_an_untouched_item_an_item_without_an_id_and_another_reports_edits_have_no_marks(self):
+        from api.services.export_redlines import Redlines
+        assert self.lines("f") is None
+        assert Redlines(REDLINED_EDITS, GEN_REPORT_ID).pay_item(pay_item(1)) is None
+        assert Redlines(REDLINED_EDITS, UUID(int=1)).pay_item(REDLINED_ITEMS[0]) is None
+        assert Redlines(REDLINED_EDITS).pay_item(REDLINED_ITEMS[0]) is None  # the header's edits only
+
+    def test_the_same_approver_is_printed_once(self):
+        twice = REDLINED_EDITS + [redline_edit("payItems[d]", "pay_item_approve", "12.5", "12.5", "RM")]
+        assert self.lines("d", twice)[0].initials == ("RM", "MK")
+
+
+class TestHeaderRedlines:
+    def test_a_weather_box_prints_its_chain_on_one_line(self, redlined):
+        cell = redlined["Gen Fr"]["AD17"]
+        assert marks(cell) == [("Sunny", None, True), ("Cloudy", BLUE, True), ("RM", BLUE, False),
+                               ("Rain", BLUE, False), ("MK", BLUE, False)]
+        assert (cell.alignment.shrink_to_fit, cell.alignment.wrap_text) == (True, False)
+
+    def test_initials_in_the_header_are_arial_6(self, redlined):
+        from api.services import export_common
+        assert export_common.REDLINE_INITIALS_FONT_PT == 6
+        sizes = {text.strip(): size for text, _, _, size, _ in runs(redlined["Gen Fr"]["AD17"])}
+        assert (sizes["RM"], sizes["MK"], sizes["Rain"]) == (6, 6, 8)  # the values keep the cell's 8 pt
+
+    def test_an_edited_time_is_redlined_inside_its_line(self, redlined):
+        cell = redlined["Gen Fr"]["AG10"]
+        assert "".join(str(part) for part in cell.value) == "( Start 07:00 07:30 RM End 15:30 )"
+        assert [m for m in marks(cell) if m[0] in ("07:00", "07:30", "RM")] == [
+            ("07:00", None, True), ("07:30", BLUE, False), ("RM", BLUE, False)]
+        assert cell.alignment.shrink_to_fit is True
+
+    def test_every_run_after_the_first_states_the_cells_font(self, redlined):
+        # Excel draws a later run without properties in its default font, not the cell's 8 pt
+        later = runs(redlined["Gen Fr"]["AG10"])[1:]
+        assert all(size is not None for _, _, _, size, _ in later)
+
+    def test_an_edited_temperature_follows_its_label(self, redlined):
+        assert marks(redlined["Gen Fr"]["AD13"]) == [("Low", None, False), ("41", None, True), ("45", BLUE, False),
+                                                      ("MK", BLUE, False)]
+
+    def test_fields_nobody_edited_are_written_as_before(self, redlined):
+        sheet = redlined["Gen Fr"]
+        assert sheet["AK13"].value == "High  62.5" and sheet["AK17"].value == "Rain"
+        assert sheet["AG12"].value == "( Start 06:45 End ________ )"
+
+    def test_a_labelled_weather_box_keeps_its_label_before_the_chain(self):
+        swcb = swcb_row(1, 2, description="Pour")
+        book = redlined_book(reports=[swcb], main_reports=[swcb])
+        cell = book["Conc Fr"]["AD15"]
+        assert [text for text, _, _ in marks(cell)] == ["AM", "Sunny", "Cloudy", "RM", "Rain", "MK"]
+        assert (cell.alignment.shrink_to_fit, cell.alignment.wrap_text) == (True, False)
+
+    def test_the_header_is_redlined_on_an_overflow_page_too(self):
+        general = own_general(payItems=pay_items(14))
+        book = redlined_book(general=general, edits=REDLINED_EDITS[:2])
+        assert marks(book["Gen Fr 2"]["AD17"])[0] == ("Sunny", None, True)
+
+
+class TestPayItemRedlinesOnTheForm:
+    def test_the_rows_as_they_print(self, redlined):
+        sheet = redlined["Gen Fr"]
+        text = lambda cell: "".join(str(part) for part in cell.value) if cell.value is not None else None
+        printed = [(sheet[f"B{row}"].value, text(sheet[f"N{row}"]), text(sheet[f"S{row}"]), sheet[f"X{row}"].value)
+                   for row in range(39, 51)]
+        assert printed == [
+            ("4.01 AAS", "125SF", None, "Sidewalk 1"),
+            ("4.01 AAS", "118SF", "AD / RM / MK", None),
+            ("4.02 AAS", "40SF", None, "Sidewalk 2"),
+            ("4.02 AAS", "42SF", "RM", None),
+            ("4.02 AAS", "45SF", "MK", None),
+            ("4.03 AAS", "8SF", "RM", "Sidewalk 3"),
+            ("4.04 AAS", "12.5SF", "RM / MK", "Sidewalk 4"),
+            ("4.05 AAS", "25SF", None, "Sidewalk 5"),
+            ("4.05 AAS", "28SF", "RM", None),
+            ("4.05 AAS", "30SF (revised)", None, None),
+            ("4.06 AAS", "312.50SF", None, "Sidewalk 6"),
+            (None, None, None, None),
+        ]
+
+    def test_the_inspectors_quantity_is_struck_and_keeps_its_row_black(self, redlined):
+        sheet = redlined["Gen Fr"]
+        assert marks(sheet["N39"]) == [("125", None, True), ("SF", None, False)]
+        assert sheet["B39"].font.color is None or sheet["B39"].font.color.rgb != BLUE
+
+    def test_a_revisions_row_is_blue_with_its_initials_in_quantity_chk_in_arial_8(self, redlined):
+        from api.services import export_common
+        assert (export_common.PAY_REDLINE_COLOR, export_common.PAY_REDLINE_INITIALS_FONT_PT) == (BLUE, 8)
+        sheet = redlined["Gen Fr"]
+        assert runs(sheet["N40"]) == [("118", BLUE, False, 14, False), ("SF", BLUE, False, 8, False)]
+        assert runs(sheet["S40"]) == [("AD / RM / MK", BLUE, False, 8, False)]
+        assert (sheet["B40"].font.color.rgb, sheet["G40"].font.color.rgb) == (BLUE, BLUE)
+        assert sheet["N40"].alignment.shrink_to_fit is True and sheet["S40"].alignment.shrink_to_fit is True
+
+    def test_the_pay_quantity_cell_never_holds_initials(self, redlined):
+        sheet = redlined["Gen Fr"]
+        for row in range(39, 50):
+            quantity = "".join(str(part) for part in sheet[f"N{row}"].value)
+            assert not re.search(r"[A-Z]{2} ?/|RM|MK|AD", quantity.replace("SF", "")), (row, quantity)
+
+    def test_the_inspectors_own_rows_have_no_initials(self, redlined):
+        sheet = redlined["Gen Fr"]
+        # the struck originals, the quantity changed after a return, and an item nobody touched
+        assert [sheet[f"S{row}"].value for row in (39, 41, 46, 48, 49)] == [None] * 5
+
+    def test_a_superseded_revision_is_struck_in_blue_and_keeps_its_initials(self, redlined):
+        sheet = redlined["Gen Fr"]
+        assert marks(sheet["N42"]) == [("42", BLUE, True), ("SF", BLUE, False)]
+        assert marks(sheet["N43"]) == [("45", BLUE, False), ("SF", BLUE, False)]
+        assert (marks(sheet["S42"]), marks(sheet["S43"])) == ([("RM", BLUE, False)], [("MK", BLUE, False)])
+
+    def test_an_added_item_has_its_item_number_and_quantity_in_blue(self, redlined):
+        sheet = redlined["Gen Fr"]
+        assert sheet["B44"].font.color.rgb == BLUE
+        assert sheet["G44"].font.color is None or sheet["G44"].font.color.rgb != BLUE  # the budget code stays black
+        assert marks(sheet["N44"]) == [("8", BLUE, False), ("SF", BLUE, False)]
+        assert marks(sheet["S44"]) == [("RM", BLUE, False)]
+
+    def test_approvals_alone_leave_the_quantity_black_and_put_blue_initials_in_quantity_chk(self, redlined):
+        sheet = redlined["Gen Fr"]
+        assert marks(sheet["N45"]) == [("12.5", None, False), ("SF", None, False)]
+        assert marks(sheet["S45"]) == [("RM / MK", BLUE, False)]
+
+    def test_the_inspectors_later_quantity_is_black_and_labelled_revised(self, redlined):
+        sheet = redlined["Gen Fr"]
+        assert marks(sheet["N47"])[0] == ("28", BLUE, True)
+        assert runs(sheet["N48"]) == [("30", None, False, None, False), ("SF", None, False, 8, False),
+                                      (" (revised)", GREY, False, 6, True)]
+
+    def test_an_untouched_item_is_written_exactly_as_before(self):
+        content = export_bytes(idr=REDLINED_IDR, general=own_general(**REDLINED_DATA), edits=REDLINED_EDITS)
+        cell = quantity_cell_xml(content, "sheet4.xml", "N49")
+        assert '<is><r><t xml:space="preserve">312.50</t></r>' + UNIT_RUN.format(unit="SF") + "</is>" in cell
+
+    def test_an_auto_generated_general_shows_header_redlines_only(self):
+        book = redlined_book(general={**own_general(**REDLINED_DATA), "is_auto_generated": True})
+        front, back = book["Gen Fr"], book["Gen Bk"]
+        assert marks(front["AD17"])[0] == ("Sunny", None, True)
+        assert front["B40"].value == "4.02 AAS"  # one row an item: no revision rows
+        assert "".join(str(part) for part in front["N39"].value) == "118SF"
+        assert back["G46"].value == 6 and back["P37"].value == "X"
+
+    def test_an_item_and_its_revisions_stay_on_one_page(self):
+        from api.services.export_redlines import Redlines
+        items = pay_items(10) + [pay_item(11, id="k", payQuantity="9")] + [pay_item(12)]
+        edits = [redline_edit("payItems[k].payQuantity", "pay_item_revision", "7", "8", "RM"),
+                 redline_edit("payItems[k].payQuantity", "pay_item_revision", "8", "9", "MK")]
+        slices = pay_item_slices(items, 12, Redlines(edits, GEN_REPORT_ID))
+        assert [len(s) for s in slices] == [10, 2]  # 10 rows, then the item's three would pass the eleventh
+        assert [len(s) for s in pay_item_slices(items, 12)] == [12]
+
+    def test_revision_rows_can_add_a_page_which_is_numbered_and_counted(self):
+        items = pay_items(11) + [pay_item(12, id="k", payQuantity="9")]
+        edits = [redline_edit("payItems[k].payQuantity", "pay_item_revision", "7", "9", "RM")]
+        book = redlined_book(general=own_general(payItems=items), edits=edits)
+        first, second = book["Gen Fr"], book["Gen Fr 2"]
+        assert first["X50"].value == "Pay items continued on next page" and first["B49"].value == "4.11 AAS"
+        assert [second[f"B{row}"].value for row in (39, 40, 41)] == ["4.12 AAS", "4.12 AAS", None]
+        assert (first["AH8"].value, first["AM8"].value) == (1, 4)  # three pages, and the one the redline added
+        assert (second["AH8"].value, second["AM8"].value) == (2, 4)
+
+    def test_an_item_with_more_revisions_than_a_page_holds_keeps_its_own_row_and_the_latest(self):
+        from api.services.export_common import pay_item_group
+        from api.services.export_redlines import Redlines
+        edits = [redline_edit("payItems[k].payQuantity", "pay_item_revision", str(n), str(n + 1), "RM")
+                 for n in range(1, 16)]
+        rows = pay_item_group(pay_item(1, id="k", payQuantity="16"), Redlines(edits, GEN_REPORT_ID), capacity=12)
+        assert [row["payQuantity"] for row in rows] == ["1"] + [str(n) for n in range(7, 17)]
+
+    def test_swcb_and_ac_pay_items_are_redlined_from_their_own_reports_edits(self):
+        swcb = swcb_row(1, 2, payItems=[pay_item(1, id="s", payQuantity="60")])
+        ac = ac_row(1, 3, payItems=[pay_item(2, id="t", payQuantity="9")])
+        edits = [redline_edit("payItems[s].payQuantity", "pay_item_revision", "55", "60", "RM", swcb["report_id"]),
+                 redline_edit("payItems[t]", "pay_item_approve", "9", "9", "MK", ac["report_id"])]
+        book = redlined_book(general=GENERAL, reports=[swcb, ac], main_reports=[swcb, ac], edits=edits)
+        assert marks(book["Conc Fr"]["K49"])[0] == ("55", None, True)
+        assert marks(book["Conc Fr"]["K50"]) == [("60", BLUE, False), ("SF", BLUE, False)]
+        assert (book["Conc Fr"]["P49"].value, marks(book["Conc Fr"]["P50"])) == (None, [("RM", BLUE, False)])
+        assert marks(book["AC Fr"]["K39"]) == [("9", None, False), ("SF", None, False)]
+        assert marks(book["AC Fr"]["P39"]) == [("MK", BLUE, False)]
+
+
+class TestTextRedlines:
+    def test_an_edited_description_prints_struck_then_in_blue_with_the_initials(self, redlined):
+        sheet = redlined["Gen Fr"]
+        assert marks(sheet["B22"]) == [("Poured curb along Main St.", None, True)]
+        assert marks(sheet["B23"]) == [("Poured curb along Main St between 1st and 2nd Ave.", BLUE, False),
+                                       ("RM", BLUE, False)]
+        assert sheet["B24"].value is None
+
+    def test_a_long_paragraph_keeps_its_marks_on_every_line_and_its_initials_on_the_last(self):
+        from api.services.export_common import RedlineText, redline_paragraphs
+        new = "The quick brown fox jumps over the lazy dog near the riverbank today"
+        queue = redline_paragraphs(new, [redline_edit("description", "field_change", "Old text", new, "RM")])
+        lines = fill_lines(queue, 10, 30)
+        assert all(isinstance(line, RedlineText) for line in lines)
+        assert [(str(line), line.struck, line.by_reviewer, line.tail) for line in lines] == [
+            ("Old text", True, False, None),
+            ("The quick brown fox jumps over", False, True, None),
+            ("the lazy dog near the", False, True, None),
+            ("riverbank today", False, True, "RM"),
+        ]
+
+    def test_text_cut_at_the_end_of_an_area_carries_its_marks_to_the_next(self):
+        from api.services.export_common import redline_paragraphs
+        new = "The quick brown fox jumps over the lazy dog near the riverbank today"
+        queue = redline_paragraphs(new, [redline_edit("description", "field_change", "Old text", new, "RM")])
+        fill_lines(queue, 2, 30)
+        (rest,) = queue
+        assert (str(rest), rest.by_reviewer, rest.tail) == ("the lazy dog near the riverbank today", True, "RM")
+        assert [line.tail for line in fill_lines(queue, 5, 30)] == [None, "RM"]
+
+    def test_a_description_the_inspector_rewrote_after_an_edit_ends_in_black_labelled_revised(self):
+        from api.services.export_common import REDLINE_REVISED_LABEL, redline_paragraphs
+        marked = redline_paragraphs("Third", [redline_edit("description", "field_change", "First", "Second", "RM")])
+        assert [(str(p), p.struck, p.by_reviewer, p.tail) for p in marked] == [
+            ("First", True, False, None), ("Second", True, True, "RM"), ("Third", False, False, REDLINE_REVISED_LABEL)]
+
+    def test_text_nobody_edited_is_plain_paragraphs(self):
+        from api.services.export_common import redline_paragraphs
+        assert redline_paragraphs("One\n\nTwo", []) == ["One", "Two"] == paragraphs("One\n\nTwo")
+
+    def test_edited_comments_flow_onto_the_back_page(self):
+        general = own_general(description="Work.", comments="New remark")
+        edits = [redline_edit("comments", "field_change", "Old remark", "New remark", "MK")]
+        sheet = redlined_book(general=general, edits=edits)["Gen Bk"]
+        assert marks(sheet["B3"]) == [("Old remark", None, True)]
+        assert marks(sheet["B4"]) == [("New remark", BLUE, False), ("MK", BLUE, False)]
+
+
+class TestBackPageRedlines:
+    def test_a_changed_answer_leaves_a_struck_x_and_gets_a_blue_one(self, redlined):
+        sheet = redlined["Gen Bk"]
+        assert marks(sheet["N37"]) == [("X", None, True)]   # Plates: the inspector's Y
+        assert marks(sheet["P37"]) == [("X", BLUE, False)]  # the reviewer's N
+        assert sheet["N30"].value == "X" and sheet["P30"].value is None  # an answer nobody edited
+
+    def test_the_initials_open_the_rows_remarks(self, redlined):
+        cell = redlined["Gen Bk"]["R37"]
+        assert runs(cell) == [("RM ", BLUE, False, 6, False), ("Plate missing", None, False, 10, False)]
+        assert cell.alignment.shrink_to_fit is True
+
+    def test_an_edited_remark_prints_as_its_chain(self, redlined):
+        assert marks(redlined["Gen Bk"]["R36"]) == [("All sides", None, True), ("North side only", BLUE, False),
+                                                     ("MK", BLUE, False)]
+
+    def test_an_answer_changed_back_keeps_only_the_struck_x_of_the_other_box(self):
+        general = own_general(safetyChecks={"plates": "Y"})
+        edits = [redline_edit("safetyChecks.plates", "field_change", "Y", "N", "RM"),
+                 redline_edit("safetyChecks.plates", "field_change", "N", "Y", "MK")]
+        sheet = redlined_book(general=general, edits=edits)["Gen Bk"]
+        assert marks(sheet["N37"]) == [("X", BLUE, False)]
+        assert marks(sheet["P37"]) == [("X", BLUE, True)]
+        assert marks(sheet["R37"]) == [("RM MK", BLUE, False)]
+
+    def test_a_form_without_a_remarks_column_puts_the_initials_after_the_x(self):
+        ac = ac_row(1, 2, safetyChecks={"plates": "N"})
+        edits = [redline_edit("safetyChecks.plates", "field_change", "Y", "N", "RM", ac["report_id"])]
+        sheet = redlined_book(general=GENERAL, reports=[ac], main_reports=[ac], edits=edits)["AC Bk"]
+        assert marks(sheet["L43"]) == [("X", None, True)]
+        assert marks(sheet["N43"]) == [("X", BLUE, False), ("RM", BLUE, False)]
+
+    def test_an_edited_headcount_and_model_print_as_chains(self, redlined):
+        sheet = redlined["Gen Bk"]
+        assert marks(sheet["G46"]) == [("5", None, True), ("6", BLUE, False), ("RM", BLUE, False)]
+        assert marks(sheet["N44"]) == [("CAT 416", None, True), ("CAT 420", BLUE, False), ("RM", BLUE, False)]
+        assert sheet["G44"].value == 2 and sheet["V44"].value == 1  # the unedited ones stay numbers
+
+    def test_an_added_trade_is_found_by_its_place_in_the_list(self):
+        general = own_general(additionalWorkforce=[{"label": "Welders", "count": "2"}, {"label": "Divers", "count": "4"}])
+        edits = [redline_edit("additionalWorkforce[1].count", "field_change", "3", "4", "RM")]
+        sheet = redlined_book(general=general, edits=edits)["Gen Bk"]
+        assert (sheet["B52"].value, sheet["G52"].value) == ("Welders", 2)
+        assert sheet["B53"].value == "Divers"
+        assert marks(sheet["G53"]) == [("3", None, True), ("4", BLUE, False), ("RM", BLUE, False)]
+
+
+class TestRedlinesAtAnyStatus:
+    @pytest.mark.parametrize("status", ["draft", "submitted", "stage1_review", "approved", "deleted"])
+    def test_redlines_print_whatever_the_idrs_status(self, status):
+        idr = {**REDLINED_IDR, "status": status}
+        sheet = redlined_book(idr=idr, edits=REDLINED_EDITS[:2])["Gen Fr"]
+        assert marks(sheet["AD17"])[0] == ("Sunny", None, True)
+
+    def test_an_export_fails_when_the_edits_cant_be_read(self):
+        with patched_export(), patch.object(export, "field_edits_for", return_value=None):
+            with pytest.raises(export.ExportDataError):
+                generate_idr_export(IDR_ID)
+
+    def test_the_edits_are_read_once_for_the_idr(self):
+        with patched_export(), patch.object(export, "field_edits_for", return_value=[]) as read:
+            generate_idr_export(IDR_ID)
+        read.assert_called_once_with(IDR_ID)
+
+
+class TestSetCellRuns:
+    def test_runs_take_the_cells_font_for_what_they_dont_set(self):
+        from api.services.xlsx_template import TextRun
+        workbook = WorkbookTemplate(TEMPLATE)
+        assert workbook.cell_font("Gen Fr", "N39") == ("Arial", 14.0)
+        workbook.set_cell_runs("Gen Fr", "N39", [TextRun("125", strike=True), TextRun(" RM", color=BLUE, points=8)])
+        xml = workbook._sheet("Gen Fr")
+        cell = re.search(r'<c r="N39"[^>]*>.*?</c>', xml, re.DOTALL).group(0)
+        assert '<rPr><strike/><sz val="14"/><rFont val="Arial"/><family val="2"/></rPr>' in cell
+        assert f'<rPr><color rgb="{BLUE}"/><sz val="8"/><rFont val="Arial"/><family val="2"/></rPr>' in cell
+
+    def test_only_a_plain_first_run_is_left_to_the_cells_font(self):
+        from api.services.xlsx_template import TextRun
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.set_cell_runs("Gen Fr", "N39", [TextRun("a"), TextRun("b")])
+        cell = re.search(r'<c r="N39"[^>]*>.*?</c>', workbook._sheet("Gen Fr"), re.DOTALL).group(0)
+        assert '<r><t xml:space="preserve">a</t></r><r><rPr><sz val="14"/>' in cell
+
+    def test_runs_without_text_leave_an_empty_cell(self):
+        from api.services.xlsx_template import TextRun
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.set_cell_runs("Gen Fr", "N39", [TextRun("")])
+        assert re.search(r'<c r="N39"[^>]*/>', workbook._sheet("Gen Fr"))
+
+    def test_shrinking_on_one_line_turns_wrapping_off(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.set_cell("Gen Fr", "AD17", "Rain")
+        workbook.shrink_on_one_line("Gen Fr", "AD17")
+        cell = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()))["Gen Fr"]["AD17"]
+        assert (cell.alignment.shrink_to_fit, cell.alignment.wrap_text) == (True, False)
+        assert (cell.alignment.horizontal, cell.alignment.vertical) == ("center", "top")  # the rest is kept

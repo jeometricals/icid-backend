@@ -20,6 +20,7 @@ from api.services.export_common import (
     TextArea, WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, stamp_common_header, stamp_equipment,
     stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, write_lines,
 )
+from api.services.export_redlines import NO_REDLINES, Redlines
 from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 GEN_FRONT = "Gen Fr"
@@ -92,46 +93,50 @@ GEN_BACK_EQUIPMENT = EquipmentLayout(
 # ---- Gen Fr ------------------------------------------------------------------
 
 def _stamp_front_header(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any],
-                        inspector: Optional[str], page_number: Optional[int]) -> None:
+                        inspector: Optional[str], page_number: Optional[int],
+                        redlines: Redlines = NO_REDLINES) -> None:
     """
     Write Gen Fr's header block (see stamp_common_header).
-    Takes the workbook, IDR row, project details (with "contractor"), inspector name and the General's page number.
+    Takes the workbook, IDR row, project details (with "contractor"), inspector name, the General's page number and
+    the IDR's redlines (none unless given).
     Returns nothing; Sheet No. is blank for a composed General, which isn't one of the IDR's numbered pages.
     """
     stamp_common_header(workbook, GEN_FRONT, GEN_FRONT_HEADER, idr, project, project.get("contractor"),
-                        inspector, page_number)
+                        inspector, page_number, redlines)
 
 
 # ---- The General ------------------------------------------------------------
 
 def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], inspector: Optional[str],
                   general_data: dict[str, Any], page_number: Optional[int],
-                  fronts: Optional[list[str]] = None) -> list[str]:
+                  fronts: Optional[list[str]] = None, redlines: Redlines = NO_REDLINES) -> list[str]:
     """
     Stamp the General onto Gen Fr (and copies of it for pay items past its table), Gen Bk and, for long text,
-    Report Cont.
+    Report Cont. What reviewers edited prints with its redlines.
     Takes the workbook, IDR row, project details (with "contractor"), inspector name, the General's report_data,
-    its page number (None for a composed General) and its front pages (Gen Fr, Gen Fr 2, ...; None clones them here).
+    its page number (None for a composed General), its front pages (Gen Fr, Gen Fr 2, ...; None clones them here)
+    and its redlines (none unless given; the header's only, for a General that isn't the inspector's own).
     Returns the sheets to print, in order: the fronts and Gen Bk always (Gen Bk carries the certification and the
     signature lines even when nothing else is on it), then Report Cont when the text continues onto it.
     """
     pay_items = general_data.get("payItems")
-    fronts = fronts or allocate_copies(workbook, GEN_FRONT, pay_item_page_count(pay_items, GEN_FRONT_PAY_ITEMS))
-    _stamp_front_header(workbook, idr, project, inspector, page_number)
+    fronts = fronts or allocate_copies(workbook, GEN_FRONT,
+                                       pay_item_page_count(pay_items, GEN_FRONT_PAY_ITEMS, redlines))
+    _stamp_front_header(workbook, idr, project, inspector, page_number, redlines)
     stamp_pay_item_pages(workbook, fronts, GEN_FRONT_HEADER, GEN_FRONT_PAY_ITEMS, GEN_FRONT_TEXT, idr, project,
-                         project.get("contractor"), inspector, page_number, pay_items)
+                         project.get("contractor"), inspector, page_number, pay_items, redlines)
 
     # The General is stamped first, so Report Cont is always free for it
     flow = flow_text(general_data.get("description"), general_data.get("comments"),
-                     GEN_FRONT_TEXT, GEN_BACK_TEXT, REPORT_CONT_TEXT)
+                     GEN_FRONT_TEXT, GEN_BACK_TEXT, REPORT_CONT_TEXT, redlines)
     write_lines(workbook, GEN_FRONT, GEN_FRONT_TEXT.rows, flow.front, GEN_FRONT_TEXT.column)
     workbook.set_cell(GEN_FRONT, REVERSE_PAGE_BOX, CHECK_MARK if flow.past_front else None)
     write_lines(workbook, GEN_BACK, GEN_BACK_TEXT.rows, flow.back, GEN_BACK_TEXT.column)
     workbook.set_cell(GEN_BACK, CONTINUED_BOX, CHECK_MARK if flow.past_back else None)
 
-    stamp_workforce(workbook, GEN_BACK, GEN_BACK_WORKFORCE, general_data)
-    stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, general_data)
-    stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, general_data)
+    stamp_workforce(workbook, GEN_BACK, GEN_BACK_WORKFORCE, general_data, redlines)
+    stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, general_data, redlines)
+    stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, general_data, redlines)
 
     sheets = fronts + [GEN_BACK]
     if flow.report_cont:

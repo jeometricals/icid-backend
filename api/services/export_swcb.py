@@ -17,6 +17,7 @@ from api.services.export_common import (
     WorkforceLayout, allocate_copies, flow_text, pay_item_page_count, section, stamp_common_header, stamp_equipment,
     stamp_pay_item_pages, stamp_report_cont, stamp_safety, stamp_workforce, text_value, tick_box, write_lines,
 )
+from api.services.export_redlines import NO_REDLINES, Redlines
 from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 
 CONC_FRONT = "Conc Fr"
@@ -230,9 +231,12 @@ def _stamp_matrix(workbook: WorkbookTemplate, front: str, data: dict[str, Any]) 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], contractor: Optional[str],
            inspector: Optional[str] = None, page_number: Optional[int] = None,
            report_data: Optional[dict[str, Any]] = None, report_cont_available: bool = True,
-           fronts: Optional[list[str]] = None, back: str = CONC_BACK) -> list[str]:
+           fronts: Optional[list[str]] = None, back: str = CONC_BACK,
+           redlines: Redlines = NO_REDLINES) -> list[str]:
     """
     Stamp an SWCB report onto a Conc Fr / Conc Bk pair, and onto Report Cont when its text runs past the Remarks.
+    What reviewers edited (the header, the description and comments, pay items, work force, equipment and the
+    safety checklist) prints with its redlines; pass them as redlines (none unless given).
     Takes the workbook, the IDR row, the project row, the contractor's and inspector's names, the report's page number
     (None leaves Sheet No. blank), its report_data (None stamps the header only), and whether Report Cont is free
     (False when another report in the export already continues onto it; the Remarks are then cut with a note), and
@@ -243,12 +247,13 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     """
     data = report_data if isinstance(report_data, dict) else {}
     fronts = fronts or allocate_copies(workbook, CONC_FRONT, pay_item_page_count(data.get("payItems"),
-                                                                                 CONC_FRONT_PAY_ITEMS))
+                                                                                 CONC_FRONT_PAY_ITEMS, redlines))
     front = fronts[0]
-    stamp_common_header(workbook, front, CONC_FRONT_HEADER, idr, project, contractor, inspector, page_number)
+    stamp_common_header(workbook, front, CONC_FRONT_HEADER, idr, project, contractor, inspector, page_number,
+                        redlines)
 
     flow = flow_text(data.get("description"), data.get("comments"), CONC_FRONT_TEXT, CONC_BACK_TEXT,
-                     REPORT_CONT_TEXT if report_cont_available else None)
+                     REPORT_CONT_TEXT if report_cont_available else None, redlines)
     write_lines(workbook, front, CONC_FRONT_TEXT.rows, flow.front, CONC_FRONT_TEXT.column)
     write_lines(workbook, back, CONC_BACK_TEXT.rows, flow.back, CONC_BACK_TEXT.column)
     tick_box(workbook, back, ATTACHED_PAGES_BOX, bool(flow.report_cont))
@@ -257,10 +262,10 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     _stamp_activity(workbook, front, data)
     _stamp_matrix(workbook, front, data)
     stamp_pay_item_pages(workbook, fronts, CONC_FRONT_HEADER, CONC_FRONT_PAY_ITEMS, CONC_FRONT_TEXT, idr, project,
-                         contractor, inspector, page_number, data.get("payItems"))
-    stamp_workforce(workbook, back, CONC_BACK_WORKFORCE, data)
-    stamp_equipment(workbook, back, CONC_BACK_EQUIPMENT, data)
-    stamp_safety(workbook, back, CONC_BACK_SAFETY, data)
+                         contractor, inspector, page_number, data.get("payItems"), redlines)
+    stamp_workforce(workbook, back, CONC_BACK_WORKFORCE, data, redlines)
+    stamp_equipment(workbook, back, CONC_BACK_EQUIPMENT, data, redlines)
+    stamp_safety(workbook, back, CONC_BACK_SAFETY, data, redlines)
 
     pages = fronts + [back]
     if flow.report_cont:

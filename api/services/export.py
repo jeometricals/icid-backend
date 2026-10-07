@@ -34,6 +34,8 @@ from api.services.export_common import (
     stamp_signature_date,
 )
 from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, stamp_general
+from api.services.export_redlines import Redlines
+from api.services.field_edits import field_edits_for
 from api.services.xlsx_template import WorkbookTemplate
 from api.storage.client import create_signed_url, download_file, upload_file
 
@@ -91,20 +93,23 @@ def _inspector_name(user: Optional[dict[str, Any]]) -> Optional[str]:
     return name or user.get("email")
 
 
-def _general_for_export(idr_id: UUID) -> tuple[dict[str, Any], Optional[int]]:
+def _general_for_export(idr_id: UUID) -> tuple[dict[str, Any], Optional[int], Optional[UUID]]:
     """
     Find the General to print: the IDR's own, or one composed the way the auto-General is when it has none.
     Takes the IDR uuid.
-    Returns (its report_data, its page number or None when composed); raises ExportDataError if reports can't load.
+    Returns (its report_data, its page number or None when composed, the uuid reviewers' edits name it by); raises
+    ExportDataError if reports can't load. An auto-generated General, like a composed one, is built from the other
+    reports and can't be edited, so it has no uuid here: the edits print on the reports they were made on.
     """
     general = get_general_report(idr_id)
     if general is not None:
-        return general["report_data"] or {}, general["page_number"]
+        edited_as = None if general.get("is_auto_generated") else general.get("report_id")
+        return general["report_data"] or {}, general["page_number"], edited_as
     reports = list_non_general_main_reports(idr_id)
     if reports is None:
         raise ExportDataError("Failed to load IDR reports")
     contributing = [report for report in reports if report["report_type"] not in ADDENDUM_TYPES]
-    return build_auto_general_data(contributing), None
+    return build_auto_general_data(contributing), None, None
 
 
 def _load_reports(idr_id: UUID) -> list[dict[str, Any]]:
@@ -169,22 +174,39 @@ class _Sheets:
     acs: list[tuple[list[str], str]]    # each AC report's (AC Fr sheets, AC Bk)
 
 
+def _load_redlines(idr_id: UUID) -> Redlines:
+    """
+    Load the edits reviewers made on the IDR, for the redlines its pages print.
+    Takes the IDR uuid.
+    Returns the IDR's Redlines (holding the header's; each report takes its own with for_report); raises
+    ExportDataError if the edits can't load.
+    """
+    edits = field_edits_for(idr_id)
+    if edits is None:
+        raise ExportDataError("Failed to load the IDR's edits")
+    return Redlines(edits)
+
+
 def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], swcbs: list[dict[str, Any]],
-                     conc_mixes: list[dict[str, Any]], acs: list[dict[str, Any]]) -> _Sheets:
+                     conc_mixes: list[dict[str, Any]], acs: list[dict[str, Any]], general_redlines: Redlines,
+                     redlines: Redlines) -> _Sheets:
     """
     Provide every report its sheets before anything is stamped, cloning the blank forms as needed. Copies are numbered
     across the whole IDR per form: Gen Fr 2, ... for the General's pay-item overflow; Conc Fr 2, ... for later SWCB
     reports and pay-item overflow alike, in page order; Conc Bk 2, ... one per later SWCB; Conc Mix 2, ... for later
     CONC_MIX reports and truck overflow; AC Fr 2, ... for later AC reports and their pavement-course and pay-item
-    overflow, in page order; AC Bk 2, ... one per later AC report.
-    Takes the workbook, the General's report_data and the SWCB, CONC_MIX and AC reports, in page order.
+    overflow, in page order; AC Bk 2, ... one per later AC report. A pay item a reviewer revised takes a row per
+    revision, so redlines can add overflow pages.
+    Takes the workbook, the General's report_data, the SWCB, CONC_MIX and AC reports, in page order, the General's
+    redlines and the IDR's (each report's are taken from them).
     Returns the sheet names for each report.
     """
-    general_fronts = allocate_copies(workbook, GEN_FRONT,
-                                     pay_item_page_count(general_data.get("payItems"), GEN_FRONT_PAY_ITEMS))
+    general_fronts = allocate_copies(workbook, GEN_FRONT, pay_item_page_count(
+        general_data.get("payItems"), GEN_FRONT_PAY_ITEMS, general_redlines))
     swcb_sheets, fronts_used = [], 0
     for index, report in enumerate(swcbs):
-        count = pay_item_page_count(section(report, "report_data").get("payItems"), export_swcb.CONC_FRONT_PAY_ITEMS)
+        count = pay_item_page_count(section(report, "report_data").get("payItems"), export_swcb.CONC_FRONT_PAY_ITEMS,
+                                    redlines.for_report(report.get("report_id")))
         fronts = allocate_copies(workbook, export_swcb.CONC_FRONT, count, fronts_used)
         swcb_sheets.append((fronts, allocate_copies(workbook, export_swcb.CONC_BACK, 1, index)[0]))
         fronts_used += count
@@ -194,7 +216,7 @@ def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], s
         mix_used += len(conc_mix_sheets[-1])
     ac_sheets, ac_fronts_used = [], 0
     for index, report in enumerate(acs):
-        count = export_ac.front_count(report["report_data"])
+        count = export_ac.front_count(report["report_data"], redlines.for_report(report.get("report_id")))
         fronts = allocate_copies(workbook, export_ac.AC_FRONT, count, ac_fronts_used)
         ac_sheets.append((fronts, allocate_copies(workbook, export_ac.AC_BACK, 1, index)[0]))
         ac_fronts_used += count
@@ -341,6 +363,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     in OF. Each report's attachments follow its last page, one unnumbered page each. A draft IDR's pages are each
     marked "DRAFT - Not for Submission"; from submission on they carry the inspector's signature wherever a page has
     a signature line, and an approved IDR's carry the Resident Engineer's beside it (the inspector's dated with the work date, the RE's with the approval date).
+    What reviewers edited prints with its redlines, at any status: the replaced value struck, the reviewer's in blue
+    with their initials (see export_redlines); a revised pay item takes a row per revision, which can add pages.
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -353,13 +377,15 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
         raise ExportDataError("Failed to load the IDR's project")
     project = {**project, "contractor": get_project_contractor_name(idr["project_id"])}
     inspector = _inspector_name(get_user_by_id(idr["reporter_uuid"]))
-    general_data, page_number = _general_for_export(idr_id)
+    general_data, page_number, general_edited_as = _general_for_export(idr_id)
     reports = _load_reports(idr_id)
     swcbs, conc_mixes, acs = _swcb_reports(reports), _conc_mix_reports(reports), _ac_reports(reports)
     general_id = next((r["report_id"] for r in reports if r["report_type"] == "GEN" and not r["is_addendum"]), None)
+    redlines = _load_redlines(idr_id)
+    general_redlines = redlines.for_report(general_edited_as)  # the header's only, unless it is the inspector's own
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
-    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes, acs)
+    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes, acs, general_redlines, redlines)
     # Each report's sheets past its first are pages of their own: they take the numbers after it and count in OF
     extras = [(page_number, len(sheets.general_fronts) - 1)]
     extras += [(r["page_number"], len(fronts) - 1) for r, (fronts, _) in zip(swcbs, sheets.swcbs)]
@@ -371,7 +397,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
 
     _stamp_contract_info(workbook, project)
     general_pages = stamp_general(workbook, idr, project, inspector, general_data,
-                                  _page_after_clones(page_number, extras), fronts=sheets.general_fronts)
+                                  _page_after_clones(page_number, extras), fronts=sheets.general_fronts,
+                                  redlines=general_redlines)
     groups = [(general_id, general_pages)]
     report_cont_used = REPORT_CONT in general_pages
 
@@ -386,7 +413,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
             fronts, back = ac_sheets[id(report)]
             ac_pages = export_ac.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
                                         page_number=page, report_data=report["report_data"],
-                                        report_cont_available=not report_cont_used, fronts=fronts, back=back)
+                                        report_cont_available=not report_cont_used, fronts=fronts, back=back,
+                                        redlines=redlines.for_report(report["report_id"]))
             report_cont_used = report_cont_used or REPORT_CONT in ac_pages
             groups.append((report["report_id"], ac_pages))
             ac_backs.append((report, back, ac_pages))
@@ -394,7 +422,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
         fronts, back = swcb_sheets[id(report)]
         swcb_pages = export_swcb.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
                                         page_number=page, report_data=report["report_data"],
-                                        report_cont_available=not report_cont_used, fronts=fronts, back=back)
+                                        report_cont_available=not report_cont_used, fronts=fronts, back=back,
+                                        redlines=redlines.for_report(report["report_id"]))
         report_cont_used = report_cont_used or REPORT_CONT in swcb_pages
         groups.append((report["report_id"], swcb_pages))
         if any(r.get("parent_report_id") == report["report_id"] for r in conc_mixes):
