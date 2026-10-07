@@ -5014,3 +5014,46 @@ class TestAddedTruckOnTheExport:
         added = redline_edit("trucks[t11]", "truck_add", None, trucks[11], "RM", MIX_REPORT_ID)
         book = redlined_mix({"trucks": trucks}, [added])
         assert marks(book["Conc Mix 2"]["B28"]) == [("T-11", BLUE, False), ("RM", BLUE, False)]
+
+
+class TestHandwrittenHeaderCells:
+    """Conc Fr and AC Fr lay their date and I.R. No. out for a pen; the export merges them as Gen Fr has them."""
+
+    def book(self) -> openpyxl.Workbook:
+        swcb, ac = swcb_row(1, 2, payItems=pay_items(13)), ac_row(1, 3)
+        idr = {**SUBMITTED_IDR, "idr_number": "IR-2026-0005", "report_date": date(2026, 12, 30)}
+        return openpyxl.load_workbook(io.BytesIO(export_bytes(idr=idr, reports=[swcb, ac], main_reports=[swcb, ac])))
+
+    def test_the_template_leaves_them_unmerged_with_slashes_drawn_in_the_date_line(self):
+        template = openpyxl.load_workbook(TEMPLATE)
+        for name in ("Conc Fr", "AC Fr"):
+            sheet = template[name]
+            merged = {str(area) for area in sheet.merged_cells.ranges}
+            assert "AI4:AO4" not in merged and "AH6:AO7" not in merged, name
+            assert sheet["AK4"].border.diagonal.style and sheet["AM4"].border.diagonal.style, name
+        assert {"AI4:AO4", "AH6:AO7"} <= {str(area) for area in template["Gen Fr"].merged_cells.ranges}
+
+    def test_the_date_and_ir_number_get_the_room_gen_fr_gives_them(self):
+        book = self.book()
+        for name in ("Conc Fr", "Conc Fr 2", "AC Fr"):  # an overflow copy too
+            sheet = book[name]
+            assert {"AI4:AO4", "AH6:AO7"} <= {str(area) for area in sheet.merged_cells.ranges}, name
+            assert (sheet["AI4"].value, sheet["AH6"].value) == ("12/30/26", "IR-2026-0005"), name
+
+    def test_the_drawn_slashes_go_and_the_lines_under_the_cells_stay(self):
+        sheet = self.book()["Conc Fr"]
+        for cell in ("AK4", "AM4"):
+            assert not (sheet[cell].border.diagonal and sheet[cell].border.diagonal.style), cell
+            assert sheet[cell].border.bottom.style, cell
+        assert sheet["AJ7"].border.bottom.style  # the I.R. No. line
+
+    def test_gen_fr_is_left_as_it_is(self):
+        from api.services.export_general import GEN_FRONT_HEADER
+        assert GEN_FRONT_HEADER.merge_areas == () and GEN_FRONT_HEADER.date_slashes == ()
+
+    def test_an_area_already_merged_is_left_alone(self):
+        workbook = WorkbookTemplate(TEMPLATE)
+        workbook.ensure_merged("Conc Fr", "AI4:AO4")
+        workbook.ensure_merged("Conc Fr", "AI4:AO4")
+        assert workbook._sheet("Conc Fr").count('<mergeCell ref="AI4:AO4"/>') == 1
+

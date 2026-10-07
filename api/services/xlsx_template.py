@@ -424,6 +424,15 @@ class WorkbookTemplate:
             xml = xml[:at] + f'<mergeCells count="1"><mergeCell ref="{reference}"/></mergeCells>' + xml[at:]
         self._write(self._sheet_paths[sheet], xml)
 
+    def ensure_merged(self, sheet: str, reference: str) -> None:
+        """
+        Merge a range of cells unless the sheet already has that exact merge.
+        Takes the sheet name and the range, e.g. 'AI4:AO4'.
+        Returns nothing.
+        """
+        if f'<mergeCell ref="{reference}"/>' not in self._sheet(sheet):
+            self.merge_cells(sheet, reference)
+
     def center_across(self, sheet: str, coordinates: list[str]) -> None:
         """
         Centre the first cell's text across a run of adjacent cells without merging them (Excel's "Center Across

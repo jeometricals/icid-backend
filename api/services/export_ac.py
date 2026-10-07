@@ -52,6 +52,9 @@ AC_FRONT_HEADER = HeaderLayout(
     temp_low="AD13", temp_high="AK13",
     weather_am="AD15", weather_pm="AK15", weather_labels=("AM", "PM"),
     inspector="H17",
+    # AI4:AO4 is the date line (a "/" drawn in AK4 and AM4) and AH6 a single cell in a 6 pt row: merged as on Gen Fr,
+    # where AI4:AO4 and AH6:AO7 are one area each, so "9/30/26" and the I.R. number aren't clipped
+    merge_areas=("AI4:AO4", "AH6:AO7"), date_slashes=("AK4", "AM4"),
 )
 
 

@@ -110,6 +110,12 @@ class HeaderLayout:
     weather_pm: str
     weather_labels: Optional[tuple[str, str]]  # ("AM", "PM") where the label shares the weather box with the value
     inspector: str
+    # Where a form is laid out for a pen (Conc Fr, AC Fr): the date line is seven one-column cells with a "/" drawn in
+    # two of them, and the I.R. No. cell is one column in a 6 pt row. A typed value needs the room Gen Fr gives it, so
+    # these areas are merged before it is written (the date and I.R. No. cells are their top-left cells) ...
+    merge_areas: tuple[str, ...] = ()
+    # ... and these cells lose their drawn "/": they take the date cell's style, which keeps the line under them
+    date_slashes: tuple[str, ...] = ()
 
 
 def text_value(value: Any) -> Optional[str]:
@@ -340,7 +346,8 @@ def stamp_common_header(workbook: WorkbookTemplate, sheet: str, layout: HeaderLa
     """
     Write a form's header block: project details (as values, not Contract Info formulas), date, day, times,
     temperatures, weather, sheet number and inspector, clearing the template's placeholders when a value is missing.
-    A time, temperature or weather a reviewer edited prints as its chain.
+    A time, temperature or weather a reviewer edited prints as its chain. Where the form's date and I.R. No. cells are
+    too small for a typed value, they are first merged into the areas the layout names.
     Takes the workbook, sheet name, its layout, the IDR row, the project row, the contractor's and inspector's names,
     this page's number (None leaves Sheet No. blank, e.g. for a page that isn't one of the IDR's numbered pages) and
     the IDR's redlines (none unless given).
@@ -348,6 +355,10 @@ def stamp_common_header(workbook: WorkbookTemplate, sheet: str, layout: HeaderLa
     """
     for cell, field in layout.project_cells.items():
         workbook.set_cell(sheet, cell, contractor if field == "contractor" else project.get(field))
+    for area in layout.merge_areas:
+        workbook.ensure_merged(sheet, area)
+    for cell in layout.date_slashes:
+        workbook.set_style(sheet, cell, workbook.cell_style(sheet, layout.date))
     report_date: date = idr["report_date"]
     workbook.set_cell(sheet, layout.date, short_date(report_date) if layout.date_as_text else report_date)
     highlight_day(workbook, sheet, layout.day_of_week, report_date)

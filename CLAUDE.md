@@ -341,6 +341,11 @@ Any change must follow these.
   its zeros): the header's "I.R. No." on Gen Fr, Conc Fr, AC Fr, Report Cont and the attachment pages, and
   "ATTACHMENT TO I.R. NO." on Conc Mix (`ir_number` in `export_common.py`). An IDR nobody has accepted yet has no
   number and the field stays blank; a returned draft keeps showing the one it was given.
+- **Date and I.R. No. on Conc Fr and AC Fr.** Those forms lay both out for a pen: the date line is seven one-column
+  cells with a "/" drawn in two of them, and the I.R. No. cell is one column in a 6 pt row, so a typed date printed
+  as `30/26` and the I.R. number lost its top. The export merges `AI4:AO4` and `AH6:AO7` before writing them, as
+  Gen Fr's template has them, and clears the two slashes (`HeaderLayout.merge_areas`, `date_slashes`). The template
+  file is unchanged.
 - **Redlines on the export.** What reviewers edited prints with its history, at any status (a returned draft
   included). `export.py` reads the IDR's edits once (`field_edits_for`) and hands each report its own
   (`Redlines.for_report`); `export_redlines.py` decides what prints and `export_common.py` draws it.
