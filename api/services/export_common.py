@@ -177,6 +177,21 @@ def short_date(day: date) -> str:
     return f"{day.month}/{day.day}/{day:%y}"
 
 
+def format_iso_as_mdy(text: Any) -> Optional[str]:
+    """
+    Format a date a report saved as ISO text (yyyy-mm-dd, as a date input gives it) the way the forms show dates.
+    Takes the saved value.
+    Returns e.g. "10/8/26"; anything that isn't an ISO date comes back as typed, trimmed (None when blank or missing).
+    """
+    shown = text_value(text)
+    if shown is None or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", shown):
+        return shown
+    try:
+        return short_date(date.fromisoformat(shown))
+    except ValueError:
+        return shown
+
+
 TIME_BLANK = "________"
 
 

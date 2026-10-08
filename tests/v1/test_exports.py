@@ -21,7 +21,7 @@ from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, pay_unit_abbreviation,
     truncate_to_lines,
 )
-from api.services.export_common import DRAFT_MARKER, REPORT_CONT_TEXT, typed_value
+from api.services.export_common import DRAFT_MARKER, REPORT_CONT_TEXT, format_iso_as_mdy, typed_value
 from api.services.export_general import GEN_FRONT_PAY_ITEMS
 from api.services.xlsx_template import WorkbookTemplate
 
@@ -5357,7 +5357,7 @@ class TestAcOwnSectionRedlines:
 
 
 # ---------------------------------------------------------------------------
-# A Concrete Cylinder Data report on Conc Cyl (the blank form so far: export_conc_cyl.render stamps nothing)
+# A Concrete Cylinder Data report on Conc Cyl: the dispatcher
 # ---------------------------------------------------------------------------
 
 def conc_cyl_row(number: int = 1, parent: Optional[UUID] = None, page_number: Optional[int] = 3,
@@ -5372,7 +5372,7 @@ def conc_cyl_row(number: int = 1, parent: Optional[UUID] = None, page_number: Op
             "parent_report_id": parent, "page_number": page_number, "report_data": report_data}
 
 
-ONE_CYLINDER = [{"id": None, "class": "4000 PSI", "cylinderNumber": "C-14-A", "slump": "3.5"}]
+ONE_CYLINDER = [{"class": "4000 PSI", "cylinderNo": "C-14-A", "slump": "3.5"}]
 
 
 class TestConcCylExport:
@@ -5386,11 +5386,21 @@ class TestConcCylExport:
         assert render.call_args.kwargs["report_data"] == {"cylinders": ONE_CYLINDER}
         assert (render.call_args.kwargs["sheets"], render.call_args.kwargs["page_number"]) == (["Conc Cyl"], 3)
 
-    def test_the_page_is_the_blank_form_for_now(self):
-        content = export_bytes(reports=[conc_cyl_row(cylinders=ONE_CYLINDER, jobLocation="125th + Lenox")])
+    def test_the_page_carries_the_report_and_the_project(self):
+        content = export_bytes(reports=[conc_cyl_row(cylinders=ONE_CYLINDER,
+                                                     deliveryCasting={"jobLocation": "125th + Lenox"})])
         sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Cyl"]
         assert (sheet["B26"].value, sheet["B24"].value) == ("CLASS       (1)", "JOB LOCATION:")
-        assert [sheet[f"{column}27"].value for column in ("B", "G", "M")] == [None, None, None]
+        assert [sheet[f"{column}27"].value for column in ("B", "G", "M")] == ["4000 PSI", "C-14-A", "3.5"]
+        assert (sheet["I24"].value, sheet["F8"].value, sheet["F14"].value) == (
+            "125th + Lenox", "HWS0023", "Benny Bowers Contracting Co.")
+
+    def test_each_report_fills_its_own_sheet(self):
+        second = [{**ONE_CYLINDER[0], "cylinderNo": "C-15-A"}]
+        content = export_bytes(reports=[conc_cyl_row(1, cylinders=ONE_CYLINDER),
+                                        conc_cyl_row(2, page_number=4, cylinders=second)])
+        book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+        assert [book[name]["G27"].value for name in ("Conc Cyl", "Conc Cyl 2")] == ["C-14-A", "C-15-A"]
 
     def test_without_a_conc_cyl_report_the_page_stays_hidden(self):
         assert "Conc Cyl" not in visible_sheets(export_bytes(reports=[swcb_row(1, 2)]))
@@ -5426,3 +5436,232 @@ class TestConcCylExport:
         sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Cyl"]
         assert sheet["AL58"].value == APPROVED_ON
         assert sheet["W59"].value.startswith("RE: ") and sheet["C59"].value == "Inspector's Signature"
+
+
+# ---------------------------------------------------------------------------
+# format_iso_as_mdy: a date a report saved as ISO text
+# ---------------------------------------------------------------------------
+
+class TestFormatIsoAsMdy:
+    def test_an_iso_date_prints_as_the_forms_show_dates(self):
+        assert format_iso_as_mdy("2026-10-08") == "10/8/26"
+        assert format_iso_as_mdy(" 2026-01-05 ") == "1/5/26"
+
+    def test_anything_else_comes_back_as_typed(self):
+        assert format_iso_as_mdy("not available") == "not available"
+        assert format_iso_as_mdy("10/8/26") == "10/8/26"
+        assert format_iso_as_mdy("2026-13-45") == "2026-13-45"  # shaped like a date, but not one
+        assert format_iso_as_mdy("20261008") == "20261008"
+
+    def test_blank_or_missing_is_none(self):
+        assert [format_iso_as_mdy(value) for value in ("", "   ", None)] == [None, None, None]
+
+
+# ---------------------------------------------------------------------------
+# export_conc_cyl.render: the Conc Cyl page
+# ---------------------------------------------------------------------------
+
+CYL_REPORT_ID = UUID(int=0xC1C1)
+CYL_DATA = {
+    "deliveryCasting": {"dateOfDelivery": "2026-09-30", "cyPoured": "12.50", "dateCast": "2026-10-01",
+                        "jobLocation": "SW corner of 125th + Lenox"},
+    "placementLocation": "First-floor interior slab, pour #3",
+    "sheetNo": "1",
+    "sheetOf": "2",
+    "cylinders": [{"id": "c1", "class": "4000 PSI", "cylinderNo": "C-14-A", "slump": "3.5"},
+                  {"id": "c2", "class": "4000 PSI", "cylinderNo": "C-14-B", "slump": "4"},
+                  {"class": "Class A", "cylinderNo": "17-A", "slump": "4 in"}],  # a draft's: no id yet
+}
+CYL_LAB_COLUMNS = ("R", "V", "AB", "AG", "AL")
+
+
+def cyl_edit(path: str, old, new, initials: str) -> dict:
+    """
+    Build a reviewer's edit of one Conc Cyl field.
+    Takes the field_path, the old and new values and the editor's initials.
+    Returns the edit row.
+    """
+    return redline_edit(path, "field_change", old, new, initials, CYL_REPORT_ID)
+
+
+def conc_cyl_page(data: Optional[dict] = CYL_DATA, idr: dict = SUBMITTED_IDR, edits: Optional[list] = None,
+                  read_only: bool = False):
+    """
+    Render a CONC_CYL report on a fresh template and open its Conc Cyl sheet.
+    Takes the report_data, the IDR row, the report's edits (none unless given) and whether to load the workbook
+    read-only (faster; without merged cells or text runs).
+    Returns the worksheet.
+    """
+    from api.services.export_redlines import Redlines
+    workbook = WorkbookTemplate(TEMPLATE)
+    pages = export_conc_cyl.render(workbook, idr, PROJECT, "Benny Bowers Contracting Co.", inspector="Genghis Khan",
+                                   page_number=3, report_data=data, redlines=Redlines(edits or [], CYL_REPORT_ID))
+    assert pages == ["Conc Cyl"]
+    options = {"read_only": True} if read_only else {"rich_text": True}
+    return openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), **options)["Conc Cyl"]
+
+
+@pytest.fixture(scope="module")
+def cyl_sheet():
+    """
+    The Conc Cyl page of a filled report nobody edited, rendered once.
+    Takes nothing.
+    Returns the worksheet, fully loaded.
+    """
+    return conc_cyl_page()
+
+
+@pytest.fixture(scope="module")
+def cyl_template():
+    """
+    The blank Conc Cyl page, as the template has it.
+    Takes nothing.
+    Returns the worksheet, fully loaded.
+    """
+    return openpyxl.load_workbook(TEMPLATE)["Conc Cyl"]
+
+
+class TestConcCylRender:
+    def test_conc_cyl_fills_project_header(self, cyl_sheet):
+        assert [cyl_sheet[cell].value for cell in ("F8", "P8", "H10", "F12", "F14")] == [
+            "HWS0023", "2024123457", "Installation of Curb, Sidewalk & Ped-Ramp <Queens>", "Queens",
+            "Benny Bowers Contracting Co."]
+        assert all(cyl_sheet[cell].alignment.shrink_to_fit for cell in ("F8", "P8", "H10", "F12", "F14"))
+        assert not cyl_sheet["P8"].font.b and not cyl_sheet["F12"].font.b  # bold in the template
+
+    def test_resident_engineers_name_and_client_stay_blank(self, cyl_sheet):
+        assert (cyl_sheet["K17"].value, cyl_sheet["F20"].value) == (None, None)
+        assert (cyl_sheet["B17"].value, cyl_sheet["B20"].value) == ("Resident Engineer's Name:", "CLIENT:")
+
+    def test_the_date_is_typed_across_the_merged_date_line_without_its_slashes(self, cyl_sheet, cyl_template):
+        assert cyl_sheet["AI5"].value == "9/30/26" and cyl_sheet["AI5"].alignment.horizontal == "center"
+        assert "AI5:AO5" in {str(area) for area in cyl_sheet.merged_cells.ranges}
+        assert "AI5:AO5" not in {str(area) for area in cyl_template.merged_cells.ranges}
+        for cell in ("AK5", "AM5"):
+            assert cyl_template[cell].border.diagonal.style == "thin" and cyl_template[cell].border.diagonalUp
+            assert cyl_sheet[cell].border.diagonal is None or cyl_sheet[cell].border.diagonal.style is None, cell
+
+    def test_conc_cyl_day_of_week_checkbox(self):
+        cells = ("AI7", "AJ7", "AK7", "AL7", "AM7", "AN7", "AO7")  # S M T W T F S
+        for offset, expected in enumerate(cells):
+            day = date(2026, 9, 27 + offset) if offset < 4 else date(2026, 10, offset - 3)  # Sun 9/27 ... Sat 10/3
+            sheet = conc_cyl_page(data={}, idr={**SUBMITTED_IDR, "report_date": day}, read_only=True)
+            assert [c for c in cells if sheet[c].fill.fill_type == "solid"] == [expected], day
+            assert [sheet[c].value for c in cells] == ["S", "M", "T", "W", "T", "F", "S"]  # the letters stay
+
+    def test_conc_cyl_fills_metadata(self, cyl_sheet):
+        assert (cyl_sheet["AH20"].value, cyl_sheet["AM20"].value) == ("1", "2")
+        assert (cyl_sheet["I22"].value, cyl_sheet["AD24"].value) == ("9/30/26", "10/1/26")  # saved as ISO text
+        assert cyl_sheet["AD22"].value == "12.50"  # as entered
+        assert cyl_sheet["I24"].value == "SW corner of 125th + Lenox"
+        assert cyl_sheet["R46"].value == "First-floor interior slab, pour #3"
+        assert (cyl_sheet["C47"].value, cyl_sheet["C48"].value) == (None, None)
+        assert cyl_sheet["I24"].alignment.shrink_to_fit is True
+
+    def test_a_date_that_isnt_one_prints_as_typed(self):
+        sheet = conc_cyl_page(data={"deliveryCasting": {"dateOfDelivery": "not available", "dateCast": ""}},
+                              read_only=True)
+        assert (sheet["I22"].value, sheet["AD24"].value) == ("not available", None)
+
+    def test_conc_cyl_fills_cylinders(self, cyl_sheet):
+        table = [[cyl_sheet[f"{column}{row}"].value for column in ("B", "G", "M")] for row in range(27, 45)]
+        assert table[:3] == [["4000 PSI", "C-14-A", "3.5"], ["4000 PSI", "C-14-B", "4"], ["Class A", "17-A", "4 in"]]
+        assert table[3:] == [[None, None, None]] * 15
+        assert all(cyl_sheet[f"{column}{row}"].value is None for column in CYL_LAB_COLUMNS for row in range(27, 45))
+
+    def test_conc_cyl_cylinder_overflow_truncates(self, caplog):
+        import logging
+        cylinders = [{"class": "4000", "cylinderNo": f"C-{n}", "slump": "3"} for n in range(1, 20)]
+        with caplog.at_level(logging.WARNING, logger="api.services.export_conc_cyl"):
+            sheet = conc_cyl_page(data={"cylinders": cylinders}, read_only=True)
+        assert [sheet[f"G{row}"].value for row in (27, 44)] == ["C-1", "C-18"]
+        assert sheet["G45"].value is None and sheet["B46"].value == "SPECIFIC LOCATION OF PLACEMENT:"
+        assert "Conc Cyl holds 18 cylinders; 1 not printed" in caplog.text
+
+    def test_malformed_cylinders_are_skipped(self):
+        sheet = conc_cyl_page(data={"cylinders": ["x", None, {"class": "3000", "cylinderNo": "A", "slump": "2"}]},
+                              read_only=True)
+        assert [sheet[f"{column}27"].value for column in ("B", "G", "M")] == ["3000", "A", "2"]
+        assert conc_cyl_page(data={"cylinders": "none"}, read_only=True)["B27"].value is None
+
+    def test_conc_cyl_lab_block_blank(self, cyl_sheet, cyl_template):
+        block = [f"{openpyxl.utils.get_column_letter(column)}{row}" for row in range(8, 20) for column in range(27, 43)]
+        assert [(c, cyl_sheet[c].value) for c in block] == [(c, cyl_template[c].value) for c in block]
+        assert sorted(c for c in block if cyl_template[c].value) == sorted(["AA8", "AA10", "AA12", "AA17", "AF17",
+                                                                            "AA18", "AF18"])
+
+    def test_placement_flows_over_its_three_lines_and_is_cut_past_them(self):
+        sheet = conc_cyl_page(data={"placementLocation": words(24)})
+        first, second, third = (sheet[cell].value for cell in ("R46", "C47", "C48"))
+        assert len(first) <= 48 and len(second) <= 79 and len(third) <= 79
+        assert f"{first} {second} {third}" == words(24)
+        assert not sheet["C47"].font.b and sheet["C47"].alignment.horizontal == "left"  # bold in the template
+        assert (sheet["C47"].border.top.style, sheet["C47"].border.bottom.style) == (None, "thin")
+        cut = conc_cyl_page(data={"placementLocation": words(200)}, read_only=True)
+        assert cut["C48"].value.endswith(" … (continued in ICID)") and len(cut["C48"].value) <= 79
+
+    def test_an_empty_report_stamps_the_header_and_leaves_the_body_blank(self):
+        sheet = conc_cyl_page(data=None, read_only=True)
+        assert (sheet["F8"].value, sheet["AI5"].value) == ("HWS0023", "9/30/26")
+        assert [sheet[c].value for c in ("AH20", "AM20", "I22", "AD22", "I24", "AD24", "B27", "R46")] == [None] * 8
+
+
+CYL_EDITS = [
+    cyl_edit("sheetNo", "", "1", "RM"),
+    cyl_edit("sheetOf", "3", "2", "RM"),
+    cyl_edit("deliveryCasting.dateOfDelivery", "2026-09-29", "2026-09-30", "MK"),
+    cyl_edit("deliveryCasting.cyPoured", "12", "12.50", "MK"),
+    cyl_edit("deliveryCasting.dateCast", "2026-09-30", "2026-10-01", "MK"),
+    cyl_edit("deliveryCasting.jobLocation", "125th + Lenox", "SW corner of 125th + Lenox", "RM"),
+    cyl_edit("placementLocation", "First-floor slab", "First-floor interior slab, pour #3", "RM"),
+    cyl_edit("cylinders[c1].class", "3000 PSI", "4000 PSI", "RM"),
+    cyl_edit("cylinders[c2].cylinderNo", "C-14-X", "C-14-B", "RM"),
+    cyl_edit("cylinders[c2].slump", "5", "4.5", "RM"),
+    cyl_edit("cylinders[c2].slump", "4.5", "4", "MK"),
+    cyl_edit("cylinders[0].slump", "9", "3.5", "MK"),  # by position: not how a cylinder is named
+]
+
+
+@pytest.fixture(scope="module")
+def cyl_redlined():
+    """
+    The Conc Cyl page of a report whose every field a reviewer edited, rendered once.
+    Takes nothing.
+    Returns the worksheet, with its text runs.
+    """
+    return conc_cyl_page(edits=CYL_EDITS)
+
+
+class TestConcCylRedlines:
+    def test_conc_cyl_redlines_passed_through(self, cyl_redlined):
+        chains = {"AM20": [("3", None, True), ("2", BLUE, False), ("RM", BLUE, False)],
+                  "AD22": [("12", None, True), ("12.50", BLUE, False), ("MK", BLUE, False)],
+                  "I24": [("125th + Lenox", None, True), ("SW corner of 125th + Lenox", BLUE, False),
+                          ("RM", BLUE, False)],
+                  "B27": [("3000 PSI", None, True), ("4000 PSI", BLUE, False), ("RM", BLUE, False)],
+                  "G28": [("C-14-X", None, True), ("C-14-B", BLUE, False), ("RM", BLUE, False)]}
+        for cell, chain in chains.items():
+            assert marks(cyl_redlined[cell]) == chain, cell
+            assert cyl_redlined[cell].alignment.shrink_to_fit is True, cell
+
+    def test_a_field_that_was_empty_shows_the_reviewers_value_alone(self, cyl_redlined):
+        assert marks(cyl_redlined["AH20"]) == [("1", BLUE, False), ("RM", BLUE, False)]
+
+    def test_an_edited_date_prints_each_value_as_a_date(self, cyl_redlined):
+        assert marks(cyl_redlined["I22"]) == [("9/29/26", None, True), ("9/30/26", BLUE, False), ("MK", BLUE, False)]
+        assert marks(cyl_redlined["AD24"]) == [("9/30/26", None, True), ("10/1/26", BLUE, False), ("MK", BLUE, False)]
+
+    def test_a_cylinder_edited_twice_keeps_the_replaced_edit_struck(self, cyl_redlined):
+        assert marks(cyl_redlined["M28"]) == [("5", None, True), ("4.5", BLUE, True), ("RM", BLUE, False),
+                                              ("4", BLUE, False), ("MK", BLUE, False)]
+
+    def test_a_cylinder_is_found_by_its_id_never_by_its_place(self, cyl_redlined):
+        assert cyl_redlined["M27"].value == "3.5"  # cylinders[0].slump names nothing
+        assert [cyl_redlined[f"{column}29"].value for column in ("B", "G", "M")] == ["Class A", "17-A", "4 in"]
+
+    def test_the_placements_replaced_text_is_struck_before_the_new_text(self, cyl_redlined):
+        assert marks(cyl_redlined["R46"]) == [("First-floor slab", None, True)]
+        assert marks(cyl_redlined["C47"]) == [("First-floor interior slab, pour #3", BLUE, False), ("RM", BLUE, False)]
+
+    def test_the_lab_columns_stay_blank_under_redlines(self, cyl_redlined):
+        assert all(cyl_redlined[f"{column}{row}"].value is None for column in CYL_LAB_COLUMNS for row in range(27, 45))
