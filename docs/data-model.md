@@ -25,6 +25,8 @@ clients ──< users ──< project_users >── projects ──< project_cli
                                  ▼
                          report_attachments >── users (uploaded_by)
 
+idrs ──< quantities >── projects                (idr_id ON DELETE CASCADE)
+
 projects ──< contract_items >── spec_items      (project_id ON DELETE CASCADE)
 ```
 
@@ -274,6 +276,34 @@ Cascades: deleting an IDR deletes its reports, and deleting a report deletes its
 2. Then each other main report, oldest first, with its addenda directly after it.
 3. Standalone addenda (no parent) last.
 
+### quantities
+
+The pay-item quantities of approved IDRs, one row per pay item, kept apart from the reports so progress and
+as-built reports can read them with plain queries. Added by migration 025. **Nothing writes to it yet**: final
+approval will (Slice L1), and a backfill script will fill it for the IDRs already approved.
+
+| Column | Type | Notes |
+|---|---|---|
+| `quantity_id` | UUID PK | `gen_random_uuid()` |
+| `project_id` | TEXT NOT NULL | FK → `projects.project_id`. A copy of the IDR's. |
+| `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
+| `report_date` | DATE NOT NULL | A copy of `idrs.report_date`, the work date |
+| `reporter_uuid` | UUID NOT NULL | A copy of `idrs.reporter_uuid`, the inspector. No foreign key. |
+| `report_type` | TEXT NOT NULL | The type of the report the pay item is on: `GEN`, `SWCB` or `AC`. Its disciplines are read off it (`api/services/disciplines.py`). |
+| `pay_item_ref` | TEXT | The item number, `payItems[].itemNo`. NULL for an item without one. |
+| `budget_code` | TEXT | `payItems[].budgetCode` |
+| `description` | TEXT | `payItems[].description` |
+| `amount` | NUMERIC NOT NULL | `payItems[].payQuantity`, parsed. An item whose quantity is blank or isn't a number gets no row. |
+| `unit` | TEXT | `payItems[].unit` in its short form: `LF`, `SF`, `CY`, `SY`, `TN`, `EA`, `LS`; an unknown unit as written |
+| `created_at` | TIMESTAMPTZ NOT NULL | `now()` |
+
+- Indexes: `idx_quantities_project_date (project_id, report_date)`, `idx_quantities_project_item (project_id,
+  pay_item_ref)`, `idx_quantities_project_budget (project_id, budget_code)`, `idx_quantities_idr (idr_id)`.
+- No unique rule: the same item and budget code can be on one IDR more than once.
+- An IDR's rows are always replaced as a set, in one statement (delete, then insert), so the copied columns never
+  drift from the IDR that was approved.
+- An auto-generated General's pay items are never written: they are sums of the other reports'.
+
 ### report_attachments
 
 Files attached to a report. Each row describes one file; the file itself is in the private
@@ -484,6 +514,7 @@ content as TEXT, linked to a report and a form template).
 | 021 | `021_pay_item_approve.sql` | K2.5 | Widened `chk_idr_field_edits_type` to allow `pay_item_approve`. No row changed. |
 | 022 | `022_stage_accepted_at.sql` | K2.6 | Added `idrs.stage1_accepted_at` and `stage2_accepted_at` (TIMESTAMPTZ, nullable, no backfill). |
 | 023 | `023_truck_add.sql` | K3-fix2 | Widened `chk_idr_field_edits_type` to allow `truck_add`, and `chk_idr_field_edits_old_value` to let it (like `pay_item_add`) have no `old_value`. Gave every existing truck in `idr_reports.report_data` an `id`; nothing else in any report changed. |
+| 025 | `025_quantities.sql` | L0 | Created `quantities` with its four indexes. No existing table or row changed. There is no 024. |
 
 Where each current column came from:
 
@@ -496,6 +527,7 @@ Where each current column came from:
 | `idrs` | `inspector_signature_path`, `inspector_signed_at` | 015 |
 | `idrs` | the review columns, `chk_idrs_returned_from`, `idx_idrs_status`, `uq_idrs_project_number`; the wider `chk_idrs_status`, the partial `idx_idrs_project_status`, and `uq_idrs_project_reporter_date` as a partial unique index | 017 |
 | `idrs` | `stage1_accepted_at`, `stage2_accepted_at` | 022 |
+| `quantities` | all | 025 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

@@ -242,6 +242,30 @@ CREATE INDEX idx_idr_field_edits_idr ON icid.idr_field_edits(idr_id, edited_at);
 CREATE INDEX idx_idr_field_edits_field ON icid.idr_field_edits(report_id, field_path);
 
 ------------------------------------------------------------
+-- QUANTITY (an approved IDR's pay items, one row each; an IDR's rows are replaced as a set; migrations/025)
+-- project_id, report_date and reporter_uuid are copies of the IDR's own
+------------------------------------------------------------
+CREATE TABLE icid.quantities (
+    quantity_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id     TEXT NOT NULL REFERENCES icid.projects(project_id),
+    idr_id         UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    report_date    DATE NOT NULL,
+    reporter_uuid  UUID NOT NULL,
+    report_type    TEXT NOT NULL,
+    pay_item_ref   TEXT,
+    budget_code    TEXT,
+    description    TEXT,
+    amount         NUMERIC NOT NULL,
+    unit           TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_quantities_project_date ON icid.quantities(project_id, report_date);
+CREATE INDEX idx_quantities_project_item ON icid.quantities(project_id, pay_item_ref);
+CREATE INDEX idx_quantities_project_budget ON icid.quantities(project_id, budget_code);
+CREATE INDEX idx_quantities_idr ON icid.quantities(idr_id);
+
+------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)
 ------------------------------------------------------------
 CREATE TABLE icid.report_attachments (
