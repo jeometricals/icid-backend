@@ -7,6 +7,7 @@ from psycopg.errors import UniqueViolation
 from api.db.runner import run_query
 from api.queries.idr_audit import AUDIT_CTE
 from api.queries.idr_reports import REPORT_DATA_WITH_IDS
+from api.queries.quantities import delete_quantities_cte, quantity_rows_json, replace_quantities_ctes
 
 IDR_COLUMNS = """
     idr_id,
@@ -336,10 +337,12 @@ def _move_idr(
     values: tuple = (),
     reviewer_column: Optional[str] = None,
     note: Optional[str] = None,
+    also: str = "",
+    also_values: tuple = (),
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Move an IDR from one review status to another in one statement: lock it, set the status, updated_at and the given columns, and log the move in icid.idr_audit.
-    Takes the IDR uuid, the acting user's uuid, the action to log, the status it must be in (one, a list of them, or None for any) and the one it moves to, the extra SET assignments (written here, never from a request) with their values, an optional reviewer column that must hold the actor, and an optional note for the log. A deleted IDR is never moved.
+    Move an IDR from one review status to another in one statement: lock it, set the status, updated_at and the given columns, and log the move in icid.idr_audit. What else must change with the move (its quantity rows) rides along as more CTEs.
+    Takes the IDR uuid, the acting user's uuid, the action to log, the status it must be in (one, a list of them, or None for any) and the one it moves to, the extra SET assignments (written here, never from a request) with their values, an optional reviewer column that must hold the actor, an optional note for the log, and further CTEs to run in the statement (written here too; they read the moved CTE, so they do nothing when the IDR doesn't move) with their values. A deleted IDR is never moved.
     Returns a one-row list with the moved IDR, an empty list if it wasn't in that status (or the actor isn't that reviewer), or None on failure.
     """
     reviewer = f"AND {reviewer_column} = %s" if reviewer_column else ""
@@ -363,12 +366,13 @@ def _move_idr(
             WHERE i.idr_id = t.idr_id
             RETURNING i.*
         ),
-        {AUDIT_CTE}
+        {AUDIT_CTE.rstrip()}{"," + also if also else ""}
         SELECT {IDR_COLUMNS}
         FROM moved;
     """
     locked_by = (actor_uuid,) if reviewer_column else ()
-    return run_query(sql, (idr_id, *status_values, *locked_by, to_status, *values, actor_uuid, action, note))
+    return run_query(sql, (idr_id, *status_values, *locked_by, to_status, *values, actor_uuid, action, note,
+                           *also_values))
 
 
 def find_idr_by_number(project_id: str, idr_number: str, except_idr_id: UUID) -> Optional[UUID]:
@@ -424,17 +428,18 @@ def accept_stage2(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any
 
 
 def approve_stage2(
-    idr_id: UUID, actor_uuid: UUID, signature_path: str, as_reviewer: bool
+    idr_id: UUID, actor_uuid: UUID, signature_path: str, as_reviewer: bool, quantity_rows: list[dict[str, Any]]
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, and clear any return. The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place.
-    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, and whether they must already be the IDR's RE reviewer (False for an admin).
+    Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, clear any return, and write its pay-item quantities to icid.quantities in place of any it had. The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place. All of it is one statement: an IDR that isn't approved gets no quantities, and a quantity that can't be written stops the approval.
+    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, whether they must already be the IDR's RE reviewer (False for an admin), and the IDR's quantity rows (empty when it has no pay items).
     Returns a one-row list with the IDR, an empty list if it isn't in Stage 2 review under that reviewer, or None on failure.
     """
     assignments = ("re_reviewer_uuid = %s, re_signature_path = %s, re_signed_at = now(), "
                    "return_reason = NULL, returned_from = NULL")
     return _move_idr(idr_id, actor_uuid, "approve_stage2", "stage2_review", "approved", assignments,
-                     (actor_uuid, signature_path), reviewer_column="re_reviewer_uuid" if as_reviewer else None)
+                     (actor_uuid, signature_path), reviewer_column="re_reviewer_uuid" if as_reviewer else None,
+                     also=replace_quantities_ctes("moved"), also_values=(quantity_rows_json(quantity_rows),))
 
 
 def return_idr(
@@ -464,19 +469,35 @@ UNLOCKABLE_STATUSES = ["approved", "stage2_review"]
 
 def admin_unlock_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again. Its number, the inspector's signature and stage1_accepted_at stay.
+    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again. Its number, the inspector's signature and stage1_accepted_at stay. Its quantity rows are deleted in the same statement: it is no longer approved, and approving it again writes them afresh.
     Takes the IDR uuid and the admin's uuid.
     Returns a one-row list with the IDR, an empty list if it isn't in one of UNLOCKABLE_STATUSES (or is deleted), or None on failure.
     """
     assignments = "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL"
-    return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments)
+    return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments,
+                     also=delete_quantities_cte("moved"))
 
 
 def admin_delete_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Soft-delete an IDR, whatever its status: mark it deleted with when and by whom. The row and everything under it are kept; its day and its IDR number become free again.
+    Soft-delete an IDR, whatever its status: mark it deleted with when and by whom. The row and everything under it are kept, but for its quantity rows, which are deleted in the same statement; its day and its IDR number become free again.
     Takes the IDR uuid and the admin's uuid.
     Returns a one-row list with the IDR, an empty list if it was already deleted, or None on failure.
     """
     return _move_idr(idr_id, actor_uuid, "admin_delete", None, "deleted", "deleted_at = now(), deleted_by = %s",
-                     (actor_uuid,))
+                     (actor_uuid,), also=delete_quantities_cte("moved"))
+
+
+def list_approved_idrs() -> Optional[list[dict[str, Any]]]:
+    """
+    List every approved IDR that isn't deleted, oldest work date first.
+    Takes nothing.
+    Returns the IDR rows (empty when there are none), or None on failure.
+    """
+    sql = f"""
+        SELECT {IDR_COLUMNS}
+        FROM icid.idrs
+        WHERE status = 'approved' AND deleted_at IS NULL
+        ORDER BY report_date, idr_id;
+    """
+    return run_query(sql)

@@ -22,7 +22,7 @@ every request to it.
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `write_quantities` replaces the IDR's rows; nothing calls them yet, final approval will), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -30,7 +30,7 @@ every request to it.
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. |
-| `scripts/` | One-off local utilities: `clean_report_template.py`, which builds the export template, and `merge_conc_cyl_template.py`, which added the Conc Cyl tab to `report_forms_source.xltx` (already run; it refuses to run twice). Not imported by the app. Seeds and ad-hoc SQL are run in the Supabase SQL editor. |
+| `scripts/` | One-off local utilities: `clean_report_template.py`, which builds the export template, `merge_conc_cyl_template.py`, which added the Conc Cyl tab to `report_forms_source.xltx` (already run; it refuses to run twice), and `backfill_quantities.py`, which fills `icid.quantities` for the IDRs already approved (it imports the app's queries and services, and works on the database `.env` names). Not imported by the app. Seeds and ad-hoc SQL are run in the Supabase SQL editor. |
 
 ### Endpoints
 
@@ -63,15 +63,15 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/accept-stage1` — OE or RE picks a submitted IDR up: `submitted` → `stage1_review`, sets `stage1_reviewer_uuid` and `stage1_accepted_at` (and clears `stage2_accepted_at`). Body `{idr_number}`, needed the first time (400 without it); an IDR that has a number keeps it. 409 with `existing_idr_id` when the number is in use on the project
 - `POST /v1/idrs/{idr_id}/approve-stage1` — `stage1_review` → `stage2_review`; only the Stage 1 reviewer (403 for another OE or RE), and only once they have approved, revised or added every pay item at this stage: otherwise 400 `{detail, untouched: [{pay_item_id, report_id, item_no, budget_code}]}`
 - `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid` and `stage2_accepted_at` is stamped; the status stays `stage2_review`, and the last to accept wins
-- `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`; only the RE reviewer, and only once they have attested to every pay item at Stage 2 (the same 400 with `untouched`); 400 `Signature required before approving`, 502 when the signature can't be copied
+- `POST /v1/idrs/{idr_id}/approve-stage2` — final approval, signed: `stage2_review` → `approved`, stamps `re_signature_path` and `re_signed_at`, and writes the IDR's pay-item quantities to `icid.quantities`; only the RE reviewer, and only once they have attested to every pay item at Stage 2 (the same 400 with `untouched`); 400 `Signature required before approving`, 502 when the signature can't be copied
 - `POST /v1/idrs/{idr_id}/return` — body `{to: "inspector" | "oe", comment}`; back to `draft` (inspector) or, from Stage 2, to `stage1_review` (OE), with `return_reason` and `returned_from`; clears `stage2_accepted_at`, and `stage1_accepted_at` too when it goes to the inspector; a return from Stage 2 also clears `re_reviewer_uuid`, so an RE has to accept the IDR again when it comes back; only the current stage's reviewer; 400 for a blank comment
 - `PATCH /v1/idrs/{idr_id}/field` — the current stage's reviewer (or an admin) edits one field of an IDR in review: body `{report_id, field_path, new_value}` (`report_id` left out for `header.<column>`). The new value is written into the IDR and the old one logged. Returns the IDR with its reports and `field_edits`. 400 when the IDR isn't in review, the path isn't a field of the report, the value doesn't fit, or nothing changes; 403 for anyone but that reviewer; 409 if the field changed meanwhile
 - `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/revise` — same caller: body `{revised_quantity}`; the pay item is found by its id in whichever report holds it. 404 when no report of the IDR holds it
 - `POST /v1/idrs/{idr_id}/pay-items/{pay_item_id}/approve` — same caller, no body: logs their approval of the item as it stands (nothing in the report changes) and returns the IDR with `field_edits`. Approving an item they have already attested to at this stage is a 200 that logs nothing
 - `POST /v1/idrs/{idr_id}/pay-items/add` — same caller: body `{report_id, item_no, budget_code, quantity, unit, description}`; appends a pay item to that report (General, SWCB or AC), logged as added by the reviewer
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/trucks/add` — same caller: body is a truck with any of the keys the report form saves (`truckOrTicketNo`, `slump`, `loadSizeCy`, `endBatch`, `mixingRevs`, `startDischTime`, `endDischTime`, `airContent`, `concTemp`, `cylinderNumbers`, `inspectionSticker`); appends it to that Concrete Truck & Mix Info report's trucks, logged as added by the reviewer. 400 for a report that isn't a CONC_MIX, or a truck with neither a truck or ticket number nor a slump
-- `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at`, `re_reviewer_uuid` and `stage2_accepted_at` cleared, so an RE must accept and approve again; the IDR number stays. 400 for a draft, submitted, Stage 1 or deleted IDR
-- `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept). Deleting an IDR already deleted is a 200 that changes nothing
+- `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at`, `re_reviewer_uuid` and `stage2_accepted_at` cleared, so an RE must accept and approve again; the IDR number stays and its quantity rows are removed. 400 for a draft, submitted, Stage 1 or deleted IDR
+- `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept, its quantity rows are removed). Deleting an IDR already deleted is a 200 that changes nothing
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — replace an attachment's name and description; draft only
@@ -165,7 +165,8 @@ Any change must follow these.
       reviewer, so the export stops printing the old signature and an RE has to accept it before approving
       again. The admin does not approve. Logged as `admin_unlock`.
     - **Admin delete is a soft delete**: `status = 'deleted'` with `deleted_at` and `deleted_by`, logged as
-      `admin_delete`; nothing is removed, attachments and audit rows included. Every review statement and
+      `admin_delete`; nothing is removed, attachments and audit rows included, but for its rows in
+      `icid.quantities` (see "Quantities"). Every review statement and
       submit match only rows with `deleted_at IS NULL`, the lists leave deleted IDRs out, and the day and the
       IDR number are free again. There is no undelete. `GET /v1/idrs/{idr_id}` and the export still answer for
       a deleted IDR by id, for anyone signed in; the edit routes refuse it, as it isn't a draft.
@@ -453,8 +454,26 @@ Any change must follow these.
   - Lists addressed by position (`additionalWorkforce[0].count`) are matched by position, with the limitation
     noted under "Reviewer edits".
 - **Quantities.** `icid.quantities` (migration 025) holds the pay-item quantities of approved IDRs, one row per pay
-  item, for the progress and as-built reports. Nothing writes to it yet: `extract_rows` and `write_quantities`
-  (`api/services/quantities.py`) are the writer's two halves, and final approval calls them from L1 on.
+  item, for the progress and as-built reports.
+  - **Approval writes them, atomically.** approve-stage2 readies the IDR's rows from its reports
+    (`quantity_rows_for_idr`) and hands them to the statement that approves it, where two more CTEs delete the
+    rows the IDR had and insert the new ones. Both read the statement's `moved` CTE, so an approval that doesn't
+    go through (a lost race, the wrong reviewer, the wrong status) writes nothing, and a row that can't be written
+    stops the approval. An IDR without pay items is approved with no rows.
+  - **Admin unlock and admin delete remove them** in their own statements, the same way
+    (`delete_quantities_cte("moved")`): an IDR that is no longer approved has no quantities. Approving it again
+    writes them afresh, from the reports as they then stand. So the table only ever holds approved IDRs that
+    aren't deleted, and a reader needs no join to leave the others out.
+  - **The CTEs have one source**, `api/queries/quantities.py`: `delete_quantities_cte` and
+    `insert_quantities_cte` take the name of the CTE that holds the IDR, and `_move_idr` appends them after the
+    audit CTE (`also`). No other move touches the table.
+  - **The rows are read just before the statement runs**, not inside it. Only the IDR's RE reviewer (or an admin)
+    can edit it at Stage 2, and they are the one approving, so nothing changes in between in practice.
+  - **`scripts/backfill_quantities.py`** does the same for the IDRs approved before this existed: for every
+    approved IDR that isn't deleted, it replaces the IDR's rows with what its reports give now
+    (`replace_quantities`, one statement per IDR). Safe to run again. Run it once after migration 025.
+  - **Migration 025 must be in the database before this code runs**: approve-stage2, admin unlock and admin
+    delete all name `icid.quantities`, and fail without it.
   - **What is read:** every item of every General, SWCB and AC report's `payItems`, as `report_data` holds it
     (so after any reviewer's edit). A Conc Mix and a Conc Cyl have no pay items. **An auto-generated General is
     skipped**: its items are sums of the other reports', and counting them would count those twice. An
@@ -469,9 +488,8 @@ Any change must follow these.
   - **An item without an item number is kept**, `pay_item_ref` NULL (a reviewer can add an item by its
     description alone).
   - **An IDR's rows are replaced as a set, in one statement** (`replace_quantities` in
-    `api/queries/quantities.py`): its rows are deleted and the new ones inserted from one JSON parameter. The
-    two steps are CTEs (`REPLACE_QUANTITIES_CTES`) so the approval statement can take them in. `project_id`,
-    `report_date` and `reporter_uuid` on a row are copies of the IDR's own.
+    `api/queries/quantities.py`): its rows are deleted and the new ones inserted from one JSON parameter.
+    `project_id`, `report_date` and `reporter_uuid` on a row are copies of the IDR's own.
   - `api/services/disciplines.py` maps a report type to its disciplines (`SWCB` → Sidewalk, Curb) and back. A
     row keeps its `report_type`; its disciplines are read off that.
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the

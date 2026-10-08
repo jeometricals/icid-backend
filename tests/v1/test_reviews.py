@@ -6,7 +6,7 @@ from uuid import UUID
 import pytest
 from psycopg.errors import UniqueViolation
 
-from api.queries.idrs import IdrNumberTakenError, accept_stage1
+from api.queries.idrs import IdrNumberTakenError, accept_stage1, list_approved_idrs
 from api.services.signatures import SignatureStorageError
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 
@@ -381,8 +381,9 @@ class TestApproveStage2:
         seen["signature"].assert_called_once_with(REVIEWER["signature_path"], UUID(IDR_ID), "re")
         sql, params = seen["moves"][0]
         assert "re_signature_path = %s, re_signed_at = now()" in sql and "AND re_reviewer_uuid = %s" in sql
-        assert params == (UUID(IDR_ID), "stage2_review", REVIEWER["uuid"], "approved", REVIEWER["uuid"],
-                          RE_SIGNATURE_COPY, REVIEWER["uuid"], "approve_stage2", None)
+        assert params[:-1] == (UUID(IDR_ID), "stage2_review", REVIEWER["uuid"], "approved", REVIEWER["uuid"],
+                               RE_SIGNATURE_COPY, REVIEWER["uuid"], "approve_stage2", None)
+        assert params[-1].obj == []  # the IDR's quantity rows: it has no pay items
 
     def test_the_approver_is_recorded_as_the_re_reviewer(self):
         with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",), moved=[APPROVED_IDR]) as seen:
@@ -417,8 +418,8 @@ class TestApproveStage2:
         sql, params = seen["moves"][0]
         assert "AND re_reviewer_uuid = %s" not in sql
         # the admin replaces whoever accepted: their name goes with their signature
-        assert params == (UUID(IDR_ID), "stage2_review", "approved", ADMIN_USER_ROW["uuid"], RE_SIGNATURE_COPY,
-                          ADMIN_USER_ROW["uuid"], "approve_stage2", None)
+        assert params[:-1] == (UUID(IDR_ID), "stage2_review", "approved", ADMIN_USER_ROW["uuid"], RE_SIGNATURE_COPY,
+                               ADMIN_USER_ROW["uuid"], "approve_stage2", None)
 
     def test_an_re_without_a_signature_is_400(self):
         unsigned = {**REVIEWER, "signature_path": None, "signature_type": None, "signature_set_at": None}
@@ -777,7 +778,7 @@ class TestAdminDelete:
         assert (body["data"]["status"], body["data"]["deleted_at"], body["data"]["deleted_by"]) == (
             "deleted", "2026-10-06T14:00:00Z", str(ADMIN_USER_ROW["uuid"]))
         sql, params = seen["moves"][0]
-        assert "UPDATE icid.idrs i" in sql and "DELETE FROM" not in sql  # the row is kept
+        assert "UPDATE icid.idrs i" in sql and "DELETE FROM icid.idrs" not in sql  # the row is kept
         assert "SET status = %s, updated_at = now(), deleted_at = now(), deleted_by = %s" in flat(sql)
         assert "WHERE idr_id = %s AND deleted_at IS NULL FOR UPDATE" in flat(sql)  # whatever its status
         assert params == (UUID(IDR_ID), "deleted", ADMIN_USER_ROW["uuid"], ADMIN_USER_ROW["uuid"], "admin_delete", None)
@@ -1055,3 +1056,224 @@ class TestPayItemGate:
         with signed_in(REVIEWER) as client, review(idr=STAGE1_IDR, roles=("oe",), reports=TWO_ITEMS) as seen:
             returned = client.post(url("return"), json={"to": "inspector", "comment": "fix the quantities"})
         assert returned.status_code == 200 and len(seen["moves"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# icid.quantities changes in the statement that approves, unlocks or deletes the IDR
+# ---------------------------------------------------------------------------
+
+AC_REPORT = UUID("c0ffee00-0000-4000-8000-0000000000ac")
+MIX_REPORT = UUID("c0ffee00-0000-4000-8000-0000000000c3")
+DELETE_QUANTITIES = "deleted_quantities AS ( DELETE FROM icid.quantities WHERE idr_id IN (SELECT idr_id FROM moved) )"
+INSERT_QUANTITIES = "inserted_quantities AS ( INSERT INTO icid.quantities ("
+PAY_REPORTS = (
+    pay_report(GEN_REPORT, item("gen-1", "2", unit="Each", description="Hydrant"), report_type="GEN"),
+    pay_report(SWCB_REPORT, item("item-1", "1,200.50", unit="L.F."), item("item-2", "29.00")),
+    pay_report(AC_REPORT, item("ac-1", "18.25", unit="Ton", budgetCode=""), report_type="AC"),
+)
+ALL_ATTESTED = [attest("approve", "gen-1", "2", stage="stage2", report_id=GEN_REPORT),
+                attest("approve", "item-1", "1,200.50", stage="stage2"),
+                attest("approve", "item-2", "29.00", stage="stage2"),
+                attest("approve", "ac-1", "18.25", stage="stage2", report_id=AC_REPORT)]
+
+
+def approve(reports=PAY_REPORTS, edits=ALL_ATTESTED, user=REVIEWER, **backend) -> tuple:
+    """
+    Approve the test IDR at Stage 2 as its RE reviewer.
+    Takes the IDR's reports, the reviewer's attestations, the caller and review()'s other keyword arguments.
+    Returns (the response, the moving statements run).
+    """
+    backend.setdefault("roles", ("re",))
+    backend.setdefault("moved", [APPROVED_IDR])
+    with signed_in(user) as client, review(idr=STAGE2_IDR, reports=reports, edits=edits, **backend) as seen:
+        return client.post(STAGE2_APPROVE), seen["moves"]
+
+
+class TestApprovalWritesQuantities:
+    def test_the_idrs_pay_items_go_into_the_approving_statement_as_rows(self):
+        response, moves = approve()
+        assert response.status_code == 200 and len(moves) == 1
+        sql, params = moves[0]
+        rows = params[-1].obj
+        assert [(r["report_type"], r["pay_item_ref"], r["amount"], r["unit"], r["budget_code"]) for r in rows] == [
+            ("GEN", "4.10 A", "2", "EA", "12345"), ("SWCB", "4.10 A", "1200.50", "LF", "12345"),
+            ("SWCB", "4.20 A", "29.00", "SF", "12345"), ("AC", "4.10 A", "18.25", "TN", None)]
+        assert {(r["project_id"], r["report_date"], r["reporter_uuid"]) for r in rows} == {
+            ("HWS0023", "2026-10-05", str(INSPECTOR["uuid"]))}
+        assert rows[0]["description"] == "Hydrant"
+
+    def test_the_status_the_log_and_the_quantities_change_in_one_statement(self):
+        sql = flat(approve()[1][0][0])
+        assert sql.count(";") == 1 and sql.count("UPDATE icid.idrs") == 1
+        assert "INSERT INTO icid.idr_audit" in sql and DELETE_QUANTITIES in sql and INSERT_QUANTITIES in sql
+        assert "CROSS JOIN moved i RETURNING quantity_id )" in sql  # no IDR moved, no rows written
+        assert sql.index("moved AS") < sql.index("logged AS") < sql.index("deleted_quantities AS") \
+            < sql.index("inserted_quantities AS")
+        assert sql.endswith("FROM moved;")  # and it still returns the IDR
+
+    def test_an_idr_without_pay_items_is_approved_with_no_rows(self):
+        trucks = pay_report(MIX_REPORT, report_type="CONC_MIX", is_addendum=True)
+        trucks["report_data"] = {"trucks": [{"id": "t1", "slump": "4"}]}
+        cylinders = {**trucks, "report_type": "CONC_CYL", "report_data": {"cylinders": [{"id": "c1", "slump": "3"}]}}
+        response, moves = approve(reports=(trucks, cylinders), edits=())
+        assert response.status_code == 200 and response.json()["data"]["status"] == "approved"
+        sql, params = moves[0]
+        assert params[-1].obj == [] and DELETE_QUANTITIES in flat(sql)  # any rows it had still go
+
+    def test_an_auto_generated_generals_sums_are_not_written(self):
+        auto = pay_report(GEN_REPORT, item("merged-1", "89.00"), report_type="GEN", is_auto_generated=True)
+        _, moves = approve(reports=(auto, *TWO_ITEMS), edits=[attest("approve", "item-1", "60.00", stage="stage2"),
+                                                              attest("approve", "item-2", "29.00", stage="stage2")])
+        assert [r["report_type"] for r in moves[0][1][-1].obj] == ["SWCB", "SWCB"]
+
+    def test_a_quantity_that_isnt_a_number_is_left_out_and_the_idr_is_still_approved(self):
+        reports = (pay_report(SWCB_REPORT, item("item-1", "abc"), item("item-2", "29.00")),)
+        edits = [attest("approve", "item-1", "abc", stage="stage2"), attest("approve", "item-2", "29.00", stage="stage2")]
+        response, moves = approve(reports=reports, edits=edits)
+        assert response.status_code == 200
+        assert [r["amount"] for r in moves[0][1][-1].obj] == ["29.00"]
+
+    def test_a_lost_race_is_409_and_the_statement_that_ran_could_write_nothing(self):
+        response, moves = approve(moved=[])
+        assert response.status_code == 409 and response.json() == CHANGED
+        sql = flat(moves[0][0])
+        # the delete and the insert both read the moved CTE, which is empty when the IDR didn't move
+        assert "WHERE idr_id IN (SELECT idr_id FROM moved)" in sql and "CROSS JOIN moved i" in sql
+        assert "AND status = %s AND deleted_at IS NULL AND re_reviewer_uuid = %s FOR UPDATE" in sql
+
+    def test_another_re_never_reaches_the_statement(self):
+        response, moves = approve(user=OTHER_REVIEWER)
+        assert response.status_code == 403 and moves == []
+
+    def test_reports_that_cant_be_read_stop_the_approval_before_anything_is_signed(self):
+        with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",)) as seen, \
+                patch("api.v1.reviews.quantity_rows_for_idr", return_value=None):
+            response = client.post(STAGE2_APPROVE)
+        assert response.status_code == 500 and response.json() == {"detail": "Failed to load IDR reports"}
+        assert seen["moves"] == []
+        seen["signature"].assert_not_called()
+
+    def test_a_statement_that_fails_approves_nothing(self):
+        response, moves = approve(moved=None)
+        assert response.status_code == 500 and len(moves) == 1  # one statement: the status didn't move either
+
+    def test_stage_one_approval_writes_no_quantities(self):
+        edits = [attest("approve", "item-1", "60.00"), attest("approve", "item-2", "29.00")]
+        with signed_in(REVIEWER) as client, review(idr=STAGE1_IDR, roles=("oe",), reports=TWO_ITEMS, edits=edits) as seen:
+            assert client.post(STAGE1_APPROVE).status_code == 200
+        assert "icid.quantities" not in seen["moves"][0][0]
+
+
+class TestUnlockAndDeleteRemoveQuantities:
+    def test_an_unlock_deletes_the_idrs_quantities_in_its_own_statement(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[UNLOCKED_IDR]) as seen:
+            assert admin_client.post(url("admin/unlock")).status_code == 200
+        sql, params = seen["moves"][0]
+        assert DELETE_QUANTITIES in flat(sql) and INSERT_QUANTITIES not in flat(sql) and sql.count(";") == 1
+        assert params == (UUID(IDR_ID), ["approved", "stage2_review"], "stage2_review", ADMIN_USER_ROW["uuid"],
+                          "admin_unlock", None)  # the delete takes no parameter: it reads the moved IDR
+
+    def test_a_soft_delete_deletes_them_too_and_keeps_the_idr(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[DELETED_IDR]) as seen:
+            assert admin_client.post(url("admin/delete")).status_code == 200
+        sql = flat(seen["moves"][0][0])
+        assert DELETE_QUANTITIES in sql and INSERT_QUANTITIES not in sql
+        assert "DELETE FROM icid.idrs" not in sql and "DELETE FROM icid.idr_reports" not in sql
+
+    def test_an_idr_already_deleted_runs_no_statement(self, admin_client):
+        with review(idr=DELETED_IDR, roles=()) as seen:
+            assert admin_client.post(url("admin/delete")).status_code == 200
+        assert seen["moves"] == []
+
+    def test_approving_again_after_an_unlock_writes_the_rows_afresh(self, admin_client):
+        with review(idr=APPROVED_IDR, roles=(), moved=[UNLOCKED_IDR]) as seen:
+            admin_client.post(url("admin/unlock"))
+        assert DELETE_QUANTITIES in flat(seen["moves"][0][0])
+        revised = (pay_report(SWCB_REPORT, item("item-1", "55.00"), item("item-2", "29.00")),)
+        edits = [attest("revise", "item-1", "55.00", stage="stage2"), attest("approve", "item-2", "29.00", stage="stage2")]
+        response, moves = approve(reports=revised, edits=edits)
+        assert response.status_code == 200
+        assert DELETE_QUANTITIES in flat(moves[0][0])  # whatever was there goes first
+        assert [r["amount"] for r in moves[0][1][-1].obj] == ["55.00", "29.00"]
+
+    @pytest.mark.parametrize("route,body", [("accept-stage2", None), ("return", {"to": "oe", "comment": "check"})])
+    def test_no_other_move_touches_quantities(self, route, body):
+        with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",)) as seen:
+            assert client.post(url(route), json=body).status_code == 200
+        assert "icid.quantities" not in seen["moves"][0][0]
+
+
+# ---------------------------------------------------------------------------
+# scripts/backfill_quantities.py
+# ---------------------------------------------------------------------------
+
+SECOND_IDR = {**APPROVED_IDR, "idr_id": UUID(OTHER_IDR_ID), "report_date": date(2026, 10, 6)}
+
+
+class TestBackfillQuantities:
+    def run(self, idrs, reports_by_idr, written=None):
+        """
+        Run the backfill over stubbed IDRs.
+        Takes the approved IDR rows the listing returns (None: it fails), {idr uuid: its reports (None: unreadable)} and {idr uuid: what the replace statement returns} (the count of rows handed over unless given).
+        Returns (the exit code, the (sql, params) of every statement that wrote quantities).
+        """
+        from scripts import backfill_quantities
+        writes = []
+
+        def reports_query(sql, params=None):
+            return reports_by_idr.get(params[0])
+
+        def quantities_query(sql, params=None):
+            writes.append((sql, params))
+            result = (written or {}).get(params[0], "count")
+            return [{"inserted": len(params[1].obj)}] if result == "count" else result
+
+        with patch("api.queries.idrs.run_query", return_value=idrs), \
+                patch("api.queries.idr_reports.run_query", side_effect=reports_query), \
+                patch("api.queries.quantities.run_query", side_effect=quantities_query):
+            return backfill_quantities.main(), writes
+
+    def test_every_approved_idrs_rows_are_replaced_one_statement_each(self, capsys):
+        reports = {UUID(IDR_ID): list(PAY_REPORTS), UUID(OTHER_IDR_ID): list(TWO_ITEMS)}
+        code, writes = self.run([APPROVED_IDR, SECOND_IDR], reports)
+        assert code == 0 and [params[0] for _, params in writes] == [UUID(IDR_ID), UUID(OTHER_IDR_ID)]
+        assert [len(params[1].obj) for _, params in writes] == [4, 2]
+        assert all("DELETE FROM icid.quantities" in sql and "INSERT INTO icid.quantities" in sql for sql, _ in writes)
+        assert writes[1][1][1].obj[0]["report_date"] == "2026-10-06"  # each row takes its own IDR's date
+        assert capsys.readouterr().out.strip().endswith("backfill complete: 2 IDRs, 6 quantity rows")
+
+    def test_an_idr_without_pay_items_is_still_written_so_stale_rows_go(self):
+        code, writes = self.run([APPROVED_IDR], {UUID(IDR_ID): []})
+        assert code == 0 and len(writes) == 1 and writes[0][1][1].obj == []
+
+    def test_progress_is_reported_every_ten_idrs(self, capsys):
+        idrs = [{**APPROVED_IDR, "idr_id": UUID(int=n)} for n in range(1, 13)]
+        code, _ = self.run(idrs, {idr["idr_id"]: list(TWO_ITEMS) for idr in idrs})
+        out = capsys.readouterr().out
+        assert code == 0 and "processed 10/12, wrote 20 rows across 10 IDRs" in out
+        assert out.strip().endswith("backfill complete: 12 IDRs, 24 quantity rows")
+
+    def test_no_approved_idrs_is_a_clean_run(self, capsys):
+        assert self.run([], {}) == (0, [])
+        assert "backfill complete: 0 IDRs, 0 quantity rows" in capsys.readouterr().out
+
+    def test_an_idr_that_fails_is_reported_and_the_rest_still_run(self, capsys):
+        reports = {UUID(IDR_ID): None, UUID(OTHER_IDR_ID): list(TWO_ITEMS)}
+        code, writes = self.run([APPROVED_IDR, SECOND_IDR], reports)
+        assert code == 1 and [params[0] for _, params in writes] == [UUID(OTHER_IDR_ID)]
+        out = capsys.readouterr().out
+        assert f"IDR {IDR_ID} failed: its reports couldn't be read" in out and "1 IDRs failed" in out
+
+    def test_a_write_that_fails_is_reported(self, capsys):
+        code, _ = self.run([APPROVED_IDR], {UUID(IDR_ID): list(TWO_ITEMS)}, written={UUID(IDR_ID): None})
+        assert code == 1 and f"IDR {IDR_ID} failed: its quantities couldn't be written" in capsys.readouterr().out
+
+    def test_a_listing_that_fails_writes_nothing(self, capsys):
+        assert self.run(None, {}) == (1, [])
+        assert "the approved IDRs couldn't be read" in capsys.readouterr().out
+
+    def test_only_approved_idrs_that_arent_deleted_are_listed_oldest_first(self):
+        with patch("api.queries.idrs.run_query", return_value=[]) as query:
+            assert list_approved_idrs() == []
+        sql = flat(query.call_args.args[0])
+        assert "FROM icid.idrs WHERE status = 'approved' AND deleted_at IS NULL ORDER BY report_date, idr_id;" in sql

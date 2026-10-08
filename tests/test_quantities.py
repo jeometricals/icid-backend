@@ -14,7 +14,9 @@ from uuid import UUID
 import pytest
 from psycopg.types.json import Jsonb
 
-from api.queries.quantities import REPLACE_QUANTITIES_CTES, quantity_rows_json, replace_quantities
+from api.queries.quantities import (
+    delete_quantities_cte, insert_quantities_cte, quantity_rows_json, replace_quantities, replace_quantities_ctes,
+)
 from api.services import quantities
 from api.services.quantities import (
     PAY_ITEM_REPORT_TYPES, canonical_unit, extract_rows, parse_amount, write_quantities,
@@ -214,7 +216,8 @@ class TestReplaceQuantities:
             assert replace_quantities(IDR_ID, [row(), row("AC", None, "3", None)]) == 2
         assert query.call_count == 1
         sql = flat(query.call_args.args[0])
-        assert sql.startswith("WITH deleted_quantities AS ( DELETE FROM icid.quantities WHERE idr_id = %s ), "
+        assert sql.startswith("WITH given AS ( SELECT %s::uuid AS idr_id ), deleted_quantities AS ( DELETE FROM "
+                              "icid.quantities WHERE idr_id IN (SELECT idr_id FROM given) ), "
                               "inserted_quantities AS ( INSERT INTO icid.quantities (")
         assert sql.endswith("RETURNING quantity_id ) SELECT COUNT(*) AS inserted FROM inserted_quantities;")
         assert "FROM jsonb_to_recordset(%s) AS q(" in sql
@@ -223,15 +226,15 @@ class TestReplaceQuantities:
     def test_the_rows_go_in_as_one_json_parameter_and_every_row_takes_the_idr_given(self):
         with patch("api.queries.quantities.run_query", return_value=[{"inserted": 1}]) as query:
             replace_quantities(IDR_ID, [row(amount="1200.50")])
-        idr_to_delete, idr_to_insert, rows = query.call_args.args[1]
-        assert (idr_to_delete, idr_to_insert) == (IDR_ID, IDR_ID)
+        idr, rows = query.call_args.args[1]
+        assert idr == IDR_ID and "CROSS JOIN given i" in flat(query.call_args.args[0])
         assert isinstance(rows, Jsonb) and rows.obj == [{
             "project_id": "HWS0023", "report_date": "2026-10-05", "reporter_uuid": str(REPORTER),
             "report_type": "SWCB", "pay_item_ref": "4.01 AAS", "budget_code": "12345",
             "description": "Concrete curb", "amount": "1200.50", "unit": "LF"}]
 
     def test_every_column_the_table_takes_is_read_from_the_json_but_its_id_and_its_idr(self):
-        columns = re.search(r"INSERT INTO icid\.quantities \((.*?)\)", flat(REPLACE_QUANTITIES_CTES)).group(1)
+        columns = re.search(r"INSERT INTO icid\.quantities \((.*?)\)", flat(replace_quantities_ctes("given"))).group(1)
         inserted = [column.strip() for column in columns.split(",")]
         assert inserted == ["project_id", "idr_id", "report_date", "reporter_uuid", "report_type", "pay_item_ref",
                             "budget_code", "description", "amount", "unit"]
@@ -240,7 +243,7 @@ class TestReplaceQuantities:
     def test_no_rows_still_deletes_what_the_idr_had(self):
         with patch("api.queries.quantities.run_query", return_value=[{"inserted": 0}]) as query:
             assert replace_quantities(IDR_ID, []) == 0
-        assert "DELETE FROM icid.quantities" in query.call_args.args[0] and query.call_args.args[1][2].obj == []
+        assert "DELETE FROM icid.quantities" in query.call_args.args[0] and query.call_args.args[1][1].obj == []
 
     def test_a_second_set_replaces_the_first(self):
         with patch("api.queries.quantities.run_query", side_effect=[[{"inserted": 2}], [{"inserted": 1}]]) as query:
@@ -248,7 +251,7 @@ class TestReplaceQuantities:
         assert counts == [2, 1]
         first, second = (call.args for call in query.call_args_list)
         assert first[0] == second[0]  # the same statement: delete this IDR's rows, insert the ones given
-        assert [r["report_type"] for r in second[1][2].obj] == ["AC"]
+        assert [r["report_type"] for r in second[1][1].obj] == ["AC"]
 
     def test_a_failed_statement_is_none(self):
         with patch("api.queries.quantities.run_query", return_value=None):
@@ -258,7 +261,15 @@ class TestReplaceQuantities:
         rows = extract_rows(IDR, [report("SWCB", pay_items=[pay_item()])])
         with patch("api.queries.quantities.run_query", return_value=[{"inserted": 1}]) as query:
             assert write_quantities(IDR_ID, rows) == 1
-        assert query.call_args.args[1][2].obj[0]["amount"] == "60.00"
+        assert query.call_args.args[1][1].obj[0]["amount"] == "60.00"
+
+    def test_the_two_ctes_read_the_idr_from_the_cte_named_and_take_one_parameter_between_them(self):
+        delete, insert = flat(delete_quantities_cte("moved")), flat(insert_quantities_cte("moved"))
+        assert delete == "deleted_quantities AS ( DELETE FROM icid.quantities WHERE idr_id IN (SELECT idr_id FROM moved) )"
+        assert "SELECT q.project_id, i.idr_id, q.report_date" in insert and insert.endswith(
+            "CROSS JOIN moved i RETURNING quantity_id )")
+        assert (delete.count("%s"), insert.count("%s")) == (0, 1)
+        assert flat(replace_quantities_ctes("moved")) == f"{delete}, {insert}"
 
 
 # ---------------------------------------------------------------------------

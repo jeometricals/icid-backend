@@ -279,8 +279,9 @@ Cascades: deleting an IDR deletes its reports, and deleting a report deletes its
 ### quantities
 
 The pay-item quantities of approved IDRs, one row per pay item, kept apart from the reports so progress and
-as-built reports can read them with plain queries. Added by migration 025. **Nothing writes to it yet**: final
-approval will (Slice L1), and a backfill script will fill it for the IDRs already approved.
+as-built reports can read them with plain queries. Added by migration 025. Final approval writes an IDR's rows in
+the statement that approves it; admin unlock and admin delete remove them in theirs. So it only ever holds IDRs
+that are approved and not deleted. `scripts/backfill_quantities.py` fills it for the IDRs approved before that.
 
 | Column | Type | Notes |
 |---|---|---|

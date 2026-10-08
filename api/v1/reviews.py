@@ -32,6 +32,7 @@ from api.schemas.idr import (
 from api.schemas.field_edit import PayItemsUntouched
 from api.services.auth import current_admin, current_user, demo_idr_fence, require_project_role
 from api.services.field_edits import FieldEditError, untouched_message, untouched_pay_items
+from api.services.quantities import quantity_rows_for_idr
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 
 logger = logging.getLogger(__name__)
@@ -226,9 +227,9 @@ def accept_for_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
 @router.post("/{idr_id}/approve-stage2", response_model=IdrResponse, responses=PAY_ITEMS_WAITING)
 def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) -> Union[IdrResponse, JSONResponse]:
     """
-    Approve an IDR for good, signed by the signed-in user: copy their signature to the IDR, then mark it approved and stamp the signature. Only the RE who accepted it at Stage 2 (or an admin) can, and only once they have approved, revised or added every pay item at this stage.
+    Approve an IDR for good, signed by the signed-in user: copy their signature to the IDR, then mark it approved and stamp the signature. Its pay-item quantities are written to icid.quantities in the same statement. Only the RE who accepted it at Stage 2 (or an admin) can, and only once they have approved, revised or added every pay item at this stage.
     Takes the IDR uuid as a path parameter and the signed-in RE; no body.
-    Returns an IdrResponse; raises 403 (not an RE on the project, or not its RE reviewer), 404 (no IDR), 409 (not in Stage 2 review), 400 with the untouched pay items (untouched) when any is left, 400 (the user has no signature) and 502 (the signature couldn't be copied).
+    Returns an IdrResponse; raises 403 (not an RE on the project, or not its RE reviewer), 404 (no IDR), 409 (not in Stage 2 review), 400 with the untouched pay items (untouched) when any is left, 400 (the user has no signature), 500 (the IDR's reports couldn't be read) and 502 (the signature couldn't be copied).
     """
     idr = _load_idr(idr_id)
 
@@ -245,6 +246,12 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
     if user.signature_path is None:
         raise HTTPException(status_code=400, detail="Signature required before approving")
 
+    # The IDR's pay items, as its reports hold them now, go to icid.quantities in the statement that approves it
+    quantity_rows = quantity_rows_for_idr(idr)
+
+    if quantity_rows is None:
+        raise HTTPException(status_code=500, detail="Failed to load IDR reports")
+
     # As at submit, the copy comes first: an approved IDR must never point at a signature that isn't there. If the
     # approval below doesn't go through, the copy is left behind, unreferenced.
     try:
@@ -253,7 +260,7 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
-        rows = approve_stage2(idr_id, user.uuid, signature_copy, as_reviewer)
+        rows = approve_stage2(idr_id, user.uuid, signature_copy, as_reviewer, quantity_rows)
     except Exception:
         logger.warning("Approval of IDR %s failed after its RE signature was copied; %s is left orphaned", idr_id, signature_copy)
         raise

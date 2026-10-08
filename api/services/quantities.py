@@ -2,8 +2,9 @@
 Quantities: an IDR's pay items as rows of icid.quantities.
 
 extract_rows reads the pay items off an IDR's reports as they stand (after any reviewer's edits) and readies one row
-each: the amount parsed to a number, the unit in its short form. write_quantities replaces the IDR's rows with them.
-Nothing calls either yet; final approval will.
+each: the amount parsed to a number, the unit in its short form. Final approval writes them in the statement that
+approves the IDR (quantity_rows_for_idr readies them for it); write_quantities replaces an already approved IDR's
+rows on its own, for the backfill.
 """
 
 import logging
@@ -12,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from uuid import UUID
 
+from api.queries.idr_reports import list_reports_for_idr
 from api.queries.quantities import replace_quantities
 from api.schemas.idr_report import ReportType
 
@@ -128,6 +130,16 @@ def extract_rows(idr: dict[str, Any], reports: list[dict[str, Any]]) -> list[dic
                 "unit": canonical_unit(item.get("unit")),
             })
     return rows
+
+
+def quantity_rows_for_idr(idr: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    """
+    Ready an IDR's quantity rows from its reports as they are stored now.
+    Takes the IDR row.
+    Returns the rows (see extract_rows; empty when the IDR has no pay items), or None if its reports can't be read.
+    """
+    reports = list_reports_for_idr(idr["idr_id"])
+    return None if reports is None else extract_rows(idr, reports)
 
 
 def write_quantities(idr_id: UUID, rows: list[dict[str, Any]]) -> Optional[int]:
