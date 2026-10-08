@@ -4,7 +4,7 @@ Quantities: an IDR's pay items as rows of icid.quantities.
 extract_rows reads the pay items off an IDR's reports as they stand (after any reviewer's edits) and readies one row
 each: the amount parsed to a number, the unit in its short form. Final approval writes them in the statement that
 approves the IDR (quantity_rows_for_idr readies them for it); write_quantities replaces an already approved IDR's
-rows on its own, for the backfill.
+rows on its own, for the backfill. totals_by_unit sums rows for the quantities endpoint.
 """
 
 import logging
@@ -27,6 +27,9 @@ PAY_ITEM_REPORT_TYPES = (ReportType.GEN.value, ReportType.SWCB.value, ReportType
 # Reports keep the unit as the catalog or the inspector wrote it; totals only add up when a quantity's is canonical.
 UNIT_FORMS = {"LF": "LF", "SF": "SF", "CY": "CY", "SY": "SY", "TN": "TN", "TON": "TN", "TONS": "TN", "T": "TN",
               "EA": "EA", "EACH": "EA", "LS": "LS"}
+
+# What the totals call the rows that have no unit
+NO_UNIT = "(unknown)"
 
 # A quantity as an inspector types one: digits, with or without commas between its thousands, and a decimal part
 _NUMBER = re.compile(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|[-+]?\.\d+")
@@ -130,6 +133,19 @@ def extract_rows(idr: dict[str, Any], reports: list[dict[str, Any]]) -> list[dic
                 "unit": canonical_unit(item.get("unit")),
             })
     return rows
+
+
+def totals_by_unit(rows: list[dict[str, Any]]) -> dict[str, float]:
+    """
+    Sum quantity rows' amounts per unit. Amounts are signed, so a correction entered as a negative quantity takes away.
+    Takes the rows (each with amount and unit).
+    Returns {unit: total}, units in alphabetical order; rows without a unit are summed under NO_UNIT.
+    """
+    totals: dict[str, Decimal] = {}
+    for row in rows:
+        unit = row["unit"] or NO_UNIT
+        totals[unit] = totals.get(unit, Decimal(0)) + Decimal(str(row["amount"]))
+    return {unit: float(totals[unit]) for unit in sorted(totals)}
 
 
 def quantity_rows_for_idr(idr: dict[str, Any]) -> Optional[list[dict[str, Any]]]:

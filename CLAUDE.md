@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -51,6 +51,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/projects/{project_id}`
 - `GET /v1/projects/{project_id}/roles` — admin only: who holds which role on the project, one entry per user and role (demo users left out)
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
+- `GET /v1/projects/{project_id}/quantities?from=&to=&pay_item=&budget_code=&discipline=&inspector_uuid=` — the pay-item quantities of the project's approved IDRs, newest work date first: `{rows, totals_by_unit, row_count, truncated}` under `data`. All filters optional; `pay_item`, `budget_code` and `discipline` repeat. For a user on the project, or an admin: 403 otherwise, 404 for an unknown project, 400 for a bad date, `from` after `to`, or an unknown discipline
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count`, `has_general` and the names of the inspector and reviewers (all filters optional). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true)
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order, and `field_edits`: every edit reviewers made on it, oldest first, each with `editor_name` and `editor_initials`
@@ -130,7 +131,9 @@ Any change must follow these.
   - **No ownership checks on reading and editing (yet).** Any signed-in user can read, edit or export any IDR by
     id, and list IDRs for any reporter (`?reporter_uuid=` is a filter, not an identity), except that nobody is
     listed another person's draft. An admin lists only the projects assigned to them in `project_users`, like
-    anyone else. Submitting and the review routes are the exception: they check project roles, below. The
+    anyone else. Submitting and the review routes are the exception: they check project roles, below. So is
+    the quantities route, which takes `project_member`: the caller must be assigned to the project, in any role,
+    or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
     admin-only routes are `/v1/admin/cleanup-demos`, the two under `/v1/projects/{project_id}/roles`, and
     `/v1/idrs/{idr_id}/admin/unlock` and `/admin/delete`.
   - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
@@ -492,6 +495,25 @@ Any change must follow these.
     `project_id`, `report_date` and `reporter_uuid` on a row are copies of the IDR's own.
   - `api/services/disciplines.py` maps a report type to its disciplines (`SWCB` → Sidewalk, Curb) and back. A
     row keeps its `report_type`; its disciplines are read off that.
+  - **Reading them: `GET /v1/projects/{project_id}/quantities`** (`api/v1/quantities.py`, a second router under
+    `/v1/projects`; `list_quantities` in `api/queries/quantities.py`).
+    - **Filters**, all optional: `from` and `to` (work dates, inclusive), `pay_item` (the item number, exact),
+      `budget_code` (exact), `discipline` (by name) and `inspector_uuid`. Different filters must all hold; a
+      repeated `pay_item`, `budget_code` or `discipline` matches any of its values. A discipline is resolved to
+      the report types that cover it, so `Sidewalk` and `Curb` both mean SWCB rows. A discipline with no pay
+      items (`Concrete (delivery)`) is a valid filter that matches nothing.
+    - **Refused with 400**, before anything is read: a date that isn't `YYYY-MM-DD`, `from` after `to`, and a
+      discipline the mapping doesn't have (spelled exactly as it is there). The two dates are read by the route
+      as text so they get 400, not FastAPI's 422; a malformed `inspector_uuid` is still 422.
+    - **Each row** carries its IDR's number and its inspector's name (joined in the one statement) and its
+      `disciplines`. `amount` is a number in the JSON.
+    - **`totals_by_unit`** is the sum of the returned rows' amounts per unit, signed; rows without a unit are
+      summed under `(unknown)`. `row_count` is how many rows came back.
+    - **At most 10,000 rows** (`MAX_ROWS`): the statement asks for one more, and when it gets it the response
+      carries the first 10,000 with `truncated: true`, still 200. The totals are then of those rows only, so a
+      client that sees `truncated` should narrow its filters.
+    - **Order:** work date newest first, then item number (rows without one last).
+    - The statement leaves out rows of a deleted IDR, though admin delete has already removed them.
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.

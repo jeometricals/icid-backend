@@ -261,6 +261,19 @@ def require_full_user(user: UserOut = Depends(current_user)) -> UserOut:
     return _refuse_demo(user, "Demo mode: submit is disabled")
 
 
+def project_member(project_id: str, user: UserOut = Depends(current_user)) -> UserOut:
+    """
+    FastAPI dependency for routes that read one project's data: the signed-in user must be assigned to the project (in any role), or be an admin.
+    Takes the project_id path parameter and the current user.
+    Returns the user; raises 404 for a project that doesn't exist and 403 for a user who isn't on it.
+    """
+    if get_project_by_id(project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if user.role != "admin" and not is_user_on_project(user.uuid, project_id):
+        raise HTTPException(status_code=403, detail="Project access required")
+    return user
+
+
 def no_demo_users(user: UserOut = Depends(current_user)) -> UserOut:
     """
     FastAPI dependency for routes demo users have no business on (e.g. the users list).

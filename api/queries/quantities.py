@@ -1,11 +1,14 @@
 """
 SQL for icid.quantities, the pay-item quantities of approved IDRs.
 
+list_quantities reads a project's rows for the quantities endpoint.
+
 An IDR's rows change with the IDR, never on their own: there are no multi-statement transactions, so the delete and
 the insert ride along in the statement that approves, unlocks or deletes it, as data-modifying CTEs. The two CTEs here
 are the one source of both; replace_quantities runs them on their own, for an IDR that is already approved.
 """
 
+from datetime import date
 from typing import Any, Optional
 from uuid import UUID
 
@@ -107,3 +110,72 @@ def replace_quantities(idr_id: UUID, rows: list[dict[str, Any]]) -> Optional[int
     """
     result = run_query(sql, (idr_id, quantity_rows_json(rows)))
     return result[0]["inserted"] if result else None
+
+
+def list_quantities(
+    project_id: str,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    pay_items: Optional[list[str]] = None,
+    budget_codes: Optional[list[str]] = None,
+    report_types: Optional[list[str]] = None,
+    reporter_uuid: Optional[UUID] = None,
+    limit: Optional[int] = None,
+) -> Optional[list[dict[str, Any]]]:
+    """
+    List a project's quantity rows, newest work date first and by item number within a day, each with its IDR's number and its inspector's name. Rows of a deleted IDR are left out, should any remain.
+    Takes the project id and the optional filters, all of which must hold (any left as None is not applied): the first and last work dates (inclusive), the item numbers, the budget codes and the report types (each matching any in its list), the inspector's uuid, and the most rows to return.
+    Returns a list of row dicts (empty if none match), or None on failure.
+    """
+    conditions = ["q.project_id = %s", "i.deleted_at IS NULL"]
+    params: list[Any] = [project_id]
+
+    if date_from is not None:
+        conditions.append("q.report_date >= %s")
+        params.append(date_from)
+
+    if date_to is not None:
+        conditions.append("q.report_date <= %s")
+        params.append(date_to)
+
+    if pay_items is not None:
+        conditions.append("q.pay_item_ref = ANY(%s)")
+        params.append(list(pay_items))
+
+    if budget_codes is not None:
+        conditions.append("q.budget_code = ANY(%s)")
+        params.append(list(budget_codes))
+
+    if report_types is not None:
+        conditions.append("q.report_type = ANY(%s)")
+        params.append(list(report_types))
+
+    if reporter_uuid is not None:
+        conditions.append("q.reporter_uuid = %s")
+        params.append(reporter_uuid)
+
+    if limit is not None:
+        params.append(limit)
+
+    sql = f"""
+        SELECT
+            q.quantity_id,
+            q.idr_id,
+            i.idr_number,
+            q.report_date,
+            q.reporter_uuid,
+            NULLIF(concat_ws(' ', u.first_name, u.last_name), '') AS reporter_name,
+            q.report_type,
+            q.pay_item_ref,
+            q.budget_code,
+            q.description,
+            q.amount,
+            q.unit
+        FROM icid.quantities q
+        JOIN icid.idrs i ON i.idr_id = q.idr_id
+        LEFT JOIN icid.users u ON u.uuid = q.reporter_uuid
+        WHERE {' AND '.join(conditions)}
+        ORDER BY q.report_date DESC, q.pay_item_ref ASC NULLS LAST, q.quantity_id
+        {'LIMIT %s' if limit is not None else ''};
+    """
+    return run_query(sql, tuple(params))

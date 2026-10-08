@@ -580,7 +580,7 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 39
+        assert len(PROTECTED_ROUTES) == 40
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
@@ -588,6 +588,7 @@ class TestEveryRouteNeedsSignIn:
                          ("POST", "/v1/signatures/upload-request"), ("POST", "/v1/signatures/confirm"),
                          ("GET", "/v1/admin/cleanup-demos"), ("POST", "/v1/admin/cleanup-demos"),
                          ("GET", "/v1/projects/{project_id}/roles"), ("POST", "/v1/projects/{project_id}/roles"),
+                         ("GET", "/v1/projects/{project_id}/quantities"),
                          ("GET", "/v1/idrs/queue"), ("POST", "/v1/idrs/{idr_id}/accept-stage1"),
                          ("POST", "/v1/idrs/{idr_id}/approve-stage1"), ("POST", "/v1/idrs/{idr_id}/accept-stage2"),
                          ("POST", "/v1/idrs/{idr_id}/approve-stage2"), ("POST", "/v1/idrs/{idr_id}/return"),
