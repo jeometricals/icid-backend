@@ -186,7 +186,8 @@ Any change must follow these.
   - **`field_path`** uses the keys as `report_data` stores them: `header.<column>` (no `report_id`);
     `description`, `workforce.foremen`, `safetyChecks.plates`; a list row by position, `additionalWorkforce[0].count`;
     a pay item by its id, `payItems[<id>].payQuantity` (`pay_item_revision`); `payItems[<id>]` for an item a
-    reviewer added (`pay_item_add`, the whole item as `new_value`).
+    reviewer added (`pay_item_add`, the whole item as `new_value`); a Conc Cyl's cylinder by its id,
+    `cylinders[<id>].slump`.
   - **Pay items carry an `id`.** They are entries in `report_data`, not rows of a table. Migration 020 gave every
     existing one an id, and submit gives one to any item without it (`REPORT_DATA_WITH_PAY_ITEM_IDS`, in the same
     UPDATE that numbers the pages). A client that saves a report must send each item's `id` back.
@@ -199,8 +200,14 @@ Any change must follow these.
   - **Cylinders get an `id` at submit.** A Concrete Cylinder Data report (`CONC_CYL`) keeps its rows in
     `cylinders`; a draft's are saved with `"id": null`, and submit gives an id to each one that has none or a null
     one (`REPORT_DATA_WITH_CYLINDER_IDS`, through `REPORT_DATA_WITH_IDS`). Nothing assigns ids on save. A client
-    that saves a Conc Cyl after submit (a returned draft) must send each cylinder's `id` back. The edit routes
-    don't name a cylinder by its id yet.
+    that saves a Conc Cyl after submit (a returned draft) must send each cylinder's `id` back.
+  - **A reviewer edits a Conc Cyl through `PATCH /field`** (N4), like any other report: `cylinders[<id>].class`,
+    `.cylinderNo` and `.slump`, `deliveryCasting.dateOfDelivery`, `.cyPoured`, `.dateCast` and `.jobLocation`,
+    `placementLocation`, `sheetNo` and `sheetOf`. Nothing lists those paths: the rule is still "the field must
+    already exist in this report", so a Conc Cyl saved before the form wrote a key can't have that key edited. A
+    cylinder is named by its id only (`ID_LISTS` in `api/services/field_edits.py`: `payItems` and `cylinders`);
+    `cylinders[0].slump` is refused, as are a whole cylinder and a cylinder's `id`. There is no adding, approving
+    or removing a cylinder.
   - **Known limitation: other lists are addressed by position** (`additionalWorkforce`, `additionalEquipment`,
     Conc Mix trucks, AC courses and tickets). That is exact while an IDR is in review, since nothing else can
     change it. Once it is back with its inspector (returned, or unlocked and then returned) and they insert,
@@ -216,7 +223,7 @@ Any change must follow these.
     can tell: the field's current value differs from the last edit's `new_value`.
   - **What can be edited:** the eight header fields (never the work date, the IDR number or a signature), and
     any single value inside a report: text, a number, true/false or nothing. A path naming a whole object, a
-    list or a pay item is refused, as is a pay item's `id`. `report_data` has no schema on the server, so the
+    list, a pay item or a cylinder is refused, as is a pay item's or a cylinder's `id`. `report_data` has no schema on the server, so the
     rule is only "the field must already exist in this report"; an edit never creates a key.
   - **An edit that changes nothing is refused** (400), so the log holds only real changes.
   - **Pay items:** editing `payItems[<id>].payQuantity` is a `pay_item_revision` whichever route it comes
@@ -441,7 +448,7 @@ Any change must follow these.
     `deliveryCasting.<dateOfDelivery|cyPoured|jobLocation|dateCast>` and `cylinders[<id>].<class|cylinderNo|slump>`
     (all chains, an edited date printing each of its values m/d/yy), and `placementLocation`, the replaced text
     struck and then the new text in blue over its three lines. A cylinder is found by its `id`, never by its place,
-    so a cylinder without one (a draft's) has no chain. The edit routes don't accept `cylinders[<id>]` paths yet.
+    so a cylinder without one (a draft's) has no chain.
   - **Not redlined:** AC Bk's safety remarks, which print inside its remarks text as they stand.
   - Lists addressed by position (`additionalWorkforce[0].count`) are matched by position, with the limitation
     noted under "Reviewer edits".

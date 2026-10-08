@@ -233,6 +233,7 @@ the item; a `pay_item_add` as a blue row; a `pay_item_approve` as initials in Qu
 | `<key>.<key>…` | `description`, `workforce.foremen`, `safetyChecks.plasticBarrels` | A field of the report |
 | `<list>[<n>].<key>` | `additionalWorkforce[0].count` | A row of a list, by position from 0 |
 | `payItems[<id>].<key>` | `payItems[3f2a…].payQuantity` | A pay item's field, by the item's `id`; `payQuantity` is a `pay_item_revision` |
+| `cylinders[<id>].<key>` | `cylinders[0c3d…].slump` | A cylinder's field on a Concrete Cylinder Data report, by the cylinder's `id` (given at submit); never by position |
 | `payItems[<id>]` | `payItems[3f2a…]` | A pay item a reviewer added (`pay_item_add`), or approved as it stands (`pay_item_approve`: `old_value` and `new_value` are both the quantity approved, and nothing in the report changes) |
 | `trucks[<id>]` | `trucks[9c1d…]` | A truck a reviewer added to a Concrete Truck & Mix Info report (`truck_add`; `new_value` is the whole truck). Every truck carries an `id` (migration 023, and submit), used only for this: a truck's own fields are named by position, `trucks[0].slump` |
 

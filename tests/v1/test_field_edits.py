@@ -4,10 +4,17 @@ from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
+import io
+
+import openpyxl
 import pytest
 from psycopg.types.json import Jsonb
 
+from api.services import export_conc_cyl
+from api.services.export import TEMPLATE_PATH
+from api.services.export_redlines import Redlines
 from api.services.field_edits import FieldEditError, _initials, parse_report_path, resolve_report_path
+from api.services.xlsx_template import WorkbookTemplate
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 
 # ---------------------------------------------------------------------------
@@ -18,6 +25,9 @@ IDR_ID = "9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e"
 SWCB_ID = "e6f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8091"
 GEN_ID = "4e5f6071-8293-4a41-b5c6-d7e8f9a0b1c2"
 MIX_ID = "5a0e8c1d-0000-4000-8000-00000000000a"
+CYL_ID = "5a0e8c1d-0000-4000-8000-00000000000c"
+CYLINDER_1 = "0c3d741b-2b84-49f0-b449-a5c66dc4aa12"
+CYLINDER_2 = "84b7ad41-6dfa-46b4-a1d3-020a0a78f5e8"
 ITEM_1 = "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b"
 ITEM_2 = "7c8d9e0f-1a2b-4c3d-8e4f-5a6b7c8d9e0f"
 NOW = datetime(2026, 10, 6, 15, 0, tzinfo=timezone.utc)
@@ -75,6 +85,17 @@ GENERAL = report(GEN_ID, "GEN", {"description": "General notes", "payItems": []}
 AUTO_GENERAL = {**GENERAL, "is_auto_generated": True}
 CONC_MIX = report(MIX_ID, "CONC_MIX", {"remarks": "ok", "trucks": [{"slump": "4"}]}, is_addendum=True,
                   parent_report_id=UUID(SWCB_ID), page_number=3)
+
+CYL_DATA = {
+    "deliveryCasting": {"dateOfDelivery": "2026-10-05", "cyPoured": "12", "dateCast": "2026-10-05",
+                        "jobLocation": "125th + Lenox"},
+    "placementLocation": "First-floor slab",
+    "sheetNo": "",
+    "sheetOf": "3",
+    "cylinders": [{"id": CYLINDER_1, "class": "3000 PSI", "cylinderNo": "C-14-A", "slump": "3.5"},
+                  {"id": CYLINDER_2, "class": "4000 PSI", "cylinderNo": "C-14-X", "slump": "5"}],
+}
+CONC_CYL = report(CYL_ID, "CONC_CYL", CYL_DATA, is_addendum=True, parent_report_id=UUID(SWCB_ID), page_number=4)
 
 EDIT_ROW = {"edit_id": UUID("aaaaaaaa-0000-4000-8000-000000000001"), "idr_id": UUID(IDR_ID),
             "report_id": UUID(SWCB_ID), "field_path": "workforce.foremen", "edit_type": "field_change",
@@ -952,3 +973,155 @@ class TestAddTruck:
         with signed_in(OLIVE) as client, backend() as seen:
             client.post(TRUCK_URL, json=NEW_TRUCK)
         seen["regen"].assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# PATCH /v1/idrs/{idr_id}/field: a Concrete Cylinder Data report
+# ---------------------------------------------------------------------------
+
+# Every field of a Conc Cyl a reviewer edits: (field_path, its place in report_data, the value there, the new one)
+CYL_FIELDS = [
+    (f"cylinders[{CYLINDER_1}].class", ["cylinders", "0", "class"], "3000 PSI", "4000 PSI"),
+    (f"cylinders[{CYLINDER_2}].cylinderNo", ["cylinders", "1", "cylinderNo"], "C-14-X", "C-14-B"),
+    (f"cylinders[{CYLINDER_2}].slump", ["cylinders", "1", "slump"], "5", "4.5"),
+    ("deliveryCasting.dateOfDelivery", ["deliveryCasting", "dateOfDelivery"], "2026-10-05", "2026-10-04"),
+    ("deliveryCasting.cyPoured", ["deliveryCasting", "cyPoured"], "12", "12.5"),
+    ("deliveryCasting.dateCast", ["deliveryCasting", "dateCast"], "2026-10-05", "2026-10-06"),
+    ("deliveryCasting.jobLocation", ["deliveryCasting", "jobLocation"], "125th + Lenox", "SW corner of 125th + Lenox"),
+    ("placementLocation", ["placementLocation"], "First-floor slab", "First-floor interior slab, pour #3"),
+    ("sheetNo", ["sheetNo"], "", "1"),
+    ("sheetOf", ["sheetOf"], "3", "2"),
+]
+# Where the export prints each of them on the Conc Cyl page, and how the reviewer's value reads there
+CYL_CELLS = {
+    f"cylinders[{CYLINDER_1}].class": ("B27", "4000 PSI"), f"cylinders[{CYLINDER_2}].cylinderNo": ("G28", "C-14-B"),
+    f"cylinders[{CYLINDER_2}].slump": ("M28", "4.5"), "deliveryCasting.dateOfDelivery": ("I22", "10/4/26"),
+    "deliveryCasting.cyPoured": ("AD22", "12.5"), "deliveryCasting.dateCast": ("AD24", "10/6/26"),
+    "deliveryCasting.jobLocation": ("I24", "SW corner of 125th + Lenox"),
+    "placementLocation": ("C47", "First-floor interior slab, pour #3"), "sheetNo": ("AH20", "1"),
+    "sheetOf": ("AM20", "2"),
+}
+BLUE = "FF0070C0"
+ALL_REPORTS = (GENERAL, SWCB, CONC_MIX, CONC_CYL)
+
+
+def cyl_field(path: str, value) -> dict:
+    """
+    Build a field-edit body for the Conc Cyl report.
+    Takes the field_path and the new value.
+    Returns the JSON body.
+    """
+    return field(path, value, report_id=CYL_ID)
+
+
+class TestEditConcCylField:
+    @pytest.mark.parametrize("path,json_path,old,new", CYL_FIELDS)
+    def test_each_field_is_written_over_what_it_held_and_logged(self, path, json_path, old, new):
+        with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(path, new))
+        assert response.status_code == 200, response.json()
+        assert response.json()["data"]["field_edits"][0]["edit_id"] == str(EDIT_ROW["edit_id"])
+        sql, params = seen["writes"][0]
+        assert "SET report_data = jsonb_set(r.report_data, %s, %s, false)" in sql
+        assert params[3:8] == [json_path, ("json", new), UUID(CYL_ID), json_path, ("json", old)]
+        assert params[8:13] == [UUID(CYL_ID), path, "field_change", ("json", old), ("json", new)]
+        assert params[-1] == "field_edit"
+        seen["regen"].assert_not_called()  # an addendum isn't summarised by an auto-General
+
+    def test_a_cylinder_is_found_by_its_id_wherever_it_sits_in_the_list(self):
+        moved = {"cylinders": list(reversed(CYL_DATA["cylinders"]))}
+        assert resolve_report_path(moved, f"cylinders[{CYLINDER_2}].slump") == (["cylinders", "0", "slump"], "5")
+
+    @pytest.mark.parametrize("path", ["cylinders[0].slump", "cylinders[1].class",
+                                      "cylinders[00000000-0000-4000-8000-000000000000].slump"])
+    def test_a_cylinder_named_by_its_place_or_an_unknown_id_is_400(self, path):
+        with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(path, "4"))
+        assert response.status_code == 400 and response.json() == {"detail": f"This report has no field {path}"}
+        assert seen["writes"] == []
+
+    @pytest.mark.parametrize("path", [f"cylinders[{CYLINDER_1}]", "cylinders", "deliveryCasting"])
+    def test_a_whole_cylinder_list_or_section_is_400(self, path):
+        with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(path, "x"))
+        assert response.status_code == 400 and response.json() == {"detail": f"{path} is not a single field"}
+        assert seen["writes"] == []
+
+    def test_a_cylinders_id_cant_be_edited(self):
+        with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(f"cylinders[{CYLINDER_1}].id", "other"))
+        assert response.status_code == 400 and response.json() == {"detail": "A cylinder's id can't be edited"}
+        assert seen["writes"] == []
+
+    @pytest.mark.parametrize("path", ["labName", "deliveryCasting.clientName", f"cylinders[{CYLINDER_1}].psi"])
+    def test_a_key_the_report_doesnt_hold_is_400_and_is_never_created(self, path):
+        with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(path, "x"))
+        assert response.status_code == 400 and response.json() == {"detail": f"This report has no field {path}"}
+        assert seen["writes"] == []
+
+    def test_a_cylinder_without_an_id_cant_be_named(self):
+        draft_made = {"cylinders": [{"class": "4000", "cylinderNo": "C-1", "slump": "3"},
+                                    {"id": None, "class": "4000", "cylinderNo": "C-2", "slump": "3"}]}
+        for path in ("cylinders[0].slump", "cylinders[None].slump"):
+            with pytest.raises(FieldEditError) as raised:
+                resolve_report_path(draft_made, path)
+            assert raised.value.status_code == 400
+
+    def test_a_field_changed_under_the_reviewer_is_409(self):
+        with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS, applied=[]) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(f"cylinders[{CYLINDER_2}].slump", "4.5"))
+        assert response.status_code == 409 and response.json() == CHANGED
+        assert len(seen["writes"]) == 1
+
+    def test_the_same_value_again_is_400(self):
+        with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(f"cylinders[{CYLINDER_2}].slump", "5"))
+        assert response.status_code == 400 and response.json() == {"detail": "The field already holds that value"}
+        assert seen["writes"] == []
+
+    def test_another_reviewer_is_403(self):
+        with signed_in(REX) as client, backend(reports=ALL_REPORTS, roles=("oe", "re")) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field("sheetOf", "2"))
+        assert response.status_code == 403 and response.json() == NOT_THE_REVIEWER
+        assert seen["writes"] == []
+
+    @pytest.mark.parametrize("status", ["draft", "submitted", "approved"])
+    def test_an_idr_that_isnt_in_review_is_400(self, status):
+        with signed_in(OLIVE) as client, backend(idr={**STAGE1_IDR, "status": status}, reports=ALL_REPORTS) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field("sheetOf", "2"))
+        assert response.status_code == 400 and response.json() == NOT_IN_REVIEW
+        assert seen["writes"] == []
+
+    def test_the_re_reviewer_edits_a_cylinder_at_stage_two(self):
+        with signed_in(REX) as client, backend(idr=STAGE2_IDR, reports=ALL_REPORTS, roles=("re",)) as seen:
+            response = client.patch(FIELD_URL, json=cyl_field(f"cylinders[{CYLINDER_1}].slump", "4"))
+        assert response.status_code == 200
+        assert seen["writes"][0][1][-3:] == [REX["uuid"], "stage2", "field_edit"]
+
+
+class TestConcCylEditsReachTheExport:
+    def test_every_edit_prints_on_the_conc_cyl_page_in_blue_with_the_editors_initials(self):
+        """What PATCH logs for each field (its path and values) is what the export reads to print that field's chain."""
+        logged, data = [], {**CYL_DATA, "deliveryCasting": dict(CYL_DATA["deliveryCasting"]),
+                            "cylinders": [dict(c) for c in CYL_DATA["cylinders"]]}
+        for path, json_path, old, new in CYL_FIELDS:
+            with signed_in(OLIVE) as client, backend(reports=ALL_REPORTS) as seen:
+                assert client.patch(FIELD_URL, json=cyl_field(path, new)).status_code == 200
+            report_id, field_path, edit_type, old_value, new_value = seen["writes"][0][1][8:13]
+            logged.append({"report_id": report_id, "field_path": field_path, "edit_type": edit_type,
+                           "old_value": old_value[1], "new_value": new_value[1], "editor_initials": "OE"})
+            holder = data  # the statement's jsonb_set, applied here
+            for step in json_path[:-1]:
+                holder = holder[int(step)] if isinstance(holder, list) else holder[step]
+            holder[json_path[-1]] = new
+
+        workbook = WorkbookTemplate(TEMPLATE_PATH)
+        export_conc_cyl.render(workbook, STAGE1_IDR, {"project_id": "HWS0023"}, None, report_data=data,
+                               redlines=Redlines(logged, UUID(CYL_ID)))
+        sheet = openpyxl.load_workbook(io.BytesIO(workbook.to_bytes()), rich_text=True)["Conc Cyl"]
+        for path, (cell, shown) in CYL_CELLS.items():
+            runs = [(str(run.text).strip(), run.font.color.rgb if run.font.color else None, bool(run.font.strike))
+                    for run in sheet[cell].value if not isinstance(run, str)]
+            assert (shown, BLUE, False) in runs and ("OE", BLUE, False) in runs, (path, cell, runs)
+            assert runs[-1] == ("OE", BLUE, False), (path, cell, runs)

@@ -6,6 +6,7 @@ A reviewer names a field by its field_path (see docs/data-model.md):
     <key>.<key>...                  a field of a report, by the keys report_data stores
     <list>[<n>].<key>               a row of a list, by position from 0
     payItems[<item id>].<key>       a pay item's field, by the item's id
+    cylinders[<cylinder id>].<key>  a Concrete Cylinder Data report's cylinder, by the cylinder's id
 
 This module checks the path, finds the field and the value it holds now, and hands both to the statement in
 api/queries/idr_field_edits.py, which only writes over that value. It also keeps an auto-generated General in step
@@ -51,7 +52,10 @@ TRUCK_TEXT_FIELDS = ("truckOrTicketNo", "loadSizeCy", "endBatch", "mixingRevs", 
 HEADER_PREFIX = "header."
 PAY_ITEMS = "payItems"
 PAY_QUANTITY = "payQuantity"
-# One step of a report path: a key, optionally followed by [position] or, for payItems, [item id]
+CYLINDERS = "cylinders"
+# The top-level lists whose rows a path names by the row's id, never by its place, and what a row of each is called
+ID_LISTS = {PAY_ITEMS: "pay item", CYLINDERS: "cylinder"}
+# One step of a report path: a key, optionally followed by [position] or, for a list in ID_LISTS, [row id]
 _SEGMENT = re.compile(r"([A-Za-z][A-Za-z0-9_]*)(?:\[([A-Za-z0-9-]+)\])?")
 
 
@@ -76,7 +80,7 @@ def _is_scalar(value: Any) -> bool:
 def parse_report_path(field_path: str) -> list[tuple[str, Optional[str]]]:
     """
     Split a report field_path into its steps.
-    Takes the path, e.g. "workforce.foremen", "additionalWorkforce[0].count" or "payItems[<id>].payQuantity".
+    Takes the path, e.g. "workforce.foremen", "additionalWorkforce[0].count", "payItems[<id>].payQuantity" or "cylinders[<id>].slump".
     Returns one (key, bracket) pair per step, bracket being the text between [ ] or None; raises FieldEditError (400) for a path that isn't in the grammar.
     """
     steps = []
@@ -91,8 +95,8 @@ def parse_report_path(field_path: str) -> list[tuple[str, Optional[str]]]:
 def resolve_report_path(report_data: Any, field_path: str) -> tuple[list[str], Any]:
     """
     Find the field a path names inside a report's report_data.
-    Takes the report_data and the field_path. A payItems step is looked up by the item's id; any other list by position.
-    Returns (the path as report_data keys and list positions, the value there now); raises FieldEditError (400) when the path leads nowhere, names a whole object, list or pay item, or names a pay item's id.
+    Takes the report_data and the field_path. A payItems or cylinders step is looked up by the row's id; any other list by position.
+    Returns (the path as report_data keys and list positions, the value there now); raises FieldEditError (400) when the path leads nowhere, names a whole object, list, pay item or cylinder, or names a pay item's or a cylinder's id.
     """
     steps = parse_report_path(field_path)
     json_path: list[str] = []
@@ -108,7 +112,7 @@ def resolve_report_path(report_data: Any, field_path: str) -> tuple[list[str], A
             continue
         if not isinstance(value, list):
             raise missing
-        if key == PAY_ITEMS and len(json_path) == 1:
+        if key in ID_LISTS and len(json_path) == 1:
             position = next((n for n, item in enumerate(value)
                              if isinstance(item, dict) and item.get("id") == bracket), None)
         else:
@@ -120,8 +124,8 @@ def resolve_report_path(report_data: Any, field_path: str) -> tuple[list[str], A
 
     if not _is_scalar(value):
         raise FieldEditError(400, f"{field_path} is not a single field")
-    if steps[0][0] == PAY_ITEMS and steps[-1][0] == "id":
-        raise FieldEditError(400, "A pay item's id can't be edited")
+    if steps[0][0] in ID_LISTS and steps[-1][0] == "id":
+        raise FieldEditError(400, f"A {ID_LISTS[steps[0][0]]}'s id can't be edited")
     return json_path, value
 
 
