@@ -22,7 +22,7 @@ every request to it.
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (the Conc Cyl page: its sheet name and signature layouts, and a `render` that stamps nothing yet; the dispatcher doesn't use it), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets: the sheet name, the signature layouts, each report's sheet, and a `render` that stamps nothing yet, so the page prints as the blank form), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -78,7 +78,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments` — list a report's uploaded attachments (pending ones left out)
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}/download-url` — short-lived signed URL; 404 while pending
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment, pending or uploaded (Storage file, then record); draft only
-- `GET /v1/idrs/{idr_id}/export` — an IDR as an .xlsx on the DDC report-forms template (a draft's pages are marked "DRAFT - Not for Submission"), stored in the `idr-exports` bucket; returns `{download_url, filename}`, the URL valid 10 minutes
+- `GET /v1/idrs/{idr_id}/export` — an IDR as an .xlsx on the DDC report-forms template (General, SWCB, AC, Conc Mix and Conc Cyl pages; a Conc Cyl page is the blank form for now) (a draft's pages are marked "DRAFT - Not for Submission"), stored in the `idr-exports` bucket; returns `{download_url, filename}`, the URL valid 10 minutes
 - `GET /v1/contract_items/?project_id=` — a project's contract items, each joined to its spec item (`item_no`, `description`, `spec_section`, `pay_unit`); `[]` when none
 
 ## 3. Modularity rules
@@ -196,6 +196,11 @@ Any change must follow these.
     `new_value` and no `old_value`, and the export finds its row by that id. A truck's own fields are still
     named by position (`trucks[0].slump`). A client that saves a Conc Mix must send each truck's `id` back.
     There is no approving, revising or removing a truck: a reviewer edits its fields like any other.
+  - **Cylinders get an `id` at submit.** A Concrete Cylinder Data report (`CONC_CYL`) keeps its rows in
+    `cylinders`; a draft's are saved with `"id": null`, and submit gives an id to each one that has none or a null
+    one (`REPORT_DATA_WITH_CYLINDER_IDS`, through `REPORT_DATA_WITH_IDS`). Nothing assigns ids on save. A client
+    that saves a Conc Cyl after submit (a returned draft) must send each cylinder's `id` back. The edit routes
+    don't name a cylinder by its id yet.
   - **Known limitation: other lists are addressed by position** (`additionalWorkforce`, `additionalEquipment`,
     Conc Mix trucks, AC courses and tickets). That is exact while an IDR is in review, since nothing else can
     change it. Once it is back with its inspector (returned, or unlocked and then returned) and they insert,
@@ -296,7 +301,7 @@ Any change must follow these.
     included).
   - **The export prints it.** For an IDR past draft (submitted, in review or approved) with
     `inspector_signature_path`, `export.py` downloads that file once and stamps it, with the IDR's work date, on
-    every printed page that has an "Inspector's Signature" line: Gen Bk, Conc Bk, AC Bk, Conc Mix, Report Cont and every attachment page, copies included. Front pages
+    every printed page that has an "Inspector's Signature" line: Gen Bk, Conc Bk, AC Bk, Conc Mix, Conc Cyl, Report Cont and every attachment page, copies included. Front pages
     have no line. Each module declares its page's `SIGNATURE_LAYOUT` (Report Cont's is in `export_common.py`);
     the dispatcher maps a printed sheet to its layout by name, so a copy signs where its original does. A new
     form with a signature line adds a layout and an entry in `SIGNATURE_LAYOUTS`.
@@ -416,7 +421,7 @@ Any change must follow these.
     - The paving contractor's name and the two max densities have no box of their own: their chain is centred
       across a run of cells and can't shrink, so a long one is cut at the run's end.
   - **Not redlined:** AC Bk's safety remarks, which print inside its remarks text as they stand; and Concrete Cylinder
-    Data, which the export doesn't print at all (the template has no cylinder form; Phase 1b backlog).
+    Data, whose Conc Cyl page prints as the blank form: nothing of the report is stamped on it yet.
   - Lists addressed by position (`additionalWorkforce[0].count`) are matched by position, with the limitation
     noted under "Reviewer edits".
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the

@@ -18,7 +18,9 @@ from api.queries.idr_field_edits import (
     AUDIT_ACTIONS, EDIT_STAGES, FIELD_EDIT_COLUMNS, append_pay_item, append_truck, apply_header_edit,
     apply_report_edit, list_field_edits, log_pay_item_approval,
 )
-from api.queries.idr_reports import REPORT_DATA_WITH_IDS, REPORT_DATA_WITH_PAY_ITEM_IDS, REPORT_DATA_WITH_TRUCK_IDS
+from api.queries.idr_reports import (
+    REPORT_DATA_WITH_CYLINDER_IDS, REPORT_DATA_WITH_IDS, REPORT_DATA_WITH_PAY_ITEM_IDS, REPORT_DATA_WITH_TRUCK_IDS,
+)
 from api.queries.idrs import HEADER_COLUMNS, submit_idr
 from tests.test_auth_setup import sql, table_columns
 
@@ -176,10 +178,20 @@ class TestSubmitGivesPayItemsIds:
         statement = self.submit_sql()
         assert flat(REPORT_DATA_WITH_IDS) in statement
         assert flat(REPORT_DATA_WITH_IDS) == (f"CASE WHEN r.report_type = 'CONC_MIX' THEN "
-                                              f"{flat(REPORT_DATA_WITH_TRUCK_IDS)} ELSE "
+                                              f"{flat(REPORT_DATA_WITH_TRUCK_IDS)} "
+                                              f"WHEN r.report_type = 'CONC_CYL' THEN "
+                                              f"{flat(REPORT_DATA_WITH_CYLINDER_IDS)} ELSE "
                                               f"{flat(REPORT_DATA_WITH_PAY_ITEM_IDS)} END")
         assert flat(REPORT_DATA_WITH_TRUCK_IDS) == flat(REPORT_DATA_WITH_PAY_ITEM_IDS).replace("payItems", "trucks")
         assert statement.count("UPDATE icid.idr_reports") == 1  # one update of each report, not two in one statement
+
+    def test_a_conc_cyl_gets_ids_on_its_cylinders_a_null_id_counting_as_none(self):
+        # A draft's cylinders are saved with "id": null; a pay item or a truck only gets an id when it has no key
+        expected = flat(REPORT_DATA_WITH_PAY_ITEM_IDS).replace("payItems", "cylinders").replace(
+            "NOT (e.item ? 'id')", "(e.item->>'id') IS NULL")
+        assert flat(REPORT_DATA_WITH_CYLINDER_IDS) == expected
+        assert "AND (e.item->>'id') IS NULL THEN e.item || jsonb_build_object('id'" in expected
+        assert "IS NULL" not in flat(REPORT_DATA_WITH_TRUCK_IDS)
 
     def test_a_report_without_pay_items_keeps_its_data_as_it_is(self):
         expression = flat(REPORT_DATA_WITH_PAY_ITEM_IDS)

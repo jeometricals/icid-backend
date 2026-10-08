@@ -15,7 +15,7 @@ import pytest
 
 from api.queries.projects import get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
-from api.services import export, export_ac, export_attachments, export_conc_mix, export_swcb
+from api.services import export, export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_swcb
 from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, pay_unit_abbreviation,
@@ -3605,6 +3605,7 @@ SIGNATURE_LINES = {
     "Gen Bk": ("C59", "AE59", "C60", "AE60"), "Conc Bk": ("C59", "AE59", "C60", "AE60"),
     "AC Bk": ("C55", "AE55", "C56", "AE56"), "Conc Mix": ("C60", "AK60", "C61", "AK61"),
     "Report Cont": ("C49", "AF49", "C50", "AF50"), "Sketch Cont": ("C61", "AF61", "C62", "AF62"),
+    "Conc Cyl": ("C58", "AL58", "C59", "AL59"),
 }
 
 
@@ -4211,11 +4212,13 @@ class TestSignatureLayouts:
     layouts = {"Gen Bk": export.SIGNATURE_LAYOUTS["Gen Bk"], "Conc Bk": export.SIGNATURE_LAYOUTS["Conc Bk"],
                "AC Bk": export.SIGNATURE_LAYOUTS["AC Bk"], "Conc Mix": export.SIGNATURE_LAYOUTS["Conc Mix"],
                "Report Cont": export.SIGNATURE_LAYOUTS["Report Cont"],
-               "Sketch Cont": export.SIGNATURE_LAYOUTS["Attachments"]}
+               "Sketch Cont": export.SIGNATURE_LAYOUTS["Attachments"],
+               "Conc Cyl": export.SIGNATURE_LAYOUTS["Conc Cyl"]}
 
     def test_every_template_sheet_with_a_signature_line_has_a_layout(self):
         assert set(self.layouts) == set(SIGNATURE_LINES)
-        assert set(export.SIGNATURE_LAYOUTS) == {"Gen Bk", "Conc Bk", "AC Bk", "Conc Mix", "Report Cont", "Attachments"}
+        assert set(export.SIGNATURE_LAYOUTS) == {"Gen Bk", "Conc Bk", "AC Bk", "Conc Mix", "Conc Cyl", "Report Cont",
+                                                 "Attachments"}
 
     @pytest.mark.parametrize("sheet", sorted(SIGNATURE_LINES))
     def test_the_layout_matches_the_template(self, sheet):
@@ -5351,3 +5354,75 @@ class TestAcOwnSectionRedlines:
         book = redlined_book(general=GENERAL, reports=[ac], main_reports=[ac], edits=AC_OWN_EDITS)
         assert marks(book["AC Fr"]["AA23"]) == CHAIN_OF_ONE("60", "62", "RM")
         assert marks(book["AC Bk"]["AG36"]) == CHAIN_OF_ONE("310", "305", "RM")
+
+
+# ---------------------------------------------------------------------------
+# A Concrete Cylinder Data report on Conc Cyl (the blank form so far: export_conc_cyl.render stamps nothing)
+# ---------------------------------------------------------------------------
+
+def conc_cyl_row(number: int = 1, parent: Optional[UUID] = None, page_number: Optional[int] = 3,
+                 **report_data) -> dict:
+    """
+    Build the IDR's nth CONC_CYL addendum row as list_reports_for_idr returns it.
+    Takes its number (for a distinct id), its parent report's id (None for none), its page number and report_data
+    fields as keyword arguments.
+    Returns the row.
+    """
+    return {"report_id": UUID(int=0xCC00 + number), "report_type": "CONC_CYL", "is_addendum": True,
+            "parent_report_id": parent, "page_number": page_number, "report_data": report_data}
+
+
+ONE_CYLINDER = [{"id": None, "class": "4000 PSI", "cylinderNumber": "C-14-A", "slump": "3.5"}]
+
+
+class TestConcCylExport:
+    def test_a_conc_cyl_report_prints_the_conc_cyl_form_through_its_render(self):
+        row = conc_cyl_row(cylinders=ONE_CYLINDER)
+        with patched_export(reports=[row]), \
+                patch.object(export_conc_cyl, "render", wraps=export_conc_cyl.render) as render:
+            content = generate_idr_export(IDR_ID).content
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Cyl"]
+        assert render.call_count == 1
+        assert render.call_args.kwargs["report_data"] == {"cylinders": ONE_CYLINDER}
+        assert (render.call_args.kwargs["sheets"], render.call_args.kwargs["page_number"]) == (["Conc Cyl"], 3)
+
+    def test_the_page_is_the_blank_form_for_now(self):
+        content = export_bytes(reports=[conc_cyl_row(cylinders=ONE_CYLINDER, jobLocation="125th + Lenox")])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Cyl"]
+        assert (sheet["B26"].value, sheet["B24"].value) == ("CLASS       (1)", "JOB LOCATION:")
+        assert [sheet[f"{column}27"].value for column in ("B", "G", "M")] == [None, None, None]
+
+    def test_without_a_conc_cyl_report_the_page_stays_hidden(self):
+        assert "Conc Cyl" not in visible_sheets(export_bytes(reports=[swcb_row(1, 2)]))
+
+    def test_every_conc_cyl_report_gets_a_sheet_of_its_own(self):
+        content = export_bytes(reports=[conc_cyl_row(1), conc_cyl_row(2, page_number=4)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Cyl", "Conc Cyl 2"]
+
+    def test_it_follows_its_parent_after_the_parents_conc_mix(self):
+        swcb, other = swcb_row(1, 2), swcb_row(2, 5)
+        content = export_bytes(reports=[swcb, conc_mix_row(1, swcb["report_id"], 3),
+                                        conc_cyl_row(1, swcb["report_id"], 4), other])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Conc Mix", "Conc Cyl",
+                                           "Conc Fr 2", "Conc Bk 2"]
+
+    def test_one_without_a_printed_parent_comes_last(self):
+        content = export_bytes(reports=[conc_cyl_row(1, page_number=2), swcb_row(1, 3)])
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Conc Cyl"]
+
+    def test_a_draft_marks_the_page_and_leaves_it_unsigned(self):
+        content = export_bytes(idr=DRAFT_IDR, general={**GENERAL, "page_number": None},
+                               reports=[conc_cyl_row(page_number=None)])
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Cyl"]
+        assert DRAFT_MARKER in [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+        assert [p for p in stamped(content, "Conc Cyl") if p["format"] == "PNG"] == []
+
+    def test_an_approved_idr_carries_both_signatures_the_date_and_the_res_name(self):
+        content = export_bytes(idr={**APPROVED_IDR, "total_pages": 3}, signature=signature_png(),
+                               re_signature=signature_png((300, 90)), users={RE_UUID: RE_USER},
+                               reports=[conc_cyl_row()])
+        inspector, resident = signatures_on(content, "Conc Cyl")
+        assert (inspector["size"], resident["size"]) == ((600, 60), (300, 90))
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Conc Cyl"]
+        assert sheet["AL58"].value == APPROVED_ON
+        assert sheet["W59"].value.startswith("RE: ") and sheet["C59"].value == "Inspector's Signature"

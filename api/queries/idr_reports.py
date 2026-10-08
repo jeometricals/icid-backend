@@ -19,18 +19,19 @@ IDR_REPORT_COLUMNS = """
 """
 
 
-def _report_data_with_ids(key: str) -> str:
+def _report_data_with_ids(key: str, null_is_missing: bool = False) -> str:
     """
     Write the expression for a report's report_data with an "id" on every entry of one of its lists that has none.
-    Takes the list's key in report_data ("payItems" or "trucks"; never anything a caller sent).
+    Takes the list's key in report_data ("payItems", "trucks" or "cylinders"; never anything a caller sent) and whether an entry whose "id" is null counts as having none.
     Returns the SQL, in which r is the idr_reports row; a report without the list, or with an empty one, keeps its report_data as it is.
     """
+    without_id = "(e.item->>'id') IS NULL" if null_is_missing else "NOT (e.item ? 'id')"
     return f"""
                 CASE WHEN jsonb_typeof(r.report_data->'{key}') = 'array'
                           AND jsonb_array_length(r.report_data->'{key}') > 0
                      THEN jsonb_set(r.report_data, '{{{key}}}', (
                               SELECT jsonb_agg(
-                                  CASE WHEN jsonb_typeof(e.item) = 'object' AND NOT (e.item ? 'id')
+                                  CASE WHEN jsonb_typeof(e.item) = 'object' AND {without_id}
                                        THEN e.item || jsonb_build_object('id', gen_random_uuid()::text)
                                        ELSE e.item END
                                   ORDER BY e.ord)
@@ -48,10 +49,15 @@ REPORT_DATA_WITH_PAY_ITEM_IDS = _report_data_with_ids("payItems")
 # (migrations/023_truck_add.sql gave the existing ones theirs).
 REPORT_DATA_WITH_TRUCK_IDS = _report_data_with_ids("trucks")
 
-# What submit writes as each report's report_data: ids on its trucks for a CONC_MIX, on its pay items otherwise
-# (no report holds both lists)
+# The same for a Concrete Cylinder Data report's cylinders, so a reviewer's edit can name one. A draft's cylinders are
+# saved with "id": null, which counts as none.
+REPORT_DATA_WITH_CYLINDER_IDS = _report_data_with_ids("cylinders", null_is_missing=True)
+
+# What submit writes as each report's report_data: ids on its trucks for a CONC_MIX, on its cylinders for a CONC_CYL,
+# on its pay items otherwise (no report holds two of the lists)
 REPORT_DATA_WITH_IDS = f"""
                 CASE WHEN r.report_type = 'CONC_MIX' THEN {REPORT_DATA_WITH_TRUCK_IDS}
+                     WHEN r.report_type = 'CONC_CYL' THEN {REPORT_DATA_WITH_CYLINDER_IDS}
                      ELSE {REPORT_DATA_WITH_PAY_ITEM_IDS} END"""
 
 

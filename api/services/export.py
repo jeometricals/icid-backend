@@ -2,8 +2,9 @@
 Exports a submitted IDR as an .xlsx file built on the DDC report-forms template.
 
 This module loads the IDR's data and assembles the workbook; each report's pages are stamped by its own module
-(export_general for the General, export_swcb for a Sidewalk, Curb, Concrete Base report, export_conc_mix for a
-Concrete Truck & Mix Info report). Pages that hold nothing stay hidden, so the file prints only the IDR's pages. A draft
+(export_general for the General, export_swcb for a Sidewalk, Curb, Concrete Base report, export_ac for an Asphaltic
+Concrete report, export_conc_mix for a Concrete Truck & Mix Info report, export_conc_cyl for a Concrete Cylinder
+Data report). Pages that hold nothing stay hidden, so the file prints only the IDR's pages. A draft
 IDR exports too, with "DRAFT - Not for Submission" across the top of every page it prints. From submission on, an
 IDR's pages carry the inspector's signature (the copy the IDR kept at submit), wherever a page has a signature line.
 An approved IDR's carry the Resident Engineer's signature beside it (the copy kept at final approval), captioned with
@@ -25,7 +26,7 @@ from api.queries.projects import get_project_by_id, get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
 from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
-from api.services import export_ac, export_attachments, export_conc_mix, export_swcb
+from api.services import export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_swcb
 from api.services.auto_general import build_auto_general_data
 from api.services import export_general
 from api.services.export_common import (
@@ -151,6 +152,15 @@ def _conc_mix_reports(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [r for r in reports if r["report_type"] == "CONC_MIX"]
 
 
+def _conc_cyl_reports(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Find the IDR's Concrete Cylinder Data reports, each printed on a Conc Cyl sheet of its own.
+    Takes the IDR's reports, in page order.
+    Returns the CONC_CYL reports, addendum or not (the flag is the frontend's to set), in page order.
+    """
+    return [r for r in reports if r["report_type"] == "CONC_CYL"]
+
+
 def _page_after_clones(page: Optional[int], extras: list[tuple[Optional[int], int]]) -> Optional[int]:
     """
     Renumber a report's page around the extra sheets reports print on (pay-item overflow fronts, Conc Mix clones): the
@@ -172,6 +182,7 @@ class _Sheets:
     swcbs: list[tuple[list[str], str]]  # each SWCB's (front pages, back page)
     conc_mixes: list[list[str]]
     acs: list[tuple[list[str], str]]    # each AC report's (AC Fr sheets, AC Bk)
+    conc_cyls: list[list[str]]          # each CONC_CYL report's one Conc Cyl sheet
 
 
 def _load_redlines(idr_id: UUID) -> Redlines:
@@ -188,17 +199,17 @@ def _load_redlines(idr_id: UUID) -> Redlines:
 
 
 def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], swcbs: list[dict[str, Any]],
-                     conc_mixes: list[dict[str, Any]], acs: list[dict[str, Any]], general_redlines: Redlines,
-                     redlines: Redlines) -> _Sheets:
+                     conc_mixes: list[dict[str, Any]], acs: list[dict[str, Any]], conc_cyls: list[dict[str, Any]],
+                     general_redlines: Redlines, redlines: Redlines) -> _Sheets:
     """
     Provide every report its sheets before anything is stamped, cloning the blank forms as needed. Copies are numbered
     across the whole IDR per form: Gen Fr 2, ... for the General's pay-item overflow; Conc Fr 2, ... for later SWCB
     reports and pay-item overflow alike, in page order; Conc Bk 2, ... one per later SWCB; Conc Mix 2, ... for later
     CONC_MIX reports and truck overflow; AC Fr 2, ... for later AC reports and their pavement-course and pay-item
-    overflow, in page order; AC Bk 2, ... one per later AC report. A pay item a reviewer revised takes a row per
-    revision, so redlines can add overflow pages.
-    Takes the workbook, the General's report_data, the SWCB, CONC_MIX and AC reports, in page order, the General's
-    redlines and the IDR's (each report's are taken from them).
+    overflow, in page order; AC Bk 2, ... one per later AC report; Conc Cyl 2, ... one per later CONC_CYL report. A
+    pay item a reviewer revised takes a row per revision, so redlines can add overflow pages.
+    Takes the workbook, the General's report_data, the SWCB, CONC_MIX, AC and CONC_CYL reports, in page order, the
+    General's redlines and the IDR's (each report's are taken from them).
     Returns the sheet names for each report.
     """
     general_fronts = allocate_copies(workbook, GEN_FRONT, pay_item_page_count(
@@ -220,22 +231,24 @@ def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], s
         fronts = allocate_copies(workbook, export_ac.AC_FRONT, count, ac_fronts_used)
         ac_sheets.append((fronts, allocate_copies(workbook, export_ac.AC_BACK, 1, index)[0]))
         ac_fronts_used += count
-    return _Sheets(general_fronts, swcb_sheets, conc_mix_sheets, ac_sheets)
+    conc_cyl_sheets = [export_conc_cyl.allocate_sheets(workbook, first_index=index) for index in range(len(conc_cyls))]
+    return _Sheets(general_fronts, swcb_sheets, conc_mix_sheets, ac_sheets, conc_cyl_sheets)
 
 
-def _segments(groups: list[tuple[Optional[UUID], list[str]]], conc_mixes: list[dict[str, Any]],
-              conc_mix_sheets: list[list[str]]) -> list[tuple[Optional[UUID], list[str]]]:
+def _segments(groups: list[tuple[Optional[UUID], list[str]]], addendums: list[dict[str, Any]],
+              addendum_sheets: list[list[str]]) -> list[tuple[Optional[UUID], list[str]]]:
     """
-    Put the printed reports in print order: each main report, then its CONC_MIX addendums.
+    Put the printed reports in print order: each main report, then its CONC_MIX and CONC_CYL addendums.
     Takes the main reports' groups in page order ((report id, its pages, including Report Cont when it continues
-    there); the id is None for a General composed for the export), the CONC_MIX reports and each one's sheets.
-    Returns (report id, its pages) for each, in order. A CONC_MIX whose parent isn't printed (a report type not
+    there); the id is None for a General composed for the export), the CONC_MIX and CONC_CYL reports and each one's
+    sheets.
+    Returns (report id, its pages) for each, in order. An addendum whose parent isn't printed (a report type not
     exported yet), or that has none, comes last.
     """
     printed = {report_id for report_id, _ in groups if report_id is not None}
     children: dict[UUID, list[tuple[UUID, list[str]]]] = {}
     orphans: list[tuple[Optional[UUID], list[str]]] = []
-    for report, sheets in zip(conc_mixes, conc_mix_sheets):
+    for report, sheets in zip(addendums, addendum_sheets):
         parent = report.get("parent_report_id")
         segment = (report.get("report_id"), sheets)
         if parent in printed:
@@ -288,6 +301,7 @@ SIGNATURE_LAYOUTS: dict[str, SignatureLayout] = {
     export_swcb.CONC_BACK: export_swcb.SIGNATURE_LAYOUT,
     export_ac.AC_BACK: export_ac.SIGNATURE_LAYOUT,
     export_conc_mix.CONC_MIX: export_conc_mix.SIGNATURE_LAYOUT,
+    export_conc_cyl.SHEET_NAME: export_conc_cyl.SIGNATURE_LAYOUT,
     REPORT_CONT: REPORT_CONT_SIGNATURE,
     export_attachments.ATTACHMENTS: export_attachments.SIGNATURE_LAYOUT,
 }
@@ -298,6 +312,7 @@ RE_SIGNATURE_LAYOUTS: dict[str, SignatureLayout] = {
     export_swcb.CONC_BACK: export_swcb.RE_SIGNATURE_LAYOUT,
     export_ac.AC_BACK: export_ac.RE_SIGNATURE_LAYOUT,
     export_conc_mix.CONC_MIX: export_conc_mix.RE_SIGNATURE_LAYOUT,
+    export_conc_cyl.SHEET_NAME: export_conc_cyl.RE_SIGNATURE_LAYOUT,
     REPORT_CONT: REPORT_CONT_RE_SIGNATURE,
     export_attachments.ATTACHMENTS: export_attachments.RE_SIGNATURE_LAYOUT,
 }
@@ -357,7 +372,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
     Build an IDR's .xlsx export from the report-forms template: the General's pages, then each SWCB report's (on Conc
     Fr / Conc Bk and clones of them) and each AC report's (AC Fr / AC Bk and clones), in page order, each followed by
-    its CONC_MIX addendums' Conc Mix sheets; an SWCB's Conc Bk ticks its "See attached" box when it has one, an AC Bk
+    its CONC_MIX addendums' Conc Mix sheets and its CONC_CYL addendums' Conc Cyl sheets (blank forms for now: nothing
+    is stamped on them yet but the draft marker and the signatures); an SWCB's Conc Bk ticks its "See attached" box when it has one, an AC Bk
     its "Attached Pages" box when its report has attachments or continues on Report Cont. Pay items past a front
     page's table continue on copies of it, right after it. A report's extra sheets are numbered after it and counted
     in OF. Each report's attachments follow its last page, one unnumbered page each. A draft IDR's pages are each
@@ -380,12 +396,13 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     general_data, page_number, general_edited_as = _general_for_export(idr_id)
     reports = _load_reports(idr_id)
     swcbs, conc_mixes, acs = _swcb_reports(reports), _conc_mix_reports(reports), _ac_reports(reports)
+    conc_cyls = _conc_cyl_reports(reports)
     general_id = next((r["report_id"] for r in reports if r["report_type"] == "GEN" and not r["is_addendum"]), None)
     redlines = _load_redlines(idr_id)
     general_redlines = redlines.for_report(general_edited_as)  # the header's only, unless it is the inspector's own
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
-    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes, acs, general_redlines, redlines)
+    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes, acs, conc_cyls, general_redlines, redlines)
     # Each report's sheets past its first are pages of their own: they take the numbers after it and count in OF
     extras = [(page_number, len(sheets.general_fronts) - 1)]
     extras += [(r["page_number"], len(fronts) - 1) for r, (fronts, _) in zip(swcbs, sheets.swcbs)]
@@ -435,9 +452,15 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
                                report_data=conc_mix["report_data"], sheets=names,
                                redlines=redlines.for_report(conc_mix.get("report_id")))
 
-    # Attachments print after their report's last page; a report that isn't printed (SWR, CONC_CYL, ...) has its
+    for conc_cyl, names in zip(conc_cyls, sheets.conc_cyls):
+        export_conc_cyl.render(workbook, idr, project, project.get("contractor"), inspector=inspector,
+                               page_number=_page_after_clones(conc_cyl["page_number"], extras),
+                               report_data=conc_cyl["report_data"], sheets=names,
+                               redlines=redlines.for_report(conc_cyl.get("report_id")))
+
+    # Attachments print after their report's last page; a report that isn't printed (SWR, HC, ...) has its
     # attachments at the end, followed by the page counting photos past the cap
-    segments = _segments(groups, conc_mixes, sheets.conc_mixes)
+    segments = _segments(groups, conc_mixes + conc_cyls, sheets.conc_mixes + sheets.conc_cyls)
     printed = [report_id for report_id, _ in segments if report_id is not None]
     unprinted = [r["report_id"] for r in reports if r.get("report_id") is not None and r["report_id"] not in printed]
     attachments = _load_attachments(reports)
