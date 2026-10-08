@@ -442,13 +442,15 @@ class TestAddReport:
         assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "FIELD_MEMO", True, None)
 
     def test_conc_cyl_addendum_can_be_created(self, admin_client):
-        conc_cyl_row = {**MOCK_NEW_SWR_ROW, "report_type": "CONC_CYL", "is_addendum": True}
-        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=[conc_cyl_row]) as mocks:
-            response = admin_client.post(self.url, json={"report_type": "CONC_CYL", "is_addendum": True})
+        body = {"report_type": "CONC_CYL", "is_addendum": True, "parent_report_id": GEN_REPORT_ID}
+        conc_cyl_row = {**MOCK_NEW_SKETCH_ROW, "report_type": "CONC_CYL"}
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([MOCK_GEN_REPORT_ROW], [conc_cyl_row])) as mocks:
+            response = admin_client.post(self.url, json=body)
         assert response.status_code == 201
         report = response.json()["data"]
         assert (report["report_type"], report["is_addendum"], report["report_data"]) == ("CONC_CYL", True, {})
-        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "CONC_CYL", True, None)
+        assert report["parent_report_id"] == GEN_REPORT_ID
+        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "CONC_CYL", True, UUID(GEN_REPORT_ID))
 
     def test_conc_cyl_on_a_submitted_idr_returns_409(self, admin_client):
         with patched(idrs=[MOCK_SUBMITTED_IDR_ROW]) as mocks:
