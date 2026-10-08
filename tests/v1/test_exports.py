@@ -886,26 +886,26 @@ def clone_parts(content: bytes, name: str) -> tuple[str, str]:
 class TestCloneSheet:
     def test_the_clone_is_added_as_the_last_tab(self):
         names = written(cloned()).sheetnames
-        assert names[-1] == "Conc Mix 2" and names.index("Conc Mix") == 7 and len(names) == 39
+        assert names[-1] == "Conc Mix 2" and names.index("Conc Mix") == 7 and len(names) == 40
 
     def test_the_clone_starts_byte_identical_to_its_source(self):
         content = cloned().to_bytes()
         package = zipfile.ZipFile(io.BytesIO(content))
         (source, _), (clone, _) = clone_parts(content, "Conc Mix"), clone_parts(content, "Conc Mix 2")
-        assert (source, clone) == ("xl/worksheets/sheet8.xml", "xl/worksheets/sheet39.xml")
+        assert (source, clone) == ("xl/worksheets/sheet8.xml", "xl/worksheets/sheet40.xml")
         assert package.read(clone) == package.read(source)
 
     def test_the_clone_has_its_own_drawing_with_the_same_shapes(self):
         content = cloned().to_bytes()
         package = zipfile.ZipFile(io.BytesIO(content))
         (_, source), (_, clone) = clone_parts(content, "Conc Mix"), clone_parts(content, "Conc Mix 2")
-        assert (source, clone) == ("xl/drawings/drawing5.xml", "xl/drawings/drawing23.xml")
+        assert (source, clone) == ("xl/drawings/drawing5.xml", "xl/drawings/drawing24.xml")
         assert package.read(clone) == package.read(source)
         # Its images are the source's (shared media), through its own relationships part
         rels = "xl/drawings/_rels/drawing{}.xml.rels"
-        assert package.read(rels.format(23)) == package.read(rels.format(5))
+        assert package.read(rels.format(24)) == package.read(rels.format(5))
         # and its own printer settings
-        sheet_rels = package.read("xl/worksheets/_rels/sheet39.xml.rels").decode()
+        sheet_rels = package.read("xl/worksheets/_rels/sheet40.xml.rels").decode()
         assert "../printerSettings/printerSettings37.bin" in sheet_rels
 
     def test_cells_stamped_on_one_sheet_stay_off_the_other(self):
@@ -931,16 +931,16 @@ class TestCloneSheet:
         types = zipfile.ZipFile(io.BytesIO(cloned().to_bytes())).read("[Content_Types].xml").decode()
         worksheet = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
         drawing = "application/vnd.openxmlformats-officedocument.drawing+xml"
-        assert f'<Override PartName="/xl/worksheets/sheet39.xml" ContentType="{worksheet}"/>' in types
-        assert f'<Override PartName="/xl/drawings/drawing23.xml" ContentType="{drawing}"/>' in types
+        assert f'<Override PartName="/xl/worksheets/sheet40.xml" ContentType="{worksheet}"/>' in types
+        assert f'<Override PartName="/xl/drawings/drawing24.xml" ContentType="{drawing}"/>' in types
 
     def test_the_clone_gets_a_new_sheet_id_and_relationship(self):
         package = zipfile.ZipFile(io.BytesIO(cloned().to_bytes()))
         workbook = package.read("xl/workbook.xml").decode()
-        assert '<sheet name="Conc Mix 2" sheetId="57" r:id="rId43"/>' in workbook  # template tops out at 56 / rId42
+        assert '<sheet name="Conc Mix 2" sheetId="58" r:id="rId44"/>' in workbook  # template tops out at 57 / rId43
         rels = package.read("xl/_rels/workbook.xml.rels").decode()
-        assert 'Id="rId43" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ' \
-               'Target="worksheets/sheet39.xml"' in rels
+        assert 'Id="rId44" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" ' \
+               'Target="worksheets/sheet40.xml"' in rels
 
     def test_the_sources_print_area_is_copied_onto_the_clone(self):
         book = openpyxl.load_workbook(io.BytesIO(cloned("AC Fr", "AC Fr 2").to_bytes()))
@@ -969,7 +969,7 @@ class TestCloneSheet:
         workbook.move_sheet("AC Fr 2", after="AC Fr")
         content = workbook.to_bytes()
         names = openpyxl.load_workbook(io.BytesIO(content), read_only=True).sheetnames
-        assert names.index("AC Fr 2") == names.index("AC Fr") + 1 and len(names) == 39
+        assert names.index("AC Fr 2") == names.index("AC Fr") + 1 and len(names) == 40
         book = openpyxl.load_workbook(io.BytesIO(content))  # each print area still on its own sheet
         assert (book["AC Fr"].print_area, book["AC Fr 2"].print_area) == (
             "'AC Fr'!$A$1:$AQ$63", "'AC Fr 2'!$A$1:$AQ$63")
@@ -988,9 +988,9 @@ class TestCloneSheet:
         changed = {"xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml", "xl/calcChain.xml"}
         assert [n for n in template.namelist() if n not in changed and package.read(n) != template.read(n)] == []
         added = sorted(set(package.namelist()) - set(template.namelist()))
-        assert added == ["xl/drawings/_rels/drawing23.xml.rels", "xl/drawings/drawing23.xml",
-                         "xl/printerSettings/printerSettings37.bin", "xl/worksheets/_rels/sheet39.xml.rels",
-                         "xl/worksheets/sheet39.xml"]
+        assert added == ["xl/drawings/_rels/drawing24.xml.rels", "xl/drawings/drawing24.xml",
+                         "xl/printerSettings/printerSettings37.bin", "xl/worksheets/_rels/sheet40.xml.rels",
+                         "xl/worksheets/sheet40.xml"]
 
 
 # ---------------------------------------------------------------------------
@@ -1463,7 +1463,7 @@ class TestConcMixHeader:
         template = zipfile.ZipFile(TEMPLATE)
         others = [n for n in template.namelist()
                   if n.startswith("xl/worksheets/sheet") and n != f"xl/worksheets/{SHEET_PARTS['Conc Mix']}"]
-        assert len(others) == 37
+        assert len(others) == 38
         assert [n for n in others if rendered.read(n) != template.read(n)] == []
 
 

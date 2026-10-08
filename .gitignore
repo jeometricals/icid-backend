@@ -19,4 +19,6 @@ venv/
 *.xlsx
 # ...except the IDR export template, which ships with the app
 !templates/report_forms.xlsx
+# ...and the DDC cylinder data sheet scripts/merge_conc_cyl_template.py adds to the template
+!templates/conc_cyl_source.xlsx
 .pytest_cache/
