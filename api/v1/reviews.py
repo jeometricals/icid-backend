@@ -23,12 +23,12 @@ from api.schemas.auth import UserOut
 from api.schemas.idr import (
     Idr,
     IdrConflict,
-    IdrListItem,
     IdrListResponse,
     IdrResponse,
     IdrReturn,
     StageOneAccept,
 )
+from api.v1._shared import idr_list_items
 from api.schemas.field_edit import PayItemsUntouched
 from api.services.auth import current_admin, current_user, demo_idr_fence, require_project_role
 from api.services.field_edits import FieldEditError, untouched_message, untouched_pay_items
@@ -139,11 +139,7 @@ def review_queue(
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to list the review queue")
 
-    return IdrListResponse(
-        status="success",
-        message=f"{len(rows)} IDR(s)",
-        data=[IdrListItem.model_validate(row) for row in rows],
-    )
+    return IdrListResponse(status="success", message=f"{len(rows)} IDR(s)", data=idr_list_items(rows))
 
 
 @router.post("/{idr_id}/accept-stage1", response_model=IdrResponse, responses=NUMBER_CONFLICT)

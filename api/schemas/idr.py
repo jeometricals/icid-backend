@@ -66,6 +66,8 @@ class IdrListItem(Idr):
     reporter_name: Optional[str] = None
     stage1_reviewer_name: Optional[str] = None
     re_reviewer_name: Optional[str] = None
+    # The disciplines its reports cover, in alphabetical order; empty for an IDR with no reports
+    disciplines: list[str] = []
 
 
 class IdrListResponse(BaseModel):

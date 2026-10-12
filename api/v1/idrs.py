@@ -2,8 +2,10 @@ import logging
 from typing import Annotated, Optional, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
+
+from api.v1._shared import day, day_range, idr_list_items, report_types_for
 
 from api.queries.idr_reports import (
     create_idr_report,
@@ -35,7 +37,6 @@ from api.schemas.idr import (
     IdrConflict,
     IdrCreate,
     IdrHeaderUpdate,
-    IdrListItem,
     IdrListResponse,
     IdrResponse,
     IdrStatus,
@@ -314,29 +315,47 @@ def list_project_idrs(
     reporter_uuid: Optional[UUID] = None,
     include_deleted: bool = False,
     include_all_drafts: bool = False,
+    idr_number: Optional[str] = None,
+    work_date: Optional[str] = None,
+    date_from: Optional[str] = Query(None, alias="from"),
+    date_to: Optional[str] = Query(None, alias="to"),
+    discipline: Optional[list[str]] = Query(None),
     user: UserOut = Depends(current_user),
 ) -> IdrListResponse:
     """
-    List IDRs most recently edited first, each with report_count, has_general and the names of its inspector and reviewers; every filter is optional. Deleted IDRs and other people's drafts are left out unless an admin asks for them. A demo user is always listed their own IDRs only, whatever reporter_uuid says.
-    Takes optional project_id, status and reporter_uuid query parameters, include_deleted and include_all_drafts (admin only), and the signed-in user.
-    Returns an IdrListResponse (empty data list when nothing matches); raises 400 when someone who isn't an admin asks for deleted IDRs or all drafts, and 500 on a query failure.
+    List IDRs most recently edited first, each with report_count, has_general, disciplines and the names of its inspector and reviewers; every filter is optional, and filters of different kinds must all hold. Deleted IDRs and other people's drafts are left out unless an admin asks for them. A demo user is always listed their own IDRs only, whatever reporter_uuid says.
+    Takes optional project_id, status and reporter_uuid query parameters, include_deleted and include_all_drafts (admin only), idr_number (the start of the number, any case), work_date (one day) or from and to (work dates, inclusive), discipline (repeatable, by name: an IDR with a report covering any of them), and the signed-in user.
+    Returns an IdrListResponse (empty data list when nothing matches); raises 400 when someone who isn't an admin asks for deleted IDRs or all drafts, for a date that isn't one, work_date sent with from or to, from after to, or an unknown discipline, and 500 on a query failure.
     """
     if (include_deleted or include_all_drafts) and user.role != "admin":
         raise HTTPException(status_code=400, detail="include_deleted and include_all_drafts are for admins only")
 
+    if work_date is not None and (date_from is not None or date_to is not None):
+        raise HTTPException(status_code=400, detail="work_date cannot be combined with from or to")
+
+    first, last = day_range(date_from, date_to)
+
     if user.is_demo:
         reporter_uuid = user.uuid
 
-    rows = list_idrs(user.uuid, project_id, status, reporter_uuid, include_deleted, include_all_drafts)
+    rows = list_idrs(
+        user.uuid,
+        project_id,
+        status,
+        reporter_uuid,
+        include_deleted,
+        include_all_drafts,
+        idr_number=(idr_number or "").strip() or None,
+        work_date=day(work_date, "work_date"),
+        date_from=first,
+        date_to=last,
+        report_types=report_types_for(discipline),
+    )
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to list IDRs")
 
-    return IdrListResponse(
-        status="success",
-        message=f"{len(rows)} IDR(s)",
-        data=[IdrListItem.model_validate(row) for row in rows],
-    )
+    return IdrListResponse(status="success", message=f"{len(rows)} IDR(s)", data=idr_list_items(rows))
 
 
 @router.post(

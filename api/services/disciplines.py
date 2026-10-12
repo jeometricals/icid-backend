@@ -27,6 +27,16 @@ def disciplines_for_report_type(report_type: str) -> tuple[str, ...]:
     return REPORT_TYPE_TO_DISCIPLINES.get(report_type, ())
 
 
+def disciplines_for_report_types(report_types: list[str]) -> list[str]:
+    """
+    List the disciplines a set of report types covers between them.
+    Takes the stored report types, in any order and repeated or not.
+    Returns the disciplines, each once, in alphabetical order; empty for no report types.
+    """
+    return sorted({discipline for report_type in report_types
+                   for discipline in disciplines_for_report_type(report_type)})
+
+
 def report_types_for_discipline(discipline: str) -> tuple[str, ...]:
     """
     List the report types that cover a discipline.

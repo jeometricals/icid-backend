@@ -568,7 +568,7 @@ class TestReturn:
 # ---------------------------------------------------------------------------
 
 QUEUE_ROW = {**STAGE1_IDR, "report_count": 2, "has_general": True, "reporter_name": "Genghis Khan",
-             "stage1_reviewer_name": "Olive Engineer", "re_reviewer_name": None}
+             "stage1_reviewer_name": "Olive Engineer", "re_reviewer_name": None, "report_types": ["SWCB", "CONC_MIX"]}
 
 
 class TestReviewQueue:
@@ -601,6 +601,13 @@ class TestReviewQueue:
         item = response.json()["data"][0]
         assert (item["idr_number"], item["status"], item["report_count"]) == ("005", "stage1_review", 2)
         assert (item["reporter_name"], item["stage1_reviewer_name"]) == ("Genghis Khan", "Olive Engineer")
+
+    def test_items_carry_the_disciplines_of_their_reports(self):
+        with signed_in(REVIEWER) as client:
+            response, sql, _ = self.queue(client, "stage1_review")
+        item = response.json()["data"][0]
+        assert item["disciplines"] == ["Concrete (delivery)", "Curb", "Sidewalk"] and "report_types" not in item
+        assert "SELECT DISTINCT r.report_type FROM icid.idr_reports r WHERE r.idr_id = i.idr_id ) AS report_types" in sql
 
     def test_oldest_submission_first(self):
         with signed_in(REVIEWER) as client:

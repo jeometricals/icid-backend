@@ -12,6 +12,7 @@ import pytest
 
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 from api.services.signatures import SignatureStorageError
+from api.schemas.idr import Idr
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, TYPE_LABELS, label_for
 from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
 
@@ -1118,14 +1119,16 @@ class TestDeleteReportAttachments:
 # GET /v1/idrs/?project_id=&status=&reporter_uuid=
 # ---------------------------------------------------------------------------
 
-MOCK_LIST_DRAFT_ROW = {**MOCK_IDR_ROW, "report_count": 3, "has_general": True}
+MOCK_LIST_DRAFT_ROW = {**MOCK_IDR_ROW, "report_count": 3, "has_general": True, "report_types": ["GEN", "SWCB"]}
 MOCK_LIST_EMPTY_DRAFT_ROW = {
     **MOCK_IDR_ROW,
     "idr_id": UUID(EXISTING_IDR_ID),
     "report_count": 0,
     "has_general": False,
+    "report_types": [],
 }
-MOCK_LIST_SUBMITTED_ROW = {**MOCK_SUBMITTED_IDR_ROW, "report_count": 2, "has_general": True}
+MOCK_LIST_SUBMITTED_ROW = {**MOCK_SUBMITTED_IDR_ROW, "report_count": 2, "has_general": True,
+                           "report_types": ["GEN", "AC"]}
 
 
 class TestListIdrs:
@@ -1273,6 +1276,176 @@ class TestListIdrs:
 
 STANDING_DELETED = "i.deleted_at IS NULL"
 STANDING_DRAFTS = "(i.status <> 'draft' OR i.reporter_uuid = %s)"
+HAS_REPORT_OF_TYPE = "EXISTS ( SELECT 1 FROM icid.idr_reports r WHERE r.idr_id = i.idr_id AND r.report_type = ANY(%s) )"
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/idrs/: idr_number, work_date, from / to and discipline filters; disciplines on each row
+# ---------------------------------------------------------------------------
+
+class TestListIdrsArchiveFilters:
+    url = "/v1/idrs/"
+
+    def where(self, client, params) -> tuple[str, tuple]:
+        """
+        List through the endpoint and capture the query.
+        Takes the client and the query parameters (a dict, or a list of pairs for a repeated one).
+        Returns (the SQL after FROM icid.idrs i, on one line, and its params).
+        """
+        with patched(idrs=[]) as mocks:
+            assert client.get(self.url, params=params).status_code == 200
+        sql, query_params = mocks["idrs"].call_args.args
+        return " ".join(sql.split("FROM icid.idrs i")[1].split("ORDER BY")[0].split()), query_params
+
+    def refused(self, client, params) -> str:
+        """
+        Send filters the endpoint refuses.
+        Takes the client and the query parameters.
+        Returns the 400's detail, having checked nothing was read.
+        """
+        with patched(idrs=[]) as mocks:
+            response = client.get(self.url, params=params)
+        assert response.status_code == 400
+        mocks["idrs"].assert_not_called()
+        return response.json()["detail"]
+
+    def test_without_them_the_query_is_what_it_was(self, admin_client):
+        where, params = self.where(admin_client, {"project_id": "HWS0023"})
+        assert where == f"WHERE i.project_id = %s AND {STANDING_DELETED} AND {STANDING_DRAFTS}"
+        assert params == ("HWS0023", ADMIN_USER_ROW["uuid"])
+
+    @pytest.mark.parametrize("sent", ["SW", "sw"])
+    def test_idr_number_matches_the_start_of_the_number_in_any_case(self, admin_client, sent):
+        where, params = self.where(admin_client, {"project_id": "HWS0023", "idr_number": sent})
+        assert "i.project_id = %s AND i.idr_number ILIKE %s AND" in where
+        assert params == ("HWS0023", f"{sent}%", ADMIN_USER_ROW["uuid"])
+
+    def test_idr_number_wildcards_are_matched_as_written(self, admin_client):
+        _, params = self.where(admin_client, {"idr_number": "5%_a\\"})
+        assert params[0] == "5\\%\\_a\\\\%"
+
+    @pytest.mark.parametrize("sent", ["", "   "])
+    def test_a_blank_idr_number_is_no_filter(self, admin_client, sent):
+        where, params = self.where(admin_client, {"idr_number": sent})
+        assert "ILIKE" not in where and params == (ADMIN_USER_ROW["uuid"],)
+
+    def test_idr_number_is_trimmed(self, admin_client):
+        assert self.where(admin_client, {"idr_number": " SW "})[1][0] == "SW%"
+
+    def test_work_date_matches_that_day_only(self, admin_client):
+        where, params = self.where(admin_client, {"work_date": "2026-10-04"})
+        assert where.startswith("WHERE i.report_date = %s AND")
+        assert params == (date(2026, 10, 4), ADMIN_USER_ROW["uuid"])
+
+    def test_from_and_to_are_an_inclusive_range(self, admin_client):
+        where, params = self.where(admin_client, {"from": "2026-10-01", "to": "2026-10-07"})
+        assert where.startswith("WHERE i.report_date >= %s AND i.report_date <= %s AND")
+        assert params == (date(2026, 10, 1), date(2026, 10, 7), ADMIN_USER_ROW["uuid"])
+
+    def test_from_and_to_work_alone_and_can_be_the_same_day(self, admin_client):
+        where, params = self.where(admin_client, {"from": "2026-10-01"})
+        assert "i.report_date >= %s" in where and "<=" not in where and params[0] == date(2026, 10, 1)
+        where, params = self.where(admin_client, {"to": "2026-10-07"})
+        assert "i.report_date <= %s" in where and ">=" not in where and params[0] == date(2026, 10, 7)
+        _, params = self.where(admin_client, {"from": "2026-10-04", "to": "2026-10-04"})
+        assert params[:2] == (date(2026, 10, 4), date(2026, 10, 4))
+
+    @pytest.mark.parametrize("params", [
+        {"from": "2026-10-01", "to": "2026-10-07", "work_date": "2026-10-04"},
+        {"from": "2026-10-01", "work_date": "2026-10-04"},
+        {"to": "2026-10-07", "work_date": "2026-10-04"},
+    ])
+    def test_work_date_with_from_or_to_is_400(self, admin_client, params):
+        assert self.refused(admin_client, params) == "work_date cannot be combined with from or to"
+
+    def test_from_after_to_is_400(self, admin_client):
+        assert self.refused(admin_client, {"from": "2026-10-10", "to": "2026-10-01"}) == "from cannot be after to"
+
+    @pytest.mark.parametrize("name", ["from", "to", "work_date"])
+    @pytest.mark.parametrize("value", ["notadate", "10/04/2026", "2026-13-01", ""])
+    def test_a_date_that_isnt_one_is_400(self, admin_client, name, value):
+        assert self.refused(admin_client, {name: value}) == f"{name} must be a date, YYYY-MM-DD"
+
+    def test_a_discipline_matches_idrs_with_a_report_that_covers_it(self, admin_client):
+        where, params = self.where(admin_client, {"discipline": "Sidewalk"})
+        assert where.startswith(f"WHERE {HAS_REPORT_OF_TYPE} AND")
+        assert params == (["SWCB"], ADMIN_USER_ROW["uuid"])
+
+    def test_several_disciplines_match_a_report_of_any_of_them(self, admin_client):
+        _, params = self.where(admin_client, [("discipline", "Sidewalk"), ("discipline", "AC Pavement")])
+        assert params[0] == ["SWCB", "AC"]
+        _, params = self.where(admin_client, [("discipline", "Sidewalk"), ("discipline", "Curb")])
+        assert params[0] == ["SWCB"]  # each report type once
+
+    @pytest.mark.parametrize("params", [{"discipline": "Nonsense"}, {"discipline": "sidewalk"},
+                                        [("discipline", "Sidewalk"), ("discipline", "Nonsense")]])
+    def test_an_unknown_discipline_is_400(self, admin_client, params):
+        assert self.refused(admin_client, params).startswith("Unknown discipline: ")
+
+    def test_filters_of_different_kinds_must_all_hold(self, admin_client):
+        where, params = self.where(admin_client, {
+            "project_id": "HWS0023", "status": "approved", "idr_number": "SW", "from": "2026-10-01",
+            "to": "2026-10-07", "discipline": "Sidewalk"})
+        assert where == ("WHERE i.project_id = %s AND i.status = %s AND i.idr_number ILIKE %s AND i.report_date >= %s"
+                         f" AND i.report_date <= %s AND {HAS_REPORT_OF_TYPE} AND {STANDING_DELETED}"
+                         f" AND {STANDING_DRAFTS}")
+        assert params == ("HWS0023", "approved", "SW%", date(2026, 10, 1), date(2026, 10, 7), ["SWCB"],
+                          ADMIN_USER_ROW["uuid"])
+
+    def test_an_admin_showing_deleted_idrs_filters_them_the_same(self, admin_client):
+        where, params = self.where(admin_client, {"include_deleted": "true", "include_all_drafts": "true",
+                                                  "work_date": "2026-10-04", "discipline": "General"})
+        assert where == f"WHERE i.report_date = %s AND {HAS_REPORT_OF_TYPE}"
+        assert params == (date(2026, 10, 4), ["GEN"])
+
+    def test_a_demo_user_is_still_listed_their_own_idrs_only(self, demo_client):
+        where, params = self.where(demo_client, {"reporter_uuid": REPORTER_UUID, "discipline": "Sidewalk"})
+        assert "i.reporter_uuid = %s" in where
+        assert params == (DEMO_USER_ROW["uuid"], ["SWCB"], DEMO_USER_ROW["uuid"])
+
+    def test_the_filters_still_need_a_signed_in_user(self, client):
+        with patched(idrs=[]) as mocks:
+            response = client.get(self.url, params={"discipline": "Sidewalk", "idr_number": "SW"})
+        assert response.status_code == 401
+        mocks["idrs"].assert_not_called()
+
+    def test_someone_who_isnt_an_admin_still_cant_ask_for_deleted_idrs(self):
+        with signed_in({**ADMIN_USER_ROW, "role": None}) as client:
+            detail = self.refused(client, {"include_deleted": "true", "discipline": "Sidewalk"})
+        assert detail == "include_deleted and include_all_drafts are for admins only"
+
+    def test_the_query_reads_each_idrs_report_types_once_each(self, admin_client):
+        with patched(idrs=[]) as mocks:
+            admin_client.get(self.url)
+        sql = " ".join(mocks["idrs"].call_args.args[0].split())
+        assert ("ARRAY( SELECT DISTINCT r.report_type FROM icid.idr_reports r WHERE r.idr_id = i.idr_id )"
+                " AS report_types") in sql
+        assert mocks["idrs"].call_count == 1
+
+    @pytest.mark.parametrize("report_types,disciplines", [
+        ([], []),
+        (["GEN"], ["General"]),
+        (["SWCB"], ["Curb", "Sidewalk"]),
+        (["AC"], ["AC Pavement"]),
+        (["CONC_MIX"], ["Concrete (delivery)"]),
+        (["CONC_CYL"], ["Concrete (testing)"]),
+        (["SWCB", "GEN", "CONC_MIX", "CONC_CYL", "AC"],
+         ["AC Pavement", "Concrete (delivery)", "Concrete (testing)", "Curb", "General", "Sidewalk"]),
+        (["NOT_A_TYPE"], []),  # a type with no discipline adds none
+    ])
+    def test_every_row_carries_the_disciplines_of_its_reports_in_alphabetical_order(
+            self, admin_client, report_types, disciplines):
+        with patched(idrs=[{**MOCK_LIST_DRAFT_ROW, "report_types": report_types}]):
+            item = admin_client.get(self.url).json()["data"][0]
+        assert item["disciplines"] == disciplines
+        assert "report_types" not in item
+
+    def test_every_other_field_of_a_row_is_as_it_was(self, admin_client):
+        with patched(idrs=[MOCK_LIST_DRAFT_ROW, MOCK_LIST_EMPTY_DRAFT_ROW]):
+            first, second = admin_client.get(self.url).json()["data"]
+        assert first["disciplines"] == ["Curb", "General", "Sidewalk"] and second["disciplines"] == []
+        assert set(first) == set(second) == set(Idr.model_fields) | {
+            "report_count", "has_general", "reporter_name", "stage1_reviewer_name", "re_reviewer_name", "disciplines"}
 
 
 class TestListIdrsAdminOptions:

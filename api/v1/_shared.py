@@ -1,0 +1,69 @@
+"""
+What more than one router needs: reading the date and discipline filters, and shaping the rows of an IDR list.
+Not a router itself.
+"""
+
+from datetime import date
+from typing import Any, Optional
+
+from fastapi import HTTPException
+
+from api.schemas.idr import IdrListItem
+from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
+
+
+def day(value: Optional[str], name: str) -> Optional[date]:
+    """
+    Read a date filter.
+    Takes the query parameter's text (None when it wasn't sent) and its name, for the message.
+    Returns the date, or None when it wasn't sent; raises 400 for text that isn't a YYYY-MM-DD date.
+    """
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{name} must be a date, YYYY-MM-DD") from exc
+
+
+def day_range(date_from: Optional[str], date_to: Optional[str]) -> tuple[Optional[date], Optional[date]]:
+    """
+    Read the from and to date filters.
+    Takes the two query parameters' text (None for one that wasn't sent).
+    Returns (from, to) as dates; raises 400 for text that isn't a YYYY-MM-DD date, or from after to.
+    """
+    first, last = day(date_from, "from"), day(date_to, "to")
+
+    if first is not None and last is not None and first > last:
+        raise HTTPException(status_code=400, detail="from cannot be after to")
+
+    return first, last
+
+
+def report_types_for(disciplines: Optional[list[str]]) -> Optional[list[str]]:
+    """
+    Resolve a discipline filter to the report types that cover any of the disciplines.
+    Takes the disciplines sent (None when the filter wasn't).
+    Returns the report types, each once, or None without a filter; raises 400 for a discipline nothing covers.
+    """
+    if not disciplines:
+        return None
+    report_types: list[str] = []
+    for discipline in disciplines:
+        covered = report_types_for_discipline(discipline)
+        if not covered:
+            raise HTTPException(status_code=400, detail=f"Unknown discipline: {discipline}")
+        report_types += [report_type for report_type in covered if report_type not in report_types]
+    return report_types
+
+
+def idr_list_items(rows: list[dict[str, Any]]) -> list[IdrListItem]:
+    """
+    Shape the rows of an IDR list, giving each the disciplines its reports cover.
+    Takes the rows of list_idrs or list_review_queue, each with its report_types.
+    Returns one IdrListItem per row, in the same order.
+    """
+    return [
+        IdrListItem(**{**row, "disciplines": disciplines_for_report_types(row["report_types"])})
+        for row in rows
+    ]

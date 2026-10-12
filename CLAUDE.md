@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, shaping an IDR list's rows). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -53,14 +53,14 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `GET /v1/projects/{project_id}/quantities?from=&to=&pay_item=&budget_code=&discipline=&inspector_uuid=` — the pay-item quantities of the project's approved IDRs, newest work date first: `{rows, totals_by_unit, row_count, truncated}` under `data`. All filters optional; `pay_item`, `budget_code` and `discipline` repeat. For a user on the project, or an admin: 403 otherwise, 404 for an unknown project, 400 for a bad date, `from` after `to`, or an unknown discipline
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
-- `GET /v1/idrs/?project_id=&status=&reporter_uuid=` — list IDRs with `report_count`, `has_general` and the names of the inspector and reviewers (all filters optional). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true)
+- `GET /v1/idrs/?project_id=&status=&reporter_uuid=&idr_number=&work_date=&from=&to=&discipline=` — list IDRs (the archive) with `report_count`, `has_general`, `disciplines` and the names of the inspector and reviewers (all filters optional; `discipline` repeats). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true). 400 for a bad date, `work_date` with `from` or `to`, `from` after `to`, or an unknown discipline
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order, and `field_edits`: every edit reviewers made on it, oldest first, each with `editor_name` and `editor_initials`
 - `PUT /v1/idrs/{idr_id}/header` — partial update of the shared header fields on a draft
 - `POST /v1/idrs/{idr_id}/reports` — add a report (typed by `ReportType`; addendums may name a parent)
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}` — replace a report's `report_data` (any JSON object)
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}` — remove a report (its addendums cascade)
 - `POST /v1/idrs/{idr_id}/submit` — submit a draft, signed by the signed-in user (locks it, numbers pages, sets `total_pages`, stamps `inspector_signature_path` and `inspector_signed_at`, clears any return); 400 `Signature required before submitting` when they have no signature, 502 when it can't be copied, 403 `Demo mode: submit is disabled` for a demo user, 403 `Role required: inspector` for a user who isn't an inspector on the project
-- `GET /v1/idrs/queue?status=submitted|stage1_review|stage2_review` — one review queue, oldest submission first, on the projects where the signed-in user works it (OE or RE; RE only for `stage2_review`); an admin sees every project
+- `GET /v1/idrs/queue?status=submitted|stage1_review|stage2_review` — one review queue, oldest submission first, on the projects where the signed-in user works it (OE or RE; RE only for `stage2_review`); an admin sees every project. Rows are shaped as the IDR list's, `disciplines` included
 - `POST /v1/idrs/{idr_id}/accept-stage1` — OE or RE picks a submitted IDR up: `submitted` → `stage1_review`, sets `stage1_reviewer_uuid` and `stage1_accepted_at` (and clears `stage2_accepted_at`). Body `{idr_number}`, needed the first time (400 without it); an IDR that has a number keeps it. 409 with `existing_idr_id` when the number is in use on the project
 - `POST /v1/idrs/{idr_id}/approve-stage1` — `stage1_review` → `stage2_review`; only the Stage 1 reviewer (403 for another OE or RE), and only once they have approved, revised or added every pay item at this stage: otherwise 400 `{detail, untouched: [{pay_item_id, report_id, item_no, budget_code}]}`
 - `POST /v1/idrs/{idr_id}/accept-stage2` — an RE becomes `re_reviewer_uuid` and `stage2_accepted_at` is stamped; the status stays `stage2_review`, and the last to accept wins
@@ -514,6 +514,27 @@ Any change must follow these.
       client that sees `truncated` should narrow its filters.
     - **Order:** work date newest first, then item number (rows without one last).
     - The statement leaves out rows of a deleted IDR, though admin delete has already removed them.
+- **The archive.** `GET /v1/idrs/` is the IDR list the archive page reads (`list_project_idrs` in
+  `api/v1/idrs.py`, `list_idrs` in `api/queries/idrs.py`). It is not paged: every match comes back, most
+  recently edited first.
+  - **Filters**, all optional, on top of `project_id`, `status` and `reporter_uuid`: `idr_number` (the start of
+    the number, any case; `%` and `_` in it are matched as written; blank is no filter, and an IDR without a
+    number never matches), `work_date` (that day) or `from` and `to` (work dates, inclusive, either alone), and
+    `discipline` (by name, repeatable). Different filters must all hold; a repeated `discipline` matches any of
+    its values. They apply inside the deleted and drafts rules, `include_deleted` included.
+  - **A discipline** is resolved to the report types that cover it, and an IDR matches when it has a report of
+    any of them (`EXISTS` on `icid.idr_reports`), addendums and an auto-generated General included. So `Sidewalk`
+    and `Curb` both mean "has an SWCB".
+  - **Refused with 400**, before anything is read: a date that isn't `YYYY-MM-DD`, `work_date` sent with `from`
+    or `to`, `from` after `to`, and a discipline the mapping doesn't have. The dates are read as text, as on
+    the quantities route; both routes read them and the disciplines through `api/v1/_shared.py`.
+  - **Each row carries `disciplines`**: what its reports cover between them, each once, in alphabetical order
+    (`["Curb", "Sidewalk"]`); `[]` for an IDR with no reports. The statement reads each IDR's distinct report
+    types in a subquery of `IDR_LIST_EXTRAS` (`report_types`, not in the response) and
+    `disciplines_for_report_types` turns them into names. No table or column holds them.
+  - **The review queue's rows carry it too**: both lists share `IDR_LIST_EXTRAS` and `idr_list_items`.
+  - The permission is unchanged: any signed-in user, with the demo fence. `project_id` is a filter, not a
+    scope, so this route does not take `project_member`.
 - **Adding an endpoint means adding tests** under `tests/v1/`, in the file matching the
   endpoint module. Tests patch the query layer (`patch("api.queries.<module>.run_query")`)
   and return **dict** rows matching the real column names; they do not hit the database.

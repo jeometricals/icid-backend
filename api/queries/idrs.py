@@ -44,9 +44,14 @@ IDR_COLUMNS = """
     deleted_by
 """
 
-# What the IDR lists add to each row (FROM icid.idrs i): its report count, whether it holds a General, and the
-# names of its inspector and reviewers
+# What the IDR lists add to each row (FROM icid.idrs i): its report count, whether it holds a General, the types of
+# its reports (each once) and the names of its inspector and reviewers
 IDR_LIST_EXTRAS = """
+            ARRAY(
+                SELECT DISTINCT r.report_type
+                FROM icid.idr_reports r
+                WHERE r.idr_id = i.idr_id
+            ) AS report_types,
             (
                 SELECT COUNT(*)
                 FROM icid.idr_reports r
@@ -193,6 +198,16 @@ def update_idr_header(idr_id: UUID, fields: dict[str, Any]) -> Optional[list[dic
     return run_query(sql, (*[fields[column] for column in columns], idr_id))
 
 
+def _starts_with(text: str) -> str:
+    """
+    Build the LIKE pattern for values that start with a text, its own % and _ matched as written.
+    Takes the text.
+    Returns the pattern, for a LIKE or ILIKE parameter.
+    """
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
 def list_idrs(
     viewer_uuid: UUID,
     project_id: Optional[str] = None,
@@ -200,10 +215,15 @@ def list_idrs(
     reporter_uuid: Optional[UUID] = None,
     include_deleted: bool = False,
     include_all_drafts: bool = False,
+    idr_number: Optional[str] = None,
+    work_date: Optional[date] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    report_types: Optional[list[str]] = None,
 ) -> Optional[list[dict[str, Any]]]:
     """
-    List IDRs, most recently edited first, each with its report count, whether it holds a General, and the names of its inspector and reviewers. Deleted IDRs are left out, and so are other people's drafts, unless asked for.
-    Takes the uuid of the user the list is for; optional project id, status and reporter uuid filters (any left as None is not applied); and whether to include deleted IDRs and other people's drafts (the endpoint allows an admin only).
+    List IDRs, most recently edited first, each with its report count, whether it holds a General, its report types and the names of its inspector and reviewers. Deleted IDRs are left out, and so are other people's drafts, unless asked for.
+    Takes the uuid of the user the list is for; optional project id, status and reporter uuid filters; whether to include deleted IDRs and other people's drafts (the endpoint allows an admin only); and optional filters on the start of the IDR number (any case), the work date (one day, or from and to, inclusive) and the report types (an IDR with a report of any of them). A filter left as None is not applied.
     Returns a list of IDR dicts with the extra columns (empty if none match), or None on failure.
     """
     conditions: list[str] = []
@@ -220,6 +240,30 @@ def list_idrs(
     if reporter_uuid is not None:
         conditions.append("i.reporter_uuid = %s")
         params.append(reporter_uuid)
+
+    if idr_number:
+        conditions.append("i.idr_number ILIKE %s")
+        params.append(_starts_with(idr_number))
+
+    if work_date is not None:
+        conditions.append("i.report_date = %s")
+        params.append(work_date)
+
+    if date_from is not None:
+        conditions.append("i.report_date >= %s")
+        params.append(date_from)
+
+    if date_to is not None:
+        conditions.append("i.report_date <= %s")
+        params.append(date_to)
+
+    if report_types is not None:
+        conditions.append("""EXISTS (
+                SELECT 1
+                FROM icid.idr_reports r
+                WHERE r.idr_id = i.idr_id AND r.report_type = ANY(%s)
+            )""")
+        params.append(report_types)
 
     if not include_deleted:
         conditions.append("i.deleted_at IS NULL")
