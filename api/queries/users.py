@@ -181,6 +181,36 @@ def set_user_signature(uuid: UUID, signature_path: str, signature_type: str) -> 
     return rows[0] if rows else None
 
 
+def list_users_for_admin() -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch every user, demo users included, without their password hash.
+    Takes nothing.
+    Returns the user dicts (as get_user_by_uuid returns them) by last name, first name and email, or None on failure.
+    """
+    return run_query(_AUTH_USER_SELECT + "        ORDER BY u.last_name, u.first_name, u.email;")
+
+
+def update_user_names(uuid: UUID, first_name: Optional[str], last_name: Optional[str]) -> Optional[dict[str, Any]]:
+    """
+    Change a user's first name, last name or both; a name passed as None keeps its value.
+    Takes the user's uuid and the two names.
+    Returns the updated user dict (as get_user_by_uuid returns it), or None if no user matches.
+    """
+    sql = (
+        """
+        UPDATE icid.users u
+        SET first_name = COALESCE(%s, u.first_name),
+            last_name = COALESCE(%s, u.last_name),
+            updated_at = now()
+        WHERE u.uuid = %s
+        RETURNING"""
+        + _AUTH_USER_COLUMNS
+        + ";"
+    )
+    rows = run_query(sql, (first_name, last_name, uuid))
+    return rows[0] if rows else None
+
+
 def cleanup_abandoned_demo_users() -> Optional[int]:
     """
     Delete the demo users created more than 24 hours ago, with everything of theirs, by running the database's cleanup function (migration 014).
