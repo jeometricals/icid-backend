@@ -1,4 +1,5 @@
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -19,6 +20,26 @@ class AdminUserUpdate(BaseModel):
 
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+
+
+class AdminUserCreate(BaseModel):
+    """
+    A user an admin is creating. The email is a plain string, as at sign-in: accounts live on reserved domains
+    (e.g. @icid.local). The route checks every value itself, so a bad one is a 400.
+    """
+
+    email: str
+    first_name: str
+    last_name: Optional[str] = None
+    password: str
+    is_admin: bool = False
+
+
+class UserConflict(BaseModel):
+    """The 409 body when an email is taken: the reason, and the user who has it."""
+
+    detail: str
+    existing_user_uuid: UUID
 
 
 class AdminUserResponse(BaseModel):

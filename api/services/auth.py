@@ -36,6 +36,11 @@ DEMO_CLIENT_ID = "C00001"
 DEMO_PROJECT_ROLE = "Demo"
 MAX_DEMO_USERS = 200
 
+# The client a user an admin creates sits under (users.client_id is required, and the form asks for none)
+DEFAULT_CLIENT_ID = "C00001"
+# bcrypt reads no more of a password than this many bytes, and refuses a longer one
+MAX_PASSWORD_BYTES = 72
+
 # The roles a user can hold on a project (icid.project_users.role). Admin is not one: it is users.role.
 PROJECT_ROLES = ("inspector", "oe", "re")
 
@@ -109,6 +114,18 @@ class LocalAuthProvider(AuthProvider):
                 raise DemoUnavailableError("Demo mode is not set up")
             raise DemoUnavailableError("Demo mode is busy, try again later")
         return UserOut.model_validate(row)
+
+
+def hash_password(password: str) -> str:
+    """
+    Hash a password for storing in icid.users, as sign-in checks it.
+    Takes the password as typed, of at most MAX_PASSWORD_BYTES bytes.
+    Returns the bcrypt hash as text; raises ValueError for a longer password.
+    """
+    encoded = password.encode("utf-8")
+    if len(encoded) > MAX_PASSWORD_BYTES:
+        raise ValueError(f"A password can't be longer than {MAX_PASSWORD_BYTES} bytes")
+    return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("utf-8")
 
 
 def _password_matches(password: str, password_hash: str) -> bool:

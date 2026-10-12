@@ -190,6 +190,27 @@ def list_users_for_admin() -> Optional[list[dict[str, Any]]]:
     return run_query(_AUTH_USER_SELECT + "        ORDER BY u.last_name, u.first_name, u.email;")
 
 
+def create_user(
+    email: str, first_name: str, last_name: Optional[str], password_hash: str, role: Optional[str], client_id: str
+) -> Optional[dict[str, Any]]:
+    """
+    Add a user who signs in with a password. Never a demo user. Does nothing when the email is taken, whatever its capitals.
+    Takes the email as it is to be stored, the names (last name may be None), the password's hash, the role ('admin' or None) and the client the user sits under.
+    Returns the new user dict (as get_user_by_uuid returns it), or None when a user already has that email.
+    """
+    sql = (
+        """
+        INSERT INTO icid.users AS u (email, first_name, last_name, client_id, password_hash, role, is_demo)
+        VALUES (%s, %s, %s, %s, %s, %s, false)
+        ON CONFLICT (lower(email)) DO NOTHING
+        RETURNING"""
+        + _AUTH_USER_COLUMNS
+        + ";"
+    )
+    rows = run_query(sql, (email, first_name, last_name, client_id, password_hash, role))
+    return rows[0] if rows else None
+
+
 def update_user_names(uuid: UUID, first_name: Optional[str], last_name: Optional[str]) -> Optional[dict[str, Any]]:
     """
     Change a user's first name, last name or both; a name passed as None keeps its value.

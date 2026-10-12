@@ -45,6 +45,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 
 - `POST` or `GET /v1/admin/cleanup-demos` — deletes demo users older than 24 hours; returns `{purged_count}`. For a signed-in admin, or the scheduler sending `CRON_SECRET` as its bearer token; 403 for anyone else signed in
 - `GET /v1/admin/users` — admin only: every user, demo users included, by last name, first name and email, under `data`; each as `/v1/auth/me` returns a user (`uuid`, `email`, `first_name`, `last_name`, `role`, `is_demo`, `has_signature`, `signature_set_at`)
+- `POST /v1/admin/users` — admin only: body `{email, first_name, last_name?, password, is_admin?}`; creates a user who signs in with that password and returns them under `data`, 201. 400 for a blank or malformed email, a blank or over-long name, or a password under 6 characters or over 72 bytes; 409 `{detail, existing_user_uuid}` when the email is taken, whatever its capitals
 - `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?}`; changes the names sent and returns the user under `data`. Names are trimmed. 400 when neither is sent (a null counts as not sent) or one is blank or over 100 characters, 404 for an unknown user
 - `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
 - `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
@@ -136,14 +137,21 @@ Any change must follow these.
     anyone else. Submitting and the review routes are the exception: they check project roles, below. So is
     the quantities route, which takes `project_member`: the caller must be assigned to the project, in any role,
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
-    admin-only routes are `/v1/admin/cleanup-demos`, the two under `/v1/admin/users`, the two under
+    admin-only routes are `/v1/admin/cleanup-demos`, the three under `/v1/admin/users`, the two under
     `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock` and `/admin/delete`.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
-    user's first and last name, a demo user's included; the email, the role and `is_demo` are changed in SQL, and
-    a name can't be cleared. The route checks the names itself, so a bad one is a 400, not FastAPI's 422. Names
+    user's first and last name, a demo user's included; an existing user's email, role and `is_demo` are changed
+    in SQL, and a name can't be cleared. The route checks the names itself, so a bad one is a 400, not FastAPI's 422. Names
     are read from `icid.users` whenever they are shown, so a rename also changes the `RE: <name>` caption on
     later exports of IDRs that user approved.
+  - **Creating a user** (`POST /v1/admin/users`): the email is stored as typed, trimmed; a blank last name is
+    stored as NULL; the password is hashed with bcrypt (`hash_password` in `api/services/auth.py`) and never
+    trimmed or returned. `is_admin` sets `role = 'admin'`, otherwise the role is NULL; the user is never a demo
+    user. `users.client_id` is required and the form asks for none, so every user made this way sits under
+    `DEFAULT_CLIENT_ID` (`C00001`). The INSERT is `ON CONFLICT (lower(email)) DO NOTHING`; when it returns no
+    row the route looks the email's user up for the 409. The new user is on no project until an admin gives
+    them a role on one.
   - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
     several on a project (migration 018). `require_project_role("oe", "re")` builds a dependency for a route with
     an `idr_id`: it passes a user holding one of those roles on the IDR's project, and any admin; 404 for an
