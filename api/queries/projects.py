@@ -127,22 +127,53 @@ def get_project_contractor_name(project_id: str) -> Optional[str]:
     return rows[0]["client_name"] if rows else None
 
 
+# A project's own columns, as its detail is returned
+_PROJECT_COLUMNS = """
+            project_id,
+            project_name,
+            project_description,
+            registration_code,
+            borough,
+            status"""
+
+
 def get_project_by_id(project_id: str) -> Optional[dict[str, Any]]:
     """
     Fetch the full detail of a single project.
     Takes the project id.
     Returns the project dict, or None if no project matches.
     """
-    sql = """
-        SELECT
-            project_id,
-            project_name,
-            project_description,
-            registration_code,
-            borough,
-            status
-        FROM icid.projects
-        WHERE project_id = %s;
-    """
+    sql = "\n        SELECT" + _PROJECT_COLUMNS + "\n        FROM icid.projects\n        WHERE project_id = %s;"
     rows = run_query(sql, (project_id,))
+    return rows[0] if rows else None
+
+
+def list_projects_for_admin() -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch every project, whoever is assigned to it.
+    Takes nothing.
+    Returns the project dicts (as get_project_by_id returns them) ordered by project id, or None on failure.
+    """
+    sql = "\n        SELECT" + _PROJECT_COLUMNS + "\n        FROM icid.projects\n        ORDER BY project_id;"
+    return run_query(sql)
+
+
+def create_project(
+    project_id: str, project_name: str, project_description: str, borough: str, registration_code: Optional[str]
+) -> Optional[dict[str, Any]]:
+    """
+    Add a project, with no status, no clients and nobody assigned. Does nothing when the project id is taken.
+    Takes the project id, name, description, borough and registration code (may be None).
+    Returns the new project dict (as get_project_by_id returns it), or None when a project already has that id.
+    """
+    sql = (
+        """
+        INSERT INTO icid.projects (project_id, project_name, project_description, borough, registration_code)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (project_id) DO NOTHING
+        RETURNING"""
+        + _PROJECT_COLUMNS
+        + ";"
+    )
+    rows = run_query(sql, (project_id, project_name, project_description, borough, registration_code))
     return rows[0] if rows else None

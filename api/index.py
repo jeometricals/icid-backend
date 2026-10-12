@@ -39,6 +39,7 @@ def include_routers(app: FastAPI):
     from api.v1.signatures import router as signatures_router
     from api.v1.admin import router as admin_router
     from api.v1.admin_users import router as admin_users_router
+    from api.v1.admin_projects import router as admin_projects_router
 
     app.include_router(auth_router)
     app.include_router(users_router)
@@ -54,6 +55,7 @@ def include_routers(app: FastAPI):
     app.include_router(signatures_router)
     app.include_router(admin_router)
     app.include_router(admin_users_router)
+    app.include_router(admin_projects_router)
 
 
 include_routers(app)

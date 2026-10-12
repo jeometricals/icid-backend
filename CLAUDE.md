@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, shaping an IDR list's rows). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, shaping an IDR list's rows). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -47,6 +47,8 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/admin/users` — admin only: every user, demo users included, by last name, first name and email, under `data`; each as `/v1/auth/me` returns a user (`uuid`, `email`, `first_name`, `last_name`, `role`, `is_demo`, `has_signature`, `signature_set_at`)
 - `POST /v1/admin/users` — admin only: body `{email, first_name, last_name?, password, is_admin?}`; creates a user who signs in with that password and returns them under `data`, 201. 400 for a blank or malformed email, a blank or over-long name, or a password under 6 characters or over 72 bytes; 409 `{detail, existing_user_uuid}` when the email is taken, whatever its capitals
 - `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?}`; changes the names sent and returns the user under `data`. Names are trimmed. 400 when neither is sent (a null counts as not sent) or one is blank or over 100 characters, 404 for an unknown user
+- `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
+- `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
 - `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
 - `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
 - `GET /v1/users/` — 403 for a demo user
@@ -137,7 +139,7 @@ Any change must follow these.
     anyone else. Submitting and the review routes are the exception: they check project roles, below. So is
     the quantities route, which takes `project_member`: the caller must be assigned to the project, in any role,
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
-    admin-only routes are `/v1/admin/cleanup-demos`, the three under `/v1/admin/users`, the two under
+    admin-only routes are `/v1/admin/cleanup-demos`, the three under `/v1/admin/users`, the two under `/v1/admin/projects`, the two under
     `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock` and `/admin/delete`.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
@@ -152,6 +154,17 @@ Any change must follow these.
     `DEFAULT_CLIENT_ID` (`C00001`). The INSERT is `ON CONFLICT (lower(email)) DO NOTHING`; when it returns no
     row the route looks the email's user up for the 409. The new user is on no project until an admin gives
     them a role on one.
+  - **Admin project routes** (`api/v1/admin_projects.py`) are their own router too, taking `current_admin`.
+    - **The list** is every row of `icid.projects`; `GET /v1/projects/` stays the signed-in user's own.
+    - **Creating a project** takes an id (trimmed, at most 32 characters, only letters, digits, hyphens and
+      underscores, since it is part of page URLs and Storage paths; matched exactly, so `hws0023` and `HWS0023`
+      are two projects), a name (100), a description (200), a borough (free text, 50) and an optional
+      registration code (50; blank is NULL). The INSERT is `ON CONFLICT (project_id) DO NOTHING`; no row back
+      is the 409.
+    - **What a new project lacks:** a `status` (NULL), any `project_clients` row (so the export prints no
+      contractor), any `contract_items` (so the pay-item picker is empty) and anyone in `project_users`, the
+      admin who made it included. It is in no one's `GET /v1/projects/` until an admin grants a role on it.
+      Those but the roles are set in SQL. There is no editing or deleting a project.
   - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
     several on a project (migration 018). `require_project_role("oe", "re")` builds a dependency for a route with
     an `idr_id`: it passes a user holding one of those roles on the IDR's project, and any admin; 404 for an

@@ -36,6 +36,35 @@ class ProjectDetailResponse(BaseModel):
     data: ProjectDetail
 
 
+class AdminProjectCreate(BaseModel):
+    """A project an admin is creating. The route checks every value itself, so a bad one is a 400."""
+
+    project_id: str
+    project_name: str
+    project_description: str
+    borough: str
+    registration_code: Optional[str] = None
+
+
+class ProjectConflict(BaseModel):
+    """The 409 body when a project id is taken: the reason, and the id."""
+
+    detail: str
+    existing_project_id: str
+
+
+class AdminProjectResponse(BaseModel):
+    """One project, as an admin sees it."""
+
+    data: ProjectDetail
+
+
+class AdminProjectListResponse(BaseModel):
+    """Every project, as an admin sees them."""
+
+    data: list[ProjectDetail]
+
+
 class ProjectRoleChange(BaseModel):
     """Giving a user a role on a project, or taking it away."""
 
