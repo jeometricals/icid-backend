@@ -41,10 +41,13 @@ INSERT INTO icid.spec_items (item_no, description, spec_section, pay_unit) VALUE
     ('6.87',      'Plastic Barrels',                                         '6.87', 'Each');
 
 ------------------------------------------------------------
--- CONTRACT ITEMS (HWS0023; resolve item_no to the generated spec_item_id)
+-- CONTRACT ITEMS (HWS0023; resolve item_no to the generated spec_item_id, and
+-- copy the spec item's number, description, unit and section onto the row)
 ------------------------------------------------------------
-INSERT INTO icid.contract_items (project_id, spec_item_id, budget_code, bid_quantity, bid_unit_price)
-SELECT 'HWS0023', s.spec_item_id, src.budget_code, src.bid_quantity, src.bid_unit_price
+INSERT INTO icid.contract_items
+    (project_id, spec_item_id, budget_code, bid_quantity, bid_unit_price, item_no, description, unit, spec_section)
+SELECT 'HWS0023', s.spec_item_id, src.budget_code, src.bid_quantity, src.bid_unit_price,
+       s.item_no, s.description, s.pay_unit, s.spec_section
 FROM (VALUES
     ('4.02 AB-R', '12345', 2500.00,  18.50),
     ('4.02 AF-R', '12345', 1800.00,  22.00),

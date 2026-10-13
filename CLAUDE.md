@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, checking a new password, shaping an IDR list's rows). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body, checking a new password, shaping an IDR list's rows). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -25,7 +25,7 @@ every request to it.
 | `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
-| `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
+| `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
@@ -50,6 +50,11 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/admin/users/{user_id}/password` — admin only: body `{new_password}`; replaces the user's password and returns the user under `data`. Any user, the admin's own row included. 400 for a password under 6 characters or over 72 bytes, 404 for an unknown user
 - `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
+- `GET /v1/admin/projects/{project_id}/pay-items` — admin only: every pay item of the project, by budget code then ref: `{status, message, data: [{pay_item_uuid, pay_item_ref, description, unit, quantity, unit_price, budget_code, spec_section}]}`. 404 for an unknown project, as on the four below
+- `POST /v1/admin/projects/{project_id}/pay-items` — admin only: body `{pay_item_ref, description, unit, quantity, unit_price, budget_code, spec_section?}`; creates the pay item and returns it under `data`, 201. 400 for a blank or over-long value, or a negative or over-precise amount; 409 `{detail, existing_pay_item_uuid}` when the project has that ref under that budget code
+- `PATCH /v1/admin/projects/{project_id}/pay-items/{pay_item_uuid}` — admin only: any of the seven fields; returns the item under `data`. 400 when nothing is sent (a null counts as not sent, except `spec_section`, which it clears) or a value doesn't fit, 404 for an item the project doesn't have, 409 as on create
+- `DELETE /v1/admin/projects/{project_id}/pay-items/{pay_item_uuid}` — admin only: deletes the item, 204; 404 for an item the project doesn't have
+- `DELETE /v1/admin/projects/{project_id}/pay-items` — admin only: deletes every pay item of the project; returns `{status, message, data: {deleted_count}}`
 - `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
 - `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
 - `GET /v1/users/` — 403 for a demo user
@@ -87,7 +92,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}/download-url` — short-lived signed URL; 404 while pending
 - `DELETE /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — remove an attachment, pending or uploaded (Storage file, then record); draft only
 - `GET /v1/idrs/{idr_id}/export` — an IDR as an .xlsx on the DDC report-forms template (General, SWCB, AC, Conc Mix and Conc Cyl pages) (a draft's pages are marked "DRAFT - Not for Submission"), stored in the `idr-exports` bucket; returns `{download_url, filename}`, the URL valid 10 minutes
-- `GET /v1/contract_items/?project_id=` — a project's contract items, each joined to its spec item (`item_no`, `description`, `spec_section`, `pay_unit`); `[]` when none
+- `GET /v1/contract_items/?project_id=` — a project's contract items for the pay-item picker, each with its `item_no`, `description`, `spec_section` (null when it has none) and `pay_unit`, by item number then budget code; `[]` when none
 
 ## 3. Modularity rules
 
@@ -141,7 +146,8 @@ Any change must follow these.
     anyone else. Submitting and the review routes are the exception: they check project roles, below. So is
     the quantities route, which takes `project_member`: the caller must be assigned to the project, in any role,
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
-    admin-only routes are `/v1/admin/cleanup-demos`, the four under `/v1/admin/users`, the two under `/v1/admin/projects`, the two under
+    admin-only routes are `/v1/admin/cleanup-demos`, the four under `/v1/admin/users`, the two under `/v1/admin/projects`, the five under
+    `/v1/admin/projects/{project_id}/pay-items`, the two under
     `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock` and `/admin/delete`.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
@@ -179,7 +185,37 @@ Any change must follow these.
     - **What a new project lacks:** a `status` (NULL), any `project_clients` row (so the export prints no
       contractor), any `contract_items` (so the pay-item picker is empty) and anyone in `project_users`, the
       admin who made it included. It is in no one's `GET /v1/projects/` until an admin grants a role on it.
-      Those but the roles are set in SQL. There is no editing or deleting a project.
+      The status and the clients are set in SQL; the pay items through the admin pay-item routes, below.
+      There is no editing or deleting a project.
+  - **Admin pay-item routes** (`api/v1/admin_pay_items.py`): a project's pay items are its rows of
+    `icid.contract_items`, which an admin lists, adds, edits and deletes for any project, assigned to it or
+    not. Its own router, taking `current_admin` and then `known_project` (404 for a project that doesn't
+    exist, on every route).
+    - **A contract item carries its own number, description, unit and section** (migration 026). They used to
+      be read off the shared `spec_items` catalog, where a description or a unit could only be one thing for
+      every project. `spec_items` is still there and the seeded rows still point at it (`spec_item_id`), but
+      nothing reads it and these routes never touch it; a row made here has no `spec_item_id`.
+    - **Names.** The API calls the row a pay item: `pay_item_uuid` is `contract_item_id`, `pay_item_ref` is
+      `item_no`, `quantity` is `bid_quantity` and `unit_price` is `bid_unit_price` (aliased in
+      `api/queries/contract_items.py`). The picker's route keeps its own names (`item_no`, `pay_unit`).
+    - **The key is `(project_id, item_no, budget_code)`**, matched exactly: a bid document lists the same item
+      under several budget codes, each a row of its own. Create is `ON CONFLICT ... DO NOTHING`, and no row
+      back is the 409, naming the item that has the key. An edit that would end up on another item's key
+      changes nothing (the UPDATE checks for it) and is the same 409. Two edits racing for one key can still
+      hit the constraint: a 500.
+    - **Values.** The ref (32), description (500), unit (16), budget code (50) and optional spec section (32)
+      are trimmed; the unit is also put in capitals and nothing else about it is changed (`l.f.` is stored
+      `L.F.`), so the seeded rows' `L.F.` and `Ton` sit beside typed `LF` and `TN` until units are normalised
+      (P0b). The budget code is otherwise kept as typed: `SE0944(CONED-CONS`, with its one bracket, is real.
+      A blank spec section is NULL.
+    - **Amounts.** Quantity takes up to 10 decimal places and unit price up to 6 (trailing zeros aren't
+      counted); zero is allowed, a negative is 400, and so is 10^15 or more. The columns are plain NUMERIC and
+      hold what was typed; responses carry them as JSON numbers. Text that isn't a number is FastAPI's 422.
+    - **Deleting is a hard delete, and safe.** Nothing references a contract item: a report's pay items and
+      the rows of `icid.quantities` are copies. A deleted item leaves the picker; reports that used it, and
+      their quantities, are unchanged. There is no undo for a delete or a clear.
+    - **Migration 026 must be in the database before this code runs**: the picker's route reads the new
+      columns too. The code from before it keeps working after it.
   - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
     several on a project (migration 018). `require_project_role("oe", "re")` builds a dependency for a route with
     an `idr_id`: it passes a user holding one of those roles on the IDR's project, and any admin; 404 for an
@@ -605,8 +641,9 @@ Any change must follow these.
 
 Not rules — current state, documented so nobody mistakes these for the intended pattern.
 
-- Endpoints exist for `users`, `projects`, `idrs` (with attachments and the .xlsx export) and `contract_items` (read-only;
-  the catalog is seeded, with no write endpoint yet). `api/schemas/` also defines models for
+- Endpoints exist for `users`, `projects`, `idrs` (with attachments and the .xlsx export) and `contract_items` (the
+  picker's read, and the admin pay-item routes). `spec_items` has queries and a schema but no endpoint, and nothing
+  reads the table since migration 026. `api/schemas/` also defines models for
   clients, form templates and the join tables — those schemas run
   ahead of the endpoints and may not match `schema.sql` exactly. Verify against `schema.sql`
   before building on them.

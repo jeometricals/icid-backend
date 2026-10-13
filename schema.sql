@@ -305,18 +305,24 @@ CREATE TABLE icid.spec_items (
 );
 
 ------------------------------------------------------------
--- CONTRACT ITEM (a project's Schedule of Bid Items; migrations/011)
+-- CONTRACT ITEM (a project's Schedule of Bid Items; migrations/011, 026)
+-- A row carries its own item number, description and unit. spec_item_id
+-- is set only on rows that came from the spec_items catalog.
 ------------------------------------------------------------
 CREATE TABLE icid.contract_items (
     contract_item_id  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_id        TEXT NOT NULL REFERENCES icid.projects(project_id) ON DELETE CASCADE,
-    spec_item_id      UUID NOT NULL REFERENCES icid.spec_items(spec_item_id),
+    spec_item_id      UUID REFERENCES icid.spec_items(spec_item_id),
     budget_code       TEXT NOT NULL,
-    bid_quantity      NUMERIC(12,2) NOT NULL,
-    bid_unit_price    NUMERIC(12,2) NOT NULL,
+    bid_quantity      NUMERIC NOT NULL,
+    bid_unit_price    NUMERIC NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT uq_contract_items_project_spec_budget UNIQUE (project_id, spec_item_id, budget_code)
+    item_no           TEXT NOT NULL,
+    description       TEXT NOT NULL,
+    unit              TEXT NOT NULL,
+    spec_section      TEXT,
+    CONSTRAINT uq_contract_items_project_item_budget UNIQUE (project_id, item_no, budget_code)
 );
 
 CREATE INDEX idx_contract_items_project ON icid.contract_items(project_id);

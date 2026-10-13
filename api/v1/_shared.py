@@ -1,6 +1,6 @@
 """
-What more than one router needs: reading the date and discipline filters, checking a new password, and shaping the
-rows of an IDR list.
+What more than one router needs: reading the date and discipline filters, reading a text field off a request body,
+checking a new password, and shaping the rows of an IDR list.
 Not a router itself.
 """
 
@@ -60,6 +60,22 @@ def report_types_for(disciplines: Optional[list[str]]) -> Optional[list[str]]:
             raise HTTPException(status_code=400, detail=f"Unknown discipline: {discipline}")
         report_types += [report_type for report_type in covered if report_type not in report_types]
     return report_types
+
+
+def clean_text(value: Optional[str], field: str, max_length: int, required: bool = True) -> Optional[str]:
+    """
+    Read one text field off the request: trimmed, and refused when too long, or blank where it is required.
+    Takes the value as sent, the field's name (for the error), its longest length and whether it must be given.
+    Returns the trimmed text, or None for an optional field left blank; raises 400 otherwise.
+    """
+    text = (value or "").strip()
+    if not text:
+        if required:
+            raise HTTPException(status_code=400, detail=f"{field} cannot be blank")
+        return None
+    if len(text) > max_length:
+        raise HTTPException(status_code=400, detail=f"{field} cannot be longer than {max_length} characters")
+    return text
 
 
 def check_new_password(password: str, field: str) -> None:

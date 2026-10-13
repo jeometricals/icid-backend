@@ -27,7 +27,7 @@ clients ──< users ──< project_users >── projects ──< project_cli
 
 idrs ──< quantities >── projects                (idr_id ON DELETE CASCADE)
 
-projects ──< contract_items >── spec_items      (project_id ON DELETE CASCADE)
+projects ──< contract_items >── spec_items      (project_id ON DELETE CASCADE; spec_item_id optional)
 ```
 
 - A **client** is an organisation. Every **user** belongs to one client.
@@ -39,9 +39,10 @@ projects ──< contract_items >── spec_items      (project_id ON DELETE CA
   addenda, and so on. Each one's form content is a JSON blob in `report_data`.
 - **report_attachments** are files (photos, PDFs) attached to a report. The row is metadata;
   the bytes live in Supabase Storage.
-- **spec_items** is the shared NYCDOT pay-item catalog. **contract_items** is one project's
-  Schedule of Bid Items: which spec items it pays for, under which budget codes, at what
-  quantity and price. See [Pay items](#pay-items).
+- **contract_items** is one project's Schedule of Bid Items: its pay items, each with its own
+  number, description and unit, under which budget codes, at what quantity and price.
+  **spec_items** is the NYCDOT pay-item catalog the first project's items were seeded from;
+  nothing reads it any more. See [Pay items](#pay-items).
 
 ## Tables
 
@@ -358,7 +359,9 @@ and returns a signed download URL valid for 10 minutes. Only the backend reaches
 
 ### spec_items
 
-The standard NYCDOT pay-item catalog, shared by every project. Added in migration 011.
+The standard NYCDOT pay-item catalog. Added in migration 011. Since migration 026 a contract
+item carries its own number, description, unit and section, so no endpoint reads this table;
+the rows seeded from it still point at it through `spec_item_id`. Kept until it is cleaned up.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -371,24 +374,33 @@ The standard NYCDOT pay-item catalog, shared by every project. Added in migratio
 ### contract_items
 
 A project's Schedule of Bid Items. "Contract" is the project here; there is no separate
-contracts table. Added in migration 011. Seeded only (`seed_sidewalk_pay_items.sql`, for
-`HWS0023`); there is no write endpoint yet.
+contracts table. Added in migration 011; migration 026 gave each row its own item number,
+description, unit and section. `HWS0023`'s rows are seeded (`seed_sidewalk_pay_items.sql`);
+an admin adds, edits and deletes any project's through
+`/v1/admin/projects/{project_id}/pay-items`, where a row is a "pay item".
 
 | Column | Type | Notes |
 |---|---|---|
-| `contract_item_id` | UUID PK | `uuid_generate_v4()` |
+| `contract_item_id` | UUID PK | `uuid_generate_v4()`. `pay_item_uuid` in the admin API |
 | `project_id` | TEXT NOT NULL | FK → `projects.project_id`, **ON DELETE CASCADE** |
-| `spec_item_id` | UUID NOT NULL | FK → `spec_items.spec_item_id` |
-| `budget_code` | TEXT NOT NULL | |
-| `bid_quantity` | NUMERIC(12,2) NOT NULL | |
-| `bid_unit_price` | NUMERIC(12,2) NOT NULL | |
+| `spec_item_id` | UUID | FK → `spec_items.spec_item_id`. Set on the seeded rows only; NULL on a row an admin created |
+| `budget_code` | TEXT NOT NULL | Stored as typed, e.g. `SE0944(CONED-CONS` |
+| `bid_quantity` | NUMERIC NOT NULL | `quantity` in the admin API, which takes up to 10 decimal places |
+| `bid_unit_price` | NUMERIC NOT NULL | `unit_price` in the admin API, which takes up to 6 decimal places |
+| `item_no` | TEXT NOT NULL | e.g. `4.13 AAS`. `pay_item_ref` in the admin API |
+| `description` | TEXT NOT NULL | |
+| `unit` | TEXT NOT NULL | The seeded rows keep the catalog's forms (`L.F.`, `Ton`); the admin API stores what is typed, in capitals (`LF`) |
+| `spec_section` | TEXT | Optional, e.g. `4.13` |
 
-`UNIQUE (project_id, spec_item_id, budget_code)` (`uq_contract_items_project_spec_budget`):
-the same spec item can appear under several budget codes in one project, but only once per
+`UNIQUE (project_id, item_no, budget_code)` (`uq_contract_items_project_item_budget`): the
+same item number can appear under several budget codes in one project, but only once per
 code. Indexes: `idx_contract_items_project (project_id)`, `idx_contract_items_spec_item (spec_item_id)`.
 
-`GET /v1/contract_items/?project_id=` returns a project's rows joined to their spec item, so
-each carries `item_no`, `description`, `spec_section` and `pay_unit` inline.
+`GET /v1/contract_items/?project_id=` returns a project's rows for the pay-item picker, each
+with `item_no`, `description`, `spec_section` (may be null) and `pay_unit` (the `unit` column).
+
+Nothing references a contract item: pay items in reports and rows of `quantities` are copies,
+so deleting one only takes it out of the picker.
 
 ### form_templates (present, unused)
 
@@ -516,6 +528,7 @@ content as TEXT, linked to a report and a form template).
 | 022 | `022_stage_accepted_at.sql` | K2.6 | Added `idrs.stage1_accepted_at` and `stage2_accepted_at` (TIMESTAMPTZ, nullable, no backfill). |
 | 023 | `023_truck_add.sql` | K3-fix2 | Widened `chk_idr_field_edits_type` to allow `truck_add`, and `chk_idr_field_edits_old_value` to let it (like `pay_item_add`) have no `old_value`. Gave every existing truck in `idr_reports.report_data` an `id`; nothing else in any report changed. |
 | 025 | `025_quantities.sql` | L0 | Created `quantities` with its four indexes. No existing table or row changed. There is no 024. |
+| 026 | `026_contract_items_own_columns.sql` | P0a | Added `contract_items.item_no`, `description`, `unit` (NOT NULL) and `spec_section` (nullable), each filled from the row's spec item. Made `spec_item_id` nullable, widened `bid_quantity` and `bid_unit_price` from NUMERIC(12,2) to NUMERIC, and replaced `uq_contract_items_project_spec_budget` with `uq_contract_items_project_item_budget` on `(project_id, item_no, budget_code)`. `spec_items` unchanged. |
 
 Where each current column came from:
 
@@ -537,7 +550,8 @@ Where each current column came from:
 | `idr_reports` | `uq_idr_reports_one_gen_per_idr` (index) | 005 |
 | `report_attachments` | everything except the three below | 008 (`storage_path` UNIQUE dropped in 010) |
 | `report_attachments` | `attachment_name`, `attachment_description`, `is_uploaded` | 009 |
-| `spec_items`, `contract_items` | all | 011 |
+| `spec_items`, `contract_items` | all but the four below | 011 |
+| `contract_items` | `item_no`, `description`, `unit`, `spec_section`, `uq_contract_items_project_item_budget`; `spec_item_id` nullable, the two amounts unbounded | 026 |
 | `idr_audit` | all | 019 |
 | `idr_field_edits` | all | 020 |
 | `idr_reports` | the `id` on each `report_data.payItems` entry | 020 |

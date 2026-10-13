@@ -16,6 +16,7 @@ from api.queries.spec_items import get_spec_item, list_spec_items
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_SQL = ROOT.joinpath("schema.sql").read_text(encoding="utf-8")
 MIGRATION_SQL = ROOT.joinpath("migrations", "011_spec_items_and_contract_items.sql").read_text(encoding="utf-8")
+OWN_COLUMNS_SQL = ROOT.joinpath("migrations", "026_contract_items_own_columns.sql").read_text(encoding="utf-8")
 SEED_SQL = ROOT.joinpath("seed_sidewalk_pay_items.sql").read_text(encoding="utf-8")
 
 SEED_PROJECT_ID = "HWS0023"
@@ -72,7 +73,7 @@ def _seed_contract_items() -> list[tuple[str, str, Decimal, Decimal]]:
 
 def _seeded_rows() -> list[dict]:
     """
-    Build the joined rows list_contract_items_for_project would return for the seeded project.
+    Build the rows list_contract_items_for_project would return for the seeded project.
     Takes nothing; derives every row from the seed file, with stable fake uuids.
     Returns dict rows keyed like the query's SELECT, with NUMERIC columns as Decimal (as psycopg returns them).
     """
@@ -99,7 +100,7 @@ def _seeded_rows() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Schema: spec_items and contract_items (schema.sql and migrations/011)
+# Schema: spec_items and contract_items (schema.sql and migrations/011 and 026)
 # ---------------------------------------------------------------------------
 
 class TestCatalogSchema:
@@ -118,22 +119,48 @@ class TestCatalogSchema:
         assert list(columns) == [
             "contract_item_id", "project_id", "spec_item_id", "budget_code",
             "bid_quantity", "bid_unit_price", "created_at", "updated_at",
+            "item_no", "description", "unit", "spec_section",
         ]
         # project_id matches icid.projects' TEXT key, and a project's items go with it.
         assert columns["project_id"] == "TEXT NOT NULL REFERENCES icid.projects(project_id) ON DELETE CASCADE"
-        assert columns["spec_item_id"] == "UUID NOT NULL REFERENCES icid.spec_items(spec_item_id)"
+        # Only a row that came from the catalog has a spec item.
+        assert columns["spec_item_id"] == "UUID REFERENCES icid.spec_items(spec_item_id)"
         assert columns["budget_code"] == "TEXT NOT NULL"
-        assert columns["bid_quantity"] == "NUMERIC(12,2) NOT NULL"
-        assert columns["bid_unit_price"] == "NUMERIC(12,2) NOT NULL"
+        assert columns["bid_quantity"] == "NUMERIC NOT NULL"
+        assert columns["bid_unit_price"] == "NUMERIC NOT NULL"
+        for name in ("item_no", "description", "unit"):
+            assert columns[name] == "TEXT NOT NULL"
+        assert columns["spec_section"] == "TEXT"
 
-    def test_contract_items_unique_on_project_spec_item_and_budget_code(self):
-        # The same spec item may appear under several budget codes, but never twice under one.
-        for sql in (SCHEMA_SQL, MIGRATION_SQL):
-            assert "UNIQUE (project_id, spec_item_id, budget_code)" in _table_body(sql, "icid.contract_items")
+    def test_contract_items_unique_on_project_item_no_and_budget_code(self):
+        # The same item number may appear under several budget codes, but never twice under one.
+        body = _table_body(SCHEMA_SQL, "icid.contract_items")
+        assert "CONSTRAINT uq_contract_items_project_item_budget UNIQUE (project_id, item_no, budget_code)" in body
+        assert "spec_item_id, budget_code" not in body
 
-    def test_migration_matches_schema(self):
-        for table in ("icid.spec_items", "icid.contract_items"):
-            assert _columns(MIGRATION_SQL, table) == _columns(SCHEMA_SQL, table)
+    def test_migration_026_gives_contract_items_their_own_columns(self):
+        sql = OWN_COLUMNS_SQL.split("-- MIGRATION", 1)[1].split("-- VERIFICATION", 1)[0]
+        for column in ("item_no      TEXT", "description  TEXT", "unit         TEXT", "spec_section TEXT"):
+            assert f"ADD COLUMN {column}" in sql
+        # Filled from each row's spec item before the three are made required
+        assert sql.index("UPDATE icid.contract_items ci") < sql.index("ALTER COLUMN item_no SET NOT NULL")
+        for copied in ("item_no      = si.item_no", "description  = si.description", "unit         = si.pay_unit",
+                       "spec_section = si.spec_section", "WHERE si.spec_item_id = ci.spec_item_id"):
+            assert copied in sql
+        for change in ("ALTER COLUMN description SET NOT NULL", "ALTER COLUMN unit SET NOT NULL",
+                       "ALTER COLUMN spec_item_id DROP NOT NULL", "ALTER COLUMN bid_quantity TYPE NUMERIC,",
+                       "ALTER COLUMN bid_unit_price TYPE NUMERIC;",
+                       "DROP CONSTRAINT uq_contract_items_project_spec_budget",
+                       "ADD CONSTRAINT uq_contract_items_project_item_budget UNIQUE (project_id, item_no, budget_code)"):
+            assert change in sql
+        assert "spec_section SET NOT NULL" not in sql and "DROP TABLE" not in sql and "icid.spec_items si" in sql
+        assert sql.count("BEGIN;") == 1 and sql.count("COMMIT;") == 1
+
+    def test_migration_011_matches_schema_where_026_changed_nothing(self):
+        assert _columns(MIGRATION_SQL, "icid.spec_items") == _columns(SCHEMA_SQL, "icid.spec_items")
+        created, now = _columns(MIGRATION_SQL, "icid.contract_items"), _columns(SCHEMA_SQL, "icid.contract_items")
+        for name in ("contract_item_id", "project_id", "budget_code", "created_at", "updated_at"):
+            assert created[name] == now[name]
         for index in ("idx_contract_items_project ON icid.contract_items(project_id)",
                       "idx_contract_items_spec_item ON icid.contract_items(spec_item_id)"):
             assert index in SCHEMA_SQL
@@ -161,6 +188,9 @@ class TestPayItemSeed:
         rows = _seed_contract_items()
         assert len(rows) == 23
         assert "SELECT 'HWS0023', s.spec_item_id" in SEED_SQL
+        # Each row gets its spec item's number, description, unit and section as its own
+        assert "bid_quantity, bid_unit_price, item_no, description, unit, spec_section)" in SEED_SQL
+        assert "s.item_no, s.description, s.pay_unit, s.spec_section" in SEED_SQL
         assert {item_no for item_no, *_ in rows} == {item[0] for item in _seed_spec_items()}
 
     def test_seed_respects_the_compound_unique_key(self):
@@ -180,15 +210,17 @@ class TestPayItemSeed:
 # ---------------------------------------------------------------------------
 
 class TestContractItemQueries:
-    def test_list_joins_spec_items_and_filters_by_project(self):
+    def test_list_reads_the_rows_own_columns_and_filters_by_project(self):
         rows = _seeded_rows()
         with patch("api.queries.contract_items.run_query", return_value=rows) as mock:
             result = list_contract_items_for_project(SEED_PROJECT_ID)
         sql, params = mock.call_args.args
         assert "FROM icid.contract_items ci" in sql
-        assert "JOIN icid.spec_items si ON si.spec_item_id = ci.spec_item_id" in sql
-        assert "si.pay_unit" in sql
+        assert "spec_items" not in sql and "JOIN" not in sql
+        assert "ci.item_no" in sql and "ci.description" in sql and "ci.spec_section" in sql
+        assert "ci.unit AS pay_unit" in sql
         assert "WHERE ci.project_id = %s" in sql
+        assert "ORDER BY ci.item_no, ci.budget_code;" in sql
         assert params == (SEED_PROJECT_ID,)
         assert result[0]["pay_unit"] == "S.Y."
 
@@ -196,7 +228,7 @@ class TestContractItemQueries:
         with patch("api.queries.contract_items.run_query", return_value=None):
             assert list_contract_items_for_project(SEED_PROJECT_ID) is None
 
-    def test_get_returns_the_joined_row_or_none(self):
+    def test_get_returns_the_row_or_none(self):
         row = _seeded_rows()[0]
         with patch("api.queries.contract_items.run_query", return_value=[row]) as mock:
             assert get_contract_item(row["contract_item_id"]) == row
@@ -257,6 +289,13 @@ class TestListContractItems:
         assert aas[0]["spec_item_id"] == aas[1]["spec_item_id"]
         assert aas[0]["contract_item_id"] != aas[1]["contract_item_id"]
         assert {i["pay_unit"] for i in aas} == {"S.F."}
+
+    def test_an_item_an_admin_created_has_no_spec_item_and_may_have_no_section(self, admin_client):
+        row = {**_seeded_rows()[0], "spec_item_id": None, "spec_section": None, "pay_unit": "LF"}
+        with patch("api.queries.contract_items.run_query", return_value=[row]):
+            item = admin_client.get(self.url, params={"project_id": SEED_PROJECT_ID}).json()["data"][0]
+        assert (item["spec_item_id"], item["spec_section"], item["pay_unit"]) == (None, None, "LF")
+        assert item["item_no"] == "4.02 AB-R"
 
     def test_empty_list_for_project_without_contract_items(self, admin_client):
         with patch("api.queries.contract_items.run_query", return_value=[]) as mock:

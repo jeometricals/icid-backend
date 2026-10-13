@@ -1,5 +1,4 @@
 import re
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -13,6 +12,7 @@ from api.schemas.project import (
     ProjectDetail,
 )
 from api.services.auth import current_admin
+from api.v1._shared import clean_text
 
 # Every route needs a signed-in admin. Its own router: /v1/admin also lets the scheduler's secret in
 router = APIRouter(prefix="/v1/admin/projects", tags=["Admin projects"], dependencies=[Depends(current_admin)])
@@ -25,22 +25,6 @@ MAX_BOROUGH_LENGTH = 50
 MAX_REGISTRATION_CODE_LENGTH = 50
 # A project id is part of page URLs and Storage paths
 _PROJECT_ID = re.compile(r"[A-Za-z0-9_-]+")
-
-
-def _clean_text(value: Optional[str], field: str, max_length: int, required: bool = True) -> Optional[str]:
-    """
-    Read one text field off the request: trimmed, and refused when too long, or blank where it is required.
-    Takes the value as sent, the field's name (for the error), its longest length and whether it must be given.
-    Returns the trimmed text, or None for an optional field left blank; raises 400 otherwise.
-    """
-    text = (value or "").strip()
-    if not text:
-        if required:
-            raise HTTPException(status_code=400, detail=f"{field} cannot be blank")
-        return None
-    if len(text) > max_length:
-        raise HTTPException(status_code=400, detail=f"{field} cannot be longer than {max_length} characters")
-    return text
 
 
 @router.get("", response_model=AdminProjectListResponse)
@@ -65,15 +49,15 @@ def create_project_record(body: AdminProjectCreate) -> AdminProjectResponse | JS
     Takes the project id (letters, digits, hyphens and underscores), name, description, borough and optional registration code (blank is none) in the body, each trimmed.
     Returns 201 with an AdminProjectResponse; raises 400 for a value that doesn't fit, 403 for a user who isn't an admin, and 409 (with existing_project_id) when the id is taken.
     """
-    project_id = _clean_text(body.project_id, "project_id", MAX_PROJECT_ID_LENGTH)
+    project_id = clean_text(body.project_id, "project_id", MAX_PROJECT_ID_LENGTH)
     if not _PROJECT_ID.fullmatch(project_id):
         raise HTTPException(
             status_code=400, detail="project_id can only contain letters, digits, hyphens and underscores"
         )
-    project_name = _clean_text(body.project_name, "project_name", MAX_PROJECT_NAME_LENGTH)
-    project_description = _clean_text(body.project_description, "project_description", MAX_DESCRIPTION_LENGTH)
-    borough = _clean_text(body.borough, "borough", MAX_BOROUGH_LENGTH)
-    registration_code = _clean_text(
+    project_name = clean_text(body.project_name, "project_name", MAX_PROJECT_NAME_LENGTH)
+    project_description = clean_text(body.project_description, "project_description", MAX_DESCRIPTION_LENGTH)
+    borough = clean_text(body.borough, "borough", MAX_BOROUGH_LENGTH)
+    registration_code = clean_text(
         body.registration_code, "registration_code", MAX_REGISTRATION_CODE_LENGTH, required=False
     )
 
