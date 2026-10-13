@@ -87,6 +87,10 @@ class IdrNumberTakenError(Exception):
     """The IDR number is already used by another IDR on the project that isn't deleted."""
 
 
+class IdrSlotTakenError(Exception):
+    """A deleted IDR can't come back: another IDR now holds its day (project, reporter and date) or its IDR number."""
+
+
 def create_idr(
     project_id: str, reporter_uuid: UUID, report_date: date
 ) -> Optional[list[dict[str, Any]]]:
@@ -530,6 +534,63 @@ def admin_delete_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, 
     """
     return _move_idr(idr_id, actor_uuid, "admin_delete", None, "deleted", "deleted_at = now(), deleted_by = %s",
                      (actor_uuid,), also=delete_quantities_cte("moved"))
+
+
+def undelete_idr(
+    idr_id: UUID, actor_uuid: UUID, quantity_rows: list[dict[str, Any]]
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Bring a soft-deleted IDR back in one statement: give it the status it had when it was deleted, clear deleted_at and deleted_by, and log it in icid.idr_audit as admin_undelete. The status is read off the IDR's latest admin_delete row in icid.idr_audit, which the delete wrote; an IDR with no such row comes back as a draft. One that comes back approved gets its quantity rows written in the same statement, as an approval writes them.
+    Takes the IDR uuid, the admin's uuid and the IDR's quantity rows as its reports give them now (used only when it comes back approved).
+    Returns a one-row list with the IDR and status_on_record (False when it came back as a draft for want of a record), an empty list if it isn't deleted, or None on failure; raises IdrSlotTakenError when another IDR holds its day or its number.
+    """
+    sql = f"""
+        WITH target AS (
+            SELECT i.idr_id, i.status AS from_status, before.status AS status_before
+            FROM icid.idrs i
+            LEFT JOIN LATERAL (
+                SELECT a.from_status AS status
+                FROM icid.idr_audit a
+                WHERE a.idr_id = i.idr_id AND a.action = 'admin_delete' AND a.from_status <> 'deleted'
+                ORDER BY a.created_at DESC
+                LIMIT 1
+            ) before ON true
+            WHERE i.idr_id = %s AND i.deleted_at IS NOT NULL
+            FOR UPDATE OF i
+        ),
+        moved AS (
+            UPDATE icid.idrs i
+            SET status = COALESCE(t.status_before, 'draft'), deleted_at = NULL, deleted_by = NULL, updated_at = now()
+            FROM target t
+            WHERE i.idr_id = t.idr_id
+            RETURNING i.*
+        ),
+        {AUDIT_CTE.rstrip()},
+        approved AS (
+            SELECT idr_id FROM moved WHERE status = 'approved'
+        ),{replace_quantities_ctes("approved")}
+        SELECT {IDR_COLUMNS},
+            (SELECT status_before IS NOT NULL FROM target) AS status_on_record
+        FROM moved;
+    """
+    try:
+        return run_query(sql, (idr_id, actor_uuid, "admin_undelete", None, quantity_rows_json(quantity_rows)))
+    except UniqueViolation as exc:
+        raise IdrSlotTakenError(str(idr_id)) from exc
+
+
+def permanent_delete_idr(idr_id: UUID) -> bool:
+    """
+    Delete a soft-deleted IDR's row for good. Its reports, their attachments, its field edits, its audit rows and its quantity rows go with it (each foreign key is ON DELETE CASCADE). An IDR that isn't soft-deleted is left alone.
+    Takes the IDR uuid.
+    Returns True when the row was deleted, False when there is no such IDR or it isn't soft-deleted.
+    """
+    sql = """
+        DELETE FROM icid.idrs
+        WHERE idr_id = %s AND deleted_at IS NOT NULL
+        RETURNING idr_id;
+    """
+    return bool(run_query(sql, (idr_id,)))
 
 
 def list_approved_idrs() -> Optional[list[dict[str, Any]]]:

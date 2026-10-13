@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional, Union
 from uuid import UUID
 
@@ -7,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from api.queries.idrs import (
     IdrNumberTakenError,
+    IdrSlotTakenError,
     UNLOCKABLE_STATUSES,
     accept_stage1,
     accept_stage2,
@@ -16,8 +18,10 @@ from api.queries.idrs import (
     approve_stage2,
     find_idr_by_number,
     get_idr_by_id,
+    get_idr_id_for_day,
     list_review_queue,
     return_idr,
+    undelete_idr,
 )
 from api.schemas.auth import UserOut
 from api.schemas.idr import (
@@ -32,6 +36,7 @@ from api.v1._shared import idr_list_items
 from api.schemas.field_edit import PayItemsUntouched
 from api.services.auth import current_admin, current_user, demo_idr_fence, require_project_role
 from api.services.field_edits import FieldEditError, untouched_message, untouched_pay_items
+from api.services.idr_purge import purge_idr
 from api.services.quantities import quantity_rows_for_idr
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 
@@ -332,3 +337,74 @@ def delete_idr(idr_id: UUID, user: UserOut = Depends(current_admin)) -> IdrRespo
         return IdrResponse(status="success", message="IDR was already deleted", data=Idr.model_validate(_load_idr(idr_id)))
 
     return IdrResponse(status="success", message="IDR deleted", data=Idr.model_validate(rows[0]))
+
+
+SLOT_CONFLICT = {409: {"model": IdrConflict, "description": "Another IDR holds this one's day or its IDR number"}}
+
+
+@router.post("/{idr_id}/admin/undelete", response_model=IdrResponse, responses=SLOT_CONFLICT)
+def undelete_idr_record(idr_id: UUID, user: UserOut = Depends(current_admin)) -> Union[IdrResponse, JSONResponse]:
+    """
+    Bring a soft-deleted IDR back as it was: it gets the status it had when it was deleted (read off the audit row the delete wrote; a draft when there is none), and is in the lists again. One that comes back approved gets its quantities back, from its reports as they stand. Admins only.
+    Takes the IDR uuid as a path parameter and the signed-in admin; no body.
+    Returns an IdrResponse; raises 403 (not an admin), 404 (no IDR, or one that isn't deleted), 409 with existing_idr_id (another IDR has since taken its day or its IDR number) and 500 (its reports couldn't be read, or the statement failed).
+    """
+    idr = _load_idr(idr_id)
+
+    if idr["deleted_at"] is None:
+        raise HTTPException(status_code=404, detail="IDR is not deleted")
+
+    # A deleted IDR gave up its day and its number; whoever has them now keeps them
+    holder = get_idr_id_for_day(idr["project_id"], idr["reporter_uuid"], idr["report_date"])
+    detail = "Another IDR now exists for this inspector, project and date"
+
+    if holder is None and idr["idr_number"]:
+        holder = find_idr_by_number(idr["project_id"], idr["idr_number"], idr_id)
+        detail = "This IDR's number is now in use on this project"
+
+    if holder is not None:
+        conflict = IdrConflict(detail=detail, existing_idr_id=holder)
+        return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
+
+    # Written only if the IDR comes back approved, in the statement that brings it back
+    quantity_rows = quantity_rows_for_idr(idr)
+
+    if quantity_rows is None:
+        raise HTTPException(status_code=500, detail="Failed to load IDR reports")
+
+    try:
+        rows = undelete_idr(idr_id, user.uuid, quantity_rows)
+    except IdrSlotTakenError as exc:
+        raise HTTPException(
+            status_code=409, detail="Another IDR took this one's day or its IDR number meanwhile; reload and try again"
+        ) from exc
+
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to restore IDR")
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="IDR is not deleted")
+
+    message = "IDR restored" if rows[0]["status_on_record"] else (
+        "IDR restored as a draft: the status it had when it was deleted is not on record"
+    )
+    return IdrResponse(status="success", message=message, data=Idr.model_validate(rows[0]))
+
+
+@router.delete("/{idr_id}/admin/permanent", status_code=204)
+def permanently_delete_idr(idr_id: UUID, user: UserOut = Depends(current_admin)) -> None:
+    """
+    Delete a soft-deleted IDR for good: its row and everything under it (reports, attachments, edits, audit rows, quantities), then its files in Storage, best-effort. It can't be undone. Admins only; an IDR must be soft-deleted first.
+    Takes the IDR uuid as a path parameter and the signed-in admin.
+    Returns nothing (204); raises 403 (not an admin) and 404 (no IDR, or one that isn't soft-deleted).
+    """
+    idr = _load_idr(idr_id)
+
+    if idr["deleted_at"] is None or not purge_idr(idr_id):
+        raise HTTPException(status_code=404, detail="IDR must be soft-deleted first")
+
+    # The IDR's audit rows went with it, so this line is the record of who removed it
+    logger.info(
+        "IDR permanently deleted: idr_id=%s idr_number=%s project_id=%s admin_user_uuid=%s at=%s",
+        idr_id, idr["idr_number"], idr["project_id"], user.uuid, datetime.now(timezone.utc).isoformat(),
+    )

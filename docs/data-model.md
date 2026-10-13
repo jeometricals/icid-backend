@@ -1,6 +1,7 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 011 (Slice F, pay-item catalog).
+Developer reference for the `icid` schema as of migration 026 (Slice P0a). The diagram below is the ER
+diagram; it was last checked against `schema.sql` in Slice P1.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -12,23 +13,32 @@ column lists below.
 
 ```
 clients ──< users ──< project_users >── projects ──< project_clients >── clients
-                │                          │
-                │ reporter_uuid            │ project_id
-                └──────────< idrs >────────┘
-                              │
-                              │ idr_id (ON DELETE CASCADE)
-                              ▼
-                         idr_reports ──┐
-                              ▲  │     │ parent_report_id (addendum → parent,
-                              └──┼─────┘  ON DELETE CASCADE)
-                                 │ report_id (ON DELETE CASCADE)
-                                 ▼
-                         report_attachments >── users (uploaded_by)
+                │      (one row per role)    │
+                │ reporter_uuid              │ project_id
+                └───────────< idrs >─────────┘
+                               │
+                               │ idr_id, ON DELETE CASCADE on all four
+        ┌──────────────┬───────┴────────┬──────────────────┐
+        ▼              ▼                ▼                  ▼
+   idr_reports     idr_audit     idr_field_edits      quantities
+     ▲  │  │                            ▲
+     └──┘  │                            │ report_id (ON DELETE CASCADE;
+  parent_  ├────────────────────────────┘  NULL for an edit of the header)
+report_id  │ report_id (ON DELETE CASCADE)
+(addendum  ▼
+→ parent)  report_attachments
 
-idrs ──< quantities >── projects                (idr_id ON DELETE CASCADE)
+projects ──< contract_items ··· spec_items     project_id ON DELETE CASCADE; spec_item_id optional (legacy catalog)
+projects ──< quantities                        project_id, a copy of the IDR's
 
-projects ──< contract_items >── spec_items      (project_id ON DELETE CASCADE; spec_item_id optional)
+users is also referenced by (none cascades):
+    idrs.stage1_reviewer_uuid, idrs.re_reviewer_uuid, idrs.deleted_by
+    idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by
 ```
+
+`──<` reads "has many". Deleting an IDR's row takes everything drawn under it; nothing cascades from a user, a
+client or a project except a project's `contract_items`. `quantities.reporter_uuid` is a copy with no foreign key.
+`form_templates` stands alone and is unused.
 
 - A **client** is an organisation. Every **user** belongs to one client.
 - **Projects** are construction contracts. Users are assigned to projects through
@@ -39,6 +49,11 @@ projects ──< contract_items >── spec_items      (project_id ON DELETE CA
   addenda, and so on. Each one's form content is a JSON blob in `report_data`.
 - **report_attachments** are files (photos, PDFs) attached to a report. The row is metadata;
   the bytes live in Supabase Storage.
+- **idr_audit** logs what is done to an IDR from submission on; **idr_field_edits** holds what reviewers
+  changed on it. **quantities** holds an approved IDR's pay-item quantities, one row each.
+- An IDR is **soft-deleted** by an admin (`status = 'deleted'`, `deleted_at`, `deleted_by`): the row and
+  everything under it stay, and it can be brought back. Only a soft-deleted IDR can then be deleted for good,
+  which removes the row and, by the cascades above, everything under it. See [idrs](#idrs).
 - **contract_items** is one project's Schedule of Bid Items: its pay items, each with its own
   number, description and unit, under which budget codes, at what quantity and price.
   **spec_items** is the NYCDOT pay-item catalog the first project's items were seeded from;
@@ -63,7 +78,9 @@ No endpoint reads clients directly yet.
 
 ### users
 
-People who sign in: inspectors, CCLs, engineers.
+People who sign in: inspectors, CCLs, engineers, admins. An admin creates a user and renames one
+(`/v1/admin/users`); a password is changed by its user or reset by an admin. Email, role and `is_demo` of an
+existing user are changed in SQL.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -72,8 +89,8 @@ People who sign in: inspectors, CCLs, engineers.
 | `first_name`, `last_name` | TEXT | |
 | `phone_number` | TEXT | |
 | `client_id` | TEXT NOT NULL | FK → `clients.client_id` (the user's employer) |
-| `password_hash` | TEXT | bcrypt. NULL: the user can't sign in with a password. |
-| `role` | TEXT | e.g. `admin`. NULL: no role yet. |
+| `password_hash` | TEXT | bcrypt. NULL: the user can't sign in with a password. Written when an admin creates the user, by `POST /v1/users/me/password` and by `POST /v1/admin/users/{id}/password`; never returned |
+| `role` | TEXT | `admin`, or NULL for everyone else. What a user may do on a project is `project_users.role` |
 | `is_demo` | BOOLEAN NOT NULL | Default `false`. Throwaway demo accounts; `idx_users_is_demo` (partial) serves their cleanup. |
 | `signature_path` | TEXT | The user's current signature: its object path in the `signatures` bucket. NULL: none yet. |
 | `signature_type` | TEXT | `drawn` or `uploaded`; CHECK `chk_users_signature_type`. NULL with no signature. |
@@ -86,7 +103,8 @@ older than 24 hours who never signed out.
 
 ### projects
 
-Construction contracts.
+Construction contracts. An admin creates one through `POST /v1/admin/projects`; its status and its clients are
+set in SQL.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -102,7 +120,7 @@ database, and R5 removed it from the General page.
 
 ### project_users
 
-Assigns users to projects. `GET /v1/projects/?user_id=` reads through this table.
+Assigns users to projects, one row per role. `GET /v1/projects/` reads the signed-in user's projects through it.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -118,15 +136,15 @@ roles through `POST /v1/projects/{project_id}/roles`; a row made that way has no
 
 ### project_clients
 
-Links additional organisations to a project.
+Links additional organisations to a project. No endpoint writes it (rows are made in SQL).
 
 | Column | Type | Notes |
 |---|---|---|
 | `project_id` | TEXT | PK part; FK → `projects.project_id` |
 | `client_id` | TEXT | PK part; FK → `clients.client_id` |
-| `client_role` | TEXT | That organisation's role on the project |
+| `client_role` | TEXT | That organisation's role on the project. The IDR export prints the client whose role is `Contractor` as the contractor |
 
-No endpoint reads this table yet.
+Read only by the export (`get_project_contractor_name`).
 
 ### idrs
 
@@ -159,8 +177,20 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `returned_from` | TEXT | `stage1` or `stage2`; CHECK `chk_idrs_returned_from` |
 | `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete: when and by whom (FK → `users.uuid`). The row is kept |
 
-The review columns (from `idr_number` down) came with migration 017. `deleted_at` and `deleted_by` are set by
-`POST /v1/idrs/{id}/admin/delete`, together with `status = 'deleted'`.
+The review columns (from `idr_number` down) came with migration 017.
+
+**Soft delete, un-delete and permanent delete** (all admin only):
+- `POST /v1/idrs/{id}/admin/delete` sets `status = 'deleted'`, `deleted_at` and `deleted_by`. The row and
+  everything under it stay, except its `quantities` rows, which are removed. Its day and its IDR number
+  become free (the two unique indexes below are partial). The status it had is not kept on the row: it is the
+  `from_status` of the `idr_audit` row (`admin_delete`) the same statement writes.
+- `POST /v1/idrs/{id}/admin/undelete` clears `deleted_at` and `deleted_by` and puts back that status (the
+  latest `admin_delete` row's `from_status`; `draft` when there is none). It is refused (409) while another IDR
+  holds the day or the number. An IDR that comes back `approved` gets its `quantities` rows written again.
+- `DELETE /v1/idrs/{id}/admin/permanent` deletes the row of an IDR that is soft-deleted, and only of one that
+  is. The cascades take its reports, attachments, field edits, audit rows and quantities; the backend then
+  removes its files from the three Storage buckets, best-effort. Nothing of it is left in the database, its
+  audit rows included, so who removed it is in the application log only.
 
 Constraints and indexes:
 - `uq_idrs_project_reporter_date UNIQUE (project_id, reporter_uuid, report_date) WHERE deleted_at IS NULL`:
@@ -188,15 +218,16 @@ that also writes a row to `idr_audit`.
 
 ### idr_audit
 
-One row per thing done to an IDR in review. Written by the statement that changes the IDR; nothing reads it yet.
+One row per thing done to an IDR from submission on. Written by the statement that changes the IDR. Un-delete
+reads it, for the status an IDR had when it was deleted; nothing else does.
 
 | Column | Type | Notes |
 |---|---|---|
 | `audit_id` | UUID PK | `gen_random_uuid()` |
 | `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE** |
 | `actor_uuid` | UUID NOT NULL | FK → `users.uuid`. Who did it |
-| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`, and for reviewer edits `field_edit`, `pay_item_revise`, `pay_item_add`, `pay_item_approve`. No CHECK |
-| `from_status`, `to_status` | TEXT | The IDR's status before and after; nullable for actions that aren't a status change |
+| `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`, `admin_undelete`, and for reviewer edits `field_edit`, `pay_item_revise`, `pay_item_add`, `pay_item_approve`, `truck_add`. No CHECK |
+| `from_status`, `to_status` | TEXT | The IDR's status before and after; nullable for actions that aren't a status change. An `admin_delete` row's `from_status` is the only record of what a deleted IDR was |
 | `note` | TEXT | The return comment; for a reviewer edit, `{"edit_id", "field_path"}` as JSON text |
 | `created_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
 
@@ -281,8 +312,8 @@ Cascades: deleting an IDR deletes its reports, and deleting a report deletes its
 
 The pay-item quantities of approved IDRs, one row per pay item, kept apart from the reports so progress and
 as-built reports can read them with plain queries. Added by migration 025. Final approval writes an IDR's rows in
-the statement that approves it; admin unlock and admin delete remove them in theirs. So it only ever holds IDRs
-that are approved and not deleted. `scripts/backfill_quantities.py` fills it for the IDRs approved before that.
+the statement that approves it; admin unlock and admin delete remove them in theirs, and admin un-delete writes
+them back for an IDR that comes back approved. So it only ever holds IDRs that are approved and not deleted. `scripts/backfill_quantities.py` fills it for the IDRs approved before that.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -338,7 +369,8 @@ no timestamp: `upload-complete` flips `is_uploaded`, and `PUT` replaces `attachm
 Storage is not part of the database transaction. Deleting a report cascades its attachment
 rows (and its addenda's), and the backend removes the matching Storage files separately, on a
 best-effort basis. A file whose removal fails is left orphaned in the bucket; nothing points
-at it.
+at it. The same goes for an IDR an admin deletes for good: its attachment rows cascade with it, and the files
+are removed afterwards.
 
 Known polish item: in the IDR export, the "Attachment unavailable" page (a photo the export couldn't
 fetch or read) still uses a small 10 pt note, unlike the PDF page's larger title and "no preview" box.
@@ -347,15 +379,18 @@ fetch or read) still uses a small 10 pt note, unlike the PDF page's larger title
 
 Private bucket, PNG only, 500 KB per file, reached only by the backend (service key). `users.signature_path`
 and `idrs.inspector_signature_path` hold object paths in it: `users/{user uuid}/signature.png` for a user's
-current signature (replaced when they set a new one), and `idrs/{idr id}/inspector_{random}.png` for the copy an
-IDR keeps from submit (never replaced or removed).
+current signature (replaced when they set a new one), `idrs/{idr id}/inspector_{random}.png` for the copy an
+IDR keeps from submit, and `idrs/{idr id}/re_{random}.png` for the approver's copy from final approval
+(`idrs.re_signature_path`). A copy is never replaced, and removed only when an admin deletes its IDR for good,
+which empties `idrs/{idr id}/`.
 
 ### Export files (Storage bucket `idr-exports`)
 
 Not a table. `GET /v1/idrs/{idr_id}/export` builds the IDR's `.xlsx`, uploads it to the private
 bucket `idr-exports` at `{idr_id}/{YYYYMMDD_HHMMSS}_{file name}` (UTC; every export is a new object)
 and returns a signed download URL valid for 10 minutes. Only the backend reaches the bucket
-(service key). Nothing removes old exports yet.
+(service key). Nothing removes old exports, except an admin's permanent delete of the IDR, which empties
+`{idr_id}/`.
 
 ### spec_items
 

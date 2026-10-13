@@ -63,14 +63,28 @@ def create_signed_upload_url(path: str, bucket: str = STORAGE_BUCKET_NAME, upser
     return url
 
 
-def remove_files(paths: list[str]) -> None:
+def remove_files(paths: list[str], bucket: str = STORAGE_BUCKET_NAME) -> None:
     """
-    Delete objects from the attachments bucket; paths that don't exist are ignored by Storage.
-    Takes a list of object paths.
+    Delete objects from a bucket; paths that don't exist are ignored by Storage.
+    Takes a list of object paths and the bucket (the attachments bucket unless given).
     Returns nothing; raises the Storage client's error on failure.
     """
     if paths:
-        _bucket().remove(paths)
+        _bucket(bucket).remove(paths)
+
+
+# The most objects one listing of a folder returns
+LIST_LIMIT = 1000
+
+
+def list_file_paths(bucket: str, folder: str) -> list[str]:
+    """
+    List the objects directly in one folder of a bucket, up to LIST_LIMIT of them; folders inside it are left out.
+    Takes the bucket and the folder's path, without a trailing slash.
+    Returns each object's full path; raises the Storage client's error on failure.
+    """
+    entries = _bucket(bucket).list(folder, {"limit": LIST_LIMIT})
+    return [f"{folder}/{entry['name']}" for entry in entries if entry.get("id") is not None]
 
 
 def create_signed_url(path: str, expires_in: int, download_name: str, bucket: str = STORAGE_BUCKET_NAME) -> str:

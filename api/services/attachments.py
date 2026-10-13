@@ -341,14 +341,17 @@ def delete_all_storage_files_for_report(report_id: UUID) -> None:
     remove_storage_files(row["storage_path"] for row in rows)
 
 
-def remove_storage_files(paths: Iterable[str]) -> None:
+def remove_storage_files(paths: Iterable[str], bucket: Optional[str] = None) -> None:
     """
     Delete files from Storage on a best-effort basis, one request per file so one failure doesn't strand the rest.
-    Takes the Storage paths to remove.
+    Takes the Storage paths to remove and the bucket they are in (the attachments bucket unless given).
     Returns nothing; each failure is logged at WARNING with the path left orphaned, never raised.
     """
     for path in paths:
         try:
-            remove_files([path])
+            if bucket is None:
+                remove_files([path])
+            else:
+                remove_files([path], bucket)
         except Exception as exc:
             logger.warning("Could not remove attachment file from Storage, left orphaned: %s (%s)", path, exc)

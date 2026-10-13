@@ -22,7 +22,7 @@ every request to it.
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `pay_items.py` (what a project's pay item may hold: the rules for each field, shared by the admin's form and the CSV import), `pay_item_units.py` (the units a pay item can be bid in and the short form each is stored in), `pay_item_import.py` (a pay-item CSV: reading the file, checking every row, sorting the rows into new items, overwrites and errors), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `idr_purge.py` (deleting a soft-deleted IDR for good: its row, then its files in the three buckets), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `pay_items.py` (what a project's pay item may hold: the rules for each field, shared by the admin's form and the CSV import), `pay_item_units.py` (the units a pay item can be bid in and the short form each is stored in), `pay_item_import.py` (a pay-item CSV: reading the file, checking every row, sorting the rows into new items, overwrites and errors), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -87,6 +87,8 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/trucks/add` — same caller: body is a truck with any of the keys the report form saves (`truckOrTicketNo`, `slump`, `loadSizeCy`, `endBatch`, `mixingRevs`, `startDischTime`, `endDischTime`, `airContent`, `concTemp`, `cylinderNumbers`, `inspectionSticker`); appends it to that Concrete Truck & Mix Info report's trucks, logged as added by the reviewer. 400 for a report that isn't a CONC_MIX, or a truck with neither a truck or ticket number nor a slump
 - `POST /v1/idrs/{idr_id}/admin/unlock` — admin only: an approved IDR (or one in `stage2_review`) goes to `stage2_review` with `re_signature_path`, `re_signed_at`, `re_reviewer_uuid` and `stage2_accepted_at` cleared, so an RE must accept and approve again; the IDR number stays and its quantity rows are removed. 400 for a draft, submitted, Stage 1 or deleted IDR
 - `POST /v1/idrs/{idr_id}/admin/delete` — admin only: soft delete at any status (`status = 'deleted'`, `deleted_at`, `deleted_by`; the row is kept, its quantity rows are removed). Deleting an IDR already deleted is a 200 that changes nothing
+- `POST /v1/idrs/{idr_id}/admin/undelete` — admin only: a soft-deleted IDR comes back with the status it had when it was deleted (a draft when that isn't on record, and the message says so), `deleted_at` and `deleted_by` cleared; one that comes back approved gets its quantity rows back. 404 `IDR is not deleted` for an IDR that isn't, 409 with `existing_idr_id` when another IDR has taken its day or its IDR number
+- `DELETE /v1/idrs/{idr_id}/admin/permanent` — admin only: deletes a soft-deleted IDR for good, with everything under it and its files in Storage; 204. It must be soft-deleted first: 404 `IDR must be soft-deleted first` otherwise. It can't be undone
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request` — start a two-step upload: records a pending attachment (name, description, file details; `uploaded_by` is the signed-in user) and returns a signed Storage upload URL plus the headers to send; draft only, not on an auto-General
 - `POST /v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-complete` — mark a pending attachment uploaded once its file is in Storage (`attachment_id` in the body); draft only
 - `PUT /v1/idrs/{idr_id}/reports/{report_id}/attachments/{attachment_id}` — replace an attachment's name and description; draft only
@@ -150,7 +152,8 @@ Any change must follow these.
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
     admin-only routes are `/v1/admin/cleanup-demos`, the four under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
     `/v1/admin/projects/{project_id}/pay-items`, the two under
-    `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock` and `/admin/delete`.
+    `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`, `/admin/undelete` and
+    `/admin/permanent`.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
     user's first and last name, a demo user's included, and reset their password; an existing user's email, role and `is_demo` are changed
@@ -301,8 +304,38 @@ Any change must follow these.
       `admin_delete`; nothing is removed, attachments and audit rows included, but for its rows in
       `icid.quantities` (see "Quantities"). Every review statement and
       submit match only rows with `deleted_at IS NULL`, the lists leave deleted IDRs out, and the day and the
-      IDR number are free again. There is no undelete. `GET /v1/idrs/{idr_id}` and the export still answer for
+      IDR number are free again. `GET /v1/idrs/{idr_id}` and the export still answer for
       a deleted IDR by id, for anyone signed in; the edit routes refuse it, as it isn't a draft.
+    - **The status before a delete is in `icid.idr_audit`, not on the IDR.** A soft delete overwrites
+      `status`, and the same statement writes its `admin_delete` audit row with `from_status`. That row is the
+      record un-delete reads; there is no column for it.
+    - **Admin un-delete** (`POST .../admin/undelete`) brings a soft-deleted IDR back as it was, in one
+      statement (`undelete_idr`): the status of its latest `admin_delete` audit row, `deleted_at` and
+      `deleted_by` cleared, logged as `admin_undelete`. Its number, reviewers, signatures, accepted times and
+      return reason were never touched by the delete, so they are as they were.
+      - **No record, a draft.** An IDR with no `admin_delete` row (deleted by hand in SQL) comes back as a
+        draft, and the response's message says so.
+      - **It needs its day and its number back.** A deleted IDR freed both. If another IDR now holds the day
+        (project, reporter and date) or the IDR number, the route answers 409 with `existing_idr_id` and
+        changes nothing; the partial unique indexes refuse it too if one is taken between the check and the
+        statement (also 409). Delete or renumber the other IDR first.
+      - **An IDR that comes back approved gets its quantities back**, in the same statement, from its reports
+        as they stand (the route readies them as approve-stage2 does). Any other status gets none.
+      - 404 for an IDR that isn't deleted (`IDR is not deleted`), so calling it twice is a 200 then a 404.
+    - **Admin permanent delete** (`DELETE .../admin/permanent`) removes a soft-deleted IDR for good
+      (`purge_idr` in `api/services/idr_purge.py`). **Two steps, on purpose:** it only takes an IDR that is
+      already soft-deleted (404 `IDR must be soft-deleted first` otherwise, and the DELETE itself carries
+      `deleted_at IS NOT NULL`), so no live IDR can be removed in one call.
+      - **One DELETE on `icid.idrs`.** Every table under an IDR is `ON DELETE CASCADE`: `idr_reports`
+        (and through it `report_attachments`), `idr_field_edits`, `idr_audit` and `quantities`. Nothing else
+        is deleted by hand.
+      - **Then its files, best-effort:** its attachments (their paths are read before the delete), every file
+        under `idrs/{idr id}/` in the signatures bucket (the copies no row points at any more included) and
+        every export under `{idr id}/` in `idr-exports`. A file that can't be removed is logged and left
+        orphaned; the delete still succeeds. Users' own signatures (`users/...`) are never touched.
+      - **The record of it is a log line**, not a row: the IDR's audit rows go with it. The route logs
+        `IDR permanently deleted: idr_id=... idr_number=... project_id=... admin_user_uuid=... at=...` at INFO.
+      - There is no undo.
   - **Unique rules on `idrs` are partial indexes** (`WHERE deleted_at IS NULL`, migration 017):
     `uq_idrs_project_reporter_date` (one IDR per reporter, project and day) and `uq_idrs_project_number`. A
     soft-deleted IDR frees its day and its number. An INSERT can't name either with a bare column list, so
@@ -427,7 +460,8 @@ Any change must follow these.
   - **Submitting signs.** The submit endpoint needs the signed-in user to have a signature (400 otherwise). It
     copies their current file to `idrs/{idr id}/inspector_{random}.png`, then runs the one submit statement, which
     stamps that path and the time on the IDR. The copy is the IDR's own: changing the signature later doesn't
-    change what was signed, and nothing under `idrs/` is ever overwritten or removed.
+    change what was signed, and nothing under `idrs/` is ever overwritten, or removed while the IDR exists
+    (an admin's permanent delete of the IDR removes its folder).
   - **The copy comes before the UPDATE.** If the copy fails, the submit is refused (502) and the IDR stays a
     draft. If the UPDATE then fails or loses a race, the copy is left behind unreferenced, and logged.
   - **Demo users have no signatures**: both signature routes return 403 `Demo mode: signatures are not
@@ -597,6 +631,9 @@ Any change must follow these.
     (`delete_quantities_cte("moved")`): an IDR that is no longer approved has no quantities. Approving it again
     writes them afresh, from the reports as they then stand. So the table only ever holds approved IDRs that
     aren't deleted, and a reader needs no join to leave the others out.
+  - **Admin un-delete writes them back** for an IDR that comes back approved, in its own statement
+    (`replace_quantities_ctes("approved")`, a CTE that holds the IDR only when its restored status is
+    `approved`). A permanent delete takes them with the IDR (the foreign key cascades).
   - **The CTEs have one source**, `api/queries/quantities.py`: `delete_quantities_cte` and
     `insert_quantities_cte` take the name of the CTE that holds the IDR, and `_move_idr` appends them after the
     audit CTE (`also`). No other move touches the table.
