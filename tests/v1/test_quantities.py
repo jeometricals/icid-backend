@@ -49,7 +49,7 @@ ROWS = [
 @contextmanager
 def backend(rows=ROWS, project=PROJECT_ROW, on_project=True):
     """
-    Patch the query layer under the quantities route.
+    Patch the query layer under the quantities route. The roll-up's two reads (tests/v1/test_quantities_budget.py) find nothing.
     Takes the rows the listing returns (None: it fails), the project row (None: no such project) and whether the caller is assigned to it.
     Yields the mock of run_query in api.queries.quantities.
     """
@@ -59,8 +59,13 @@ def backend(rows=ROWS, project=PROJECT_ROW, on_project=True):
             return [{"?column?": 1}] if on_project else []
         return [project] if project else []
 
+    def quantities_query(sql, params=None):
+        """Stand in for run_query in api.queries.quantities: the listing's rows, and no summed ones."""
+        return [] if "GROUP BY" in sql else rows
+
     with patch("api.queries.projects.run_query", side_effect=projects_query), \
-         patch("api.queries.quantities.run_query", return_value=rows) as query:
+         patch("api.queries.contract_items.run_query", return_value=[]), \
+         patch("api.queries.quantities.run_query", side_effect=quantities_query) as query:
         yield query
 
 
@@ -83,7 +88,8 @@ def get(params=None, user=INSPECTOR, **stubs) -> tuple:
         response = client.get(URL, params=params)
     if not query.called:
         return response, None, None
-    return response, flat(query.call_args.args[0]), query.call_args.args[1]
+    listing = query.call_args_list[0]
+    return response, flat(listing.args[0]), listing.args[1]
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +149,8 @@ class TestListQuantities:
 
     def test_no_rows_is_an_empty_list_with_no_totals(self):
         data = get({"from": "2026-11-01"}, rows=[])[0].json()["data"]
-        assert data == {"rows": [], "totals_by_unit": {}, "row_count": 0, "truncated": False}
+        rows_part = {key: data[key] for key in ("rows", "totals_by_unit", "row_count", "truncated")}
+        assert rows_part == {"rows": [], "totals_by_unit": {}, "row_count": 0, "truncated": False}
 
     def test_a_failed_listing_is_500(self):
         response, _, _ = get(rows=None)

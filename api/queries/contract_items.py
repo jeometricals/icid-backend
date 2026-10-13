@@ -76,6 +76,26 @@ def list_project_pay_items(project_id: str) -> Optional[list[dict[str, Any]]]:
     return run_query(sql, (project_id,))
 
 
+def list_project_contract_totals(project_id: str) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch what every contract item of a project is worth: its bid quantity times its bid unit price.
+    Takes the project id.
+    Returns a list of dicts (item_no, budget_code, bid_quantity, bid_unit_price, budgeted_value) ordered by budget code then item number (empty when the project has none), or None on failure.
+    """
+    sql = """
+        SELECT
+            ci.item_no,
+            ci.budget_code,
+            ci.bid_quantity,
+            ci.bid_unit_price,
+            ci.bid_quantity * ci.bid_unit_price AS budgeted_value
+        FROM icid.contract_items ci
+        WHERE ci.project_id = %s
+        ORDER BY ci.budget_code, ci.item_no;
+    """
+    return run_query(sql, (project_id,))
+
+
 def get_project_pay_item(project_id: str, pay_item_uuid: UUID) -> Optional[dict[str, Any]]:
     """
     Fetch one pay item of a project.

@@ -127,6 +127,91 @@ def list_quantities(
     Takes the project id and the optional filters, all of which must hold (any left as None is not applied): the first and last work dates (inclusive), the item numbers, the budget codes and the report types (each matching any in its list), the inspector's uuid, and the most rows to return.
     Returns a list of row dicts (empty if none match), or None on failure.
     """
+    conditions, params = _quantity_filters(
+        project_id, date_from, date_to, pay_items, budget_codes, report_types, reporter_uuid
+    )
+
+    if limit is not None:
+        params.append(limit)
+
+    sql = f"""
+        SELECT
+            q.quantity_id,
+            q.idr_id,
+            i.idr_number,
+            q.report_date,
+            q.reporter_uuid,
+            NULLIF(concat_ws(' ', u.first_name, u.last_name), '') AS reporter_name,
+            q.report_type,
+            q.pay_item_ref,
+            q.budget_code,
+            q.description,
+            q.amount,
+            q.unit
+        FROM icid.quantities q
+        JOIN icid.idrs i ON i.idr_id = q.idr_id
+        LEFT JOIN icid.users u ON u.uuid = q.reporter_uuid
+        WHERE {' AND '.join(conditions)}
+        ORDER BY q.report_date DESC, q.pay_item_ref ASC NULLS LAST, q.quantity_id
+        {'LIMIT %s' if limit is not None else ''};
+    """
+    return run_query(sql, tuple(params))
+
+
+def list_quantities_with_budget(
+    project_id: str,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    pay_items: Optional[list[str]] = None,
+    budget_codes: Optional[list[str]] = None,
+    report_types: Optional[list[str]] = None,
+    reporter_uuid: Optional[UUID] = None,
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Sum a project's quantity rows per pay item and budget code, each with the contract item that has that key (its bid quantity and unit price), by budget code then item number. Rows no contract item matches are summed too, per unit, and marked unbudgeted.
+    Takes the project id and list_quantities' filters, which narrow the rows summed (the contract items are never filtered).
+    Returns a list of row dicts (pay_item_ref, budget_code, description, unit, actual_quantity, budgeted_quantity, unit_price, unbudgeted), empty if no row matches, or None on failure.
+    """
+    conditions, params = _quantity_filters(
+        project_id, date_from, date_to, pay_items, budget_codes, report_types, reporter_uuid
+    )
+
+    sql = f"""
+        SELECT
+            q.pay_item_ref,
+            q.budget_code,
+            COALESCE(c.description, MAX(q.description)) AS description,
+            COALESCE(c.unit, MAX(q.unit)) AS unit,
+            SUM(q.amount) AS actual_quantity,
+            c.bid_quantity AS budgeted_quantity,
+            c.bid_unit_price AS unit_price,
+            (c.contract_item_id IS NULL) AS unbudgeted
+        FROM icid.quantities q
+        JOIN icid.idrs i ON i.idr_id = q.idr_id
+        LEFT JOIN icid.contract_items c
+               ON c.project_id = q.project_id AND c.item_no = q.pay_item_ref AND c.budget_code = q.budget_code
+        WHERE {' AND '.join(conditions)}
+        GROUP BY q.pay_item_ref, q.budget_code, c.contract_item_id,
+                 CASE WHEN c.contract_item_id IS NULL THEN q.unit END
+        ORDER BY q.budget_code ASC NULLS LAST, q.pay_item_ref ASC NULLS LAST, unit ASC NULLS LAST;
+    """
+    return run_query(sql, tuple(params))
+
+
+def _quantity_filters(
+    project_id: str,
+    date_from: Optional[date],
+    date_to: Optional[date],
+    pay_items: Optional[list[str]],
+    budget_codes: Optional[list[str]],
+    report_types: Optional[list[str]],
+    reporter_uuid: Optional[UUID],
+) -> tuple[list[str], list[Any]]:
+    """
+    Write the WHERE conditions that pick a project's quantity rows (q) of IDRs that aren't deleted (i).
+    Takes the project id and the optional filters (see list_quantities); any left as None is not applied.
+    Returns (the conditions, to join with AND, and their parameters in order).
+    """
     conditions = ["q.project_id = %s", "i.deleted_at IS NULL"]
     params: list[Any] = [project_id]
 
@@ -154,28 +239,4 @@ def list_quantities(
         conditions.append("q.reporter_uuid = %s")
         params.append(reporter_uuid)
 
-    if limit is not None:
-        params.append(limit)
-
-    sql = f"""
-        SELECT
-            q.quantity_id,
-            q.idr_id,
-            i.idr_number,
-            q.report_date,
-            q.reporter_uuid,
-            NULLIF(concat_ws(' ', u.first_name, u.last_name), '') AS reporter_name,
-            q.report_type,
-            q.pay_item_ref,
-            q.budget_code,
-            q.description,
-            q.amount,
-            q.unit
-        FROM icid.quantities q
-        JOIN icid.idrs i ON i.idr_id = q.idr_id
-        LEFT JOIN icid.users u ON u.uuid = q.reporter_uuid
-        WHERE {' AND '.join(conditions)}
-        ORDER BY q.report_date DESC, q.pay_item_ref ASC NULLS LAST, q.quantity_id
-        {'LIMIT %s' if limit is not None else ''};
-    """
-    return run_query(sql, tuple(params))
+    return conditions, params
