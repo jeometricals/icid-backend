@@ -78,9 +78,8 @@ No endpoint reads clients directly yet.
 
 ### users
 
-People who sign in: inspectors, CCLs, engineers, admins. An admin creates a user and renames one
-(`/v1/admin/users`); a password is changed by its user or reset by an admin. Email, role and `is_demo` of an
-existing user are changed in SQL.
+People who sign in: inspectors, CCLs, engineers, admins. An admin creates a user and edits one's names, email,
+admin role and demo flag (`/v1/admin/users`); a password is changed by its user or reset by an admin.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -90,8 +89,8 @@ existing user are changed in SQL.
 | `phone_number` | TEXT | |
 | `client_id` | TEXT NOT NULL | FK → `clients.client_id` (the user's employer) |
 | `password_hash` | TEXT | bcrypt. NULL: the user can't sign in with a password. Written when an admin creates the user, by `POST /v1/users/me/password` and by `POST /v1/admin/users/{id}/password`; never returned |
-| `role` | TEXT | `admin`, or NULL for everyone else. What a user may do on a project is `project_users.role` |
-| `is_demo` | BOOLEAN NOT NULL | Default `false`. Throwaway demo accounts; `idx_users_is_demo` (partial) serves their cleanup. |
+| `role` | TEXT | `admin`, or NULL for everyone else; the admin API sets it from `is_admin`. What a user may do on a project is `project_users.role` |
+| `is_demo` | BOOLEAN NOT NULL | Default `false`. Throwaway demo accounts; `idx_users_is_demo` (partial) serves their cleanup. An admin can turn it off for a user (demo to real), never on |
 | `signature_path` | TEXT | The user's current signature: its object path in the `signatures` bucket. NULL: none yet. |
 | `signature_type` | TEXT | `drawn` or `uploaded`; CHECK `chk_users_signature_type`. NULL with no signature. |
 | `signature_set_at` | TIMESTAMPTZ | When the current signature was set |

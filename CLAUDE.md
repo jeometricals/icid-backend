@@ -46,7 +46,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST` or `GET /v1/admin/cleanup-demos` — deletes demo users older than 24 hours; returns `{purged_count}`. For a signed-in admin, or the scheduler sending `CRON_SECRET` as its bearer token; 403 for anyone else signed in
 - `GET /v1/admin/users` — admin only: every user, demo users included, by last name, first name and email, under `data`; each as `/v1/auth/me` returns a user (`uuid`, `email`, `first_name`, `last_name`, `role`, `is_demo`, `has_signature`, `signature_set_at`)
 - `POST /v1/admin/users` — admin only: body `{email, first_name, last_name?, password, is_admin?}`; creates a user who signs in with that password and returns them under `data`, 201. 400 for a blank or malformed email, a blank or over-long name, or a password under 6 characters or over 72 bytes; 409 `{detail, existing_user_uuid}` when the email is taken, whatever its capitals
-- `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?}`; changes the names sent and returns the user under `data`. Names are trimmed. 400 when neither is sent (a null counts as not sent) or one is blank or over 100 characters, 404 for an unknown user
+- `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?, email?, is_admin?, is_demo?}`; changes what is sent and returns the user under `data` (`role` is `admin` or null). Names and email are trimmed. 400 when nothing is sent (a null counts as not sent), a name is blank or over 100 characters, the email is blank or malformed, an admin sends `is_admin: false` for themselves (`You cannot revoke your own admin role.`), or `is_demo: true` is sent for a real user (`Cannot change a real user to a demo user.`); 404 for an unknown user; 409 `{detail, existing_user_uuid}` when another user has the email, whatever its capitals
 - `POST /v1/admin/users/{user_id}/password` — admin only: body `{new_password}`; replaces the user's password and returns the user under `data`. Any user, the admin's own row included. 400 for a password under 6 characters or over 72 bytes, 404 for an unknown user
 - `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
@@ -156,10 +156,27 @@ Any change must follow these.
     `/admin/permanent`.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
-    user's first and last name, a demo user's included, and reset their password; an existing user's email, role and `is_demo` are changed
-    in SQL, and a name can't be cleared. The route checks the names itself, so a bad one is a 400, not FastAPI's 422. Names
+    user's first and last name, email, admin role and demo flag, a demo user's included, and reset their password; a name can't be cleared. The route checks the values itself, so a bad one is a 400, not FastAPI's 422. Names
     are read from `icid.users` whenever they are shown, so a rename also changes the `RE: <name>` caption on
     later exports of IDRs that user approved.
+  - **Editing a user** (`PATCH /v1/admin/users/{user_id}`) takes any of five fields and writes them in one
+    statement (`update_user_fields`), so either all of them change or none does.
+    - **Email:** checked as on create and stored as typed, trimmed. The statement itself won't write an email
+      another user has, whatever its capitals (`NOT EXISTS ... lower(other.email) = lower(%s)`), and the unique
+      index backs that up; the route then looks the holder up for the 409. The user's own email in other
+      capitals is not a collision. Sign-in is by user id inside the token, so a user whose email changes stays
+      signed in and signs in with the new one next time.
+    - **`is_admin`:** `true` sets `role = 'admin'`, `false` clears it to NULL; the response shows it as `role`.
+      **An admin can't revoke their own admin role** (400): another admin has to, so the last admin can't lock
+      everyone out by a slip. Nothing else is checked: a demo user can be made an admin.
+    - **`is_demo`: only demo to real.** `false` on a demo user makes them a real one: the demo fences no longer
+      hold them, signing out no longer deletes them, and the daily cleanup passes them by (both delete only
+      `is_demo = true`). They keep their `demo-<uuid>@icid.local` email, their one `DEMO01` assignment and no
+      password, so an admin gives them an email and a password next. **A real user can't be made a demo user**
+      (400): demo users are deleted with everything they made. The statement can only turn the flag off
+      (`is_demo = u.is_demo AND COALESCE(%s, true)`), whatever the route let through. `false` on a real user and
+      `true` on a demo user are 200s that change nothing.
+    - A password is not part of this route, and nor is the client (`client_id`), which is still changed in SQL.
   - **Creating a user** (`POST /v1/admin/users`): the email is stored as typed, trimmed; a blank last name is
     stored as NULL; the password is hashed with bcrypt (`hash_password` in `api/services/auth.py`) and never
     trimmed or returned. `is_admin` sets `role = 'admin'`, otherwise the role is NULL; the user is never a demo

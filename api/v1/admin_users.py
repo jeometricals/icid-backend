@@ -7,8 +7,9 @@ from fastapi.responses import JSONResponse
 from api.queries.users import (
     create_user,
     get_user_by_email,
+    get_user_by_uuid,
     list_users_for_admin,
-    update_user_names,
+    update_user_fields,
     update_user_password,
 )
 from api.schemas.admin import (
@@ -108,23 +109,48 @@ def create_user_account(body: AdminUserCreate) -> AdminUserResponse | JSONRespon
     return AdminUserResponse(data=UserOut.model_validate(row))
 
 
-@router.patch("/{user_id}", response_model=AdminUserResponse)
-def update_user(user_id: UUID, body: AdminUserUpdate) -> AdminUserResponse:
+@router.patch("/{user_id}", response_model=AdminUserResponse, responses={409: {"model": UserConflict}})
+def update_user(
+    user_id: UUID, body: AdminUserUpdate, admin: UserOut = Depends(current_admin)
+) -> AdminUserResponse | JSONResponse:
     """
-    Change a user's first name, last name or both. Admins only. A field left out, or sent as null, keeps its value.
-    Takes the user's uuid as a path parameter and the names in the body.
-    Returns an AdminUserResponse with the user as they now are; raises 400 when neither name is sent or one is blank or over 100 characters, 403 for a user who isn't an admin, and 404 for an unknown user.
+    Change some of a user's first name, last name, email, admin role and demo flag. Admins only. A field left out, or sent as null, keeps its value. An admin can't take their own admin role away, and a real user can't be made a demo user.
+    Takes the user's uuid as a path parameter, the fields to change in the body (names and email trimmed) and the signed-in admin.
+    Returns an AdminUserResponse with the user as they now are; raises 400 when nothing is sent, a value doesn't fit or one of the two rules is broken, 403 for a user who isn't an admin, 404 for an unknown user, and 409 (with existing_user_uuid) when another user has the email, whatever its capitals. Nothing is changed unless everything can be.
     """
     first_name = _clean_name(body.first_name, "first_name")
     last_name = _clean_name(body.last_name, "last_name")
+    email = _clean_email(body.email) if body.email is not None else None
 
-    if first_name is None and last_name is None:
-        raise HTTPException(status_code=400, detail="Send first_name, last_name or both")
+    if first_name is None and last_name is None and email is None and body.is_admin is None and body.is_demo is None:
+        raise HTTPException(status_code=400, detail="Send first_name, last_name, email, is_admin or is_demo")
 
-    row = update_user_names(user_id, first_name, last_name)
+    if body.is_admin is False and user_id == admin.uuid:
+        raise HTTPException(status_code=400, detail="You cannot revoke your own admin role.")
+
+    if body.is_demo:
+        target = get_user_by_uuid(user_id)
+
+        if target is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if not target["is_demo"]:
+            raise HTTPException(status_code=400, detail="Cannot change a real user to a demo user.")
+
+    row = update_user_fields(user_id, first_name, last_name, email, body.is_admin, body.is_demo)
 
     if row is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        # No such user, or the email is another user's
+        if get_user_by_uuid(user_id) is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        holder = get_user_by_email(email) if email is not None else None
+
+        if holder is None or holder["uuid"] == user_id:
+            raise HTTPException(status_code=500, detail="Failed to update user")
+
+        conflict = UserConflict(detail="A user with this email already exists", existing_user_uuid=holder["uuid"])
+        return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
 
     return AdminUserResponse(data=UserOut.model_validate(row))
 

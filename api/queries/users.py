@@ -1,6 +1,8 @@
 from typing import Any, Optional
 from uuid import UUID
 
+from psycopg.errors import UniqueViolation
+
 from api.db.runner import run_query
 
 # What sign-in reads about a user. The password hash is added only by get_user_for_auth.
@@ -211,24 +213,43 @@ def create_user(
     return rows[0] if rows else None
 
 
-def update_user_names(uuid: UUID, first_name: Optional[str], last_name: Optional[str]) -> Optional[dict[str, Any]]:
+def update_user_fields(
+    uuid: UUID,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    email: Optional[str] = None,
+    is_admin: Optional[bool] = None,
+    is_demo: Optional[bool] = None,
+) -> Optional[dict[str, Any]]:
     """
-    Change a user's first name, last name or both; a name passed as None keeps its value.
-    Takes the user's uuid and the two names.
-    Returns the updated user dict (as get_user_by_uuid returns it), or None if no user matches.
+    Change some of a user's first name, last name, email, admin role and demo flag; a value passed as None keeps what the user has. Changes nothing when another user has the email, whatever its capitals. The demo flag can only ever be turned off: True leaves it as it is.
+    Takes the user's uuid and the new values: the names and the email as they are to be stored, is_admin (True makes the role 'admin', False clears it) and is_demo (False makes a demo user a real one).
+    Returns the updated user dict (as get_user_by_uuid returns it), or None if no user matches or the email is taken.
     """
     sql = (
         """
         UPDATE icid.users u
         SET first_name = COALESCE(%s, u.first_name),
             last_name = COALESCE(%s, u.last_name),
+            email = COALESCE(%s, u.email),
+            role = CASE WHEN %s::boolean THEN 'admin' WHEN NOT %s::boolean THEN NULL ELSE u.role END,
+            is_demo = u.is_demo AND COALESCE(%s, true),
             updated_at = now()
         WHERE u.uuid = %s
+          AND NOT EXISTS (
+              SELECT 1
+              FROM icid.users other
+              WHERE lower(other.email) = lower(%s::text) AND other.uuid <> u.uuid
+          )
         RETURNING"""
         + _AUTH_USER_COLUMNS
         + ";"
     )
-    rows = run_query(sql, (first_name, last_name, uuid))
+    try:
+        rows = run_query(sql, (first_name, last_name, email, is_admin, is_admin, is_demo, uuid, email))
+    except UniqueViolation:
+        # Another user took the email between the statement's own check and its write
+        return None
     return rows[0] if rows else None
 
 

@@ -14,12 +14,17 @@ class DemoCleanupResult(BaseModel):
 
 class AdminUserUpdate(BaseModel):
     """
-    The names an admin is changing on a user. Either may be left out; the route checks their length itself, so a
-    bad one is a 400.
+    What an admin is changing on a user. Any field may be left out, and a null counts as left out; the route
+    checks the values itself, so a bad one is a 400.
     """
 
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    email: Optional[str] = None
+    # True makes the user an admin, False takes the role away.
+    is_admin: Optional[bool] = None
+    # False makes a demo user a real one. True is only ever a no-op, on a user who is already a demo user.
+    is_demo: Optional[bool] = None
 
 
 class AdminUserCreate(BaseModel):
