@@ -232,6 +232,26 @@ def update_user_names(uuid: UUID, first_name: Optional[str], last_name: Optional
     return rows[0] if rows else None
 
 
+def update_user_password(uuid: UUID, password_hash: str) -> Optional[dict[str, Any]]:
+    """
+    Replace the password a user signs in with.
+    Takes the user's uuid and the new password's hash.
+    Returns the updated user dict (as get_user_by_uuid returns it, so without the hash), or None if no user matches.
+    """
+    sql = (
+        """
+        UPDATE icid.users u
+        SET password_hash = %s,
+            updated_at = now()
+        WHERE u.uuid = %s
+        RETURNING"""
+        + _AUTH_USER_COLUMNS
+        + ";"
+    )
+    rows = run_query(sql, (password_hash, uuid))
+    return rows[0] if rows else None
+
+
 def cleanup_abandoned_demo_users() -> Optional[int]:
     """
     Delete the demo users created more than 24 hours ago, with everything of theirs, by running the database's cleanup function (migration 014).

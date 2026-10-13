@@ -1,5 +1,6 @@
 """
-What more than one router needs: reading the date and discipline filters, and shaping the rows of an IDR list.
+What more than one router needs: reading the date and discipline filters, checking a new password, and shaping the
+rows of an IDR list.
 Not a router itself.
 """
 
@@ -9,7 +10,11 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from api.schemas.idr import IdrListItem
+from api.services.auth import MAX_PASSWORD_BYTES
 from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
+
+# The shortest password sign-in takes
+MIN_PASSWORD_LENGTH = 6
 
 
 def day(value: Optional[str], name: str) -> Optional[date]:
@@ -55,6 +60,18 @@ def report_types_for(disciplines: Optional[list[str]]) -> Optional[list[str]]:
             raise HTTPException(status_code=400, detail=f"Unknown discipline: {discipline}")
         report_types += [report_type for report_type in covered if report_type not in report_types]
     return report_types
+
+
+def check_new_password(password: str, field: str) -> None:
+    """
+    Check a password a user is to sign in with, as typed (never trimmed).
+    Takes the password and the body field it came in, for the message.
+    Returns nothing; raises 400 for one under 6 characters or over 72 bytes, the most bcrypt reads.
+    """
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail=f"{field} must be at least {MIN_PASSWORD_LENGTH} characters")
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise HTTPException(status_code=400, detail=f"{field} cannot be longer than {MAX_PASSWORD_BYTES} bytes")
 
 
 def idr_list_items(rows: list[dict[str, Any]]) -> list[IdrListItem]:

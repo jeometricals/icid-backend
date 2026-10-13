@@ -52,3 +52,9 @@ class AdminUserListResponse(BaseModel):
     """Every user, as an admin sees them."""
 
     data: list[UserOut]
+
+
+class AdminResetPasswordRequest(BaseModel):
+    """The password an admin is giving a user. The route checks its length itself, so a bad one is a 400."""
+
+    new_password: str

@@ -365,3 +365,78 @@ class TestHashPassword:
         assert hash_password("p" * 72).startswith("$2b$")
         with pytest.raises(ValueError):
             hash_password("p" * 73)
+
+
+# ---------------------------------------------------------------------------
+# POST /v1/admin/users/{user_id}/password
+# ---------------------------------------------------------------------------
+
+PASSWORD_URL = f"{USER_URL}/password"
+RESET_BODY = {"new_password": "fresh-pass-9"}
+
+
+class TestResetUserPassword:
+    def test_a_valid_password_replaces_the_users_hash(self, admin_client):
+        with patch(QUERY, return_value=[USER_ROW]) as run:
+            response = admin_client.post(PASSWORD_URL, json=RESET_BODY)
+        assert response.status_code == 200 and response.json() == {"data": USER_JSON}
+        assert run.call_count == 1
+        sql, (password_hash, uuid) = run.call_args.args
+        assert "UPDATE icid.users u" in sql and "SET password_hash = %s" in sql and "WHERE u.uuid = %s" in sql
+        assert "u.password_hash" not in sql.split("RETURNING")[1]
+        assert uuid == UUID(USER_ID)
+        assert password_hash.startswith("$2b$") and bcrypt.checkpw(b"fresh-pass-9", password_hash.encode("utf-8"))
+        assert "fresh-pass-9" not in response.text and "password" not in response.text
+
+    def test_the_user_can_sign_in_with_it(self, admin_client):
+        with patch(QUERY, return_value=[USER_ROW]) as run:
+            admin_client.post(PASSWORD_URL, json=RESET_BODY)
+        stored = {**USER_ROW, "password_hash": run.call_args.args[1][0]}
+        with patch("api.services.auth.get_user_for_auth", return_value=stored):
+            assert auth_provider.verify_credentials("khang@magnoleng.pc", "fresh-pass-9").uuid == UUID(USER_ID)
+
+    def test_an_admin_can_reset_their_own(self, admin_client):
+        with patch(QUERY, return_value=[ADMIN_USER_ROW]) as run:
+            response = admin_client.post(f"{URL}/{ADMIN_USER_ROW['uuid']}/password", json=RESET_BODY)
+        assert response.status_code == 200 and response.json()["data"]["email"] == "admin@icid.local"
+        assert run.call_args.args[1][1] == ADMIN_USER_ROW["uuid"]
+
+    @pytest.mark.parametrize("new_password,detail", [
+        ("12345", "new_password must be at least 6 characters"),
+        ("", "new_password must be at least 6 characters"),
+        ("p" * 73, "new_password cannot be longer than 72 bytes"),
+        ("é" * 37, "new_password cannot be longer than 72 bytes"),
+    ])
+    def test_a_password_that_doesnt_fit_is_400_and_nothing_is_written(self, admin_client, new_password, detail):
+        with patch(QUERY) as run:
+            response = admin_client.post(PASSWORD_URL, json={"new_password": new_password})
+        assert response.status_code == 400 and response.json() == {"detail": detail}
+        run.assert_not_called()
+
+    def test_an_unknown_user_is_404(self, admin_client):
+        with patch(QUERY, return_value=[]):
+            response = admin_client.post(PASSWORD_URL, json=RESET_BODY)
+        assert response.status_code == 404 and response.json() == {"detail": "User not found"}
+
+    def test_a_missing_password_is_422(self, admin_client):
+        with patch(QUERY) as run:
+            assert admin_client.post(PASSWORD_URL, json={}).status_code == 422
+        run.assert_not_called()
+
+    def test_a_user_who_isnt_an_admin_is_forbidden(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(QUERY) as run:
+            response = inspector.post(PASSWORD_URL, json=RESET_BODY)
+        assert (response.status_code, response.json()) == FORBIDDEN
+        run.assert_not_called()
+
+    def test_a_demo_user_is_forbidden(self, demo_client):
+        with patch(QUERY) as run:
+            assert demo_client.post(PASSWORD_URL, json=RESET_BODY).status_code == 403
+        run.assert_not_called()
+
+    def test_the_schedulers_secret_doesnt_open_it(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "CRON_SECRET", CRON_SECRET)
+        with patch(QUERY) as run:
+            response = client.post(PASSWORD_URL, json=RESET_BODY, headers={"Authorization": f"Bearer {CRON_SECRET}"})
+        assert response.status_code == 401  # the secret is no user's token
+        run.assert_not_called()
