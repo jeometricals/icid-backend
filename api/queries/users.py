@@ -1,7 +1,7 @@
 from typing import Any, Optional
 from uuid import UUID
 
-from psycopg.errors import UniqueViolation
+from psycopg.errors import ForeignKeyViolation, UniqueViolation
 
 from api.db.runner import run_query
 
@@ -16,16 +16,21 @@ _AUTH_USER_COLUMNS = """
             u.is_demo,
             u.signature_path,
             u.signature_type,
-            u.signature_set_at"""
+            u.signature_set_at,
+            u.deleted_at,
+            u.deleted_by"""
 _AUTH_USER_SELECT = "\n        SELECT" + _AUTH_USER_COLUMNS + "\n        FROM icid.users u\n"
 _AUTH_USER_WITH_HASH_SELECT = _AUTH_USER_SELECT.replace("u.is_demo", "u.is_demo,\n            u.password_hash")
-# Emails are stored as entered and matched without regard to case; the oldest wins if two differ only by case
-_BY_EMAIL = "        WHERE lower(u.email) = %s\n        ORDER BY u.created_at, u.uuid\n        LIMIT 1;"
+# Emails are stored as entered and matched without regard to case, among users who aren't deleted: a deleted user's
+# email belongs to no one
+_BY_EMAIL = (
+    "        WHERE lower(u.email) = %s AND u.deleted_at IS NULL\n        ORDER BY u.created_at, u.uuid\n        LIMIT 1;"
+)
 
 
 def get_all_users() -> Optional[list[dict[str, Any]]]:
     """
-    Fetch every user with their employing client.
+    Fetch every user who isn't deleted, with their employing client.
     Takes no arguments.
     Returns a list of user dicts ordered by last then first name, or None on failure.
     """
@@ -38,6 +43,7 @@ def get_all_users() -> Optional[list[dict[str, Any]]]:
             u.phone_number,
             u.client_id AS employer
         FROM icid.users u
+        WHERE u.deleted_at IS NULL
         ORDER BY u.last_name, u.first_name;
     """
     return run_query(sql)
@@ -66,7 +72,7 @@ def get_user_by_id(user_id: str) -> Optional[dict[str, Any]]:
 
 def get_user_by_email(email: str) -> Optional[dict[str, Any]]:
     """
-    Fetch a single user by email, ignoring case, without their password hash.
+    Fetch the user who has an email, ignoring case, without their password hash. Deleted users are left out.
     Takes the email.
     Returns the user dict (uuid, email, names, client_id, role, is_demo), or None if no user matches.
     """
@@ -76,9 +82,9 @@ def get_user_by_email(email: str) -> Optional[dict[str, Any]]:
 
 def get_user_for_auth(email: str) -> Optional[dict[str, Any]]:
     """
-    Fetch a single user by email, ignoring case, with their password hash. For checking credentials only.
+    Fetch the user who has an email, ignoring case, with their password hash. For checking credentials only. Deleted users are left out, so one can't sign in.
     Takes the email.
-    Returns the user dict including password_hash, or None if no user matches.
+    Returns the user dict including password_hash, or None if no user who isn't deleted matches.
     """
     rows = run_query(_AUTH_USER_WITH_HASH_SELECT + _BY_EMAIL, (email.strip().lower(),))
     return rows[0] if rows else None
@@ -86,9 +92,9 @@ def get_user_for_auth(email: str) -> Optional[dict[str, Any]]:
 
 def get_user_by_uuid(uuid: UUID) -> Optional[dict[str, Any]]:
     """
-    Fetch a single user by uuid, without their password hash.
+    Fetch a single user by uuid, without their password hash. A deleted user is returned too, with deleted_at set.
     Takes the user's uuid.
-    Returns the user dict (uuid, email, names, client_id, role, is_demo), or None if no user matches.
+    Returns the user dict (uuid, email, names, client_id, role, is_demo, deleted_at), or None if no user matches.
     """
     rows = run_query(_AUTH_USER_SELECT + "        WHERE u.uuid = %s;", (uuid,))
     return rows[0] if rows else None
@@ -183,20 +189,21 @@ def set_user_signature(uuid: UUID, signature_path: str, signature_type: str) -> 
     return rows[0] if rows else None
 
 
-def list_users_for_admin() -> Optional[list[dict[str, Any]]]:
+def list_users_for_admin(include_deleted: bool = False) -> Optional[list[dict[str, Any]]]:
     """
     Fetch every user, demo users included, without their password hash.
-    Takes nothing.
+    Takes whether deleted users are listed too.
     Returns the user dicts (as get_user_by_uuid returns them) by last name, first name and email, or None on failure.
     """
-    return run_query(_AUTH_USER_SELECT + "        ORDER BY u.last_name, u.first_name, u.email;")
+    where = "" if include_deleted else "        WHERE u.deleted_at IS NULL\n"
+    return run_query(_AUTH_USER_SELECT + where + "        ORDER BY u.last_name, u.first_name, u.email;")
 
 
 def create_user(
     email: str, first_name: str, last_name: Optional[str], password_hash: str, role: Optional[str], client_id: str
 ) -> Optional[dict[str, Any]]:
     """
-    Add a user who signs in with a password. Never a demo user. Does nothing when the email is taken, whatever its capitals.
+    Add a user who signs in with a password. Never a demo user. Does nothing when a user who isn't deleted has the email, whatever its capitals.
     Takes the email as it is to be stored, the names (last name may be None), the password's hash, the role ('admin' or None) and the client the user sits under.
     Returns the new user dict (as get_user_by_uuid returns it), or None when a user already has that email.
     """
@@ -204,7 +211,7 @@ def create_user(
         """
         INSERT INTO icid.users AS u (email, first_name, last_name, client_id, password_hash, role, is_demo)
         VALUES (%s, %s, %s, %s, %s, %s, false)
-        ON CONFLICT (lower(email)) DO NOTHING
+        ON CONFLICT (lower(email)) WHERE deleted_at IS NULL DO NOTHING
         RETURNING"""
         + _AUTH_USER_COLUMNS
         + ";"
@@ -222,7 +229,7 @@ def update_user_fields(
     is_demo: Optional[bool] = None,
 ) -> Optional[dict[str, Any]]:
     """
-    Change some of a user's first name, last name, email, admin role and demo flag; a value passed as None keeps what the user has. Changes nothing when another user has the email, whatever its capitals. The demo flag can only ever be turned off: True leaves it as it is.
+    Change some of a user's first name, last name, email, admin role and demo flag; a value passed as None keeps what the user has. Changes nothing when another user who isn't deleted has the email, whatever its capitals. The demo flag can only ever be turned off: True leaves it as it is.
     Takes the user's uuid and the new values: the names and the email as they are to be stored, is_admin (True makes the role 'admin', False clears it) and is_demo (False makes a demo user a real one).
     Returns the updated user dict (as get_user_by_uuid returns it), or None if no user matches or the email is taken.
     """
@@ -239,7 +246,7 @@ def update_user_fields(
           AND NOT EXISTS (
               SELECT 1
               FROM icid.users other
-              WHERE lower(other.email) = lower(%s::text) AND other.uuid <> u.uuid
+              WHERE lower(other.email) = lower(%s::text) AND other.uuid <> u.uuid AND other.deleted_at IS NULL
           )
         RETURNING"""
         + _AUTH_USER_COLUMNS
@@ -271,6 +278,94 @@ def update_user_password(uuid: UUID, password_hash: str) -> Optional[dict[str, A
     )
     rows = run_query(sql, (password_hash, uuid))
     return rows[0] if rows else None
+
+
+def soft_delete_user(uuid: UUID, admin_uuid: UUID) -> Optional[dict[str, Any]]:
+    """
+    Mark a user deleted, with when and by whom. Nothing else of theirs changes: their IDRs, reviews, roles and signature stay.
+    Takes the user's uuid and the uuid of the admin deleting them.
+    Returns the updated user dict (as get_user_by_uuid returns it), or None if no user matches or they are already deleted.
+    """
+    sql = (
+        """
+        UPDATE icid.users u
+        SET deleted_at = now(),
+            deleted_by = %s,
+            updated_at = now()
+        WHERE u.uuid = %s AND u.deleted_at IS NULL
+        RETURNING"""
+        + _AUTH_USER_COLUMNS
+        + ";"
+    )
+    rows = run_query(sql, (admin_uuid, uuid))
+    return rows[0] if rows else None
+
+
+def undelete_user(uuid: UUID) -> Optional[dict[str, Any]]:
+    """
+    Bring a deleted user back: clear deleted_at and deleted_by. Changes nothing when a user who isn't deleted now has their email, whatever its capitals.
+    Takes the user's uuid.
+    Returns the updated user dict (as get_user_by_uuid returns it), or None if no user matches, they aren't deleted, or their email is taken.
+    """
+    sql = (
+        """
+        UPDATE icid.users u
+        SET deleted_at = NULL,
+            deleted_by = NULL,
+            updated_at = now()
+        WHERE u.uuid = %s
+          AND u.deleted_at IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM icid.users other
+              WHERE lower(other.email) = lower(u.email) AND other.uuid <> u.uuid AND other.deleted_at IS NULL
+          )
+        RETURNING"""
+        + _AUTH_USER_COLUMNS
+        + ";"
+    )
+    try:
+        rows = run_query(sql, (uuid,))
+    except UniqueViolation:
+        # Another user took the email between the statement's own check and its write
+        return None
+    return rows[0] if rows else None
+
+
+def count_user_references(uuid: UUID) -> Optional[dict[str, int]]:
+    """
+    Count the rows that name a user, each of which stops the user's row being deleted for good.
+    Takes the user's uuid.
+    Returns {idrs, project_users, audit, field_edits, attachments}: the IDRs they reported, reviewed or deleted, their project roles, the audit rows and field edits they made and the attachments they uploaded; or None on failure.
+    """
+    sql = """
+        SELECT
+            (SELECT count(*) FROM icid.idrs i
+             WHERE %s IN (i.reporter_uuid, i.stage1_reviewer_uuid, i.re_reviewer_uuid, i.deleted_by)) AS idrs,
+            (SELECT count(*) FROM icid.project_users pu WHERE pu.user_uuid = %s) AS project_users,
+            (SELECT count(*) FROM icid.idr_audit a WHERE a.actor_uuid = %s) AS audit,
+            (SELECT count(*) FROM icid.idr_field_edits e WHERE e.editor_uuid = %s) AS field_edits,
+            (SELECT count(*) FROM icid.report_attachments ra WHERE ra.uploaded_by = %s) AS attachments;
+    """
+    rows = run_query(sql, (uuid, uuid, uuid, uuid, uuid))
+    return rows[0] if rows else None
+
+
+def permanent_delete_user(uuid: UUID) -> bool:
+    """
+    Delete a soft-deleted user's row for good. A user who isn't soft-deleted is left alone, and so is one that any row still names (each foreign key to users refuses the delete).
+    Takes the user's uuid.
+    Returns True when the row was deleted, False when there is no such user, they aren't soft-deleted, or something still names them.
+    """
+    sql = """
+        DELETE FROM icid.users u
+        WHERE u.uuid = %s AND u.deleted_at IS NOT NULL
+        RETURNING u.uuid;
+    """
+    try:
+        return bool(run_query(sql, (uuid,)))
+    except ForeignKeyViolation:
+        return False
 
 
 def cleanup_abandoned_demo_users() -> Optional[int]:

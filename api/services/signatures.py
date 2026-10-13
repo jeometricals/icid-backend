@@ -2,7 +2,8 @@
 Signatures: a user's current signature, and the copy an IDR keeps from the moment it is submitted.
 
 Files live in the private signatures bucket (SIGNATURE_BUCKET_NAME):
-    users/{user uuid}/signature.png                 the user's current signature; a new upload replaces it
+    users/{user uuid}/signature.png                 the user's current signature; a new upload replaces it, and it is
+                                                    removed when an admin deletes the user for good
     idrs/{idr id}/inspector_{random}.png            the copy stamped on one IDR at submit; never replaced or removed
     idrs/{idr id}/re_{random}.png                   the RE's copy, stamped at final approval; the same rule
 
@@ -17,7 +18,7 @@ from uuid import UUID, uuid4
 
 from api.core.config import SIGNATURE_BUCKET_NAME
 from api.queries.users import set_user_signature
-from api.services.attachments import SUPABASE_UPLOAD_URL_LIFETIME_SECONDS
+from api.services.attachments import SUPABASE_UPLOAD_URL_LIFETIME_SECONDS, remove_storage_files
 from api.storage.client import copy_file, create_signed_upload_url, object_exists
 
 logger = logging.getLogger(__name__)
@@ -99,3 +100,12 @@ def snapshot_signature_for_idr(signature_path: str, idr_id: UUID, signer: str = 
         logger.error("Storage could not copy signature %s to %s: %s", signature_path, copy_path, exc)
         raise SignatureStorageError("Could not copy the signature for this IDR") from exc
     return copy_path
+
+
+def remove_user_signature(user_uuid: UUID) -> None:
+    """
+    Remove a user's current signature file from Storage, best-effort, once the user has been deleted for good. The copies IDRs keep are not touched.
+    Takes the user's uuid.
+    Returns nothing; a file that can't be removed is logged at WARNING and left orphaned. No file there is fine.
+    """
+    remove_storage_files([user_signature_path(user_uuid)], SIGNATURE_BUCKET_NAME)

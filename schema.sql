@@ -43,14 +43,17 @@ CREATE TABLE icid.users (
     signature_path   TEXT,
     signature_type   TEXT,
     signature_set_at TIMESTAMPTZ,
+    deleted_at       TIMESTAMPTZ,
+    deleted_by       UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
     CONSTRAINT fk_users_client
         FOREIGN KEY (client_id) REFERENCES icid.clients(client_id),
     CONSTRAINT chk_users_signature_type CHECK (signature_type IN ('drawn', 'uploaded'))
 );
 
 CREATE INDEX idx_users_uuid ON icid.users(uuid);
--- One account per email, whatever its capitals; also serves sign-in's lookup by lower(email)
-CREATE UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email));
+-- One account per email, whatever its capitals, among users who aren't deleted (a deleted user's email is free
+-- again; migrations/028); also serves sign-in's lookup by lower(email)
+CREATE UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email)) WHERE deleted_at IS NULL;
 CREATE INDEX idx_users_is_demo ON icid.users(is_demo) WHERE is_demo = true;
 
 ------------------------------------------------------------

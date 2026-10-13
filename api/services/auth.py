@@ -84,7 +84,7 @@ class LocalAuthProvider(AuthProvider):
         """
         Check an email (matched without regard to case) and password against icid.users.
         Takes the email and the password as typed.
-        Returns the user, or None for an unknown email, a user without a password or a wrong password.
+        Returns the user, or None for an unknown email, a deleted user, a user without a password or a wrong password.
         """
         row = get_user_for_auth(email)
         password_hash = row["password_hash"] if row else None
@@ -149,7 +149,7 @@ def current_user(authorization: Optional[str] = Header(None)) -> UserOut:
     FastAPI dependency: the user a request's bearer token belongs to.
     Takes the Authorization header.
     Returns the user; raises 401 for a missing or malformed header, an expired or invalid token, or a user who no
-    longer exists.
+    longer exists or has been deleted.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated", headers=_BEARER)
@@ -162,7 +162,8 @@ def current_user(authorization: Optional[str] = Header(None)) -> UserOut:
     except (jwt.PyJWTError, ValueError):
         raise HTTPException(status_code=401, detail="Invalid token", headers=_BEARER)
     row = get_user_by_uuid(user_uuid)
-    if row is None:
+    # A deleted user's token is refused like one for a user who no longer exists
+    if row is None or row.get("deleted_at") is not None:
         raise HTTPException(status_code=401, detail="Invalid token", headers=_BEARER)
     return UserOut.model_validate(row)
 

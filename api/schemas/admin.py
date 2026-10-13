@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
@@ -47,16 +48,40 @@ class UserConflict(BaseModel):
     existing_user_uuid: UUID
 
 
+class AdminUserOut(UserOut):
+    """A user as an admin sees them: with when they were deleted and by whom, both None for a user who isn't."""
+
+    deleted_at: Optional[datetime] = None
+    deleted_by: Optional[UUID] = None
+
+
 class AdminUserResponse(BaseModel):
     """One user, as an admin sees them."""
 
-    data: UserOut
+    data: AdminUserOut
 
 
 class AdminUserListResponse(BaseModel):
     """Every user, as an admin sees them."""
 
-    data: list[UserOut]
+    data: list[AdminUserOut]
+
+
+class UserReferences(BaseModel):
+    """How many rows name a user: what stops the user being deleted for good."""
+
+    idrs: int
+    project_users: int
+    audit: int
+    field_edits: int
+    attachments: int
+
+
+class UserHasHistory(BaseModel):
+    """The 409 body when a user can't be deleted for good: the reason, and what still names them."""
+
+    detail: str
+    references: UserReferences
 
 
 class AdminResetPasswordRequest(BaseModel):

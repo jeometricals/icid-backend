@@ -26,7 +26,8 @@ USER_ROW = {"uuid": UUID(USER_ID), "email": "KhanG@magnoleng.pc", "first_name": 
             "client_id": "C00001", "role": None, "is_demo": False, "signature_path": None, "signature_type": None,
             "signature_set_at": None}
 USER_JSON = {"uuid": USER_ID, "email": "KhanG@magnoleng.pc", "first_name": "Genghis", "last_name": "Khan",
-             "role": None, "is_demo": False, "signature_set_at": None, "has_signature": False}
+             "role": None, "is_demo": False, "signature_set_at": None, "has_signature": False, "deleted_at": None,
+             "deleted_by": None}
 # A regular user: signed in, no admin role
 INSPECTOR_ROW = {**ADMIN_USER_ROW, "role": None}
 FORBIDDEN = (403, {"detail": "Admin access required"})
@@ -74,7 +75,7 @@ class TestListAdminUsers:
             assert admin_client.get(URL).json() == {"data": []}
         sql = run.call_args.args[0]
         assert "FROM icid.users u" in sql and "ORDER BY u.last_name, u.first_name, u.email;" in sql
-        assert "password_hash" not in sql and "WHERE" not in sql
+        assert "password_hash" not in sql and "WHERE u.deleted_at IS NULL" in sql  # deleted users are left out
 
     def test_a_user_who_isnt_an_admin_is_forbidden(self):
         with signed_in(INSPECTOR_ROW) as inspector, patch(QUERY) as run:
@@ -246,7 +247,8 @@ class TestCreateAdminUser:
         assert response.status_code == 201
         assert response.json() == {"data": {"uuid": NEW_ID, "email": "New.User@icid.local", "first_name": "Nora",
                                             "last_name": "New", "role": None, "is_demo": False,
-                                            "signature_set_at": None, "has_signature": False}}
+                                            "signature_set_at": None, "has_signature": False, "deleted_at": None,
+                                            "deleted_by": None}}
         assert run.call_count == 1
         email, first_name, last_name, client_id, password_hash, role = run.call_args.args[1]
         assert (email, first_name, last_name, client_id, role) == ("New.User@icid.local", "Nora", "New", "C00001", None)
@@ -287,7 +289,7 @@ class TestCreateAdminUser:
         sql = run.call_args.args[0]
         assert "INSERT INTO icid.users AS u (email, first_name, last_name, client_id, password_hash, role, is_demo)" in sql
         assert "VALUES (%s, %s, %s, %s, %s, %s, false)" in sql
-        assert "ON CONFLICT (lower(email)) DO NOTHING" in sql and "RETURNING" in sql
+        assert "ON CONFLICT (lower(email)) WHERE deleted_at IS NULL DO NOTHING" in sql and "RETURNING" in sql
         assert "u.password_hash" not in sql.split("RETURNING")[1]
 
     def test_the_email_and_names_are_trimmed_and_the_email_keeps_its_capitals(self, admin_client):
@@ -486,7 +488,7 @@ class TestUpdateAdminUserEmail:
         sql = " ".join(run.call_args.args[0].split())
         assert "email = COALESCE(%s, u.email)" in sql
         assert ("AND NOT EXISTS ( SELECT 1 FROM icid.users other WHERE lower(other.email) = lower(%s::text) "
-                "AND other.uuid <> u.uuid )") in sql
+                "AND other.uuid <> u.uuid AND other.deleted_at IS NULL )") in sql
         assert "password_hash" not in sql and sql.count(";") == 1
 
     def test_another_users_email_is_409_naming_them_whatever_its_capitals(self, admin_client):

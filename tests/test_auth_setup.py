@@ -75,7 +75,9 @@ class TestUsersSchema:
 
     def test_email_is_unique_and_demo_users_are_indexed(self):
         schema = sql("schema.sql")
-        assert "CREATE UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email));" in schema
+        # Unique among users who aren't deleted (migration 028): a deleted user's email is free again
+        assert ("CREATE UNIQUE INDEX idx_users_email_lower ON icid.users (lower(email)) WHERE deleted_at IS NULL;"
+                in schema)
         assert "uq_users_email" not in schema and "idx_users_email ON" not in schema  # replaced by migration 016
         assert f"CREATE INDEX {IS_DEMO_INDEX}" in schema
 
@@ -109,7 +111,8 @@ class TestSeeds:
 
     def test_auth_users_upserts_on_the_case_insensitive_email(self):
         seed = sql("seed_auth_users.sql")
-        assert "ON CONFLICT (lower(email)) DO UPDATE" in seed  # the only unique index on email since 016
+        # The only unique index on email since 016, partial since 028: the upsert names its WHERE too
+        assert "ON CONFLICT (lower(email)) WHERE deleted_at IS NULL DO UPDATE" in seed
         assert "ON CONFLICT (email)" not in seed
 
     def test_auth_users_puts_genghis_khans_email_back_and_nothing_else(self):
@@ -235,7 +238,7 @@ class TestMigration016:
     def test_it_matches_schema_sql_and_what_sign_in_asks(self):
         from unittest.mock import patch
         from api.queries.users import get_user_for_auth
-        assert "ON icid.users (lower(email));" in sql("schema.sql")
+        assert "ON icid.users (lower(email)) WHERE deleted_at IS NULL;" in sql("schema.sql")  # partial since 028
         with patch("api.queries.users.run_query", return_value=[]) as run:
             get_user_for_auth("Reza@ICID.local")
         assert "WHERE lower(u.email) = %s" in run.call_args.args[0]  # the expression the index is on

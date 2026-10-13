@@ -1,7 +1,7 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 026 (Slice P0a). The diagram below is the ER
-diagram; it was last checked against `schema.sql` in Slice P1.
+Developer reference for the `icid` schema as of migration 028 (Slice P3). The diagram below is the ER
+diagram; it was last checked against `schema.sql` in Slice P3.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -34,6 +34,7 @@ projects ──< quantities                        project_id, a copy of the IDR
 users is also referenced by (none cascades):
     idrs.stage1_reviewer_uuid, idrs.re_reviewer_uuid, idrs.deleted_by
     idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by
+    users.deleted_by (ON DELETE SET NULL)
 ```
 
 `──<` reads "has many". Deleting an IDR's row takes everything drawn under it; nothing cascades from a user, a
@@ -84,7 +85,7 @@ admin role and demo flag (`/v1/admin/users`); a password is changed by its user 
 | Column | Type | Notes |
 |---|---|---|
 | `uuid` | UUID PK | `uuid_generate_v4()`. The API calls it `user_id`. |
-| `email` | TEXT NOT NULL | Stored as entered; unique without regard to case (`idx_users_email_lower` on `lower(email)`), which is also how sign-in looks it up |
+| `email` | TEXT NOT NULL | Stored as entered; unique without regard to case among users who aren't deleted (`idx_users_email_lower` on `lower(email)`, `WHERE deleted_at IS NULL`), which is also how sign-in looks it up. A deleted user keeps their email, and a new account can take it |
 | `first_name`, `last_name` | TEXT | |
 | `phone_number` | TEXT | |
 | `client_id` | TEXT NOT NULL | FK → `clients.client_id` (the user's employer) |
@@ -94,6 +95,20 @@ admin role and demo flag (`/v1/admin/users`); a password is changed by its user 
 | `signature_path` | TEXT | The user's current signature: its object path in the `signatures` bucket. NULL: none yet. |
 | `signature_type` | TEXT | `drawn` or `uploaded`; CHECK `chk_users_signature_type`. NULL with no signature. |
 | `signature_set_at` | TIMESTAMPTZ | When the current signature was set |
+| `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted the user. NULL for a user who isn't deleted. Migration 028 |
+| `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
+
+**Soft delete, un-delete and permanent delete** (all admin only, under `/v1/admin/users/{id}`):
+- `POST .../delete` sets `deleted_at` and `deleted_by`, and nothing else. The user can't sign in, and a token
+  they hold is refused. Every row that names them stays, and still shows their name. There is no `deleted`
+  status on a user: deleted is `deleted_at IS NOT NULL`. `GET /v1/users/` leaves deleted users out;
+  `GET /v1/admin/users` does unless `include_deleted=true`.
+- `POST .../undelete` clears the two columns. It is refused (409) while another user who isn't deleted has the
+  same email.
+- `DELETE .../permanent` deletes the row of a user who is soft-deleted, and only when no row names them: every
+  foreign key to `users.uuid` (see the diagram) is `NO ACTION` and refuses the delete, except
+  `users.deleted_by`. So only a user who never reported, reviewed, edited, uploaded or held a role can go;
+  anyone with history stays soft-deleted. The user's signature file is then removed from Storage, best-effort.
 
 A demo user is made by `POST /v1/auth/demo` (`demo-<uuid>@icid.local`, first name `Demo`, client `C00001`, no
 password, no role) together with one `project_users` row on `DEMO01` (`user_role` `Demo`). Signing out deletes the
@@ -564,6 +579,7 @@ content as TEXT, linked to a report and a form template).
 | 023 | `023_truck_add.sql` | K3-fix2 | Widened `chk_idr_field_edits_type` to allow `truck_add`, and `chk_idr_field_edits_old_value` to let it (like `pay_item_add`) have no `old_value`. Gave every existing truck in `idr_reports.report_data` an `id`; nothing else in any report changed. |
 | 025 | `025_quantities.sql` | L0 | Created `quantities` with its four indexes. No existing table or row changed. There is no 024. |
 | 026 | `026_contract_items_own_columns.sql` | P0a | Added `contract_items.item_no`, `description`, `unit` (NOT NULL) and `spec_section` (nullable), each filled from the row's spec item. Made `spec_item_id` nullable, widened `bid_quantity` and `bid_unit_price` from NUMERIC(12,2) to NUMERIC, and replaced `uq_contract_items_project_spec_budget` with `uq_contract_items_project_item_budget` on `(project_id, item_no, budget_code)`. `spec_items` unchanged. |
+| 028 | `028_users_soft_delete.sql` | P3 | Added `users.deleted_at` and `deleted_by` (FK to `users` with ON DELETE SET NULL), and made `idx_users_email_lower` partial (`WHERE deleted_at IS NULL`), so a deleted user's email can be used again. No row changed. There is no 027. |
 
 Where each current column came from:
 
@@ -571,7 +587,8 @@ Where each current column came from:
 |---|---|---|
 | `clients`, `users`, `projects`, `project_users`, `project_clients`, `form_templates` | all | Baseline |
 | `users` | `password_hash`, `role`, `is_demo`, `idx_users_is_demo` (index) | 013 |
-| `users` | `idx_users_email_lower` (unique index; replaced 013's `uq_users_email` and the baseline's `idx_users_email`) | 016 |
+| `users` | `idx_users_email_lower` (unique index; replaced 013's `uq_users_email` and the baseline's `idx_users_email`) | 016 (partial since 028) |
+| `users` | `deleted_at`, `deleted_by` | 028 |
 | `users` | `signature_path`, `signature_type`, `signature_set_at`, `chk_users_signature_type` | 015 |
 | `idrs` | `inspector_signature_path`, `inspector_signed_at` | 015 |
 | `idrs` | the review columns, `chk_idrs_returned_from`, `idx_idrs_status`, `uq_idrs_project_number`; the wider `chk_idrs_status`, the partial `idx_idrs_project_status`, and `uq_idrs_project_reporter_date` as a partial unique index | 017 |

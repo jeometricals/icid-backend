@@ -26,7 +26,7 @@ BEGIN;
 INSERT INTO icid.users (email, first_name, client_id, password_hash, role, is_demo)
 VALUES ('reza@icid.local', 'Reza', 'C00001',
         '$2b$12$t4tLFWw0/EVvuNYznot6Ju7YXu9xnWR7F8E948wG6YGAyb9v02zu.', 'admin', false)
-ON CONFLICT (lower(email)) DO UPDATE
+ON CONFLICT (lower(email)) WHERE deleted_at IS NULL DO UPDATE
 SET role = EXCLUDED.role,
     is_demo = EXCLUDED.is_demo,
     password_hash = COALESCE(icid.users.password_hash, EXCLUDED.password_hash);

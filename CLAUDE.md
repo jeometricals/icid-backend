@@ -36,7 +36,7 @@ every request to it.
 
 <!-- Update this list when endpoints change -->
 - `GET /status`
-- `POST /v1/auth/login` — email (matched without regard to case) and password; returns `{access_token, token_type, expires_in, user}`, or 401 `Invalid email or password`
+- `POST /v1/auth/login` — email (matched without regard to case) and password; returns `{access_token, token_type, expires_in, user}`, or 401 `Invalid email or password` (a deleted user gets the same)
 - `GET /v1/auth/me` — the user the bearer token belongs to, with `has_signature` and `signature_set_at`; 401 `Not authenticated`, `Token expired` or `Invalid token`
 - `POST /v1/auth/demo` — public; makes a throwaway demo user on `DEMO01` and returns what login returns; 503 when `DEMO01` is missing or 200 demo users already exist
 - `POST /v1/auth/logout` — 204 always; stateless, the client drops its token. A demo user signing out is deleted with everything they made
@@ -44,9 +44,12 @@ every request to it.
 Every route below needs a bearer token (401 without a valid one); see "Sign-in" under the conventions.
 
 - `POST` or `GET /v1/admin/cleanup-demos` — deletes demo users older than 24 hours; returns `{purged_count}`. For a signed-in admin, or the scheduler sending `CRON_SECRET` as its bearer token; 403 for anyone else signed in
-- `GET /v1/admin/users` — admin only: every user, demo users included, by last name, first name and email, under `data`; each as `/v1/auth/me` returns a user (`uuid`, `email`, `first_name`, `last_name`, `role`, `is_demo`, `has_signature`, `signature_set_at`)
+- `GET /v1/admin/users` — admin only: every user, demo users included, by last name, first name and email, under `data`; each as `/v1/auth/me` returns a user (`uuid`, `email`, `first_name`, `last_name`, `role`, `is_demo`, `has_signature`, `signature_set_at`), plus `deleted_at` and `deleted_by`. Deleted users are left out unless `?include_deleted=true`
 - `POST /v1/admin/users` — admin only: body `{email, first_name, last_name?, password, is_admin?}`; creates a user who signs in with that password and returns them under `data`, 201. 400 for a blank or malformed email, a blank or over-long name, or a password under 6 characters or over 72 bytes; 409 `{detail, existing_user_uuid}` when the email is taken, whatever its capitals
 - `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?, email?, is_admin?, is_demo?}`; changes what is sent and returns the user under `data` (`role` is `admin` or null). Names and email are trimmed. 400 when nothing is sent (a null counts as not sent), a name is blank or over 100 characters, the email is blank or malformed, an admin sends `is_admin: false` for themselves (`You cannot revoke your own admin role.`), or `is_demo: true` is sent for a real user (`Cannot change a real user to a demo user.`); 404 for an unknown user; 409 `{detail, existing_user_uuid}` when another user has the email, whatever its capitals
+- `POST /v1/admin/users/{user_id}/delete` — admin only: soft-deletes the user (`deleted_at`, `deleted_by`) and returns them under `data`; they can no longer sign in or use a token. Nothing else of theirs changes. 400 `You cannot delete your own account.`, 404 for an unknown user or `User is already deleted`
+- `POST /v1/admin/users/{user_id}/undelete` — admin only: restores a soft-deleted user and returns them under `data`. 404 for an unknown user or `User is not deleted`, 409 `{detail, existing_user_uuid}` when another user now has their email
+- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments}}` when anything still names them
 - `POST /v1/admin/users/{user_id}/password` — admin only: body `{new_password}`; replaces the user's password and returns the user under `data`. Any user, the admin's own row included. 400 for a password under 6 characters or over 72 bytes, 404 for an unknown user
 - `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
@@ -59,7 +62,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/admin/projects/{project_id}/pay-items/import/commit` — admin only: the same upload, read and checked again, then written in one statement; returns `{status, message, data: {inserted, updated}}`. 400 `{detail, error_count, errors}` when any row has an error (nothing is written), 400 for a file with no rows, and the preview's 400s and 413
 - `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
 - `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
-- `GET /v1/users/` — 403 for a demo user
+- `GET /v1/users/` — every user who isn't deleted; 403 for a demo user
 - `POST /v1/users/me/password` — body `{current_password, new_password}`; the signed-in user changes their own password; returns `{status, message, data: null}`. 400 for a blank current password, `Current password is incorrect`, a new one under 6 characters or over 72 bytes, or `New password must differ from current`; 403 for a demo user
 - `GET /v1/projects/` — the signed-in user's projects (through `project_users`), each once, with `roles` (the project roles they hold on it) and `user_role` (the label)
 - `GET /v1/projects/{project_id}`
@@ -138,8 +141,10 @@ Any change must follow these.
   `user: UserOut = Depends(current_user)` and reads `user.uuid`: the user never comes from a query parameter or a
   request body (`reporter_uuid` and `uploaded_by` are set from the session). `/status`, `/v1/auth/login`,
   `/v1/auth/demo` and `/v1/auth/logout` stay public.
-  - Emails are stored as entered, matched without regard to case at sign-in, and unique the same way
-    (`idx_users_email_lower`, migration 016). An upsert on email is `ON CONFLICT (lower(email))`.
+  - Emails are stored as entered, matched without regard to case at sign-in, and unique the same way among
+    users who aren't deleted (`idx_users_email_lower`, migration 016; partial, `WHERE deleted_at IS NULL`, since
+    028). An upsert on email has to name that predicate: `ON CONFLICT (lower(email)) WHERE deleted_at IS NULL`.
+    A bare `ON CONFLICT (lower(email))` no longer matches any index and fails.
   - User `327d3ed2-a3d6-4235-9408-7fe721b12bed` in the live database is Genghis Khan, a seeded inspector, and
     the id the frontend sent for everyone before sign-in existed. H0 mistook the row for a placeholder and
     renamed it `legacy-demo@icid.local`; his email (`KhanG@magnoleng.pc`) has been put back, and
@@ -150,7 +155,7 @@ Any change must follow these.
     anyone else. Submitting and the review routes are the exception: they check project roles, below. So is
     the quantities route, which takes `project_member`: the caller must be assigned to the project, in any role,
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
-    admin-only routes are `/v1/admin/cleanup-demos`, the four under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
+    admin-only routes are `/v1/admin/cleanup-demos`, the seven under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
     `/v1/admin/projects/{project_id}/pay-items`, the two under
     `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`, `/admin/undelete` and
     `/admin/permanent`.
@@ -177,6 +182,45 @@ Any change must follow these.
       (`is_demo = u.is_demo AND COALESCE(%s, true)`), whatever the route let through. `false` on a real user and
       `true` on a demo user are 200s that change nothing.
     - A password is not part of this route, and nor is the client (`client_id`), which is still changed in SQL.
+  - **Deleting a user is a soft delete** (`POST /v1/admin/users/{user_id}/delete`, migration 028):
+    `deleted_at` and `deleted_by` on the user's row, and nothing else. Their IDRs, reviews, project roles,
+    signature and audit rows stay, and their name still shows wherever they acted (names are joined from
+    `icid.users` whatever `deleted_at` says). Unlike an IDR, a user has no `deleted` status: deleted is
+    `deleted_at IS NOT NULL`.
+    - **A deleted user is locked out.** Sign-in looks an email up only among users who aren't deleted
+      (`_BY_EMAIL` in `api/queries/users.py`), so they get the same 401 `Invalid email or password` as a wrong
+      password, after the same work. `current_user` refuses a token they already hold (401 `Invalid token`, as
+      for a user who no longer exists), so they are out at once, not when the token expires.
+    - **An admin can't delete their own account** (400), so the last admin can't remove themselves. Deleting a
+      user already deleted is 404 `User is already deleted`; the first deletion's time and admin stand.
+    - **The lists leave deleted users out:** `GET /v1/users/` always, `GET /v1/admin/users` unless
+      `include_deleted=true`. `GET /v1/admin/users` rows carry `deleted_at` and `deleted_by` either way
+      (`AdminUserOut`); `/v1/auth/me` and sign-in responses don't. `GET /v1/projects/{id}/roles` still lists a
+      deleted user's roles, without marking them: that is where an admin sees what to revoke.
+    - **A deleted user can't be given a project role** (400 on a grant); a revoke still works. Their name,
+      email, role and password can still be changed through the other admin routes.
+    - **Their email is free.** The unique index covers only users who aren't deleted, so a new account can take
+      a deleted account's email (the deleted row keeps it too), and create and edit look for a clash only among
+      users who aren't deleted.
+    - **Un-delete** (`POST .../undelete`) clears `deleted_at` and `deleted_by`; the user signs in again with
+      the password they had. **If another user now has their email it is refused** (409 with
+      `existing_user_uuid`): the statement checks, and the index backs it. Change one of the two emails (the
+      deleted user's can be edited while deleted) and try again.
+    - **Permanent delete** (`DELETE .../permanent`) takes only a user who is already soft-deleted (404 `User
+      must be soft-deleted first`), and only one nothing names. `count_user_references` counts what does: IDRs
+      they reported, reviewed at either stage or deleted; project roles; audit rows; field edits; attachments
+      they uploaded. Any of those is a 409 with the counts under `references`. Those are all the foreign keys to
+      `users.uuid`; none cascades, and the DELETE itself is refused by them if a row appears at the last moment
+      (also 409). So a user who ever did anything stays soft-deleted for good, which is the usual case; a
+      project role is the one thing an admin can clear first (revoke it).
+      - Then the user's own signature file (`users/{uuid}/signature.png`) is removed from Storage, best-effort.
+        Signature copies under `idrs/` belong to IDRs, and such a user has none.
+      - **The record of it is a log line**: `User permanently deleted: user_uuid=... email=... admin=... at=...`
+        at INFO. `users.deleted_by` is `ON DELETE SET NULL`, so deleting an admin for good doesn't block on the
+        users they deleted.
+    - **Migration 028 must be in the database before this code runs** (every token check reads `deleted_at`),
+      and this code must follow it at once: the code before it creates users with a bare
+      `ON CONFLICT (lower(email))`, which fails against the partial index.
   - **Creating a user** (`POST /v1/admin/users`): the email is stored as typed, trimmed; a blank last name is
     stored as NULL; the password is hashed with bcrypt (`hash_password` in `api/services/auth.py`) and never
     trimmed or returned. `is_admin` sets `role = 'admin'`, otherwise the role is NULL; the user is never a demo
@@ -293,7 +337,8 @@ Any change must follow these.
     `re` (Stage 2: `re`). `user_role` on the same table is a display label and is never checked.
     - Roles are granted and revoked by an admin through `POST /v1/projects/{project_id}/roles`, one row per
       call. A row made that way has no `user_role` label. Revoking a user's last role on a project removes
-      their only `project_users` row there, so the project leaves their list; their IDRs stay. Nothing stops a
+      their only `project_users` row there, so the project leaves their list; their IDRs stay. A role can be
+      revoked from a deleted user, not granted to one. Nothing stops a
       revoke while the user is the reviewer on an IDR in review: they then get 403 on it, and an admin (or a
       direct update) has to move it on.
   - **Review.** `api/v1/reviews.py`, a second router under `/v1/idrs`, registered before the IDRs router so

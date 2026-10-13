@@ -119,7 +119,7 @@ def change_role(project_id: str, body: ProjectRoleChange) -> ProjectRolesRespons
     """
     Give a user a role on a project, or take one away. Admins only. Both are safe to repeat: granting a role already held and revoking one not held succeed and change nothing.
     Takes the project id as a path parameter and a ProjectRoleChange body (user_uuid, role, action).
-    Returns a ProjectRolesResponse with the project's roles as they now stand; raises 403 for a user who isn't an admin, 404 for an unknown project or user, and 400 for a demo user.
+    Returns a ProjectRolesResponse with the project's roles as they now stand; raises 403 for a user who isn't an admin, 404 for an unknown project or user, and 400 for a demo user or a grant to a deleted user.
     """
     if get_project_by_id(project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -131,6 +131,10 @@ def change_role(project_id: str, body: ProjectRoleChange) -> ProjectRolesRespons
 
     if target["is_demo"]:
         raise HTTPException(status_code=400, detail="Demo users can't be given project roles")
+
+    # A deleted user's roles can still be taken away, which a permanent delete needs
+    if body.action == "grant" and target.get("deleted_at") is not None:
+        raise HTTPException(status_code=400, detail="Deleted users can't be given project roles")
 
     change = grant_project_role if body.action == "grant" else revoke_project_role
     rows = change(project_id, body.user_uuid, body.role)
