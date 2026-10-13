@@ -17,12 +17,12 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body, checking a new password, shaping an IDR list's rows). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `pay_items.py` (what a project's pay item may hold: the rules for each field, shared by the admin's form and the CSV import), `pay_item_units.py` (the units a pay item can be bid in and the short form each is stored in), `pay_item_import.py` (a pay-item CSV: reading the file, checking every row, sorting the rows into new items, overwrites and errors), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -51,10 +51,12 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
 - `GET /v1/admin/projects/{project_id}/pay-items` — admin only: every pay item of the project, by budget code then ref: `{status, message, data: [{pay_item_uuid, pay_item_ref, description, unit, quantity, unit_price, budget_code, spec_section}]}`. 404 for an unknown project, as on the four below
-- `POST /v1/admin/projects/{project_id}/pay-items` — admin only: body `{pay_item_ref, description, unit, quantity, unit_price, budget_code, spec_section?}`; creates the pay item and returns it under `data`, 201. 400 for a blank or over-long value, or a negative or over-precise amount; 409 `{detail, existing_pay_item_uuid}` when the project has that ref under that budget code
+- `POST /v1/admin/projects/{project_id}/pay-items` — admin only: body `{pay_item_ref, description, unit, quantity, unit_price, budget_code, spec_section?}`; creates the pay item and returns it under `data`, 201. 400 for a blank or over-long value, an unknown unit, or a negative or over-precise amount; 409 `{detail, existing_pay_item_uuid}` when the project has that ref under that budget code
 - `PATCH /v1/admin/projects/{project_id}/pay-items/{pay_item_uuid}` — admin only: any of the seven fields; returns the item under `data`. 400 when nothing is sent (a null counts as not sent, except `spec_section`, which it clears) or a value doesn't fit, 404 for an item the project doesn't have, 409 as on create
 - `DELETE /v1/admin/projects/{project_id}/pay-items/{pay_item_uuid}` — admin only: deletes the item, 204; 404 for an item the project doesn't have
 - `DELETE /v1/admin/projects/{project_id}/pay-items` — admin only: deletes every pay item of the project; returns `{status, message, data: {deleted_count}}`
+- `POST /v1/admin/projects/{project_id}/pay-items/import/preview` — admin only: a CSV as the multipart field `file`; writes nothing and returns `{status, message, data: {parsed_rows, new_count, overwrite_count, error_count, ignored_columns, new, overwrites, errors}}`. 400 for a file that isn't UTF-8, isn't a CSV, has no header row or lacks a required column; 413 over 2 MB
+- `POST /v1/admin/projects/{project_id}/pay-items/import/commit` — admin only: the same upload, read and checked again, then written in one statement; returns `{status, message, data: {inserted, updated}}`. 400 `{detail, error_count, errors}` when any row has an error (nothing is written), 400 for a file with no rows, and the preview's 400s and 413
 - `POST /v1/signatures/upload-request` — body `{content_type: "image/png"}`; returns `{upload_url, storage_path, expires_in}`, a signed URL to PUT the signed-in user's signature PNG to (it replaces their current one); 403 for a demo user
 - `POST /v1/signatures/confirm` — body `{signature_type: "drawn" | "uploaded"}`; records the uploaded file as the user's signature and returns the user; 400 `Upload the signature before confirming` when no file is there; 403 for a demo user
 - `GET /v1/users/` — 403 for a demo user
@@ -146,7 +148,7 @@ Any change must follow these.
     anyone else. Submitting and the review routes are the exception: they check project roles, below. So is
     the quantities route, which takes `project_member`: the caller must be assigned to the project, in any role,
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
-    admin-only routes are `/v1/admin/cleanup-demos`, the four under `/v1/admin/users`, the two under `/v1/admin/projects`, the five under
+    admin-only routes are `/v1/admin/cleanup-demos`, the four under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
     `/v1/admin/projects/{project_id}/pay-items`, the two under
     `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock` and `/admin/delete`.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
@@ -204,10 +206,28 @@ Any change must follow these.
       changes nothing (the UPDATE checks for it) and is the same 409. Two edits racing for one key can still
       hit the constraint: a 500.
     - **Values.** The ref (32), description (500), unit (16), budget code (50) and optional spec section (32)
-      are trimmed; the unit is also put in capitals and nothing else about it is changed (`l.f.` is stored
-      `L.F.`), so the seeded rows' `L.F.` and `Ton` sit beside typed `LF` and `TN` until units are normalised
-      (P0b). The budget code is otherwise kept as typed: `SE0944(CONED-CONS`, with its one bracket, is real.
-      A blank spec section is NULL.
+      are trimmed. The budget code is otherwise kept as typed: `SE0944(CONED-CONS`, with its one bracket, is
+      real. A blank spec section is NULL. The rules live in `api/services/pay_items.py`
+      (`clean_pay_item_fields`, raising `PayItemValueError`), which the form's routes and the CSV import both
+      go through, so a value is refused for the same reason either way.
+    - **Units are stored in one short form** (`normalize_unit` in `api/services/pay_item_units.py`), on create,
+      on edit and on import. A bid document's long form and the short form are both taken, whatever their
+      capitals, periods and spaces (`l.f.`, `L. F.` and `LF` are all `LF`):
+
+      | Typed | Stored | Typed | Stored | Typed | Stored |
+      |---|---|---|---|---|---|
+      | `EACH` | `EA` | `L.F.` | `LF` | `S.F.` | `SF` |
+      | `S.Y.` | `SY` | `C.Y.` | `CY` | `V.F.` | `VF` |
+      | `F.S.` | `FS` | `L.S.` | `LS` | `MONTH` | `MONTH` |
+      | `DAY` | `DAY` | `P/HR` | `HR` | `CREW/HR` | `CREWHR` |
+      | `TONS`, `TON` | `TN` | `LBS.` | `LB` | `BLOCK` | `BLOCK` |
+      | `UNITS` | `UNIT` | `SETS` | `SET` | | |
+
+      Any other unit is refused (`unknown unit: 'XYZ'`): a 400 from the form, a row's error in an import. A new
+      unit is a new entry in `UNIT_FORMS`. The rows seeded before this keep `L.F.`, `Ton` and `Each` until they
+      are edited or imported over; the picker, the export and `icid.quantities` take both forms. This table is
+      apart from `UNIT_FORMS` in `api/services/quantities.py`, which reads what inspectors typed in reports and
+      keeps an unknown unit as written.
     - **Amounts.** Quantity takes up to 10 decimal places and unit price up to 6 (trailing zeros aren't
       counted); zero is allowed, a negative is 400, and so is 10^15 or more. The columns are plain NUMERIC and
       hold what was typed; responses carry them as JSON numbers. Text that isn't a number is FastAPI's 422.
@@ -216,6 +236,36 @@ Any change must follow these.
       their quantities, are unchanged. There is no undo for a delete or a clear.
     - **Migration 026 must be in the database before this code runs**: the picker's route reads the new
       columns too. The code from before it keeps working after it.
+    - **CSV import** is two routes taking the same upload (multipart field `file`): `import/preview` shows
+      what would happen and `import/commit` does it. Commit reads and checks the file itself, so what is
+      written is what was uploaded to it, not what an earlier preview saw.
+      - **The file:** UTF-8 (a byte-order mark is fine), comma-separated, at most 2 MB (413), with a header
+        row. The header names the columns, in any order and any capitals: `pay_item_ref`, `description`,
+        `quantity`, `unit`, `unit_price` and `budget_code` are required, `spec_section` is optional, and any
+        other column is ignored and listed in `ignored_columns`. A file that isn't that is a 400 for the whole
+        file. The upload's content type is not checked: browsers send a .csv as several.
+      - **Rows** are numbered as in the file, the header being row 1; a row with nothing in it is skipped but
+        counted, so a number matches the spreadsheet's. Each row is checked as the form checks a pay item. An
+        amount may carry commas between its thousands and a leading `$` (`"9,500.00"`, `$14.50`), as a
+        spreadsheet exports them; anything else that isn't a number is the row's error.
+      - **Each row is one of three things** (`classify_rows` in `api/services/pay_item_import.py`): `new`;
+        an `overwrite`, when the project has an item under that ref and budget code (matched exactly), carrying
+        the item as it is (`existing`) and as the row would leave it (`incoming`); or an `error`, with its
+        `reason` and its cells as typed (`raw`). Only a row's first problem is reported. Rows of the file that
+        share a ref and budget code are all errors (`duplicated in CSV, see also row N`).
+      - **The project's items are read once**, with the list's own statement, and matched in memory; there is
+        no per-row lookup.
+      - **Commit refuses a file with any error** (400 with the errors) and writes nothing; there is no skipping
+        of bad rows. Otherwise every row goes in one statement (`bulk_upsert_pay_items`: `INSERT ... ON
+        CONFLICT (project_id, item_no, budget_code) DO UPDATE`, the rows as one JSON parameter), so all of them
+        land or none. `inserted` and `updated` are counted by that statement, so an item someone added between
+        the read and the write is counted as updated. A statement that fails is a 500 carrying the database's
+        message.
+      - **An overwrite replaces** the description, unit, quantity and unit price; the row keeps its id. Its
+        spec section is replaced only when the file has a `spec_section` column (a blank cell then clears it);
+        without the column it keeps the one it has.
+      - Items the file doesn't mention are left alone: an import never deletes. To replace a project's list,
+        clear it first.
   - **Project roles.** `project_users.role` is `inspector`, `oe` or `re`, one row per role, so a user can hold
     several on a project (migration 018). `require_project_role("oe", "re")` builds a dependency for a route with
     an `idr_id`: it passes a user holding one of those roles on the IDR's project, and any admin; 404 for an

@@ -2,6 +2,8 @@ from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
+from psycopg.types.json import Jsonb
+
 from api.db.runner import run_query
 
 # A contract item as the pay-item picker reads it: the row's own item number, description and section,
@@ -189,3 +191,46 @@ def clear_project_pay_items(project_id: str) -> Optional[int]:
     """
     rows = run_query(sql, (project_id,))
     return rows[0]["deleted_count"] if rows else None
+
+
+def bulk_upsert_pay_items(
+    project_id: str, rows: list[dict[str, Any]], replace_spec_section: bool
+) -> Optional[tuple[int, int]]:
+    """
+    Write a set of pay items to a project in one statement, so all of them land or none: a row whose item number and budget code the project doesn't have is inserted, and one it has is overwritten with the row's description, unit, quantity and price.
+    Takes the project id, the rows keyed by column (item_no, description, unit, bid_quantity, bid_unit_price, budget_code, and spec_section when the file had one), no two with the same item number and budget code, and whether an overwritten item takes the row's spec section (otherwise it keeps its own).
+    Returns (how many were inserted, how many were overwritten), or None if the statement returned nothing.
+    """
+    sql = """
+        WITH incoming AS (
+            SELECT *
+            FROM jsonb_to_recordset(%s) AS r(
+                item_no text, description text, unit text, bid_quantity numeric, bid_unit_price numeric,
+                budget_code text, spec_section text
+            )
+        ),
+        written AS (
+            INSERT INTO icid.contract_items AS ci
+                (project_id, item_no, description, unit, bid_quantity, bid_unit_price, budget_code, spec_section)
+            SELECT %s, r.item_no, r.description, r.unit, r.bid_quantity, r.bid_unit_price, r.budget_code, r.spec_section
+            FROM incoming r
+            ON CONFLICT (project_id, item_no, budget_code) DO UPDATE
+            SET description = EXCLUDED.description,
+                unit = EXCLUDED.unit,
+                bid_quantity = EXCLUDED.bid_quantity,
+                bid_unit_price = EXCLUDED.bid_unit_price,
+                spec_section = CASE WHEN %s THEN EXCLUDED.spec_section ELSE ci.spec_section END,
+                updated_at = now()
+            RETURNING (ci.xmax = 0) AS was_inserted
+        )
+        SELECT
+            count(*) FILTER (WHERE was_inserted) AS inserted,
+            count(*) FILTER (WHERE NOT was_inserted) AS updated
+        FROM written;
+    """
+    # Amounts go as text, so a NUMERIC column gets every digit that was typed
+    payload = Jsonb([
+        {**row, "bid_quantity": str(row["bid_quantity"]), "bid_unit_price": str(row["bid_unit_price"])} for row in rows
+    ])
+    result = run_query(sql, (payload, project_id, replace_spec_section))
+    return (result[0]["inserted"], result[0]["updated"]) if result else None

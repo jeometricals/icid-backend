@@ -184,13 +184,13 @@ class TestCreatePayItem:
             response = admin_client.post(URL, json=BODY)
         assert response.status_code == 500 and response.json() == {"detail": "Failed to create pay item"}
 
-    def test_text_is_trimmed_the_unit_goes_to_capitals_and_the_budget_code_stays_as_typed(self, admin_client, project):
+    def test_text_is_trimmed_the_unit_is_stored_short_and_the_budget_code_stays_as_typed(self, admin_client, project):
         body = {**BODY, "pay_item_ref": "  4.13 aas ", "description": " 4\" Concrete Sidewalk\t", "unit": " l.f. ",
                 "budget_code": " se0944(Coned-Cons ", "spec_section": " 4.13 "}
         with patch(ITEMS, return_value=[ITEM_ROW]) as run:
             assert admin_client.post(URL, json=body).status_code == 201
         params = run.call_args.args[1]
-        assert params[1:4] == ("4.13 aas", '4" Concrete Sidewalk', "L.F.")
+        assert params[1:4] == ("4.13 aas", '4" Concrete Sidewalk', "LF")
         assert params[6:] == ("se0944(Coned-Cons", "4.13")
 
     @pytest.mark.parametrize("change,detail", [
@@ -201,6 +201,8 @@ class TestCreatePayItem:
         ({"description": "d" * 501}, "description cannot be longer than 500 characters"),
         ({"unit": ""}, "unit cannot be blank"),
         ({"unit": "u" * 17}, "unit cannot be longer than 16 characters"),
+        ({"unit": "XYZ"}, "unknown unit: 'XYZ'"),
+        ({"unit": " furlongs "}, "unknown unit: 'furlongs'"),
         ({"budget_code": "  "}, "budget_code cannot be blank"),
         ({"budget_code": "b" * 51}, "budget_code cannot be longer than 50 characters"),
         ({"spec_section": "s" * 33}, "spec_section cannot be longer than 32 characters"),
@@ -218,13 +220,24 @@ class TestCreatePayItem:
         run.assert_not_called()
 
     def test_values_at_the_limits_and_zero_are_taken(self, admin_client, project):
-        body = {"pay_item_ref": "r" * 32, "description": "d" * 500, "unit": "u" * 16, "budget_code": "b" * 50,
+        body = {"pay_item_ref": "r" * 32, "description": "d" * 500, "unit": "CREW/HR", "budget_code": "b" * 50,
                 "spec_section": "s" * 32, "quantity": "0", "unit_price": "0.000000"}
         with patch(ITEMS, return_value=[ITEM_ROW]) as run:
             assert admin_client.post(URL, json=body).status_code == 201
             precise = {**BODY, "quantity": "1234.1234567890", "unit_price": "0.123456"}
             assert admin_client.post(URL, json=precise).status_code == 201
         assert run.call_args.args[1][4:6] == (Decimal("1234.1234567890"), Decimal("0.123456"))
+
+    @pytest.mark.parametrize("typed,stored", [
+        ("L.F.", "LF"), ("EACH", "EA"), ("TONS", "TN"), ("Ton", "TN"), ("s.f.", "SF"), ("C.Y.", "CY"), ("S.Y.", "SY"),
+        ("V.F.", "VF"), ("F.S.", "FS"), ("L.S.", "LS"), ("P/HR", "HR"), ("CREW/HR", "CREWHR"), ("LBS.", "LB"),
+        ("UNITS", "UNIT"), ("SETS", "SET"), ("MONTH", "MONTH"), ("DAY", "DAY"), ("BLOCK", "BLOCK"),
+        ("LF", "LF"), ("ea", "EA"), ("TN", "TN"), ("HR", "HR"), ("LB", "LB"),
+    ])
+    def test_a_unit_typed_the_long_way_is_stored_short(self, admin_client, project, typed, stored):
+        with patch(ITEMS, return_value=[ITEM_ROW]) as run:
+            assert admin_client.post(URL, json={**BODY, "unit": typed}).status_code == 201
+        assert run.call_args.args[1][3] == stored
 
     def test_trailing_zeros_arent_counted_as_decimal_places(self, admin_client, project):
         with patch(ITEMS, return_value=[ITEM_ROW]):
@@ -327,6 +340,7 @@ class TestUpdatePayItem:
         ({"pay_item_ref": " "}, "pay_item_ref cannot be blank"),
         ({"description": "d" * 501}, "description cannot be longer than 500 characters"),
         ({"unit": ""}, "unit cannot be blank"),
+        ({"unit": "XYZ"}, "unknown unit: 'XYZ'"),
         ({"budget_code": ""}, "budget_code cannot be blank"),
         ({"quantity": -5}, "quantity cannot be negative"),
         ({"unit_price": "0.0000001"}, "unit_price cannot have more than 6 decimal places"),

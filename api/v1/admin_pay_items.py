@@ -1,11 +1,11 @@
-from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
 from api.queries.contract_items import (
+    bulk_upsert_pay_items,
     clear_project_pay_items,
     create_project_pay_item,
     delete_project_pay_item,
@@ -20,13 +20,19 @@ from api.schemas.pay_item import (
     PayItemClearResult,
     PayItemConflict,
     PayItemCreate,
+    PayItemImportCommitResponse,
+    PayItemImportPreview,
+    PayItemImportPreviewResponse,
+    PayItemImportRefused,
+    PayItemImportResult,
     PayItemListResponse,
     PayItemOut,
     PayItemResponse,
     PayItemUpdate,
 )
 from api.services.auth import current_admin
-from api.v1._shared import clean_text
+from api.services.pay_item_import import ClassifyResult, CsvFormatError, classify_rows, parse_csv
+from api.services.pay_items import AMOUNT_FIELDS, TEXT_FIELDS, PayItemValueError, clean_pay_item_fields
 
 
 def known_project(project_id: str) -> None:
@@ -46,57 +52,46 @@ router = APIRouter(
     dependencies=[Depends(current_admin), Depends(known_project)],
 )
 
-# The text fields: the body's name, the column it is stored in and the longest value it takes
-TEXT_FIELDS = (
-    ("pay_item_ref", "item_no", 32),
-    ("description", "description", 500),
-    ("unit", "unit", 16),
-    ("budget_code", "budget_code", 50),
-)
-MAX_SPEC_SECTION_LENGTH = 32
-# The amounts: the body's name, the column it is stored in and the most decimal places it takes
-AMOUNT_FIELDS = (("quantity", "bid_quantity", 10), ("unit_price", "bid_unit_price", 6))
-# An amount is below this, so it goes out as a JSON number
-AMOUNT_LIMIT = Decimal(10) ** 15
-
 CONFLICT_DETAIL = "A pay item with this ref and budget code already exists for this project"
-
-
-def _clean_amount(value: Decimal, field: str, max_places: int) -> Decimal:
-    """
-    Check a quantity or a price off the request. Zero is allowed.
-    Takes the value, the field's name (for the error) and the most decimal places it may have (trailing zeros don't count).
-    Returns the value; raises 400 for one that isn't a finite number, is negative, is too large or has too many decimal places.
-    """
-    if not value.is_finite():
-        raise HTTPException(status_code=400, detail=f"{field} must be a number")
-    if value < 0:
-        raise HTTPException(status_code=400, detail=f"{field} cannot be negative")
-    if value >= AMOUNT_LIMIT:
-        raise HTTPException(status_code=400, detail=f"{field} is too large")
-    if -value.normalize().as_tuple().exponent > max_places:
-        raise HTTPException(status_code=400, detail=f"{field} cannot have more than {max_places} decimal places")
-    return value
+# The largest CSV an import takes
+MAX_IMPORT_BYTES = 2 * 1024 * 1024
 
 
 def _clean_fields(body: PayItemCreate | PayItemUpdate) -> dict[str, Any]:
     """
-    Read a pay item's fields off the request: text trimmed (the unit in capitals too, the budget code otherwise as typed), amounts checked. A field sent as null is left out; spec_section is optional, and a blank or null one is None.
+    Read a pay item's fields off the request, checked as clean_pay_item_fields checks them: text trimmed, the unit in its stored form, amounts checked. A field sent as null is left out; spec_section is optional, and a blank or null one is None.
     Takes the request body.
     Returns the values keyed by column, for the fields sent; raises 400 for a value that doesn't fit.
     """
-    fields: dict[str, Any] = {}
-    for name, column, max_length in TEXT_FIELDS:
-        value = getattr(body, name)
-        if value is not None:
-            fields[column] = clean_text(value.upper() if name == "unit" else value, name, max_length)
-    for name, column, max_places in AMOUNT_FIELDS:
-        value = getattr(body, name)
-        if value is not None:
-            fields[column] = _clean_amount(value, name, max_places)
+    values = {name: getattr(body, name) for name, _, _ in TEXT_FIELDS + AMOUNT_FIELDS}
     if "spec_section" in body.model_fields_set:
-        fields["spec_section"] = clean_text(body.spec_section, "spec_section", MAX_SPEC_SECTION_LENGTH, required=False)
-    return fields
+        values["spec_section"] = body.spec_section
+    try:
+        return clean_pay_item_fields(values)
+    except PayItemValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _read_import(project_id: str, file: UploadFile) -> ClassifyResult:
+    """
+    Read an uploaded pay-item CSV and sort its rows against the project's items. Writes nothing.
+    Takes the project id and the uploaded file.
+    Returns the ClassifyResult; raises 413 for a file over 2 MB, 400 for one that can't be read as a pay-item CSV, and 500 if the project's items can't be read.
+    """
+    content = file.file.read(MAX_IMPORT_BYTES + 1)
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=413, detail="The file cannot be larger than 2 MB")
+    try:
+        parsed = parse_csv(content)
+    except CsvFormatError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    result = classify_rows(project_id, parsed)
+
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch pay items")
+
+    return result
 
 
 def _conflict(existing: dict[str, Any]) -> JSONResponse:
@@ -212,4 +207,63 @@ def clear_pay_items(project_id: str) -> PayItemClearResponse:
         status="success",
         message=f"Deleted {deleted_count} pay items from project {project_id}",
         data=PayItemClearResult(deleted_count=deleted_count),
+    )
+
+
+@router.post("/import/preview", response_model=PayItemImportPreviewResponse)
+def preview_pay_item_import(project_id: str, file: UploadFile = File(...)) -> PayItemImportPreviewResponse:
+    """
+    Show what importing a CSV of pay items would do. Admins only. Writes nothing.
+    Takes the project id as a path parameter and the CSV as the multipart field "file": UTF-8, with a header row naming pay_item_ref, description, quantity, unit, unit_price and budget_code (spec_section optional), in any order.
+    Returns a PayItemImportPreviewResponse with each row as a new item, an overwrite of an item the project has, or an error; raises 400 for a file that can't be read as a pay-item CSV, 403 for a user who isn't an admin, 404 for an unknown project and 413 for a file over 2 MB.
+    """
+    result = _read_import(project_id, file)
+
+    return PayItemImportPreviewResponse(
+        status="ok",
+        message="Preview ready.",
+        data=PayItemImportPreview(
+            parsed_rows=result.parsed_rows,
+            new_count=len(result.new),
+            overwrite_count=len(result.overwrites),
+            error_count=len(result.errors),
+            ignored_columns=result.ignored_columns,
+            new=result.new,
+            overwrites=result.overwrites,
+            errors=result.errors,
+        ),
+    )
+
+
+@router.post(
+    "/import/commit", response_model=PayItemImportCommitResponse, responses={400: {"model": PayItemImportRefused}}
+)
+def commit_pay_item_import(project_id: str, file: UploadFile = File(...)) -> PayItemImportCommitResponse | JSONResponse:
+    """
+    Import a CSV of pay items: the file is read and checked again, then every row is written in one statement, new items inserted and items the project has overwritten. Admins only.
+    Takes the project id as a path parameter and the CSV as the multipart field "file", as the preview takes it.
+    Returns a PayItemImportCommitResponse with how many were inserted and overwritten; raises 400 for a file that can't be read, has no rows, or has a row with an error (with the errors, and nothing written), 403 for a user who isn't an admin, 404 for an unknown project and 413 for a file over 2 MB.
+    """
+    result = _read_import(project_id, file)
+
+    if result.errors:
+        refused = PayItemImportRefused(
+            detail=f"The file has {len(result.errors)} row(s) with errors; fix them and upload it again",
+            error_count=len(result.errors),
+            errors=result.errors,
+        )
+        return JSONResponse(status_code=400, content=refused.model_dump(mode="json"))
+
+    if not result.to_write:
+        raise HTTPException(status_code=400, detail="The file has no pay items")
+
+    counts = bulk_upsert_pay_items(project_id, result.to_write, result.has_spec_section)
+
+    if counts is None:
+        raise HTTPException(status_code=500, detail="Failed to import pay items")
+
+    return PayItemImportCommitResponse(
+        status="ok",
+        message="Imported pay items.",
+        data=PayItemImportResult(inserted=counts[0], updated=counts[1]),
     )

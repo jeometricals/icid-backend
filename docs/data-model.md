@@ -377,7 +377,8 @@ A project's Schedule of Bid Items. "Contract" is the project here; there is no s
 contracts table. Added in migration 011; migration 026 gave each row its own item number,
 description, unit and section. `HWS0023`'s rows are seeded (`seed_sidewalk_pay_items.sql`);
 an admin adds, edits and deletes any project's through
-`/v1/admin/projects/{project_id}/pay-items`, where a row is a "pay item".
+`/v1/admin/projects/{project_id}/pay-items`, or imports them from a CSV (`.../import/preview`,
+`.../import/commit`); there a row is a "pay item".
 
 | Column | Type | Notes |
 |---|---|---|
@@ -389,7 +390,7 @@ an admin adds, edits and deletes any project's through
 | `bid_unit_price` | NUMERIC NOT NULL | `unit_price` in the admin API, which takes up to 6 decimal places |
 | `item_no` | TEXT NOT NULL | e.g. `4.13 AAS`. `pay_item_ref` in the admin API |
 | `description` | TEXT NOT NULL | |
-| `unit` | TEXT NOT NULL | The seeded rows keep the catalog's forms (`L.F.`, `Ton`); the admin API stores what is typed, in capitals (`LF`) |
+| `unit` | TEXT NOT NULL | The admin API and the CSV import store one short form per unit (`LF`, `EA`, `TN`; `UNIT_FORMS` in `api/services/pay_item_units.py`). The seeded rows keep the catalog's forms (`L.F.`, `Ton`) until edited or imported over |
 | `spec_section` | TEXT | Optional, e.g. `4.13` |
 
 `UNIQUE (project_id, item_no, budget_code)` (`uq_contract_items_project_item_budget`): the
