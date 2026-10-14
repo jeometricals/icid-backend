@@ -438,8 +438,8 @@ Demo users only read (since S2).
 |---|---|---|
 | `id` | UUID PK | `gen_random_uuid()` |
 | `property_id` | UUID NOT NULL | FK → `properties.id`, no cascade (a PIR is a record of its own). One per property among PIRs that aren't deleted (`uq_pirs_property`, `WHERE deleted_at IS NULL`) |
-| `source_image_url` | TEXT | The scanned sheet. Not written yet (R1d) |
-| `source_image_scale` | REAL | Likewise |
+| `source_image_url` | TEXT | The scanned sheet: its **Storage path** in the `pir-images` bucket (`pirs/{pir id}/{random}.png` or `.jpg`), not a URL. Set and cleared by the image routes since R1d |
+| `source_image_scale` | REAL | The image's scale in **pixels per foot**; set with the image, and changed alone by `PATCH /v1/pirs/{id}/image` |
 | `inspector_initials` | TEXT NOT NULL | Trimmed, at most 16 characters |
 | `inspector_sign_date` | DATE NOT NULL | When the inspector signed the sheet |
 | `digitized_by` | UUID NOT NULL | The signed-in user who created the row: any project member or admin; FK → `users.uuid` |
@@ -527,6 +527,14 @@ current signature (replaced when they set a new one), `idrs/{idr id}/inspector_{
 IDR keeps from submit, and `idrs/{idr id}/re_{random}.png` for the approver's copy from final approval
 (`idrs.re_signature_path`). A copy is never replaced, and removed only when an admin deletes its IDR for good,
 which empties `idrs/{idr id}/`.
+
+### PIR image files (Storage bucket `pir-images`)
+
+Private; only the backend reads and writes it (`migrations/031b_pir_images_bucket.sql`). 10 MB per file; PNG, JPEG
+and PDF. `pirs/{pir id}/uploads/{random}` is a raw upload, PUT by the client through a signed URL and removed once
+the backend has stored the image; `pirs/{pir id}/{random}.png` or `.jpg` is a PIR's image, a PDF's first page
+rendered to PNG. Each upload gets a new path; the old image is removed after `pirs.source_image_url` points at the
+new one.
 
 ### Export files (Storage bucket `idr-exports`)
 
@@ -714,6 +722,7 @@ content as TEXT, linked to a report and a form template).
 | 029 | `029_properties.sql` | R0a | Created `properties` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`, CHECK `chk_properties_type`) and the partial unique index `uq_properties_project_bbl`. No existing table or row changed. |
 | 030 | `030_task_orders.sql` | R0b | Created `task_orders` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`) with the partial unique index `uq_task_orders_project_number`, and `task_order_properties` (PK `(task_order_id, property_id)`, FKs to `task_orders` and `properties` both ON DELETE CASCADE, FK to `users` for `added_by`) with `idx_task_order_properties_property`. No existing table or row changed. |
 | 031 | `031_pirs.sql` | R1a | Created `pirs` (FK to `properties` with no cascade; FKs to `users` for `digitized_by` and, ON DELETE SET NULL, `as_built_signed_by` and `deleted_by`) with the partial unique index `uq_pirs_property`. No existing table or row changed. |
+| 031b | `031b_pir_images_bucket.sql` | R1d | Created the private Storage bucket `pir-images` (10 MB per file; PNG, JPEG and PDF). No `icid` table changes. |
 | 032 | `032_flags.sql` | R1b | Created `flags` (FK to `pirs` with no cascade; FK to `contract_items` ON DELETE SET NULL; FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`; CHECKs on `display_order`, `shape`, `surveyed_mark`, `surveyed_non_assessable_reason`, `surveyed_thickness` and `reported_quantity`) with the partial indexes `idx_flags_pir` and `idx_flags_pay_item`. No existing table or row changed. |
 
 Where each current column came from:

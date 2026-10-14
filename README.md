@@ -40,6 +40,10 @@ start without the two required ones.
 | `EXPORT_URL_EXPIRY_SECONDS` | no | `600` | Lifetime of an export's signed download URL |
 | `SIGNATURE_BUCKET_NAME` | no | `signatures` | Bucket for signatures |
 | `SIGNATURE_URL_EXPIRY_SECONDS` | no | `300` | Lifetime of a signature's signed URL |
+| `PIR_IMAGE_BUCKET_NAME` | no | `pir-images` | Bucket for PIRs' scanned sheets |
+| `PIR_IMAGE_URL_EXPIRY_SECONDS` | no | `3600` | Lifetime of a PIR image's signed URL |
+| `PIR_IMAGE_MAX_BYTES` | no | `10485760` | Largest PIR image upload (10 MB; the bucket enforces the same) |
+| `PIR_IMAGE_RENDER_DPI` | no | `150` | Resolution a PIR PDF's first page is rendered to PNG at |
 | `CRON_SECRET` | for the daily cleanup | | What Vercel Cron sends as its bearer token; without it the scheduled demo cleanup is refused |
 
 The two Supabase settings are only checked when Storage is first used, so everything that doesn't touch attachments,
@@ -65,6 +69,7 @@ Three private buckets, created by hand or by their migration (the backend never 
 - `report-attachments`: report attachments (see migration 008's notes)
 - `idr-exports`: exported IDRs (`migrations/012_idr_exports_bucket.sql`)
 - `signatures`: user signatures and each submitted IDR's copy (`migrations/015b_signatures_bucket.sql`)
+- `pir-images`: PIRs' scanned sheets, a PDF rendered to PNG (`migrations/031b_pir_images_bucket.sql`)
 
 ## Tests
 

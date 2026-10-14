@@ -37,3 +37,10 @@ EXPORT_URL_EXPIRY_SECONDS: int = int(os.getenv("EXPORT_URL_EXPIRY_SECONDS", "600
 # Signatures: each user's signature PNG lives in this private bucket and is shown through a short-lived signed URL
 SIGNATURE_BUCKET_NAME: str = os.getenv("SIGNATURE_BUCKET_NAME", "signatures")
 SIGNATURE_URL_EXPIRY_SECONDS: int = int(os.getenv("SIGNATURE_URL_EXPIRY_SECONDS", "300"))
+
+# PIR images: each PIR's scanned sheet (a PDF is rendered to PNG) lives in this private bucket, shown through a
+# signed URL. Uploads larger than PIR_IMAGE_MAX_BYTES are refused; a PDF's first page is rendered at PIR_IMAGE_RENDER_DPI
+PIR_IMAGE_BUCKET_NAME: str = os.getenv("PIR_IMAGE_BUCKET_NAME", "pir-images")
+PIR_IMAGE_URL_EXPIRY_SECONDS: int = int(os.getenv("PIR_IMAGE_URL_EXPIRY_SECONDS", "3600"))
+PIR_IMAGE_MAX_BYTES: int = int(os.getenv("PIR_IMAGE_MAX_BYTES", str(10 * 1024 * 1024)))
+PIR_IMAGE_RENDER_DPI: int = int(os.getenv("PIR_IMAGE_RENDER_DPI", "150"))

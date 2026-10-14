@@ -154,3 +154,71 @@ def undelete_pir(pir_id: UUID) -> Optional[dict[str, Any]]:
         # Another PIR was created for the property between the statement's own check and its write
         return None
     return rows[0] if rows else None
+
+
+def _swap_image_sql(set_clause: str) -> str:
+    """
+    Build the statement that changes a PIR's image columns and says which file it pointed at before, in one go.
+    Takes the SET clause for the new values (its parameters come after the PIR's id).
+    Returns the SQL: it returns the PIR as every function here does, plus previous_image_path.
+    """
+    return (
+        """
+        WITH old AS (
+            SELECT id, source_image_url FROM icid.pirs WHERE id = %s FOR UPDATE
+        ),
+        pir AS (
+            UPDATE icid.pirs target
+            SET """
+        + set_clause
+        + """,
+                updated_at = now()
+            FROM old
+            WHERE target.id = old.id
+            RETURNING target.*
+        )
+        SELECT"""
+        + _PIR_COLUMNS
+        + """,
+            (SELECT source_image_url FROM old) AS previous_image_path
+        FROM pir;"""
+    )
+
+
+def set_pir_image(pir_id: UUID, path: str, scale: float) -> Optional[dict[str, Any]]:
+    """
+    Point a PIR at a new image file, with its scale.
+    Takes the PIR's id, the file's Storage path and the scale (pixels per foot).
+    Returns the updated PIR dict with previous_image_path (the file it pointed at before, or None), or None if no PIR matches.
+    """
+    rows = run_query(_swap_image_sql("source_image_url = %s, source_image_scale = %s"), (pir_id, path, scale))
+    return rows[0] if rows else None
+
+
+def clear_pir_image(pir_id: UUID) -> Optional[dict[str, Any]]:
+    """
+    Take a PIR's image away: clear its path and scale.
+    Takes the PIR's id.
+    Returns the updated PIR dict with previous_image_path (the file it pointed at, or None when it had none), or None if no PIR matches.
+    """
+    rows = run_query(_swap_image_sql("source_image_url = NULL, source_image_scale = NULL"), (pir_id,))
+    return rows[0] if rows else None
+
+
+def set_pir_image_scale(pir_id: UUID, scale: float) -> Optional[dict[str, Any]]:
+    """
+    Change the scale of a PIR's image, keeping the image.
+    Takes the PIR's id and the new scale (pixels per foot).
+    Returns the updated PIR dict, or None if no PIR matches or it has no image.
+    """
+    sql = (
+        """
+        UPDATE icid.pirs pir
+        SET source_image_scale = %s, updated_at = now()
+        WHERE pir.id = %s AND pir.source_image_url IS NOT NULL
+        RETURNING"""
+        + _PIR_COLUMNS
+        + ";"
+    )
+    rows = run_query(sql, (scale, pir_id))
+    return rows[0] if rows else None

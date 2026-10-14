@@ -2,7 +2,7 @@ from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PirCreate(BaseModel):
@@ -59,3 +59,66 @@ class PirConflict(BaseModel):
 
     detail: str
     existing_pir_id: UUID
+
+
+class PirImageUploadRequest(BaseModel):
+    """Starting a PIR image upload: the type of the file the client will PUT (a PDF, PNG or JPEG)."""
+
+    content_type: str
+
+
+class PirImageUploadUrl(BaseModel):
+    """Where to PUT a PIR's image file, and the path to complete it with."""
+
+    upload_url: str
+    upload_path: str
+    expires_in: int
+
+
+class PirImageUploadUrlResponse(BaseModel):
+    status: str
+    message: str
+    data: PirImageUploadUrl
+
+
+class PirImageComplete(BaseModel):
+    """
+    Finishing a PIR image upload: the path the file was PUT to, and the image's scale in pixels per foot (15 when
+    left out; the route refuses one that isn't above 0).
+    """
+
+    upload_path: str
+    scale: float = Field(default=15, allow_inf_nan=False)
+
+
+class PirImageScale(BaseModel):
+    """A new scale for a PIR's image, in pixels per foot (the route refuses one that isn't above 0)."""
+
+    scale: float = Field(allow_inf_nan=False)
+
+
+class PirWithImage(PirOut):
+    """A PIR just given an image, with a signed URL to the image and when that URL stops working."""
+
+    signed_url: str
+    expires_at: datetime
+
+
+class PirWithImageResponse(BaseModel):
+    status: str
+    message: str
+    data: PirWithImage
+
+
+class PirImage(BaseModel):
+    """A link to a PIR's image: the signed URL, when it stops working, and the image's scale (pixels per foot)."""
+
+    signed_url: str
+    expires_at: datetime
+    scale: Optional[float] = None
+
+
+class PirImageResponse(BaseModel):
+    status: str
+    message: str
+    data: PirImage

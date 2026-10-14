@@ -586,7 +586,7 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 86
+        assert len(PROTECTED_ROUTES) == 91
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
@@ -625,6 +625,9 @@ class TestEveryRouteNeedsSignIn:
                          ("GET", "/v1/pirs/{pir_id}"), ("PATCH", "/v1/pirs/{pir_id}"),
                          ("POST", "/v1/pirs/{pir_id}/admin/soft-delete"), ("POST", "/v1/pirs/{pir_id}/admin/undelete"),
                          ("GET", "/v1/pirs/{pir_id}/flags"), ("POST", "/v1/pirs/{pir_id}/flags"),
+                         ("POST", "/v1/pirs/{pir_id}/image/upload-request"),
+                         ("POST", "/v1/pirs/{pir_id}/image/complete"), ("GET", "/v1/pirs/{pir_id}/image"),
+                         ("PATCH", "/v1/pirs/{pir_id}/image"), ("DELETE", "/v1/pirs/{pir_id}/image"),
                          ("GET", "/v1/flags/{flag_id}"), ("PATCH", "/v1/flags/{flag_id}"),
                          ("POST", "/v1/flags/{flag_id}/admin/soft-delete"),
                          ("POST", "/v1/flags/{flag_id}/admin/undelete"),
