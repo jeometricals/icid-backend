@@ -17,12 +17,12 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`). Each exports a `router` (`properties.py` and `task_orders.py` also a `project_router`, for their routes under `/v1/projects`; `pirs.py` a `property_router`, for its routes under `/v1/properties`). `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `flags.py`). Each exports a `router` (`properties.py` and `task_orders.py` also a `project_router`, for their routes under `/v1/projects`; `pirs.py` a `property_router`, for its routes under `/v1/properties`; `flags.py` a `pir_router`, for its routes under `/v1/pirs`). `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `budget_rollup.py` (budget against actual by contract value: a project's summed quantities at their contract items' unit prices, per pay item, per budget code and for the project), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `idr_purge.py` (deleting a soft-deleted IDR for good: its row, then its files in the three buckets), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `pay_items.py` (what a project's pay item may hold: the rules for each field, shared by the admin's form and the CSV import), `pay_item_units.py` (the units a pay item can be bid in and the short form each is stored in), `pay_item_import.py` (a pay-item CSV: reading the file, checking every row, sorting the rows into new items, overwrites and errors), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `budget_rollup.py` (budget against actual by contract value: a project's summed quantities at their contract items' unit prices, per pay item, per budget code and for the project), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `idr_purge.py` (deleting a soft-deleted IDR for good: its row, then its files in the three buckets), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `pay_items.py` (what a project's pay item may hold: the rules for each field, shared by the admin's form and the CSV import), `pay_item_units.py` (the units a pay item can be bid in and the short form each is stored in), `flag_area.py` (a flag's area from its shape and dimensions, in square feet), `pay_item_import.py` (a pay-item CSV: reading the file, checking every row, sorting the rows into new items, overwrites and errors), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, and the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`). No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -49,7 +49,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?, email?, is_admin?, is_demo?}`; changes what is sent and returns the user under `data` (`role` is `admin` or null). Names and email are trimmed. 400 when nothing is sent (a null counts as not sent), a name is blank or over 100 characters, the email is blank or malformed, an admin sends `is_admin: false` for themselves (`You cannot revoke your own admin role.`), or `is_demo: true` is sent for a real user (`Cannot change a real user to a demo user.`); 404 for an unknown user; 409 `{detail, existing_user_uuid}` when another user has the email, whatever its capitals
 - `POST /v1/admin/users/{user_id}/delete` — admin only: soft-deletes the user (`deleted_at`, `deleted_by`) and returns them under `data`; they can no longer sign in or use a token. Nothing else of theirs changes. 400 `You cannot delete your own account.`, 404 for an unknown user or `User is already deleted`
 - `POST /v1/admin/users/{user_id}/undelete` — admin only: restores a soft-deleted user and returns them under `data`. 404 for an unknown user or `User is not deleted`, 409 `{detail, existing_user_uuid}` when another user now has their email
-- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs}}` when anything still names them
+- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs, flags}}` when anything still names them
 - `POST /v1/admin/users/{user_id}/password` — admin only: body `{new_password}`; replaces the user's password and returns the user under `data`. Any user, the admin's own row included. 400 for a password under 6 characters or over 72 bytes, 404 for an unknown user
 - `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
@@ -90,6 +90,12 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `PATCH /v1/pirs/{pir_id}` — project members and admins: `inspector_initials` and/or `inspector_sign_date`; returns the PIR under `data`. 403 for a user who isn't on its project or a demo user; 400 when nothing is sent (a null counts as not sent), the initials don't fit, or a user who isn't an admin edits a soft-deleted PIR (`PIR is deleted`) or a PIR of a soft-deleted property (`Property is deleted`), 422 for a malformed date, 404 for an unknown PIR
 - `POST /v1/pirs/{pir_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by`, freeing the property for a new PIR, and returns the PIR under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown PIR
 - `POST /v1/pirs/{pir_id}/admin/undelete` — admin only: clears both and returns the PIR under `data`. 404 for an unknown PIR or `PIR is not deleted`, 409 `{detail, existing_pir_id}` when the property now has another live PIR
+- `GET /v1/pirs/{pir_id}/flags?include_deleted=` — the PIR's flags, by `display_order` then creation, under `data` (see "Flags"). For a user on its project, or an admin: 403 otherwise, 404 for an unknown PIR. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
+- `POST /v1/pirs/{pir_id}/flags` — project members (any role) and admins: body as "Flags" lists; creates the flag, `created_by` the signed-in user, its `computed_quantity` the area of its shape, and returns it under `data`, 201. 422 for dimensions that don't fit the shape or a broken rule; 400 for a pay item of another project (`Pay item belongs to a different project`), or, for a user who isn't an admin, a soft-deleted PIR (`PIR is deleted`) or a PIR of a soft-deleted property (`Property is deleted`); 403 for a user who isn't on its project or a demo user (`Demo mode: flags are read-only`); 404 for an unknown PIR
+- `GET /v1/flags/{flag_id}` — one flag, soft-deleted or not, under `data`. For a user on its project, or an admin: 403 otherwise, 404 for an unknown flag
+- `PATCH /v1/flags/{flag_id}` — project members and admins: any of the create body's fields, merged over the stored flag and checked whole; the area is computed again. Returns the flag under `data`. 400 when nothing is sent, for a pay item of another project, or, for a user who isn't an admin, a soft-deleted flag (`Flag is deleted`), PIR or property; 422 as on create, and for a new `shape` without its `dimensions`; 403 and 404 as on read, and 403 for a demo user
+- `POST /v1/flags/{flag_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by` and returns the flag under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown flag
+- `POST /v1/flags/{flag_id}/admin/undelete` — admin only: clears both and returns the flag under `data`. 404 for an unknown flag or `Flag is not deleted`
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=&idr_number=&work_date=&from=&to=&discipline=` — list IDRs (the archive) with `report_count`, `has_general`, `disciplines` and the names of the inspector and reviewers (all filters optional; `discipline` repeats). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true). 400 for a bad date, `work_date` with `from` or `to`, `from` after `to`, or an unknown discipline
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order, and `field_edits`: every edit reviewers made on it, oldest first, each with `editor_name` and `editor_initials`
@@ -241,9 +247,10 @@ Any change must follow these.
       must be soft-deleted first`), and only one nothing names. `count_user_references` counts what does: IDRs
       they reported, reviewed at either stage or deleted; project roles; audit rows; field edits; attachments
       they uploaded; properties and task orders they created or deleted; properties they bundled into task
-      orders; PIRs they digitized, signed as built or deleted. Any of those is a 409 with the counts under
-      `references`. Those are all the foreign keys to `users.uuid` (the `deleted_by` of a property, a task
-      order or a PIR and a PIR's `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
+      orders; PIRs they digitized, signed as built or deleted; flags they created or deleted. Any of those is a
+      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (the `deleted_by`
+      of a property, a task order, a PIR or a flag and a PIR's `as_built_signed_by` are `ON DELETE SET NULL`,
+      but are counted anyway); none
       cascades, and the DELETE itself is refused by them if a row appears at the last moment
       (also 409). So a user who ever did anything stays soft-deleted for good, which is the usual case; a
       project role is the one thing an admin can clear first (revoke it).
@@ -329,9 +336,11 @@ Any change must follow these.
     - **Amounts.** Quantity takes up to 10 decimal places and unit price up to 6 (trailing zeros aren't
       counted); zero is allowed, a negative is 400, and so is 10^15 or more. The columns are plain NUMERIC and
       hold what was typed; responses carry them as JSON numbers. Text that isn't a number is FastAPI's 422.
-    - **Deleting is a hard delete, and safe.** Nothing references a contract item: a report's pay items and
-      the rows of `icid.quantities` are copies. A deleted item leaves the picker; reports that used it, and
-      their quantities, are unchanged. There is no undo for a delete or a clear.
+    - **Deleting is a hard delete, and safe.** A report's pay items and the rows of `icid.quantities` are
+      copies, and the one foreign key to a contract item, `flags.pay_item_id`, is `ON DELETE SET NULL`: a flag
+      mapped to a deleted item keeps its geometry and quantity and loses only its mapping. A deleted item leaves
+      the picker; reports that used it, and their quantities, are unchanged. There is no undo for a delete or a
+      clear.
     - **Migration 026 must be in the database before this code runs**: the picker's route reads the new
       columns too. The code from before it keeps working after it.
     - **CSV import** is two routes taking the same upload (multipart field `file`): `import/preview` shows
@@ -911,6 +920,54 @@ Any change must follow these.
   - `property_id` doesn't cascade: a permanent delete of a property, if one is ever built, must refuse while it
     has PIRs.
   - **Migration 031 must be in the database before this code runs**: the routes and the user-reference count
+    name the table.
+- **Flags.** `icid.flags` (migration 032): the marked pieces of sidewalk on a PIR, one row each, with their
+  shape, the DOT survey's classification and the quantity they come to (`api/v1/flags.py`, `api/queries/flags.py`,
+  `api/schemas/flag.py`, `api/services/flag_area.py`).
+  - **The body** (`FlagCreate`): `display_order` (an integer ≥ 0; not unique, the list sorts by it then by
+    creation), `shape`, `dimensions`, `sketch_x` / `sketch_y` (optional), `rotation` (default 0),
+    `surveyed_mark`, `surveyed_is_assessable`, `surveyed_non_assessable_reason`, `surveyed_thickness`,
+    `added_in_field` (default false), `pay_item_id`, `reported_quantity` and `quantity_delta_reason` (optional).
+    The values each enum takes: shape `rectangle` `trapezoid` `triangle` `polygon` `arc`; mark `number_only`
+    `cross` `cross_with_number` `tick` `none`; reason `tree_damage` `city_tree` `transition` `no_driveway`
+    `hydrant` `fronting_city` `utility` `settlement` `other`; thickness `4in` `7in` `7in_as_4in` (the table's
+    CHECKs hold the same). `is_constructed` is not the API's to write: a later IDR-claim slice sets it.
+  - **Dimensions, by shape** (feet; finite numbers, lengths above 0, no other keys): rectangle `{L, W}`;
+    trapezoid `{a, b, w}` (the parallel sides and the width between them); triangle `{a, b}` (a right
+    triangle's legs); polygon `{vertices: [{x, y}, ...]}` (three or more, in order, enclosing some area: a
+    collinear set is refused); arc `{r, theta}` (a circular segment, `0 < theta ≤ 2π` radians). Checked by the
+    `DIMENSIONS_BY_SHAPE` models; the database only knows `dimensions` is JSON.
+  - **The area** (`compute_area`) is computed by the server on create and on every PATCH and stored as
+    `computed_quantity`, square feet to 2 decimal places, halves up: rectangle `L × W`; trapezoid
+    `(a + b) / 2 × w`; triangle `a × b / 2`; polygon the shoelace formula, its absolute value; arc
+    `r² / 2 × (θ − sin θ)`. Lengths are taken as decimals as written (`0.1 × 0.3` is `0.03`).
+  - **Rules** (422, from `FlagCreate`): an assessable flag has no `surveyed_non_assessable_reason`, one that
+    isn't has one; `surveyed_mark = 'none'` if and only if `added_in_field` (a flag added on site carries no PIR
+    mark); `reported_quantity`, when set, is above 0.
+  - **Overrides.** `reported_quantity` NULL means there is none: the computed area stands. Every response
+    carries `quantity` (`COALESCE(reported_quantity, computed_quantity)`, worked out in the statement) and
+    `is_overridden`. A PATCH with `reported_quantity: null` reverts to the computed area and clears
+    `quantity_delta_reason`.
+  - **PATCH merges, then checks the whole.** The body is laid over the stored flag and the result is checked
+    as `FlagCreate` checks a new one (a 422 in FastAPI's own shape), so a change that breaks a rule only
+    together with the stored values is caught. A new `shape` needs its `dimensions` in the same PATCH. A null
+    clears `sketch_x`, `sketch_y`, `surveyed_non_assessable_reason`, `pay_item_id` and `quantity_delta_reason`;
+    on any other field (but `reported_quantity`, above) it counts as not sent. The statement writes the merged
+    record whole.
+  - **Pay items.** `pay_item_id` is a contract item of the PIR's project: the route checks it (400 `Pay item
+    belongs to a different project`, an unknown id included) and the INSERT and UPDATE match only when it
+    holds. Mapping flags to pay items automatically is R1c. A deleted pay item leaves its flags unmapped
+    (`ON DELETE SET NULL`).
+  - **Who.** Reading takes a user on the project, or an admin (`pir_member` for the list, `flag_member` by id,
+    which reads the project through the flag's PIR and property in the same statement; responses carry
+    `property_id` and `project_id`). Creating and editing take the same, but not a demo user (403 `Demo mode:
+    flags are read-only`, `no_demo_flag_writes`). A user who isn't an admin gets 400 `Flag is deleted`, `PIR is
+    deleted` or `Property is deleted` on a write under anything soft-deleted; an admin can still write there.
+    Soft delete and un-delete are admin only (again is a 200 no-op; un-deleting a live flag is 404; nothing
+    blocks an un-delete).
+  - `pir_id` has no cascade: a flag is a record of its own. `created_by` is `NO ACTION`, so
+    `count_user_references` counts flags created or deleted.
+  - **Migration 032 must be in the database before this code runs**: the routes and the user-reference count
     name the table.
 - **The archive.** `GET /v1/idrs/` is the IDR list the archive page reads (`list_project_idrs` in
   `api/v1/idrs.py`, `list_idrs` in `api/queries/idrs.py`). It is not paged: every match comes back, most

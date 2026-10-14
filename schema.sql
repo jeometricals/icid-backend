@@ -348,6 +348,49 @@ CREATE TABLE icid.pirs (
 CREATE UNIQUE INDEX uq_pirs_property ON icid.pirs (property_id) WHERE deleted_at IS NULL;
 
 ------------------------------------------------------------
+-- FLAG (a marked piece of sidewalk on a PIR: shape, survey classification, quantity; soft-deleted; migrations/032)
+-- dimensions are checked per shape by the API; computed_quantity is the shape's area (sq ft), reported_quantity an
+-- override (NULL: none). pay_item_id is SET NULL on delete: pay items are hard-deleted by the admin routes
+------------------------------------------------------------
+CREATE TABLE icid.flags (
+    id                              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pir_id                          UUID NOT NULL REFERENCES icid.pirs(id),
+    display_order                   INT NOT NULL,
+    added_in_field                  BOOLEAN NOT NULL DEFAULT false,
+    shape                           TEXT NOT NULL,
+    dimensions                      JSONB NOT NULL,
+    sketch_x                        REAL,
+    sketch_y                        REAL,
+    rotation                        REAL NOT NULL DEFAULT 0,
+    surveyed_mark                   TEXT NOT NULL,
+    surveyed_is_assessable          BOOLEAN NOT NULL,
+    surveyed_non_assessable_reason  TEXT,
+    surveyed_thickness              TEXT NOT NULL,
+    is_constructed                  BOOLEAN NOT NULL DEFAULT false,
+    pay_item_id                     UUID REFERENCES icid.contract_items(contract_item_id) ON DELETE SET NULL,
+    computed_quantity               NUMERIC NOT NULL,
+    reported_quantity               NUMERIC,
+    quantity_delta_reason           TEXT,
+    created_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by                      UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at                      TIMESTAMPTZ,
+    deleted_by                      UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    CONSTRAINT chk_flags_display_order CHECK (display_order >= 0),
+    CONSTRAINT chk_flags_shape CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
+    CONSTRAINT chk_flags_surveyed_mark
+        CHECK (surveyed_mark IN ('number_only', 'cross', 'cross_with_number', 'tick', 'none')),
+    CONSTRAINT chk_flags_non_assessable_reason CHECK (surveyed_non_assessable_reason IS NULL OR
+        surveyed_non_assessable_reason IN ('tree_damage', 'city_tree', 'transition', 'no_driveway', 'hydrant',
+                                           'fronting_city', 'utility', 'settlement', 'other')),
+    CONSTRAINT chk_flags_thickness CHECK (surveyed_thickness IN ('4in', '7in', '7in_as_4in')),
+    CONSTRAINT chk_flags_reported_quantity CHECK (reported_quantity IS NULL OR reported_quantity > 0)
+);
+
+CREATE INDEX idx_flags_pir ON icid.flags (pir_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_flags_pay_item ON icid.flags (pay_item_id) WHERE deleted_at IS NULL AND pay_item_id IS NOT NULL;
+
+------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)
 ------------------------------------------------------------
 CREATE TABLE icid.report_attachments (

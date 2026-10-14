@@ -79,6 +79,7 @@ class UserReferences(BaseModel):
     task_orders: int
     task_order_properties: int
     pirs: int
+    flags: int
 
 
 class UserHasHistory(BaseModel):

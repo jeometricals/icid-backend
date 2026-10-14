@@ -1,7 +1,7 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 031 (Slice R1a). The diagram below is the ER
-diagram; it was last checked against `schema.sql` in Slice R1a.
+Developer reference for the `icid` schema as of migration 032 (Slice R1b). The diagram below is the ER
+diagram; it was last checked against `schema.sql` in Slice R1b.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -34,13 +34,14 @@ projects ──< properties                        project_id; soft-deleted, uni
 projects ──< task_orders ──< task_order_properties >── properties
                                                both FKs ON DELETE CASCADE; both sides share a project
 properties ──< pirs                            property_id, no cascade; one live PIR per property
+pirs ──< flags ··· contract_items              pir_id, no cascade; pay_item_id optional, ON DELETE SET NULL
 
 users is also referenced by (none cascades):
     idrs.stage1_reviewer_uuid, idrs.re_reviewer_uuid, idrs.deleted_by
     idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by, properties.created_by,
-    task_orders.created_by, task_order_properties.added_by, pirs.digitized_by
+    task_orders.created_by, task_order_properties.added_by, pirs.digitized_by, flags.created_by
     users.deleted_by, properties.deleted_by, task_orders.deleted_by, pirs.deleted_by,
-    pirs.as_built_signed_by (ON DELETE SET NULL)
+    pirs.as_built_signed_by, flags.deleted_by (ON DELETE SET NULL)
 ```
 
 `──<` reads "has many". Deleting an IDR's row takes everything drawn under it; nothing cascades from a user, a
@@ -63,7 +64,8 @@ client or a project except a project's `contract_items`. `quantities.reporter_uu
 - **task_orders** bundle a project's properties (**task_order_properties**, the join); a property can be in
   several. See [task_orders](#task_orders).
 - A **PIR** is a property's digitized DOT survey sheet; a property has at most one that isn't deleted. See
-  [pirs](#pirs).
+  [pirs](#pirs). Its **flags** are the marked pieces of sidewalk on it, each with a shape and the area it comes
+  to. See [flags](#flags).
 - An IDR is **soft-deleted** by an admin (`status = 'deleted'`, `deleted_at`, `deleted_by`): the row and
   everything under it stay, and it can be brought back. Only a soft-deleted IDR can then be deleted for good,
   which removes the row and, by the cascades above, everything under it. See [idrs](#idrs).
@@ -119,10 +121,10 @@ admin role and demo flag (`/v1/admin/users`); a password is changed by its user 
   same email.
 - `DELETE .../permanent` deletes the row of a user who is soft-deleted, and only when no row names them: every
   foreign key to `users.uuid` (see the diagram) is `NO ACTION` and refuses the delete, except
-  the `deleted_by` of users, properties, task orders and PIRs and `pirs.as_built_signed_by`, which (but for
-  `users.deleted_by`) are counted all the same. So only a user who never reported, reviewed, edited, uploaded,
-  held a role, created or deleted a property or a task order, bundled a property, or digitized, signed or
-  deleted a PIR, can go;
+  the `deleted_by` of users, properties, task orders, PIRs and flags and `pirs.as_built_signed_by`, which (but
+  for `users.deleted_by`) are counted all the same. So only a user who never reported, reviewed, edited,
+  uploaded, held a role, created or deleted a property, a task order or a flag, bundled a property, or
+  digitized, signed or deleted a PIR, can go;
   anyone with history stays soft-deleted. The user's signature file is then removed from Storage, best-effort.
 
 A demo user is made by `POST /v1/auth/demo` (`demo-<uuid>@icid.local`, first name `Demo`, client `C00001`, no
@@ -450,6 +452,35 @@ Demo users only read (since S2).
 A soft-deleted PIR frees its property, so a replacement can be created while the old one is kept; un-deleting
 the old one is then refused (409). No PIR can be created on a soft-deleted property.
 
+### flags
+
+The marked pieces of sidewalk on a PIR, one row each. Added by migration 032. Anyone on the project, and any admin,
+reads, adds and edits them (`/v1/pirs/{id}/flags`, `/v1/flags/{id}`); only admins soft-delete and restore them.
+Demo users only read.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `pir_id` | UUID NOT NULL | FK → `pirs.id`, no cascade; `idx_flags_pir` (live flags) |
+| `display_order` | INT NOT NULL | ≥ 0 (`chk_flags_display_order`); not unique |
+| `added_in_field` | BOOLEAN NOT NULL | Default false. True for a flag added on site, which has the mark `none` |
+| `shape` | TEXT NOT NULL | `rectangle`, `trapezoid`, `triangle`, `polygon` or `arc`; CHECK `chk_flags_shape` |
+| `dimensions` | JSONB NOT NULL | Per shape, in feet; checked by the API, not the database |
+| `sketch_x`, `sketch_y` | REAL | Where it sits on the sketch |
+| `rotation` | REAL NOT NULL | Degrees, default 0 |
+| `surveyed_mark` | TEXT NOT NULL | `number_only`, `cross`, `cross_with_number`, `tick` or `none`; CHECK `chk_flags_surveyed_mark` |
+| `surveyed_is_assessable` | BOOLEAN NOT NULL | |
+| `surveyed_non_assessable_reason` | TEXT | Required when not assessable, empty when assessable (the API checks the pairing); CHECK `chk_flags_non_assessable_reason` on the nine values |
+| `surveyed_thickness` | TEXT NOT NULL | `4in`, `7in` or `7in_as_4in`; CHECK `chk_flags_thickness` |
+| `is_constructed` | BOOLEAN NOT NULL | Default false; set by a later IDR-claim slice, not the API |
+| `pay_item_id` | UUID | FK → `contract_items.contract_item_id`, **ON DELETE SET NULL**; a contract item of the PIR's project (the API checks); `idx_flags_pay_item` (live, mapped flags) |
+| `computed_quantity` | NUMERIC NOT NULL | The shape's area in square feet, 2 decimal places, computed by the API |
+| `reported_quantity` | NUMERIC | An override, above 0 (`chk_flags_reported_quantity`); NULL means the computed quantity stands |
+| `quantity_delta_reason` | TEXT | Why the override differs |
+| `created_by` | UUID NOT NULL | The signed-in user who added it: any project member or admin; FK → `users.uuid` |
+| `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
+| `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
+
 ### report_attachments
 
 Files attached to a report. Each row describes one file; the file itself is in the private
@@ -548,8 +579,9 @@ code. Indexes: `idx_contract_items_project (project_id)`, `idx_contract_items_sp
 `GET /v1/contract_items/?project_id=` returns a project's rows for the pay-item picker, each
 with `item_no`, `description`, `spec_section` (may be null) and `pay_unit` (the `unit` column).
 
-Nothing references a contract item: pay items in reports and rows of `quantities` are copies,
-so deleting one only takes it out of the picker.
+Pay items in reports and rows of `quantities` are copies. The one foreign key to a contract item is
+`flags.pay_item_id`, `ON DELETE SET NULL`, so deleting one takes it out of the picker and unmaps any flag that
+pointed at it.
 
 ### form_templates (present, unused)
 
@@ -682,6 +714,7 @@ content as TEXT, linked to a report and a form template).
 | 029 | `029_properties.sql` | R0a | Created `properties` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`, CHECK `chk_properties_type`) and the partial unique index `uq_properties_project_bbl`. No existing table or row changed. |
 | 030 | `030_task_orders.sql` | R0b | Created `task_orders` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`) with the partial unique index `uq_task_orders_project_number`, and `task_order_properties` (PK `(task_order_id, property_id)`, FKs to `task_orders` and `properties` both ON DELETE CASCADE, FK to `users` for `added_by`) with `idx_task_order_properties_property`. No existing table or row changed. |
 | 031 | `031_pirs.sql` | R1a | Created `pirs` (FK to `properties` with no cascade; FKs to `users` for `digitized_by` and, ON DELETE SET NULL, `as_built_signed_by` and `deleted_by`) with the partial unique index `uq_pirs_property`. No existing table or row changed. |
+| 032 | `032_flags.sql` | R1b | Created `flags` (FK to `pirs` with no cascade; FK to `contract_items` ON DELETE SET NULL; FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`; CHECKs on `display_order`, `shape`, `surveyed_mark`, `surveyed_non_assessable_reason`, `surveyed_thickness` and `reported_quantity`) with the partial indexes `idx_flags_pir` and `idx_flags_pay_item`. No existing table or row changed. |
 
 Where each current column came from:
 
@@ -699,6 +732,7 @@ Where each current column came from:
 | `properties` | all | 029 |
 | `task_orders`, `task_order_properties` | all | 030 |
 | `pirs` | all | 031 |
+| `flags` | all | 032 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

@@ -20,6 +20,7 @@ import jwt
 from fastapi import Depends, Header, HTTPException, Request
 
 from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
+from api.queries.flags import get_flag
 from api.queries.idrs import get_idr_by_id
 from api.queries.pirs import get_pir
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
@@ -319,6 +320,15 @@ def property_member(property_id: UUID, user: UserOut = Depends(current_user)) ->
     return _readable_on_project(get_property(property_id), user, "Property not found")
 
 
+def flag_member(flag_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one flag: the signed-in user must be assigned to its PIR's property's project (in any role), or be an admin.
+    Takes the flag_id path parameter and the current user.
+    Returns the flag dict; raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_flag(flag_id), user, "Flag not found")
+
+
 def task_order_member(task_order_id: UUID, user: UserOut = Depends(current_user)) -> dict:
     """
     FastAPI dependency for routes that read one task order: the signed-in user must be assigned to its project (in any role), or be an admin.
@@ -380,6 +390,15 @@ def no_demo_pir_writes(user: UserOut = Depends(current_user)) -> UserOut:
     Returns them; raises 403 for a demo user.
     """
     return _refuse_demo(user, "Demo mode: PIRs are read-only")
+
+
+def no_demo_flag_writes(user: UserOut = Depends(current_user)) -> UserOut:
+    """
+    FastAPI dependency for the flag writes project members make: demo users only read flags (what they wrote would outlive their own deletion).
+    Takes the current user.
+    Returns them; raises 403 for a demo user.
+    """
+    return _refuse_demo(user, "Demo mode: flags are read-only")
 
 
 def demo_idr_fence(request: Request, user: UserOut = Depends(current_user)) -> None:

@@ -1,0 +1,454 @@
+import math
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from unittest.mock import patch
+from uuid import UUID
+
+import pytest
+
+from api.queries.flags import _WRITABLE, list_flags, soft_delete_flag, undelete_flag
+from tests.conftest import ADMIN_USER_ROW, signed_in
+
+# ---------------------------------------------------------------------------
+# /v1/pirs/{pir_id}/flags and /v1/flags/{flag_id}
+# Mock rows are dicts, as run_query returns them: a flag's own columns, its PIR's property and project, and its
+# quantity as the statement works it out.
+# ---------------------------------------------------------------------------
+
+FLAGS = "api.queries.flags.run_query"
+PIRS = "api.queries.pirs.run_query"
+PROPS = "api.queries.properties.run_query"
+PROJECTS = "api.queries.projects.run_query"
+CONTRACT = "api.queries.contract_items.run_query"
+
+ADMIN_ID = ADMIN_USER_ROW["uuid"]
+MEMBER_ROW = {**ADMIN_USER_ROW, "uuid": UUID("b0000000-0000-4000-8000-000000000002"), "role": None}
+MEMBER_ID = MEMBER_ROW["uuid"]
+PROPERTY_ID = UUID("9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f")
+PIR_ID = UUID("6f7a8b9c-0d1e-4f2a-8b3c-4d5e6f7a8b9c")
+FLAG_ID = UUID("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d")
+PAY_ITEM_ID = UUID("7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4e")
+FLAGS_URL = f"/v1/pirs/{PIR_ID}/flags"
+URL = f"/v1/flags/{FLAG_ID}"
+CREATED = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
+DELETED = datetime(2026, 10, 14, 10, 0, tzinfo=timezone.utc)
+
+PROPERTY_ROW = {"id": PROPERTY_ID, "project_id": "HWS0023", "bbl": "4012340056", "address": "12-34 56th Ave",
+                "property_type": "1_3_family", "notes": None, "created_at": CREATED, "updated_at": CREATED,
+                "created_by": ADMIN_ID, "deleted_at": None, "deleted_by": None}
+PIR_ROW = {"id": PIR_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023", "source_image_url": None,
+           "source_image_scale": None, "inspector_initials": "JD", "inspector_sign_date": date(2026, 9, 30),
+           "digitized_by": ADMIN_ID, "digitized_at": CREATED, "as_built_signed_by": None, "as_built_signed_at": None,
+           "created_at": CREATED, "updated_at": CREATED, "deleted_at": None, "deleted_by": None}
+PAY_ITEM_ROW = {"pay_item_uuid": PAY_ITEM_ID, "pay_item_ref": "4.01", "description": "Sidewalk", "unit": "SF",
+                "quantity": Decimal("100"), "unit_price": Decimal("12"), "budget_code": "SE01", "spec_section": None}
+FLAG_ROW = {"id": FLAG_ID, "pir_id": PIR_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023", "display_order": 1,
+            "added_in_field": False, "shape": "rectangle", "dimensions": {"L": 5.0, "W": 4.0}, "sketch_x": None,
+            "sketch_y": None, "rotation": 0.0, "surveyed_mark": "cross", "surveyed_is_assessable": True,
+            "surveyed_non_assessable_reason": None, "surveyed_thickness": "4in", "is_constructed": False,
+            "pay_item_id": None, "computed_quantity": Decimal("20.00"), "reported_quantity": None,
+            "quantity": Decimal("20.00"), "is_overridden": False, "quantity_delta_reason": None,
+            "created_at": CREATED, "updated_at": CREATED, "created_by": ADMIN_ID, "deleted_at": None,
+            "deleted_by": None}
+DELETED_ROW = {**FLAG_ROW, "deleted_at": DELETED, "deleted_by": ADMIN_ID}
+BODY = {"display_order": 1, "shape": "rectangle", "dimensions": {"L": 5, "W": 4}, "surveyed_mark": "cross",
+        "surveyed_is_assessable": True, "surveyed_thickness": "4in"}
+
+FORBIDDEN = (403, {"detail": "Admin access required"})
+ON_PROJECT = [{"?column?": 1}]
+
+# Where a write's parameters sit: the writable columns, then the computed area, then (on create) the creator
+AREA = len(_WRITABLE)
+CREATOR = AREA + 1
+
+
+def written(run, call: int = -1) -> dict:
+    """
+    Read the writable values a create or update statement was given.
+    Takes the run_query mock and which of its calls (the last by default).
+    Returns them keyed by column, with the computed area under computed_quantity.
+    """
+    params = run.call_args_list[call].args[1]
+    values = dict(zip(_WRITABLE, params))
+    values["computed_quantity"] = params[AREA]
+    return values
+
+
+def error_messages(response) -> str:
+    """
+    Join a 422's messages, to look for one in.
+    Takes the response.
+    Returns the messages, one string.
+    """
+    return " | ".join(error["msg"] for error in response.json()["detail"])
+
+
+class TestCreateFlag:
+    def test_an_admin_creates_a_rectangle_with_its_area(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 201 and response.json()["message"] == "Flag created"
+        data = response.json()["data"]
+        assert data["computed_quantity"] == 20.0 and data["quantity"] == 20.0 and data["is_overridden"] is False
+        assert data["property_id"] == str(PROPERTY_ID) and data["project_id"] == "HWS0023"
+        values = written(run)
+        assert values["computed_quantity"] == Decimal("20.00") and values["reported_quantity"] is None
+        assert values["rotation"] == 0 and values["added_in_field"] is False
+        assert run.call_args.args[1][CREATOR] == ADMIN_ID
+
+    def test_a_member_creates_a_flag_as_its_creator(self):
+        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
+                patch(PROJECTS, return_value=ON_PROJECT), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(FLAGS, return_value=[{**FLAG_ROW, "created_by": MEMBER_ID}]) as run:
+            response = member.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 201 and response.json()["data"]["created_by"] == str(MEMBER_ID)
+        assert run.call_args.args[1][CREATOR] == MEMBER_ID
+
+    @pytest.mark.parametrize("shape,dimensions,area", [
+        ("rectangle", {"L": 5, "W": 4}, "20.00"),
+        ("trapezoid", {"a": 3, "b": 5, "w": 4}, "16.00"),
+        ("triangle", {"a": 3, "b": 4}, "6.00"),
+        ("polygon", {"vertices": [{"x": 0, "y": 0}, {"x": 4, "y": 0}, {"x": 4, "y": 3}, {"x": 0, "y": 3}]}, "12.00"),
+        ("arc", {"r": 2, "theta": math.pi}, "6.28"),
+    ])
+    def test_each_shape_is_stored_with_its_area(self, admin_client, shape, dimensions, area):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "shape": shape, "dimensions": dimensions})
+        assert response.status_code == 201
+        assert written(run)["computed_quantity"] == Decimal(area)
+        assert written(run)["shape"] == shape
+
+    def test_the_statement_checks_the_pir_and_the_pay_items_project_itself(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            admin_client.post(FLAGS_URL, json=BODY)
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "INSERT INTO icid.flags" in one_line and "FROM icid.pirs pir JOIN icid.properties p" in one_line
+        assert "ci.contract_item_id = %s::uuid AND ci.project_id = p.project_id" in one_line
+        assert "COALESCE(f.reported_quantity, f.computed_quantity) AS quantity" in one_line
+        assert "%s::real" in one_line and "%s::jsonb" in one_line  # a NULL parameter is typed, not text
+
+    @pytest.mark.parametrize("dimensions,shape", [
+        ({"L": -1, "W": 4}, "rectangle"),
+        ({"L": 0, "W": 4}, "rectangle"),
+        ({"L": 5}, "rectangle"),
+        ({"L": 5, "W": 4, "H": 2}, "rectangle"),
+        ({"a": 3, "b": 4}, "rectangle"),
+        ({"a": 3, "b": -5, "w": 4}, "trapezoid"),
+        ({"a": 3, "b": 0}, "triangle"),
+        ({"vertices": [{"x": 0, "y": 0}, {"x": 4, "y": 0}]}, "polygon"),
+        ({"vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 2}]}, "polygon"),
+        ({"r": 2, "theta": 2 * math.pi + 0.01}, "arc"),
+        ({"r": 2, "theta": 0}, "arc"),
+        ({"r": -2, "theta": 1}, "arc"),
+    ])
+    def test_dimensions_that_dont_fit_the_shape_are_422(self, admin_client, dimensions, shape):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "shape": shape, "dimensions": dimensions})
+        assert response.status_code == 422
+        run.assert_not_called()
+
+    def test_a_degenerate_polygon_says_why(self, admin_client):
+        collinear = {"vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 2}]}
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS):
+            response = admin_client.post(FLAGS_URL, json={**BODY, "shape": "polygon", "dimensions": collinear})
+        assert "must enclose an area" in error_messages(response)
+
+    @pytest.mark.parametrize("changes,message", [
+        ({"surveyed_is_assessable": False}, "needs a surveyed_non_assessable_reason"),
+        ({"surveyed_non_assessable_reason": "hydrant"}, "an assessable flag has no surveyed_non_assessable_reason"),
+        ({"surveyed_mark": "none"}, "'none' is only for a flag added in the field"),
+        ({"added_in_field": True}, "a flag added in the field has surveyed_mark 'none'"),
+        ({"reported_quantity": -1}, "greater than 0"),
+        ({"reported_quantity": 0}, "greater than 0"),
+        ({"display_order": -1}, "greater than or equal to 0"),
+        ({"surveyed_thickness": "6in"}, "Input should be"),
+        ({"surveyed_non_assessable_reason": "aliens", "surveyed_is_assessable": False}, "Input should be"),
+    ])
+    def test_a_flag_that_breaks_a_rule_is_422(self, admin_client, changes, message):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, **changes})
+        assert response.status_code == 422 and message in error_messages(response)
+        run.assert_not_called()
+
+    def test_the_rules_let_a_field_added_flag_and_a_non_assessable_one_through(self, admin_client):
+        body = {**BODY, "added_in_field": True, "surveyed_mark": "none", "surveyed_is_assessable": False,
+                "surveyed_non_assessable_reason": "hydrant", "reported_quantity": 18.5,
+                "quantity_delta_reason": "measured on site"}
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            assert admin_client.post(FLAGS_URL, json=body).status_code == 201
+        values = written(run)
+        assert values["reported_quantity"] == Decimal("18.5") and values["computed_quantity"] == Decimal("20.00")
+
+    def test_a_pay_item_of_the_project_is_taken(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(CONTRACT, return_value=[PAY_ITEM_ROW]) as items, \
+                patch(FLAGS, return_value=[{**FLAG_ROW, "pay_item_id": PAY_ITEM_ID}]) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "pay_item_id": str(PAY_ITEM_ID)})
+        assert response.status_code == 201
+        assert items.call_args.args[1] == ("HWS0023", PAY_ITEM_ID)
+        assert written(run)["pay_item_id"] == PAY_ITEM_ID
+
+    def test_a_pay_item_of_another_project_is_400(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(CONTRACT, return_value=[]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "pay_item_id": str(PAY_ITEM_ID)})
+        assert response.status_code == 400 and response.json() == {"detail": "Pay item belongs to a different project"}
+        run.assert_not_called()
+
+    def test_a_user_who_isnt_on_the_project_is_forbidden(self):
+        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), patch(PROJECTS, return_value=[]), \
+                patch(FLAGS) as run:
+            response = member.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+        run.assert_not_called()
+
+    def test_a_demo_user_cant_add_on_their_own_project(self, demo_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS) as run:
+            response = demo_client.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: flags are read-only"}
+        run.assert_not_called()
+
+    def test_a_demo_user_gets_404_on_another_project(self, demo_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PROJECTS, return_value=[]), patch(FLAGS) as run:
+            response = demo_client.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 404 and response.json() == {"detail": "PIR not found"}
+        run.assert_not_called()
+
+    def test_a_member_cant_add_to_a_deleted_pir(self):
+        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[{**PIR_ROW, "deleted_at": DELETED}]), \
+                patch(PROJECTS, return_value=ON_PROJECT), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(FLAGS) as run:
+            response = member.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 400 and response.json() == {"detail": "PIR is deleted"}
+        run.assert_not_called()
+
+    def test_a_member_cant_add_to_a_pir_of_a_deleted_property(self):
+        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
+                patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PROPS, return_value=[{**PROPERTY_ROW, "deleted_at": DELETED}]), patch(FLAGS) as run:
+            response = member.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 400 and response.json() == {"detail": "Property is deleted"}
+        run.assert_not_called()
+
+    def test_an_admin_adds_to_a_deleted_pir(self, admin_client):
+        with patch(PIRS, return_value=[{**PIR_ROW, "deleted_at": DELETED}]), patch(PROPS) as props, \
+                patch(FLAGS, return_value=[FLAG_ROW]):
+            assert admin_client.post(FLAGS_URL, json=BODY).status_code == 201
+        props.assert_not_called()
+
+    def test_an_unknown_pir_is_404(self, admin_client):
+        with patch(PIRS, return_value=[]), patch(FLAGS) as run:
+            assert admin_client.post(FLAGS_URL, json=BODY).status_code == 404
+        run.assert_not_called()
+
+
+class TestListAndReadFlags:
+    def test_a_member_lists_the_live_flags_in_display_order(self):
+        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
+                patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = member.get(FLAGS_URL, params={"include_deleted": "true"})
+        assert response.status_code == 200 and len(response.json()["data"]) == 1
+        sql, params = run.call_args.args
+        assert "(%s OR f.deleted_at IS NULL)" in sql and "ORDER BY f.display_order, f.created_at;" in sql
+        assert params == (PIR_ID, False)  # include_deleted from a member is ignored
+
+    def test_an_admin_can_ask_for_the_deleted_ones_too(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW, DELETED_ROW]) as run:
+            response = admin_client.get(FLAGS_URL, params={"include_deleted": "true"})
+        assert len(response.json()["data"]) == 2 and run.call_args.args[1] == (PIR_ID, True)
+
+    def test_a_user_who_isnt_on_the_project_cant_list(self):
+        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
+                patch(PROJECTS, return_value=[]), patch(FLAGS) as run:
+            assert member.get(FLAGS_URL).status_code == 403
+        run.assert_not_called()
+
+    def test_a_member_reads_one_flag(self):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(FLAGS, return_value=[DELETED_ROW]):
+            response = member.get(URL)
+        assert response.status_code == 200 and response.json()["data"]["deleted_at"] is not None
+
+    def test_a_user_who_isnt_on_the_project_cant_read_one(self):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=[]), patch(FLAGS, return_value=[FLAG_ROW]):
+            response = member.get(URL)
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+
+    def test_an_unknown_flag_is_404(self, admin_client):
+        with patch(FLAGS, return_value=[]):
+            response = admin_client.get(URL)
+        assert response.status_code == 404 and response.json() == {"detail": "Flag not found"}
+
+    def test_an_override_reads_as_the_quantity(self, admin_client):
+        row = {**FLAG_ROW, "reported_quantity": Decimal("18.5"), "quantity": Decimal("18.5"), "is_overridden": True}
+        with patch(FLAGS, return_value=[row]):
+            data = admin_client.get(URL).json()["data"]
+        assert (data["computed_quantity"], data["reported_quantity"], data["quantity"], data["is_overridden"]) == \
+            (20.0, 18.5, 18.5, True)
+
+
+class TestUpdateFlag:
+    def test_a_new_shape_with_its_dimensions_is_recomputed(self, admin_client):
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]) as run:
+            response = admin_client.patch(URL, json={"shape": "triangle", "dimensions": {"a": 3, "b": 4}})
+        assert response.status_code == 200 and response.json()["message"] == "Flag updated"
+        values = written(run)
+        assert values["shape"] == "triangle" and values["dimensions"].obj == {"a": 3.0, "b": 4.0}
+        assert values["computed_quantity"] == Decimal("6.00")
+        assert values["surveyed_mark"] == "cross"  # the rest of the stored flag is kept
+        assert "UPDATE icid.flags flag" in run.call_args.args[0]
+
+    def test_new_dimensions_alone_are_recomputed(self, admin_client):
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]) as run:
+            admin_client.patch(URL, json={"dimensions": {"L": 10, "W": 2.5}})
+        assert written(run)["computed_quantity"] == Decimal("25.00")
+
+    def test_a_new_shape_without_dimensions_is_422(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.patch(URL, json={"shape": "arc"})
+        assert response.status_code == 422 and "required when the shape changes" in error_messages(response)
+        assert run.call_count == 1  # the flag read, nothing written
+
+    def test_dimensions_that_dont_fit_the_stored_shape_are_422(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            assert admin_client.patch(URL, json={"dimensions": {"r": 2, "theta": 1}}).status_code == 422
+        assert run.call_count == 1
+
+    def test_an_override_is_written(self, admin_client):
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]) as run:
+            admin_client.patch(URL, json={"reported_quantity": 22.25, "quantity_delta_reason": "re-measured"})
+        values = written(run)
+        assert values["reported_quantity"] == Decimal("22.25") and values["quantity_delta_reason"] == "re-measured"
+
+    def test_a_null_override_reverts_to_the_computed_quantity_and_clears_its_reason(self, admin_client):
+        overridden = {**FLAG_ROW, "reported_quantity": Decimal("22.25"), "quantity_delta_reason": "re-measured"}
+        with patch(FLAGS, side_effect=[[overridden], [FLAG_ROW]]) as run:
+            response = admin_client.patch(URL, json={"reported_quantity": None})
+        assert response.status_code == 200
+        values = written(run)
+        assert values["reported_quantity"] is None and values["quantity_delta_reason"] is None
+        assert values["computed_quantity"] == Decimal("20.00")
+
+    def test_a_null_clears_a_clearable_field_and_is_ignored_on_any_other(self, admin_client):
+        mapped = {**FLAG_ROW, "pay_item_id": PAY_ITEM_ID, "sketch_x": 3.0}
+        with patch(FLAGS, side_effect=[[mapped], [FLAG_ROW]]) as run:
+            admin_client.patch(URL, json={"pay_item_id": None, "sketch_x": None, "shape": None, "rotation": None})
+        values = written(run)
+        assert values["pay_item_id"] is None and values["sketch_x"] is None
+        assert values["shape"] == "rectangle" and values["rotation"] == 0
+
+    def test_nothing_to_change_is_400(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.patch(URL, json={"shape": None, "is_constructed": True})
+        assert response.status_code == 400 and response.json() == {"detail": "Send at least one field to change"}
+        assert run.call_count == 1  # is_constructed isn't the API's to write
+
+    def test_the_merged_flag_is_checked_against_the_rules(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.patch(URL, json={"surveyed_is_assessable": False})
+        assert response.status_code == 422 and "needs a surveyed_non_assessable_reason" in error_messages(response)
+        assert run.call_count == 1
+
+    def test_switching_to_assessable_takes_the_reason_away_in_one_patch(self, admin_client):
+        not_assessable = {**FLAG_ROW, "surveyed_is_assessable": False, "surveyed_non_assessable_reason": "hydrant"}
+        with patch(FLAGS, side_effect=[[not_assessable], [FLAG_ROW]]) as run:
+            response = admin_client.patch(URL, json={"surveyed_is_assessable": True,
+                                                     "surveyed_non_assessable_reason": None})
+        assert response.status_code == 200 and written(run)["surveyed_non_assessable_reason"] is None
+
+    def test_a_pay_item_of_another_project_is_400(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]) as run, patch(CONTRACT, return_value=[]):
+            response = admin_client.patch(URL, json={"pay_item_id": str(PAY_ITEM_ID)})
+        assert response.status_code == 400 and response.json() == {"detail": "Pay item belongs to a different project"}
+        assert run.call_count == 1
+
+    def test_a_member_edits_a_flag(self):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PIRS, return_value=[PIR_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]):
+            assert member.patch(URL, json={"display_order": 3}).status_code == 200
+
+    @pytest.mark.parametrize("flag,pir,owner,detail", [
+        (DELETED_ROW, PIR_ROW, PROPERTY_ROW, "Flag is deleted"),
+        (FLAG_ROW, {**PIR_ROW, "deleted_at": DELETED}, PROPERTY_ROW, "PIR is deleted"),
+        (FLAG_ROW, PIR_ROW, {**PROPERTY_ROW, "deleted_at": DELETED}, "Property is deleted"),
+    ])
+    def test_a_member_cant_edit_under_something_deleted(self, flag, pir, owner, detail):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PIRS, return_value=[pir]), patch(PROPS, return_value=[owner]), \
+                patch(FLAGS, return_value=[flag]) as run:
+            response = member.patch(URL, json={"display_order": 3})
+        assert response.status_code == 400 and response.json() == {"detail": detail}
+        assert run.call_count == 1  # read, nothing written
+
+    def test_an_admin_edits_a_deleted_flag(self, admin_client):
+        with patch(FLAGS, side_effect=[[DELETED_ROW], [DELETED_ROW]]), patch(PIRS) as pirs:
+            assert admin_client.patch(URL, json={"display_order": 3}).status_code == 200
+        pirs.assert_not_called()
+
+    def test_a_user_who_isnt_on_the_project_is_forbidden(self):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=[]), \
+                patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = member.patch(URL, json={"display_order": 3})
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+        assert run.call_count == 1
+
+    def test_a_demo_user_cant_edit_on_their_own_project(self, demo_client):
+        with patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = demo_client.patch(URL, json={"display_order": 3})
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: flags are read-only"}
+        assert run.call_count == 1
+
+    def test_a_demo_user_gets_404_on_another_project(self, demo_client):
+        with patch(PROJECTS, return_value=[]), patch(FLAGS, return_value=[FLAG_ROW]):
+            response = demo_client.patch(URL, json={"display_order": 3})
+        assert response.status_code == 404 and response.json() == {"detail": "Flag not found"}
+
+
+class TestSoftDeleteAndUndeleteFlag:
+    def test_an_admin_soft_deletes_and_restores_a_flag(self, admin_client):
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [DELETED_ROW]]):
+            deleted = admin_client.post(f"{URL}/admin/soft-delete")
+        assert deleted.status_code == 200 and deleted.json()["message"] == "Flag deleted"
+        assert deleted.json()["data"]["deleted_by"] == str(ADMIN_ID)
+        with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW]]):
+            restored = admin_client.post(f"{URL}/admin/undelete")
+        assert restored.status_code == 200 and restored.json()["message"] == "Flag restored"
+        assert restored.json()["data"]["deleted_at"] is None
+
+    def test_the_statements_touch_only_the_delete_columns(self):
+        with patch(FLAGS, return_value=[]) as run:
+            soft_delete_flag(FLAG_ID, ADMIN_ID)
+            undelete_flag(FLAG_ID)
+        delete_sql, undelete_sql = (call.args[0] for call in run.call_args_list)
+        assert "SET deleted_at = now(), deleted_by = %s" in delete_sql and "deleted_at IS NULL" in delete_sql
+        assert "SET deleted_at = NULL, deleted_by = NULL" in undelete_sql
+        assert run.call_args_list[0].args[1] == (ADMIN_ID, FLAG_ID)
+
+    def test_deleting_it_again_changes_nothing(self, admin_client):
+        with patch(FLAGS, return_value=[DELETED_ROW]) as run:
+            response = admin_client.post(f"{URL}/admin/soft-delete")
+        assert response.status_code == 200 and response.json()["message"] == "Flag was already deleted"
+        assert run.call_count == 1
+
+    def test_undeleting_one_that_isnt_deleted_is_404(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]):
+            response = admin_client.post(f"{URL}/admin/undelete")
+        assert response.status_code == 404 and response.json() == {"detail": "Flag is not deleted"}
+
+    def test_an_unknown_flag_is_404(self, admin_client):
+        with patch(FLAGS, return_value=[]):
+            assert admin_client.post(f"{URL}/admin/soft-delete").status_code == 404
+            assert admin_client.post(f"{URL}/admin/undelete").status_code == 404
+
+    @pytest.mark.parametrize("action", ["soft-delete", "undelete"])
+    def test_a_member_who_isnt_an_admin_is_forbidden(self, action):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS) as run:
+            response = member.post(f"{URL}/admin/{action}")
+        assert (response.status_code, response.json()) == FORBIDDEN
+        run.assert_not_called()
+
+
+def test_every_flag_statement_is_in_the_icid_schema():
+    with patch(FLAGS, return_value=[]) as run:
+        list_flags(PIR_ID)
+    sql = run.call_args.args[0]
+    assert "FROM icid.flags f" in sql and "JOIN icid.pirs pir" in sql and "JOIN icid.properties p" in sql

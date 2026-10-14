@@ -562,7 +562,8 @@ PATH_VALUES = {"idr_id": "9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e", "report_id": "e
                "pay_item_uuid": "7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4e",
                "property_id": "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
                "task_order_id": "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b",
-               "pir_id": "6f7a8b9c-0d1e-4f2a-8b3c-4d5e6f7a8b9c"}
+               "pir_id": "6f7a8b9c-0d1e-4f2a-8b3c-4d5e6f7a8b9c",
+               "flag_id": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"}
 
 
 def api_routes() -> list[tuple[str, str]]:
@@ -585,7 +586,7 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 80
+        assert len(PROTECTED_ROUTES) == 86
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
@@ -623,6 +624,10 @@ class TestEveryRouteNeedsSignIn:
                          ("GET", "/v1/properties/{property_id}/pirs"),
                          ("GET", "/v1/pirs/{pir_id}"), ("PATCH", "/v1/pirs/{pir_id}"),
                          ("POST", "/v1/pirs/{pir_id}/admin/soft-delete"), ("POST", "/v1/pirs/{pir_id}/admin/undelete"),
+                         ("GET", "/v1/pirs/{pir_id}/flags"), ("POST", "/v1/pirs/{pir_id}/flags"),
+                         ("GET", "/v1/flags/{flag_id}"), ("PATCH", "/v1/flags/{flag_id}"),
+                         ("POST", "/v1/flags/{flag_id}/admin/soft-delete"),
+                         ("POST", "/v1/flags/{flag_id}/admin/undelete"),
                          ("GET", "/v1/idrs/queue"), ("POST", "/v1/idrs/{idr_id}/accept-stage1"),
                          ("POST", "/v1/idrs/{idr_id}/approve-stage1"), ("POST", "/v1/idrs/{idr_id}/accept-stage2"),
                          ("POST", "/v1/idrs/{idr_id}/approve-stage2"), ("POST", "/v1/idrs/{idr_id}/return"),
