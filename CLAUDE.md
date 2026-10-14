@@ -973,7 +973,11 @@ Any change must follow these.
     (`ON DELETE SET NULL`).
   - **On a page (R1e).** Every live flag sits on a page of its PIR (`pir_page_id`; the database's
     `chk_flags_live_on_a_page` lets only a soft-deleted flag have none), and `sketch_x` / `sketch_y` / `rotation`
-    are its place on that page. Flags are created through `POST /v1/pir-pages/{id}/flags` (the R1b route on the
+    are its place on that page, in the page's native, unrotated pixel space whatever its `rotation_deg`: x right
+    and y down from the stored PNG's top-left corner (0..`width_px`, 0..`height_px`). `sketch_x` / `sketch_y` is
+    the centre of the shape's bounding box and `rotation` the shape's own turn about it, in degrees clockwise. The
+    frontend draws the overlay with the page's rotation, so a page's rotation never moves its flags; the API stores
+    the three as sent and checks none of them against the page. Flags are created through `POST /v1/pir-pages/{id}/flags` (the R1b route on the
     PIR is a deprecated wrapper onto page 1). The PIR's list shows the live flags on its live pages; a page's,
     its live flags. A flag keeps `pir_id` too, which the statement copies from the page.
   - **Who.** Reading takes a user on the project, or an admin (`pir_member`, `pir_page_member`, `flag_member` by
