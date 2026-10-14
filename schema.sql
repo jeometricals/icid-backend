@@ -324,6 +324,30 @@ CREATE TABLE icid.task_order_properties (
 CREATE INDEX idx_task_order_properties_property ON icid.task_order_properties (property_id);
 
 ------------------------------------------------------------
+-- PIR (a property's digitized DOT survey sheet; one live PIR per property; soft-deleted; migrations/031)
+-- property_id has no cascade: a PIR is a record of its own. as_built_signed_* are set by a sign route, never by hand
+------------------------------------------------------------
+CREATE TABLE icid.pirs (
+    id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    property_id          UUID NOT NULL REFERENCES icid.properties(id),
+    source_image_url     TEXT,
+    source_image_scale   REAL,
+    inspector_initials   TEXT NOT NULL,
+    inspector_sign_date  DATE NOT NULL,
+    digitized_by         UUID NOT NULL REFERENCES icid.users(uuid),
+    digitized_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    as_built_signed_by   UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    as_built_signed_at   TIMESTAMPTZ,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at           TIMESTAMPTZ,
+    deleted_by           UUID REFERENCES icid.users(uuid) ON DELETE SET NULL
+);
+
+-- One live PIR per property; a soft-deleted one frees it for a replacement
+CREATE UNIQUE INDEX uq_pirs_property ON icid.pirs (property_id) WHERE deleted_at IS NULL;
+
+------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)
 ------------------------------------------------------------
 CREATE TABLE icid.report_attachments (

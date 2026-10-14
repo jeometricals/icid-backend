@@ -34,6 +34,8 @@ def include_routers(app: FastAPI):
     from api.v1.properties import router as properties_router
     from api.v1.task_orders import project_router as project_task_orders_router
     from api.v1.task_orders import router as task_orders_router
+    from api.v1.pirs import property_router as property_pirs_router
+    from api.v1.pirs import router as pirs_router
     from api.v1.reviews import router as reviews_router
     from api.v1.field_edits import router as field_edits_router
     from api.v1.idrs import router as idrs_router
@@ -54,6 +56,8 @@ def include_routers(app: FastAPI):
     app.include_router(properties_router)
     app.include_router(project_task_orders_router)
     app.include_router(task_orders_router)
+    app.include_router(property_pirs_router)
+    app.include_router(pirs_router)
     # Before the IDRs router, so /v1/idrs/queue isn't read as /v1/idrs/{idr_id}
     app.include_router(reviews_router)
     app.include_router(idrs_router)

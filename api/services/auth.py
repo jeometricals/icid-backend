@@ -21,6 +21,7 @@ from fastapi import Depends, Header, HTTPException, Request
 
 from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
 from api.queries.idrs import get_idr_by_id
+from api.queries.pirs import get_pir
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.properties import get_property
 from api.queries.task_orders import get_task_order
@@ -325,6 +326,15 @@ def task_order_member(task_order_id: UUID, user: UserOut = Depends(current_user)
     Returns the task order dict, with its live bundled properties; raises 404 or 403 as _readable_on_project does.
     """
     return _readable_on_project(get_task_order(task_order_id), user, "Task order not found")
+
+
+def pir_member(pir_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one PIR: the signed-in user must be assigned to its property's project (in any role), or be an admin.
+    Takes the pir_id path parameter and the current user.
+    Returns the PIR dict; raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_pir(pir_id), user, "PIR not found")
 
 
 def no_demo_users(user: UserOut = Depends(current_user)) -> UserOut:

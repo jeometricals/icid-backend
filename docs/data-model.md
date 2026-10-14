@@ -1,7 +1,7 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 030 (Slice R0b). The diagram below is the ER
-diagram; it was last checked against `schema.sql` in Slice R0b.
+Developer reference for the `icid` schema as of migration 031 (Slice R1a). The diagram below is the ER
+diagram; it was last checked against `schema.sql` in Slice R1a.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -33,12 +33,14 @@ projects ──< quantities                        project_id, a copy of the IDR
 projects ──< properties                        project_id; soft-deleted, unique BBL per project among live ones
 projects ──< task_orders ──< task_order_properties >── properties
                                                both FKs ON DELETE CASCADE; both sides share a project
+properties ──< pirs                            property_id, no cascade; one live PIR per property
 
 users is also referenced by (none cascades):
     idrs.stage1_reviewer_uuid, idrs.re_reviewer_uuid, idrs.deleted_by
     idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by, properties.created_by,
-    task_orders.created_by, task_order_properties.added_by
-    users.deleted_by, properties.deleted_by, task_orders.deleted_by (ON DELETE SET NULL)
+    task_orders.created_by, task_order_properties.added_by, pirs.digitized_by
+    users.deleted_by, properties.deleted_by, task_orders.deleted_by, pirs.deleted_by,
+    pirs.as_built_signed_by (ON DELETE SET NULL)
 ```
 
 `──<` reads "has many". Deleting an IDR's row takes everything drawn under it; nothing cascades from a user, a
@@ -60,6 +62,8 @@ client or a project except a project's `contract_items`. `quantities.reporter_uu
   soft-deletes and restores them. See [properties](#properties).
 - **task_orders** bundle a project's properties (**task_order_properties**, the join); a property can be in
   several. See [task_orders](#task_orders).
+- A **PIR** is a property's digitized DOT survey sheet; a property has at most one that isn't deleted. See
+  [pirs](#pirs).
 - An IDR is **soft-deleted** by an admin (`status = 'deleted'`, `deleted_at`, `deleted_by`): the row and
   everything under it stay, and it can be brought back. Only a soft-deleted IDR can then be deleted for good,
   which removes the row and, by the cascades above, everything under it. See [idrs](#idrs).
@@ -115,9 +119,10 @@ admin role and demo flag (`/v1/admin/users`); a password is changed by its user 
   same email.
 - `DELETE .../permanent` deletes the row of a user who is soft-deleted, and only when no row names them: every
   foreign key to `users.uuid` (see the diagram) is `NO ACTION` and refuses the delete, except
-  the `deleted_by` of users, properties and task orders, which are counted all the same. So only a user who
-  never reported, reviewed, edited, uploaded, held a role, created or deleted a property or a task order, or
-  bundled a property, can go;
+  the `deleted_by` of users, properties, task orders and PIRs and `pirs.as_built_signed_by`, which (but for
+  `users.deleted_by`) are counted all the same. So only a user who never reported, reviewed, edited, uploaded,
+  held a role, created or deleted a property or a task order, bundled a property, or digitized, signed or
+  deleted a PIR, can go;
   anyone with history stays soft-deleted. The user's signature file is then removed from Storage, best-effort.
 
 A demo user is made by `POST /v1/auth/demo` (`demo-<uuid>@icid.local`, first name `Demo`, client `C00001`, no
@@ -418,6 +423,30 @@ several task orders (a re-issue is a new task order), once in each. Migration 03
   (both filter `properties.deleted_at IS NULL`); un-deleting it brings it back. Only a permanent delete of either
   side (none is built yet) takes the rows, by the cascades.
 
+### pirs
+
+A property's PIR: the DOT survey sheet an inspector signed off, digitized by an admin. Added by migration 031.
+Admins create, edit, soft-delete and restore them; anyone on the property's project reads them
+(`/v1/properties/{id}/pir`, `/v1/properties/{id}/pirs`, `/v1/pirs/{id}`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `property_id` | UUID NOT NULL | FK → `properties.id`, no cascade (a PIR is a record of its own). One per property among PIRs that aren't deleted (`uq_pirs_property`, `WHERE deleted_at IS NULL`) |
+| `source_image_url` | TEXT | The scanned sheet. Not written yet (R1d) |
+| `source_image_scale` | REAL | Likewise |
+| `inspector_initials` | TEXT NOT NULL | Trimmed, at most 16 characters |
+| `inspector_sign_date` | DATE NOT NULL | When the inspector signed the sheet |
+| `digitized_by` | UUID NOT NULL | The admin who created the row, from the session; FK → `users.uuid` |
+| `digitized_at` | TIMESTAMPTZ NOT NULL | `now()` at creation |
+| `as_built_signed_by` | UUID | FK → `users.uuid`, **ON DELETE SET NULL**. Set by a later slice's sign route; no route writes it yet |
+| `as_built_signed_at` | TIMESTAMPTZ | Likewise |
+| `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
+| `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
+
+A soft-deleted PIR frees its property, so a replacement can be created while the old one is kept; un-deleting
+the old one is then refused (409). No PIR can be created on a soft-deleted property.
+
 ### report_attachments
 
 Files attached to a report. Each row describes one file; the file itself is in the private
@@ -649,6 +678,7 @@ content as TEXT, linked to a report and a form template).
 | 028 | `028_users_soft_delete.sql` | P3 | Added `users.deleted_at` and `deleted_by` (FK to `users` with ON DELETE SET NULL), and made `idx_users_email_lower` partial (`WHERE deleted_at IS NULL`), so a deleted user's email can be used again. No row changed. There is no 027. |
 | 029 | `029_properties.sql` | R0a | Created `properties` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`, CHECK `chk_properties_type`) and the partial unique index `uq_properties_project_bbl`. No existing table or row changed. |
 | 030 | `030_task_orders.sql` | R0b | Created `task_orders` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`) with the partial unique index `uq_task_orders_project_number`, and `task_order_properties` (PK `(task_order_id, property_id)`, FKs to `task_orders` and `properties` both ON DELETE CASCADE, FK to `users` for `added_by`) with `idx_task_order_properties_property`. No existing table or row changed. |
+| 031 | `031_pirs.sql` | R1a | Created `pirs` (FK to `properties` with no cascade; FKs to `users` for `digitized_by` and, ON DELETE SET NULL, `as_built_signed_by` and `deleted_by`) with the partial unique index `uq_pirs_property`. No existing table or row changed. |
 
 Where each current column came from:
 
@@ -665,6 +695,7 @@ Where each current column came from:
 | `quantities` | all | 025 |
 | `properties` | all | 029 |
 | `task_orders`, `task_order_properties` | all | 030 |
+| `pirs` | all | 031 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

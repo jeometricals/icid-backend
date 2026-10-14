@@ -47,7 +47,7 @@ DELETED_JSON = {"uuid": USER_ID, "email": "KhanG@magnoleng.pc", "first_name": "G
                 "deleted_at": "2026-10-13T15:00:00Z", "deleted_by": ADMIN_ID}
 OTHER_ROW = {**USER_ROW, "uuid": UUID(OTHER_ID), "email": "khang@magnoleng.pc", "first_name": "New"}
 NO_REFERENCES = {"idrs": 0, "project_users": 0, "audit": 0, "field_edits": 0, "attachments": 0, "properties": 0,
-                 "task_orders": 0, "task_order_properties": 0}
+                 "task_orders": 0, "task_order_properties": 0, "pirs": 0}
 INSPECTOR_ROW = {**ADMIN_USER_ROW, "role": None}
 FORBIDDEN = (403, {"detail": "Admin access required"})
 
@@ -266,8 +266,9 @@ class TestPermanentDeleteUser:
         {**NO_REFERENCES, "idrs": 3}, {**NO_REFERENCES, "project_users": 2}, {**NO_REFERENCES, "audit": 14},
         {**NO_REFERENCES, "field_edits": 1}, {**NO_REFERENCES, "attachments": 5}, {**NO_REFERENCES, "properties": 2},
         {**NO_REFERENCES, "task_orders": 1}, {**NO_REFERENCES, "task_order_properties": 3},
+        {**NO_REFERENCES, "pirs": 4},
         {"idrs": 4, "project_users": 2, "audit": 9, "field_edits": 3, "attachments": 1, "properties": 1,
-         "task_orders": 2, "task_order_properties": 5},
+         "task_orders": 2, "task_order_properties": 5, "pirs": 1},
     ])
     def test_a_user_with_history_is_409_with_what_names_them(self, admin_client, references):
         with patch(QUERY, side_effect=[[DELETED_ROW], [references]]) as run, \
@@ -290,13 +291,14 @@ class TestPermanentDeleteUser:
                           "icid.report_attachments ra WHERE ra.uploaded_by = %s",
                           "icid.properties p WHERE %s IN (p.created_by, p.deleted_by)",
                           "icid.task_orders t WHERE %s IN (t.created_by, t.deleted_by)",
-                          "icid.task_order_properties tp WHERE tp.added_by = %s"):
+                          "icid.task_order_properties tp WHERE tp.added_by = %s",
+                          "icid.pirs pir WHERE %s IN (pir.digitized_by, pir.as_built_signed_by, pir.deleted_by)"):
             assert reference in one_line
-        assert params == (UUID(USER_ID),) * 8
+        assert params == (UUID(USER_ID),) * 9
         # schema.sql has no foreign key to users that the count leaves out
         schema = ROOT.joinpath("schema.sql").read_text(encoding="utf-8")
-        # the thirteen counted (the properties', task orders' and bundles' among them), and users.deleted_by (SET NULL)
-        assert schema.count("REFERENCES icid.users(uuid)") == 14
+        # the sixteen counted (the properties', task orders', bundles' and PIRs' among them), and users.deleted_by
+        assert schema.count("REFERENCES icid.users(uuid)") == 17
 
     def test_a_user_who_isnt_soft_deleted_is_404(self, admin_client):
         with patch(QUERY, side_effect=[[USER_ROW]]) as run, patch("api.services.attachments.remove_files") as remove:

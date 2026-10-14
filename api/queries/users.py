@@ -336,7 +336,7 @@ def count_user_references(uuid: UUID) -> Optional[dict[str, int]]:
     """
     Count the rows that name a user, each of which stops the user's row being deleted for good.
     Takes the user's uuid.
-    Returns {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties}: the IDRs they reported, reviewed or deleted, their project roles, the audit rows and field edits they made, the attachments they uploaded, the properties and task orders they created or deleted and the properties they bundled into task orders; or None on failure.
+    Returns {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs}: the IDRs they reported, reviewed or deleted, their project roles, the audit rows and field edits they made, the attachments they uploaded, the properties and task orders they created or deleted, the properties they bundled into task orders and the PIRs they digitized, signed as built or deleted; or None on failure.
     """
     sql = """
         SELECT
@@ -348,9 +348,11 @@ def count_user_references(uuid: UUID) -> Optional[dict[str, int]]:
             (SELECT count(*) FROM icid.report_attachments ra WHERE ra.uploaded_by = %s) AS attachments,
             (SELECT count(*) FROM icid.properties p WHERE %s IN (p.created_by, p.deleted_by)) AS properties,
             (SELECT count(*) FROM icid.task_orders t WHERE %s IN (t.created_by, t.deleted_by)) AS task_orders,
-            (SELECT count(*) FROM icid.task_order_properties tp WHERE tp.added_by = %s) AS task_order_properties;
+            (SELECT count(*) FROM icid.task_order_properties tp WHERE tp.added_by = %s) AS task_order_properties,
+            (SELECT count(*) FROM icid.pirs pir
+             WHERE %s IN (pir.digitized_by, pir.as_built_signed_by, pir.deleted_by)) AS pirs;
     """
-    rows = run_query(sql, (uuid,) * 8)
+    rows = run_query(sql, (uuid,) * 9)
     return rows[0] if rows else None
 
 

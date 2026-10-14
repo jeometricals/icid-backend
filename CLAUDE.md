@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`). Each exports a `router` (`properties.py` and `task_orders.py` also a `project_router`, for their routes under `/v1/projects`). `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`). Each exports a `router` (`properties.py` and `task_orders.py` also a `project_router`, for their routes under `/v1/projects`; `pirs.py` a `property_router`, for its routes under `/v1/properties`). `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -49,7 +49,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?, email?, is_admin?, is_demo?}`; changes what is sent and returns the user under `data` (`role` is `admin` or null). Names and email are trimmed. 400 when nothing is sent (a null counts as not sent), a name is blank or over 100 characters, the email is blank or malformed, an admin sends `is_admin: false` for themselves (`You cannot revoke your own admin role.`), or `is_demo: true` is sent for a real user (`Cannot change a real user to a demo user.`); 404 for an unknown user; 409 `{detail, existing_user_uuid}` when another user has the email, whatever its capitals
 - `POST /v1/admin/users/{user_id}/delete` — admin only: soft-deletes the user (`deleted_at`, `deleted_by`) and returns them under `data`; they can no longer sign in or use a token. Nothing else of theirs changes. 400 `You cannot delete your own account.`, 404 for an unknown user or `User is already deleted`
 - `POST /v1/admin/users/{user_id}/undelete` — admin only: restores a soft-deleted user and returns them under `data`. 404 for an unknown user or `User is not deleted`, 409 `{detail, existing_user_uuid}` when another user now has their email
-- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties}}` when anything still names them
+- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs}}` when anything still names them
 - `POST /v1/admin/users/{user_id}/password` — admin only: body `{new_password}`; replaces the user's password and returns the user under `data`. Any user, the admin's own row included. 400 for a password under 6 characters or over 72 bytes, 404 for an unknown user
 - `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
@@ -83,6 +83,13 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/task-orders/{task_order_id}/admin/undelete` — admin only: clears both and returns the task order, its bundle as it was, under `data`. 404 for an unknown task order or `Task order is not deleted`, 409 `{detail, existing_task_order_id}` when another live task order of the project now has its number
 - `POST /v1/task-orders/{task_order_id}/properties/{property_id}` — admin only: bundles the property into the task order and returns the task order with its properties, 201. 404 for an unknown task order or property; 400 for a property of another project (`Property belongs to a different project`), a deleted task order or a deleted property; 409 `Property is already in this task order`
 - `DELETE /v1/task-orders/{task_order_id}/properties/{property_id}` — admin only: takes the property out, 204, whether or not either is deleted. 404 for an unknown task order or `Property is not in this task order`
+- `GET /v1/properties/{property_id}/pir` — the property's live PIR under `data` (see "PIRs"). For a user on its project, or an admin: 403 otherwise, 404 for an unknown property or `No PIR for this property`
+- `GET /v1/properties/{property_id}/pirs?include_deleted=` — the property's PIRs, most recently digitized first, under `data`: the live one, plus the soft-deleted ones for an admin who sends `include_deleted=true` (ignored for anyone else). Same access as above
+- `POST /v1/properties/{property_id}/pir` — admin only: body `{inspector_initials, inspector_sign_date}`; creates the PIR, `digitized_by` the admin and `digitized_at` now, and returns it under `data`, 201. 400 for blank or over-long initials or a soft-deleted property, 422 for a malformed date, 404 for an unknown property, 409 `{detail, existing_pir_id}` when the property already has a live PIR
+- `GET /v1/pirs/{pir_id}` — one PIR, soft-deleted or not, under `data`. For a user on its property's project, or an admin: 403 otherwise, 404 for an unknown PIR
+- `PATCH /v1/pirs/{pir_id}` — admin only: `inspector_initials` and/or `inspector_sign_date`; returns the PIR under `data`. 400 when nothing is sent (a null counts as not sent) or the initials don't fit, 422 for a malformed date, 404 for an unknown PIR
+- `POST /v1/pirs/{pir_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by`, freeing the property for a new PIR, and returns the PIR under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown PIR
+- `POST /v1/pirs/{pir_id}/admin/undelete` — admin only: clears both and returns the PIR under `data`. 404 for an unknown PIR or `PIR is not deleted`, 409 `{detail, existing_pir_id}` when the property now has another live PIR
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=&idr_number=&work_date=&from=&to=&discipline=` — list IDRs (the archive) with `report_count`, `has_general`, `disciplines` and the names of the inspector and reviewers (all filters optional; `discipline` repeats). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true). 400 for a bad date, `work_date` with `from` or `to`, `from` after `to`, or an unknown discipline
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order, and `field_edits`: every edit reviewers made on it, oldest first, each with `editor_name` and `editor_initials`
@@ -173,9 +180,10 @@ Any change must follow these.
     `/v1/admin/projects/{project_id}/pay-items`, the two under
     `/v1/projects/{project_id}/roles`, `POST /v1/projects/{project_id}/properties`, `PATCH /v1/properties/{property_id}`
     and its `/admin/soft-delete` and `/admin/undelete`, `POST /v1/projects/{project_id}/task-orders`, everything
-    under `/v1/task-orders/{task_order_id}` but its GET, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`,
-    `/admin/undelete` and `/admin/permanent`. The property and task-order reads take `project_member`, or, by id,
-    `property_member` and `task_order_member`.
+    under `/v1/task-orders/{task_order_id}` but its GET, `POST /v1/properties/{property_id}/pir`, everything
+    under `/v1/pirs/{pir_id}` but its GET, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`,
+    `/admin/undelete` and `/admin/permanent`. The property, task-order and PIR reads take `project_member`, or,
+    by id, `property_member`, `task_order_member` and `pir_member` (all three through `_readable_on_project`).
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
     user's first and last name, email, admin role and demo flag, a demo user's included, and reset their password; a name can't be cleared. The route checks the values itself, so a bad one is a 400, not FastAPI's 422. Names
@@ -227,9 +235,10 @@ Any change must follow these.
       must be soft-deleted first`), and only one nothing names. `count_user_references` counts what does: IDRs
       they reported, reviewed at either stage or deleted; project roles; audit rows; field edits; attachments
       they uploaded; properties and task orders they created or deleted; properties they bundled into task
-      orders. Any of those is a 409 with the counts under `references`. Those are all the foreign keys to
-      `users.uuid` (the `deleted_by` of a property or a task order is `ON DELETE SET NULL`, but is counted
-      anyway); none cascades, and the DELETE itself is refused by them if a row appears at the last moment
+      orders; PIRs they digitized, signed as built or deleted. Any of those is a 409 with the counts under
+      `references`. Those are all the foreign keys to `users.uuid` (the `deleted_by` of a property, a task
+      order or a PIR and a PIR's `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
+      cascades, and the DELETE itself is refused by them if a row appears at the last moment
       (also 409). So a user who ever did anything stays soft-deleted for good, which is the usual case; a
       project role is the one thing an admin can clear first (revoke it).
       - Then the user's own signature file (`users/{uuid}/signature.png`) is removed from Storage, best-effort.
@@ -850,6 +859,29 @@ Any change must follow these.
   - `created_by`, `deleted_by` and `added_by` name users, so `count_user_references` counts them.
   - **Migration 030 must be in the database before this code runs**: the routes and the user-reference count
     name both tables.
+- **PIRs.** `icid.pirs` (migration 031): a property's digitized PIR, the DOT survey sheet an inspector signed
+  off (`api/v1/pirs.py`, `api/queries/pirs.py`, `api/schemas/pir.py`).
+  - **One live PIR per property** (`uq_pirs_property`, partial, `WHERE deleted_at IS NULL`). Soft-deleting a
+    PIR frees the property, so a replacement can be created while the old one is kept; un-deleting the old
+    one is then a 409 `{detail, existing_pir_id}`, as is creating a second live one. No PIR can be created on
+    a soft-deleted property (400); the INSERT itself selects only a live property.
+  - **Who made it is the server's.** `digitized_by` is the signed-in admin and `digitized_at` is `now()`; the
+    body can't carry either. The body is `inspector_initials` (trimmed, at most 16 characters, blank is 400)
+    and `inspector_sign_date` (a date; malformed is 422).
+  - **The as-built signature is not editable.** `as_built_signed_by` and `as_built_signed_at` are a
+    signature: a later slice adds sign and unsign routes for them, as approve-stage2 signs an IDR. PATCH
+    takes only the initials and the sign date, and a null counts as not sent, as on the other admin PATCHes.
+  - `source_image_url` and `source_image_scale` are in every response but nothing writes them until R1d.
+  - **Finding a deleted PIR.** `GET /v1/properties/{id}/pir` gives only the live one; an admin finds the
+    soft-deleted ones (to un-delete) with `GET /v1/properties/{id}/pirs?include_deleted=true`.
+  - Each response carries the property's `project_id` (read in the same statement), which `pir_member`
+    checks. Reads take a user on the project or an admin; a demo user gets 404 for another project's. Writes
+    are admin only. Soft delete again is a 200 no-op; un-deleting a live PIR is 404. A PIR can be edited while
+    soft-deleted.
+  - `property_id` doesn't cascade: a permanent delete of a property, if one is ever built, must refuse while it
+    has PIRs.
+  - **Migration 031 must be in the database before this code runs**: the routes and the user-reference count
+    name the table.
 - **The archive.** `GET /v1/idrs/` is the IDR list the archive page reads (`list_project_idrs` in
   `api/v1/idrs.py`, `list_idrs` in `api/queries/idrs.py`). It is not paged: every match comes back, most
   recently edited first.
