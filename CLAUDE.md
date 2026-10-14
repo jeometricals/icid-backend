@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`). Each exports a `router`. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`). Each exports a `router` (`properties.py` also a `project_router`, for its routes under `/v1/projects`). `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -49,7 +49,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?, email?, is_admin?, is_demo?}`; changes what is sent and returns the user under `data` (`role` is `admin` or null). Names and email are trimmed. 400 when nothing is sent (a null counts as not sent), a name is blank or over 100 characters, the email is blank or malformed, an admin sends `is_admin: false` for themselves (`You cannot revoke your own admin role.`), or `is_demo: true` is sent for a real user (`Cannot change a real user to a demo user.`); 404 for an unknown user; 409 `{detail, existing_user_uuid}` when another user has the email, whatever its capitals
 - `POST /v1/admin/users/{user_id}/delete` — admin only: soft-deletes the user (`deleted_at`, `deleted_by`) and returns them under `data`; they can no longer sign in or use a token. Nothing else of theirs changes. 400 `You cannot delete your own account.`, 404 for an unknown user or `User is already deleted`
 - `POST /v1/admin/users/{user_id}/undelete` — admin only: restores a soft-deleted user and returns them under `data`. 404 for an unknown user or `User is not deleted`, 409 `{detail, existing_user_uuid}` when another user now has their email
-- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments}}` when anything still names them
+- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments, properties}}` when anything still names them
 - `POST /v1/admin/users/{user_id}/password` — admin only: body `{new_password}`; replaces the user's password and returns the user under `data`. Any user, the admin's own row included. 400 for a password under 6 characters or over 72 bytes, 404 for an unknown user
 - `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
@@ -69,6 +69,12 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/projects/{project_id}/roles` — admin only: who holds which role on the project, one entry per user and role (demo users left out)
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `GET /v1/projects/{project_id}/quantities?from=&to=&pay_item=&budget_code=&discipline=&inspector_uuid=&cumulative=` — the pay-item quantities of the project's approved IDRs, newest work date first, and what they come to against the project's contract items: `{range, rows, totals_by_unit, row_count, truncated, pay_items, totals_by_budget_code, project_total, unbudgeted_total}` under `data`. All filters optional; `pay_item`, `budget_code` and `discipline` repeat; `cumulative=true` leaves `from` and `to` unapplied. For a user on the project, or an admin: 403 otherwise, 404 for an unknown project, 400 for a bad date, `from` after `to`, or an unknown discipline
+- `GET /v1/projects/{project_id}/properties?include_deleted=` — the project's properties, by address, under `data` (see "Properties"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
+- `POST /v1/projects/{project_id}/properties` — admin only: body `{bbl, address, property_type, notes?}`; creates the property, its creator the admin, and returns it under `data`, 201. 400 for a blank or over-long value, 422 for an unknown `property_type`, 404 for an unknown project, 409 `{detail, existing_property_id}` when a live property of the project has the BBL
+- `GET /v1/properties/{property_id}` — one property, soft-deleted or not, under `data`. For a user on its project, or an admin: 403 otherwise, 404 for an unknown property
+- `PATCH /v1/properties/{property_id}` — admin only: any of `bbl`, `address`, `property_type`, `notes`; returns the property under `data`. 400 when nothing is sent (a null counts as not sent, except `notes`, which it clears) or a value doesn't fit, 422 for an unknown `property_type`, 404 for an unknown property, 409 as on create
+- `POST /v1/properties/{property_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by` and returns the property under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown property
+- `POST /v1/properties/{property_id}/admin/undelete` — admin only: clears both and returns the property under `data`. 404 for an unknown property or `Property is not deleted`, 409 `{detail, existing_property_id}` when another live property of the project now has its BBL
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=&idr_number=&work_date=&from=&to=&discipline=` — list IDRs (the archive) with `report_count`, `has_general`, `disciplines` and the names of the inspector and reviewers (all filters optional; `discipline` repeats). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true). 400 for a bad date, `work_date` with `from` or `to`, `from` after `to`, or an unknown discipline
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order, and `field_edits`: every edit reviewers made on it, oldest first, each with `editor_name` and `editor_initials`
@@ -157,8 +163,10 @@ Any change must follow these.
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
     admin-only routes are `/v1/admin/cleanup-demos`, the seven under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
     `/v1/admin/projects/{project_id}/pay-items`, the two under
-    `/v1/projects/{project_id}/roles`, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`, `/admin/undelete` and
-    `/admin/permanent`.
+    `/v1/projects/{project_id}/roles`, `POST /v1/projects/{project_id}/properties`, `PATCH /v1/properties/{property_id}`
+    and its `/admin/soft-delete` and `/admin/undelete`, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`,
+    `/admin/undelete` and `/admin/permanent`. The property reads take `project_member`, or, by property id,
+    `property_member`.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
     user's first and last name, email, admin role and demo flag, a demo user's included, and reset their password; a name can't be cleared. The route checks the values itself, so a bad one is a 400, not FastAPI's 422. Names
@@ -209,8 +217,9 @@ Any change must follow these.
     - **Permanent delete** (`DELETE .../permanent`) takes only a user who is already soft-deleted (404 `User
       must be soft-deleted first`), and only one nothing names. `count_user_references` counts what does: IDRs
       they reported, reviewed at either stage or deleted; project roles; audit rows; field edits; attachments
-      they uploaded. Any of those is a 409 with the counts under `references`. Those are all the foreign keys to
-      `users.uuid`; none cascades, and the DELETE itself is refused by them if a row appears at the last moment
+      they uploaded; properties they created or deleted. Any of those is a 409 with the counts under
+      `references`. Those are all the foreign keys to `users.uuid` (a property's `deleted_by` is `ON DELETE SET
+      NULL`, but is counted anyway); none cascades, and the DELETE itself is refused by them if a row appears at the last moment
       (also 409). So a user who ever did anything stays soft-deleted for good, which is the usual case; a
       project role is the one thing an admin can clear first (revoke it).
       - Then the user's own signature file (`users/{uuid}/signature.png`) is removed from Storage, best-effort.
@@ -781,6 +790,29 @@ Any change must follow these.
       Quantities and unit prices are not rounded. All are JSON numbers.
     - **Units are not compared.** A quantity filed in another unit than its contract item's is still multiplied
       by that item's price.
+- **Properties.** `icid.properties` (migration 029) holds a project's tax lots, one row per property, named by
+  its BBL (`api/v1/properties.py`, `api/queries/properties.py`, `api/schemas/property.py`).
+  - **Fields:** `bbl` (at most 32 characters), `address` (200) and `notes` (2000, optional; blank is NULL), all
+    trimmed; a blank BBL or address is 400. `property_type` is one of `1_3_family`, `4_plus_family` and
+    `expedited` (a Pydantic `Literal`, so anything else is FastAPI's 422, unlike the admin forms' 400s; the table
+    has the same CHECK). The response also carries `id`, `project_id`, `created_at`, `updated_at`, `created_by`,
+    `deleted_at` and `deleted_by`. Every write sets `updated_at`.
+  - **The BBL is unique per project among live properties** (`uq_properties_project_bbl`, partial,
+    `WHERE deleted_at IS NULL`), matched exactly; the same BBL in another project is fine. Create is
+    `ON CONFLICT DO NOTHING` (no target, as for `create_idr`); edit and un-delete check with `NOT EXISTS` in the
+    statement, and the index backs them. Each answers a clash with 409 `{detail, existing_property_id}`.
+  - **Who:** reading takes a user on the project in any role, or an admin (`project_member` for the list,
+    `property_member` by id; 403 `Project access required`). A demo user gets 404 for another project's
+    property, as the project fence does. Every write is admin only. `include_deleted=true` on the list from
+    anyone but an admin is ignored, not refused (the IDR list refuses it).
+  - **Soft delete, IDR-style:** `POST .../admin/soft-delete` sets `deleted_at` and `deleted_by` and frees the
+    BBL; again is a 200 that changes nothing. `POST .../admin/undelete` clears both; 404 `Property is not
+    deleted` for one that isn't. There is no permanent delete. A deleted property can still be read by id and
+    edited; an edit of a deleted one isn't checked against the live BBLs (un-deleting it is).
+  - `created_by` is NOT NULL and `NO ACTION`, so an admin who added a property can't be permanently deleted:
+    `count_user_references` counts properties they created or deleted.
+  - **Migration 029 must be in the database before this code runs**: the routes and the user-reference count
+    name the table.
 - **The archive.** `GET /v1/idrs/` is the IDR list the archive page reads (`list_project_idrs` in
   `api/v1/idrs.py`, `list_idrs` in `api/queries/idrs.py`). It is not paged: every match comes back, most
   recently edited first.

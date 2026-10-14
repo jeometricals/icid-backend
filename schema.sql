@@ -269,6 +269,27 @@ CREATE INDEX idx_quantities_project_budget ON icid.quantities(project_id, budget
 CREATE INDEX idx_quantities_idr ON icid.quantities(idr_id);
 
 ------------------------------------------------------------
+-- PROPERTY (a project's tax lots, by BBL; soft-deleted like users and idrs; migrations/029)
+------------------------------------------------------------
+CREATE TABLE icid.properties (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id     TEXT NOT NULL REFERENCES icid.projects(project_id),
+    bbl            TEXT NOT NULL,
+    address        TEXT NOT NULL,
+    property_type  TEXT NOT NULL,
+    notes          TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by     UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at     TIMESTAMPTZ,
+    deleted_by     UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    CONSTRAINT chk_properties_type CHECK (property_type IN ('1_3_family', '4_plus_family', 'expedited'))
+);
+
+-- One live property per BBL in a project; a soft-deleted one frees its BBL
+CREATE UNIQUE INDEX uq_properties_project_bbl ON icid.properties (project_id, bbl) WHERE deleted_at IS NULL;
+
+------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)
 ------------------------------------------------------------
 CREATE TABLE icid.report_attachments (

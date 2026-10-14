@@ -22,6 +22,7 @@ from fastapi import Depends, Header, HTTPException, Request
 from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
+from api.queries.properties import get_property
 from api.queries.users import create_demo_user, get_user_by_uuid, get_user_for_auth
 from api.schemas.auth import UserOut
 
@@ -290,6 +291,22 @@ def project_member(project_id: str, user: UserOut = Depends(current_user)) -> Us
     if user.role != "admin" and not is_user_on_project(user.uuid, project_id):
         raise HTTPException(status_code=403, detail="Project access required")
     return user
+
+
+def property_member(property_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one property: the signed-in user must be assigned to its project (in any role), or be an admin.
+    Takes the property_id path parameter and the current user.
+    Returns the property dict; raises 404 for a property that doesn't exist (and, as the project fence does, for a demo user's view of another project's) and 403 for a user who isn't on its project.
+    """
+    found = get_property(property_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Property not found")
+    if user.role != "admin" and not is_user_on_project(user.uuid, found["project_id"]):
+        if user.is_demo:
+            raise HTTPException(status_code=404, detail="Property not found")
+        raise HTTPException(status_code=403, detail="Project access required")
+    return found
 
 
 def no_demo_users(user: UserOut = Depends(current_user)) -> UserOut:

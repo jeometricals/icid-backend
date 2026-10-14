@@ -75,6 +75,7 @@ class UserReferences(BaseModel):
     audit: int
     field_edits: int
     attachments: int
+    properties: int
 
 
 class UserHasHistory(BaseModel):

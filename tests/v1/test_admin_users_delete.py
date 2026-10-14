@@ -46,7 +46,7 @@ DELETED_JSON = {"uuid": USER_ID, "email": "KhanG@magnoleng.pc", "first_name": "G
                 "role": None, "is_demo": False, "signature_set_at": None, "has_signature": False,
                 "deleted_at": "2026-10-13T15:00:00Z", "deleted_by": ADMIN_ID}
 OTHER_ROW = {**USER_ROW, "uuid": UUID(OTHER_ID), "email": "khang@magnoleng.pc", "first_name": "New"}
-NO_REFERENCES = {"idrs": 0, "project_users": 0, "audit": 0, "field_edits": 0, "attachments": 0}
+NO_REFERENCES = {"idrs": 0, "project_users": 0, "audit": 0, "field_edits": 0, "attachments": 0, "properties": 0}
 INSPECTOR_ROW = {**ADMIN_USER_ROW, "role": None}
 FORBIDDEN = (403, {"detail": "Admin access required"})
 
@@ -263,8 +263,8 @@ class TestPermanentDeleteUser:
 
     @pytest.mark.parametrize("references", [
         {**NO_REFERENCES, "idrs": 3}, {**NO_REFERENCES, "project_users": 2}, {**NO_REFERENCES, "audit": 14},
-        {**NO_REFERENCES, "field_edits": 1}, {**NO_REFERENCES, "attachments": 5},
-        {"idrs": 4, "project_users": 2, "audit": 9, "field_edits": 3, "attachments": 1},
+        {**NO_REFERENCES, "field_edits": 1}, {**NO_REFERENCES, "attachments": 5}, {**NO_REFERENCES, "properties": 2},
+        {"idrs": 4, "project_users": 2, "audit": 9, "field_edits": 3, "attachments": 1, "properties": 1},
     ])
     def test_a_user_with_history_is_409_with_what_names_them(self, admin_client, references):
         with patch(QUERY, side_effect=[[DELETED_ROW], [references]]) as run, \
@@ -284,12 +284,14 @@ class TestPermanentDeleteUser:
         assert "%s IN (i.reporter_uuid, i.stage1_reviewer_uuid, i.re_reviewer_uuid, i.deleted_by)" in one_line
         for reference in ("icid.project_users pu WHERE pu.user_uuid = %s", "icid.idr_audit a WHERE a.actor_uuid = %s",
                           "icid.idr_field_edits e WHERE e.editor_uuid = %s",
-                          "icid.report_attachments ra WHERE ra.uploaded_by = %s"):
+                          "icid.report_attachments ra WHERE ra.uploaded_by = %s",
+                          "icid.properties p WHERE %s IN (p.created_by, p.deleted_by)"):
             assert reference in one_line
-        assert params == (UUID(USER_ID),) * 5
+        assert params == (UUID(USER_ID),) * 6
         # schema.sql has no foreign key to users that the count leaves out
         schema = ROOT.joinpath("schema.sql").read_text(encoding="utf-8")
-        assert schema.count("REFERENCES icid.users(uuid)") == 9  # the eight counted, and users.deleted_by (SET NULL)
+        # the ten counted (properties.created_by and deleted_by among them), and users.deleted_by (SET NULL)
+        assert schema.count("REFERENCES icid.users(uuid)") == 11
 
     def test_a_user_who_isnt_soft_deleted_is_404(self, admin_client):
         with patch(QUERY, side_effect=[[USER_ROW]]) as run, patch("api.services.attachments.remove_files") as remove:

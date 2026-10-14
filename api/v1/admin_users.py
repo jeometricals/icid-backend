@@ -250,7 +250,7 @@ def undelete_user_account(user_id: UUID) -> AdminUserResponse | JSONResponse:
 )
 def permanently_delete_user(user_id: UUID, admin: UserOut = Depends(current_admin)) -> Optional[JSONResponse]:
     """
-    Delete a soft-deleted user for good, then their signature file, best-effort. Only a user nothing names: no IDR reported, reviewed or deleted, no project role, no audit row, field edit or attachment. It can't be undone. Admins only; a user must be soft-deleted first.
+    Delete a soft-deleted user for good, then their signature file, best-effort. Only a user nothing names: no IDR reported, reviewed or deleted, no project role, no audit row, field edit, attachment or property created or deleted. It can't be undone. Admins only; a user must be soft-deleted first.
     Takes the user's uuid as a path parameter and the signed-in admin.
     Returns nothing (204); raises 403 for a user who isn't an admin, 404 for an unknown user or one who isn't soft-deleted, 409 (with references, the counts of what names them) for a user with history, and 500 if that can't be counted.
     """
