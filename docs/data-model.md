@@ -1,11 +1,11 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 029 (Slice R0a). The diagram below is the ER
-diagram; it was last checked against `schema.sql` in Slice R0a.
+Developer reference for the `icid` schema as of migration 030 (Slice R0b). The diagram below is the ER
+diagram; it was last checked against `schema.sql` in Slice R0b.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
-All tables live in the `icid` schema. Every table except the two join tables has
+All tables live in the `icid` schema. Every table except the three join tables has
 `created_at` / `updated_at` (`TIMESTAMPTZ NOT NULL DEFAULT now()`); they're left out of the
 column lists below.
 
@@ -31,11 +31,14 @@ report_id  │ report_id (ON DELETE CASCADE)
 projects ──< contract_items ··· spec_items     project_id ON DELETE CASCADE; spec_item_id optional (legacy catalog)
 projects ──< quantities                        project_id, a copy of the IDR's
 projects ──< properties                        project_id; soft-deleted, unique BBL per project among live ones
+projects ──< task_orders ──< task_order_properties >── properties
+                                               both FKs ON DELETE CASCADE; both sides share a project
 
 users is also referenced by (none cascades):
     idrs.stage1_reviewer_uuid, idrs.re_reviewer_uuid, idrs.deleted_by
-    idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by, properties.created_by
-    users.deleted_by, properties.deleted_by (ON DELETE SET NULL)
+    idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by, properties.created_by,
+    task_orders.created_by, task_order_properties.added_by
+    users.deleted_by, properties.deleted_by, task_orders.deleted_by (ON DELETE SET NULL)
 ```
 
 `──<` reads "has many". Deleting an IDR's row takes everything drawn under it; nothing cascades from a user, a
@@ -55,6 +58,8 @@ client or a project except a project's `contract_items`. `quantities.reporter_uu
   changed on it. **quantities** holds an approved IDR's pay-item quantities, one row each.
 - **properties** are the tax lots a project's work is done on, each named by its BBL. An admin adds, edits,
   soft-deletes and restores them. See [properties](#properties).
+- **task_orders** bundle a project's properties (**task_order_properties**, the join); a property can be in
+  several. See [task_orders](#task_orders).
 - An IDR is **soft-deleted** by an admin (`status = 'deleted'`, `deleted_at`, `deleted_by`): the row and
   everything under it stay, and it can be brought back. Only a soft-deleted IDR can then be deleted for good,
   which removes the row and, by the cascades above, everything under it. See [idrs](#idrs).
@@ -110,8 +115,9 @@ admin role and demo flag (`/v1/admin/users`); a password is changed by its user 
   same email.
 - `DELETE .../permanent` deletes the row of a user who is soft-deleted, and only when no row names them: every
   foreign key to `users.uuid` (see the diagram) is `NO ACTION` and refuses the delete, except
-  `users.deleted_by` and `properties.deleted_by`, a property's two being counted all the same. So only a user
-  who never reported, reviewed, edited, uploaded, held a role or created or deleted a property can go;
+  the `deleted_by` of users, properties and task orders, which are counted all the same. So only a user who
+  never reported, reviewed, edited, uploaded, held a role, created or deleted a property or a task order, or
+  bundled a property, can go;
   anyone with history stays soft-deleted. The user's signature file is then removed from Storage, best-effort.
 
 A demo user is made by `POST /v1/auth/demo` (`demo-<uuid>@icid.local`, first name `Demo`, client `C00001`, no
@@ -377,6 +383,41 @@ A soft-deleted property keeps its row and frees its BBL; un-deleting it is refus
 property of the project has that BBL. There is no permanent delete. The unique index also serves lookups by
 project, so there is no separate project index.
 
+### task_orders
+
+A project's task orders. Added by migration 030. Admins add, change, soft-delete and restore them, and bundle
+properties into them; anyone on the project reads them (`/v1/projects/{id}/task-orders`, `/v1/task-orders/{id}`).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | `gen_random_uuid()` |
+| `project_id` | TEXT NOT NULL | FK → `projects.project_id` |
+| `task_order_number` | TEXT NOT NULL | Trimmed; matched exactly. Unique per project among task orders that aren't deleted (`uq_task_orders_project_number`, `WHERE deleted_at IS NULL`) |
+| `issued_date` | DATE | |
+| `estimate_notes` | TEXT | Blank is NULL |
+| `created_by` | UUID NOT NULL | The admin who added it; FK → `users.uuid` |
+| `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
+| `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
+
+### task_order_properties
+
+Which properties a task order holds, one row per pair (PK `(task_order_id, property_id)`). A property can be in
+several task orders (a re-issue is a new task order), once in each. Migration 030. No `created_at` / `updated_at`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `task_order_id` | UUID NOT NULL | FK → `task_orders.id`, **ON DELETE CASCADE** |
+| `property_id` | UUID NOT NULL | FK → `properties.id`, **ON DELETE CASCADE**; `idx_task_order_properties_property` |
+| `added_at` | TIMESTAMPTZ NOT NULL | `now()` |
+| `added_by` | UUID NOT NULL | The admin who bundled it; FK → `users.uuid` |
+
+- **Same project.** No constraint says the two sides share a project; the statement that bundles only inserts
+  when they do (and neither is deleted). Neither row's `project_id` can change, so that holds.
+- **Soft deletes leave the rows alone.** A soft-deleted task order keeps its bundle, so un-deleting it restores
+  it. A soft-deleted property stays bundled but is left out of the task order's detail and its `property_count`
+  (both filter `properties.deleted_at IS NULL`); un-deleting it brings it back. Only a permanent delete of either
+  side (none is built yet) takes the rows, by the cascades.
+
 ### report_attachments
 
 Files attached to a report. Each row describes one file; the file itself is in the private
@@ -607,6 +648,7 @@ content as TEXT, linked to a report and a form template).
 | 026 | `026_contract_items_own_columns.sql` | P0a | Added `contract_items.item_no`, `description`, `unit` (NOT NULL) and `spec_section` (nullable), each filled from the row's spec item. Made `spec_item_id` nullable, widened `bid_quantity` and `bid_unit_price` from NUMERIC(12,2) to NUMERIC, and replaced `uq_contract_items_project_spec_budget` with `uq_contract_items_project_item_budget` on `(project_id, item_no, budget_code)`. `spec_items` unchanged. |
 | 028 | `028_users_soft_delete.sql` | P3 | Added `users.deleted_at` and `deleted_by` (FK to `users` with ON DELETE SET NULL), and made `idx_users_email_lower` partial (`WHERE deleted_at IS NULL`), so a deleted user's email can be used again. No row changed. There is no 027. |
 | 029 | `029_properties.sql` | R0a | Created `properties` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`, CHECK `chk_properties_type`) and the partial unique index `uq_properties_project_bbl`. No existing table or row changed. |
+| 030 | `030_task_orders.sql` | R0b | Created `task_orders` (FK to `projects`, FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`) with the partial unique index `uq_task_orders_project_number`, and `task_order_properties` (PK `(task_order_id, property_id)`, FKs to `task_orders` and `properties` both ON DELETE CASCADE, FK to `users` for `added_by`) with `idx_task_order_properties_property`. No existing table or row changed. |
 
 Where each current column came from:
 
@@ -622,6 +664,7 @@ Where each current column came from:
 | `idrs` | `stage1_accepted_at`, `stage2_accepted_at` | 022 |
 | `quantities` | all | 025 |
 | `properties` | all | 029 |
+| `task_orders`, `task_order_properties` | all | 030 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

@@ -23,6 +23,7 @@ from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.properties import get_property
+from api.queries.task_orders import get_task_order
 from api.queries.users import create_demo_user, get_user_by_uuid, get_user_for_auth
 from api.schemas.auth import UserOut
 
@@ -293,20 +294,37 @@ def project_member(project_id: str, user: UserOut = Depends(current_user)) -> Us
     return user
 
 
+def _readable_on_project(found: Optional[dict], user: UserOut, not_found: str) -> dict:
+    """
+    Check that the signed-in user may read a row that belongs to a project: they are assigned to its project (in any role), or are an admin.
+    Takes the row (None when it doesn't exist), the current user and the 404's detail.
+    Returns the row; raises 404 for a missing row (and, as the project fence does, for a demo user's view of another project's) and 403 for a user who isn't on its project.
+    """
+    if found is None:
+        raise HTTPException(status_code=404, detail=not_found)
+    if user.role != "admin" and not is_user_on_project(user.uuid, found["project_id"]):
+        if user.is_demo:
+            raise HTTPException(status_code=404, detail=not_found)
+        raise HTTPException(status_code=403, detail="Project access required")
+    return found
+
+
 def property_member(property_id: UUID, user: UserOut = Depends(current_user)) -> dict:
     """
     FastAPI dependency for routes that read one property: the signed-in user must be assigned to its project (in any role), or be an admin.
     Takes the property_id path parameter and the current user.
-    Returns the property dict; raises 404 for a property that doesn't exist (and, as the project fence does, for a demo user's view of another project's) and 403 for a user who isn't on its project.
+    Returns the property dict; raises 404 or 403 as _readable_on_project does.
     """
-    found = get_property(property_id)
-    if found is None:
-        raise HTTPException(status_code=404, detail="Property not found")
-    if user.role != "admin" and not is_user_on_project(user.uuid, found["project_id"]):
-        if user.is_demo:
-            raise HTTPException(status_code=404, detail="Property not found")
-        raise HTTPException(status_code=403, detail="Project access required")
-    return found
+    return _readable_on_project(get_property(property_id), user, "Property not found")
+
+
+def task_order_member(task_order_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one task order: the signed-in user must be assigned to its project (in any role), or be an admin.
+    Takes the task_order_id path parameter and the current user.
+    Returns the task order dict, with its live bundled properties; raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_task_order(task_order_id), user, "Task order not found")
 
 
 def no_demo_users(user: UserOut = Depends(current_user)) -> UserOut:

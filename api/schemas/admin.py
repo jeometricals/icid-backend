@@ -76,6 +76,8 @@ class UserReferences(BaseModel):
     field_edits: int
     attachments: int
     properties: int
+    task_orders: int
+    task_order_properties: int
 
 
 class UserHasHistory(BaseModel):

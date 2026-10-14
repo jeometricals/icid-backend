@@ -290,6 +290,40 @@ CREATE TABLE icid.properties (
 CREATE UNIQUE INDEX uq_properties_project_bbl ON icid.properties (project_id, bbl) WHERE deleted_at IS NULL;
 
 ------------------------------------------------------------
+-- TASK ORDER (a project's task orders; soft-deleted like properties; migrations/030)
+------------------------------------------------------------
+CREATE TABLE icid.task_orders (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id         TEXT NOT NULL REFERENCES icid.projects(project_id),
+    task_order_number  TEXT NOT NULL,
+    issued_date        DATE,
+    estimate_notes     TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by         UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at         TIMESTAMPTZ,
+    deleted_by         UUID REFERENCES icid.users(uuid) ON DELETE SET NULL
+);
+
+-- One live task order per number in a project; a soft-deleted one frees its number
+CREATE UNIQUE INDEX uq_task_orders_project_number
+    ON icid.task_orders (project_id, task_order_number) WHERE deleted_at IS NULL;
+
+------------------------------------------------------------
+-- TASK ORDER PROPERTY (the bundle: which properties a task order holds; migrations/030)
+-- Soft deletes on either side leave the rows alone; both sides share a project (checked when bundling)
+------------------------------------------------------------
+CREATE TABLE icid.task_order_properties (
+    task_order_id  UUID NOT NULL REFERENCES icid.task_orders(id) ON DELETE CASCADE,
+    property_id    UUID NOT NULL REFERENCES icid.properties(id) ON DELETE CASCADE,
+    added_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    added_by       UUID NOT NULL REFERENCES icid.users(uuid),
+    PRIMARY KEY (task_order_id, property_id)
+);
+
+CREATE INDEX idx_task_order_properties_property ON icid.task_order_properties (property_id);
+
+------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)
 ------------------------------------------------------------
 CREATE TABLE icid.report_attachments (
