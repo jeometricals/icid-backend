@@ -6,19 +6,22 @@ from psycopg.types.json import Jsonb
 
 from api.db.runner import run_query
 
-# A flag as every function here returns it: its own columns, its PIR's property and project, and what counts as
-# its quantity. Read from a row source named f (the table, or a CTE of rows just written).
+# A flag as every function here returns it: its own columns, its PIR's property and project, what counts as its
+# quantity, and whether its page, PIR and property are deleted (what the routes check before a write). Read from a
+# row source named f (the table, or a CTE of rows just written).
 _FLAG_COLUMNS = """
-            f.id, f.pir_id, pir.property_id, p.project_id, f.display_order, f.added_in_field, f.shape, f.dimensions,
+            f.id, f.pir_id, f.pir_page_id, pir.property_id, p.project_id, f.display_order, f.added_in_field, f.shape, f.dimensions,
             f.sketch_x, f.sketch_y, f.rotation, f.surveyed_mark, f.surveyed_is_assessable,
             f.surveyed_non_assessable_reason, f.surveyed_thickness, f.is_constructed, f.pay_item_id,
             f.computed_quantity, f.reported_quantity,
             COALESCE(f.reported_quantity, f.computed_quantity) AS quantity,
             (f.reported_quantity IS NOT NULL) AS is_overridden,
-            f.quantity_delta_reason, f.created_at, f.updated_at, f.created_by, f.deleted_at, f.deleted_by"""
+            f.quantity_delta_reason, f.created_at, f.updated_at, f.created_by, f.deleted_at, f.deleted_by,
+            pg.deleted_at AS page_deleted_at, pir.deleted_at AS pir_deleted_at, p.deleted_at AS property_deleted_at"""
 _FROM = """
         JOIN icid.pirs pir ON pir.id = f.pir_id
-        JOIN icid.properties p ON p.id = pir.property_id"""
+        JOIN icid.properties p ON p.id = pir.property_id
+        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id"""
 # The columns a write sets from the request, in the order their values are passed, each with its type (so a NULL
 # parameter is typed, not text)
 _WRITABLE_TYPES = {
@@ -47,8 +50,8 @@ def _values(data: dict[str, Any]) -> list[Any]:
 
 def list_flags(pir_id: UUID, include_deleted: bool = False) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch a PIR's flags, the soft-deleted ones only when asked for.
-    Takes the PIR's id and whether to include soft-deleted flags.
+    Fetch a PIR's flags across its pages: the live ones on its live pages, or, when asked for, every one it has had.
+    Takes the PIR's id and whether to include soft-deleted flags (and those of replaced pages).
     Returns the flag dicts ordered by display_order then creation, or None on failure.
     """
     sql = (
@@ -57,10 +60,28 @@ def list_flags(pir_id: UUID, include_deleted: bool = False) -> Optional[list[dic
         + "\n        FROM icid.flags f"
         + _FROM
         + """
-        WHERE f.pir_id = %s AND (%s OR f.deleted_at IS NULL)
+        WHERE f.pir_id = %s AND (%s OR (f.deleted_at IS NULL AND pg.deleted_at IS NULL))
         ORDER BY f.display_order, f.created_at;"""
     )
     return run_query(sql, (pir_id, include_deleted))
+
+
+def list_flags_for_page(pir_page_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch the live flags drawn on one page.
+    Takes the page's id.
+    Returns the flag dicts ordered by display_order then creation, or None on failure.
+    """
+    sql = (
+        "\n        SELECT"
+        + _FLAG_COLUMNS
+        + "\n        FROM icid.flags f"
+        + _FROM
+        + """
+        WHERE f.pir_page_id = %s AND f.deleted_at IS NULL
+        ORDER BY f.display_order, f.created_at;"""
+    )
+    return run_query(sql, (pir_page_id,))
 
 
 def get_flag(flag_id: UUID) -> Optional[dict[str, Any]]:
@@ -75,11 +96,11 @@ def get_flag(flag_id: UUID) -> Optional[dict[str, Any]]:
 
 
 def create_flag(
-    pir_id: UUID, created_by_uuid: UUID, data: dict[str, Any], computed_area: Decimal
+    pir_page_id: UUID, created_by_uuid: UUID, data: dict[str, Any], computed_area: Decimal
 ) -> Optional[dict[str, Any]]:
     """
-    Add a flag to a PIR. Adds nothing when the PIR doesn't exist or the pay item isn't one of its project's.
-    Takes the PIR's id, the uuid of the user adding it, the values keyed by column (every writable column) and the area computed from its shape.
+    Add a flag to a page of a PIR (and so to the PIR). Adds nothing when the page doesn't exist or was replaced, or the pay item isn't one of its project's.
+    Takes the page's id, the uuid of the user adding it, the values keyed by column (every writable column) and the area computed from its shape.
     Returns the new flag dict, or None when nothing was added.
     """
     sql = (
@@ -87,13 +108,14 @@ def create_flag(
         WITH f AS (
             INSERT INTO icid.flags ("""
         + ", ".join(_WRITABLE)
-        + """, computed_quantity, pir_id, created_by)
+        + """, computed_quantity, pir_id, pir_page_id, created_by)
             SELECT """
         + ", ".join(_PLACEHOLDERS)
-        + """, %s::numeric, pir.id, %s::uuid
-            FROM icid.pirs pir
+        + """, %s::numeric, pir.id, page.pir_page_id, %s::uuid
+            FROM icid.pir_pages page
+            JOIN icid.pirs pir ON pir.id = page.pir_id
             JOIN icid.properties p ON p.id = pir.property_id
-            WHERE pir.id = %s
+            WHERE page.pir_page_id = %s AND page.deleted_at IS NULL
               AND """
         + _PAY_ITEM_OF_PROJECT
         + """
@@ -105,7 +127,9 @@ def create_flag(
         + _FROM
         + ";"
     )
-    params = (*_values(data), computed_area, created_by_uuid, pir_id, data.get("pay_item_id"), data.get("pay_item_id"))
+    params = (
+        *_values(data), computed_area, created_by_uuid, pir_page_id, data.get("pay_item_id"), data.get("pay_item_id"),
+    )
     rows = run_query(sql, params)
     return rows[0] if rows else None
 
@@ -150,7 +174,7 @@ def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal) -> 
 def soft_delete_flag(flag_id: UUID, deleted_by_uuid: UUID) -> Optional[dict[str, Any]]:
     """
     Mark a flag deleted, with when and by whom.
-    Takes the flag's id and the uuid of the admin deleting it.
+    Takes the flag's id and the uuid of the user deleting it.
     Returns the updated flag dict, or None if no flag matches or it is already deleted.
     """
     sql = (
@@ -173,17 +197,19 @@ def soft_delete_flag(flag_id: UUID, deleted_by_uuid: UUID) -> Optional[dict[str,
 
 def undelete_flag(flag_id: UUID) -> Optional[dict[str, Any]]:
     """
-    Bring a deleted flag back: clear deleted_at and deleted_by.
+    Bring a deleted flag back: clear deleted_at and deleted_by. Only a flag on a page that is still live comes back.
     Takes the flag's id.
-    Returns the updated flag dict, or None if no flag matches or it isn't deleted.
+    Returns the updated flag dict, or None if no flag matches, it isn't deleted, it has no page or its page was replaced.
     """
     sql = (
         """
         WITH f AS (
-            UPDATE icid.flags
+            UPDATE icid.flags flag
             SET deleted_at = NULL, deleted_by = NULL, updated_at = now()
-            WHERE id = %s AND deleted_at IS NOT NULL
-            RETURNING *
+            FROM icid.pir_pages page
+            WHERE flag.id = %s AND flag.deleted_at IS NOT NULL
+              AND page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL
+            RETURNING flag.*
         )
         SELECT"""
         + _FLAG_COLUMNS

@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from api.queries.pirs import (
@@ -11,28 +11,11 @@ from api.queries.pirs import (
     list_pirs_for_property,
     soft_delete_pir,
     undelete_pir,
-    set_pir_image_scale,
     update_pir,
 )
 from api.queries.properties import get_property
 from api.schemas.auth import UserOut
-from api.schemas.pir import (
-    PirConflict,
-    PirCreate,
-    PirImage,
-    PirImageComplete,
-    PirImageResponse,
-    PirImageScale,
-    PirImageUploadRequest,
-    PirImageUploadUrl,
-    PirImageUploadUrlResponse,
-    PirListResponse,
-    PirOut,
-    PirResponse,
-    PirUpdate,
-    PirWithImage,
-    PirWithImageResponse,
-)
+from api.schemas.pir import PirConflict, PirCreate, PirListResponse, PirOut, PirResponse, PirUpdate
 from api.services.auth import (
     current_admin,
     current_user,
@@ -40,15 +23,7 @@ from api.services.auth import (
     pir_member,
     property_member,
 )
-from api.services.pir_image import (
-    PirImageError,
-    PirImageStorageError,
-    complete_pir_image_upload,
-    pir_image_signed_url,
-    remove_pir_image,
-    request_pir_image_upload,
-)
-from api.v1._shared import clean_text, refuse_deleted_for_member
+from api.v1._shared import clean_text, refuse_deleted_pir_for_member, writable_pir
 
 # A second router under /v1/properties, for a property's PIR. property_member keeps demo users to their own project.
 property_router = APIRouter(prefix="/v1/properties", tags=["PIRs"], dependencies=[Depends(current_user)])
@@ -58,9 +33,6 @@ router = APIRouter(prefix="/v1/pirs", tags=["PIRs"], dependencies=[Depends(curre
 # The longest initials the field takes
 MAX_INITIALS_LENGTH = 16
 CONFLICT = {409: {"model": PirConflict}}
-# What a member who isn't an admin is told when they change a soft-deleted PIR, or a PIR of a soft-deleted property
-PIR_DELETED = "PIR is deleted"
-PROPERTY_DELETED = "Property is deleted"
 
 
 def _pir_writer_on_property(
@@ -70,28 +42,6 @@ def _pir_writer_on_property(
     FastAPI dependency for creating a property's PIR: the signed-in user must be on its project (or an admin), and not a demo user.
     Takes the property (loaded and checked by property_member, so 404 and 403 come first) and the user (refused when a demo user).
     Returns the property dict; raises 403 for a demo user.
-    """
-    return found
-
-
-def _refuse_deleted_for_member_writes(pir: dict[str, Any], user: UserOut) -> None:
-    """
-    Keep a soft-deleted PIR, and a PIR of a soft-deleted property, for admins: a member who isn't one can't change it.
-    Takes the PIR dict and the signed-in user.
-    Returns nothing; raises 400 "PIR is deleted" or "Property is deleted" for a user who isn't an admin.
-    """
-    refuse_deleted_for_member(pir, user, PIR_DELETED)
-    if user.role != "admin":
-        owner = get_property(pir["property_id"])
-        if owner is not None:
-            refuse_deleted_for_member(owner, user, PROPERTY_DELETED)
-
-
-def _writable_pir(found: dict = Depends(pir_member), user: UserOut = Depends(no_demo_pir_writes)) -> dict:
-    """
-    FastAPI dependency for the writes to one PIR: the signed-in user must be on its property's project (or an admin), and not a demo user.
-    Takes the PIR (loaded and checked by pir_member, so 404 and 403 come first) and the user (refused when a demo user).
-    Returns the PIR dict; raises 403 for a demo user.
     """
     return found
 
@@ -221,14 +171,14 @@ def get_pir_record(found: dict = Depends(pir_member)) -> PirResponse:
 
 @router.patch("/{pir_id}", response_model=PirResponse)
 def update_pir_record(
-    pir_id: UUID, body: PirUpdate, found: dict = Depends(_writable_pir), user: UserOut = Depends(current_user)
+    pir_id: UUID, body: PirUpdate, found: dict = Depends(writable_pir), user: UserOut = Depends(current_user)
 ) -> PirResponse:
     """
     Change a PIR's inspector initials or sign date. For a user on its property's project, or an admin; not a demo user. Only an admin changes a soft-deleted PIR, or a PIR of a soft-deleted property. A field left out, or sent as null, keeps its value; the as-built signature is never changed here.
-    Takes the PIR's id as a path parameter, the fields to change in the body, the PIR (loaded by _writable_pir) and the user.
+    Takes the PIR's id as a path parameter, the fields to change in the body, the PIR (loaded by writable_pir) and the user.
     Returns a PirResponse with the PIR as it now is; raises 400 when nothing is sent, the initials don't fit, or a user who isn't an admin edits a deleted PIR or one of a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown PIR and 422 for a malformed date.
     """
-    _refuse_deleted_for_member_writes(found, user)
+    refuse_deleted_pir_for_member(found, user)
     fields = _clean_fields(body)
 
     if not fields:
@@ -290,111 +240,3 @@ def undelete_pir_record(pir_id: UUID) -> PirResponse | JSONResponse:
 
     return _response(row, "PIR restored")
 
-
-def _positive_scale(scale: float) -> float:
-    """
-    Check an image's scale.
-    Takes the scale (pixels per foot).
-    Returns it; raises 400 when it isn't above 0.
-    """
-    if scale <= 0:
-        raise HTTPException(status_code=400, detail="scale must be a positive number")
-    return scale
-
-
-def _image_failure(exc: Exception) -> HTTPException:
-    """
-    Turn a PIR image failure into the response it calls for.
-    Takes a PirImageError (its own status and message) or a PirImageStorageError (502).
-    Returns the HTTPException to raise.
-    """
-    if isinstance(exc, PirImageError):
-        return HTTPException(status_code=exc.status_code, detail=exc.detail)
-    return HTTPException(status_code=502, detail=str(exc))
-
-
-@router.post("/{pir_id}/image/upload-request", response_model=PirImageUploadUrlResponse)
-def request_image_upload(
-    pir_id: UUID, body: PirImageUploadRequest, found: dict = Depends(_writable_pir),
-    user: UserOut = Depends(current_user),
-) -> PirImageUploadUrlResponse:
-    """
-    Start giving a PIR an image: a signed URL to PUT the file (a PDF, PNG or JPEG) to, at a fresh path. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted PIR, or a PIR of a soft-deleted property.
-    Takes the PIR's id as a path parameter, the file's type in the body, the PIR (loaded by _writable_pir) and the user.
-    Returns a PirImageUploadUrlResponse; raises 400 for another type ("Unsupported file type") or a deleted PIR or property, 403 for a demo user or a user who isn't on its project, 404 for an unknown PIR and 502 if Storage can't sign a URL.
-    """
-    _refuse_deleted_for_member_writes(found, user)
-    try:
-        upload = request_pir_image_upload(pir_id, body.content_type)
-    except (PirImageError, PirImageStorageError) as exc:
-        raise _image_failure(exc) from exc
-    return PirImageUploadUrlResponse(status="success", message="Upload URL created", data=PirImageUploadUrl(**upload))
-
-
-@router.post("/{pir_id}/image/complete", response_model=PirWithImageResponse)
-def complete_image_upload(
-    pir_id: UUID, body: PirImageComplete, found: dict = Depends(_writable_pir), user: UserOut = Depends(current_user)
-) -> PirWithImageResponse:
-    """
-    Finish giving a PIR an image, once the file is PUT: it is checked by its first bytes, a PDF's first page is rendered to PNG, the image is stored at a new path with its scale, and the PIR's previous image and the raw upload are removed. Same access as the upload request.
-    Takes the PIR's id as a path parameter, the upload's path and the scale (pixels per foot, 15 by default) in the body, the PIR and the user.
-    Returns a PirWithImageResponse: the PIR with its image path and scale, and a signed URL to the image; raises 400 for a scale that isn't above 0, a path that isn't one of the PIR's uploads or has no file, a file that isn't a PDF, PNG or JPEG ("Unsupported file type"), a PDF that can't be read, or a deleted PIR or property; 413 for a file too large; 403 and 404 as on the upload request; and 502 when Storage fails.
-    """
-    _refuse_deleted_for_member_writes(found, user)
-    scale = _positive_scale(body.scale)
-    try:
-        row = complete_pir_image_upload(pir_id, body.upload_path, scale)
-        if row is None:
-            raise HTTPException(status_code=404, detail="PIR not found")
-        link = pir_image_signed_url(pir_id, row["source_image_url"])
-    except (PirImageError, PirImageStorageError) as exc:
-        raise _image_failure(exc) from exc
-    return PirWithImageResponse(status="success", message="PIR image set", data=PirWithImage(**row, **link))
-
-
-@router.get("/{pir_id}/image", response_model=PirImageResponse)
-def get_pir_image(found: dict = Depends(pir_member)) -> PirImageResponse:
-    """
-    A signed link to a PIR's image, good for PIR_IMAGE_URL_EXPIRY_SECONDS, with its scale. For a user on its project, or an admin.
-    Takes the PIR (loaded and checked by pir_member from the pir_id path parameter).
-    Returns a PirImageResponse; raises 403 for a user who isn't on its project, 404 for an unknown PIR or one with no image, and 502 if Storage can't sign a URL.
-    """
-    if not found["source_image_url"]:
-        raise HTTPException(status_code=404, detail="No image for this PIR")
-    try:
-        link = pir_image_signed_url(found["id"], found["source_image_url"])
-    except PirImageStorageError as exc:
-        raise _image_failure(exc) from exc
-    return PirImageResponse(
-        status="success", message="PIR image link created", data=PirImage(**link, scale=found["source_image_scale"])
-    )
-
-
-@router.patch("/{pir_id}/image", response_model=PirResponse)
-def update_pir_image_scale(
-    pir_id: UUID, body: PirImageScale, found: dict = Depends(_writable_pir), user: UserOut = Depends(current_user)
-) -> PirResponse:
-    """
-    Change the scale of a PIR's image, keeping the image (recalibrating). Same access as the upload request.
-    Takes the PIR's id as a path parameter, the new scale (pixels per foot) in the body, the PIR and the user.
-    Returns a PirResponse with the PIR as it now is; raises 400 for a scale that isn't above 0 or a deleted PIR or property, 403 for a demo user or a user who isn't on its project, and 404 for an unknown PIR or one with no image.
-    """
-    _refuse_deleted_for_member_writes(found, user)
-    row = set_pir_image_scale(pir_id, _positive_scale(body.scale))
-
-    if row is None:
-        raise HTTPException(status_code=404, detail="No image for this PIR")
-
-    return _response(row, "PIR image scale updated")
-
-
-@router.delete("/{pir_id}/image", status_code=204, response_class=Response)
-def delete_pir_image(pir_id: UUID, found: dict = Depends(_writable_pir), user: UserOut = Depends(current_user)) -> None:
-    """
-    Take a PIR's image away: clear its path and scale, then remove the file. A PIR without one is left as it is. Same access as the upload request.
-    Takes the PIR's id as a path parameter, the PIR (loaded by _writable_pir) and the user.
-    Returns nothing (204); raises 400 for a deleted PIR or property, 403 for a demo user or a user who isn't on its project, and 404 for an unknown PIR.
-    """
-    _refuse_deleted_for_member_writes(found, user)
-    if remove_pir_image(pir_id) is None:
-        raise HTTPException(status_code=404, detail="PIR not found")

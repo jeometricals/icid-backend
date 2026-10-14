@@ -5,11 +5,17 @@ from psycopg.errors import UniqueViolation
 
 from api.db.runner import run_query
 
-# A PIR as every function here returns it: its own columns and its property's project
+# A PIR as every function here returns it: its own columns and its property's project.
+# DEPRECATED (R1e, remove in R1f): source_image_url and source_image_scale are read from the PIR's live page 1, for
+# the R1d image card the deployed frontend still shows; the columns themselves were dropped by migration 033.
 _PIR_COLUMNS = """
             pir.id, pir.property_id,
             (SELECT p.project_id FROM icid.properties p WHERE p.id = pir.property_id) AS project_id,
-            pir.source_image_url, pir.source_image_scale, pir.inspector_initials, pir.inspector_sign_date,
+            (SELECT pg.image_path FROM icid.pir_pages pg
+             WHERE pg.pir_id = pir.id AND pg.page_number = 1 AND pg.deleted_at IS NULL) AS source_image_url,
+            (SELECT pg.scale_px_per_ft::float8 FROM icid.pir_pages pg
+             WHERE pg.pir_id = pir.id AND pg.page_number = 1 AND pg.deleted_at IS NULL) AS source_image_scale,
+            pir.inspector_initials, pir.inspector_sign_date,
             pir.digitized_by, pir.digitized_at, pir.as_built_signed_by, pir.as_built_signed_at,
             pir.created_at, pir.updated_at, pir.deleted_at, pir.deleted_by"""
 
@@ -155,70 +161,3 @@ def undelete_pir(pir_id: UUID) -> Optional[dict[str, Any]]:
         return None
     return rows[0] if rows else None
 
-
-def _swap_image_sql(set_clause: str) -> str:
-    """
-    Build the statement that changes a PIR's image columns and says which file it pointed at before, in one go.
-    Takes the SET clause for the new values (its parameters come after the PIR's id).
-    Returns the SQL: it returns the PIR as every function here does, plus previous_image_path.
-    """
-    return (
-        """
-        WITH old AS (
-            SELECT id, source_image_url FROM icid.pirs WHERE id = %s FOR UPDATE
-        ),
-        pir AS (
-            UPDATE icid.pirs target
-            SET """
-        + set_clause
-        + """,
-                updated_at = now()
-            FROM old
-            WHERE target.id = old.id
-            RETURNING target.*
-        )
-        SELECT"""
-        + _PIR_COLUMNS
-        + """,
-            (SELECT source_image_url FROM old) AS previous_image_path
-        FROM pir;"""
-    )
-
-
-def set_pir_image(pir_id: UUID, path: str, scale: float) -> Optional[dict[str, Any]]:
-    """
-    Point a PIR at a new image file, with its scale.
-    Takes the PIR's id, the file's Storage path and the scale (pixels per foot).
-    Returns the updated PIR dict with previous_image_path (the file it pointed at before, or None), or None if no PIR matches.
-    """
-    rows = run_query(_swap_image_sql("source_image_url = %s, source_image_scale = %s"), (pir_id, path, scale))
-    return rows[0] if rows else None
-
-
-def clear_pir_image(pir_id: UUID) -> Optional[dict[str, Any]]:
-    """
-    Take a PIR's image away: clear its path and scale.
-    Takes the PIR's id.
-    Returns the updated PIR dict with previous_image_path (the file it pointed at, or None when it had none), or None if no PIR matches.
-    """
-    rows = run_query(_swap_image_sql("source_image_url = NULL, source_image_scale = NULL"), (pir_id,))
-    return rows[0] if rows else None
-
-
-def set_pir_image_scale(pir_id: UUID, scale: float) -> Optional[dict[str, Any]]:
-    """
-    Change the scale of a PIR's image, keeping the image.
-    Takes the PIR's id and the new scale (pixels per foot).
-    Returns the updated PIR dict, or None if no PIR matches or it has no image.
-    """
-    sql = (
-        """
-        UPDATE icid.pirs pir
-        SET source_image_scale = %s, updated_at = now()
-        WHERE pir.id = %s AND pir.source_image_url IS NOT NULL
-        RETURNING"""
-        + _PIR_COLUMNS
-        + ";"
-    )
-    rows = run_query(sql, (scale, pir_id))
-    return rows[0] if rows else None

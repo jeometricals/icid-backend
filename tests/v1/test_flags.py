@@ -10,12 +10,13 @@ from api.queries.flags import _WRITABLE, list_flags, soft_delete_flag, undelete_
 from tests.conftest import ADMIN_USER_ROW, signed_in
 
 # ---------------------------------------------------------------------------
-# /v1/pirs/{pir_id}/flags and /v1/flags/{flag_id}
-# Mock rows are dicts, as run_query returns them: a flag's own columns, its PIR's property and project, and its
-# quantity as the statement works it out.
+# /v1/pir-pages/{pir_page_id}/flags, /v1/pirs/{pir_id}/flags and /v1/flags/{flag_id}
+# Mock rows are dicts, as run_query returns them: a flag's own columns, its PIR's property and project, its quantity
+# as the statement works it out, and its page's, PIR's and property's deleted states.
 # ---------------------------------------------------------------------------
 
 FLAGS = "api.queries.flags.run_query"
+PAGES = "api.queries.pir_pages.run_query"
 PIRS = "api.queries.pirs.run_query"
 PROPS = "api.queries.properties.run_query"
 PROJECTS = "api.queries.projects.run_query"
@@ -27,8 +28,10 @@ MEMBER_ID = MEMBER_ROW["uuid"]
 PROPERTY_ID = UUID("9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f")
 PIR_ID = UUID("6f7a8b9c-0d1e-4f2a-8b3c-4d5e6f7a8b9c")
 FLAG_ID = UUID("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d")
+PAGE_ID = UUID("8b9c0d1e-2f3a-4b4c-8d5e-6f7a8b9c0d1e")
 PAY_ITEM_ID = UUID("7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4e")
-FLAGS_URL = f"/v1/pirs/{PIR_ID}/flags"
+FLAGS_URL = f"/v1/pir-pages/{PAGE_ID}/flags"
+PIR_FLAGS_URL = f"/v1/pirs/{PIR_ID}/flags"
 URL = f"/v1/flags/{FLAG_ID}"
 CREATED = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
 DELETED = datetime(2026, 10, 14, 10, 0, tzinfo=timezone.utc)
@@ -40,16 +43,21 @@ PIR_ROW = {"id": PIR_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023", "s
            "source_image_scale": None, "inspector_initials": "JD", "inspector_sign_date": date(2026, 9, 30),
            "digitized_by": ADMIN_ID, "digitized_at": CREATED, "as_built_signed_by": None, "as_built_signed_at": None,
            "created_at": CREATED, "updated_at": CREATED, "deleted_at": None, "deleted_by": None}
+PAGE_ROW = {"pir_page_id": PAGE_ID, "pir_id": PIR_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023",
+            "page_number": 1, "image_path": f"pirs/{PIR_ID}/u1/page-1.png", "image_mime": "image/png",
+            "width_px": 1275, "height_px": 1650, "scale_px_per_ft": Decimal("15.0000"), "rotation_deg": 0,
+            "created_at": CREATED, "updated_at": CREATED, "deleted_at": None, "deleted_by": None,
+            "pir_deleted_at": None, "property_deleted_at": None}
 PAY_ITEM_ROW = {"pay_item_uuid": PAY_ITEM_ID, "pay_item_ref": "4.01", "description": "Sidewalk", "unit": "SF",
                 "quantity": Decimal("100"), "unit_price": Decimal("12"), "budget_code": "SE01", "spec_section": None}
-FLAG_ROW = {"id": FLAG_ID, "pir_id": PIR_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023", "display_order": 1,
+FLAG_ROW = {"id": FLAG_ID, "pir_id": PIR_ID, "pir_page_id": PAGE_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023", "display_order": 1,
             "added_in_field": False, "shape": "rectangle", "dimensions": {"L": 5.0, "W": 4.0}, "sketch_x": None,
             "sketch_y": None, "rotation": 0.0, "surveyed_mark": "cross", "surveyed_is_assessable": True,
             "surveyed_non_assessable_reason": None, "surveyed_thickness": "4in", "is_constructed": False,
             "pay_item_id": None, "computed_quantity": Decimal("20.00"), "reported_quantity": None,
             "quantity": Decimal("20.00"), "is_overridden": False, "quantity_delta_reason": None,
             "created_at": CREATED, "updated_at": CREATED, "created_by": ADMIN_ID, "deleted_at": None,
-            "deleted_by": None}
+            "deleted_by": None, "page_deleted_at": None, "pir_deleted_at": None, "property_deleted_at": None}
 DELETED_ROW = {**FLAG_ROW, "deleted_at": DELETED, "deleted_by": ADMIN_ID}
 BODY = {"display_order": 1, "shape": "rectangle", "dimensions": {"L": 5, "W": 4}, "surveyed_mark": "cross",
         "surveyed_is_assessable": True, "surveyed_thickness": "4in"}
@@ -85,7 +93,7 @@ def error_messages(response) -> str:
 
 class TestCreateFlag:
     def test_an_admin_creates_a_rectangle_with_its_area(self, admin_client):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
             response = admin_client.post(FLAGS_URL, json=BODY)
         assert response.status_code == 201 and response.json()["message"] == "Flag created"
         data = response.json()["data"]
@@ -97,7 +105,7 @@ class TestCreateFlag:
         assert run.call_args.args[1][CREATOR] == ADMIN_ID
 
     def test_a_member_creates_a_flag_as_its_creator(self):
-        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
+        with signed_in(MEMBER_ROW) as member, patch(PAGES, return_value=[PAGE_ROW]), \
                 patch(PROJECTS, return_value=ON_PROJECT), patch(PROPS, return_value=[PROPERTY_ROW]), \
                 patch(FLAGS, return_value=[{**FLAG_ROW, "created_by": MEMBER_ID}]) as run:
             response = member.post(FLAGS_URL, json=BODY)
@@ -112,17 +120,21 @@ class TestCreateFlag:
         ("arc", {"r": 2, "theta": math.pi}, "6.28"),
     ])
     def test_each_shape_is_stored_with_its_area(self, admin_client, shape, dimensions, area):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
             response = admin_client.post(FLAGS_URL, json={**BODY, "shape": shape, "dimensions": dimensions})
         assert response.status_code == 201
         assert written(run)["computed_quantity"] == Decimal(area)
         assert written(run)["shape"] == shape
 
-    def test_the_statement_checks_the_pir_and_the_pay_items_project_itself(self, admin_client):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+    def test_the_statement_checks_the_page_and_the_pay_items_project_itself(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
             admin_client.post(FLAGS_URL, json=BODY)
         one_line = " ".join(run.call_args.args[0].split())
-        assert "INSERT INTO icid.flags" in one_line and "FROM icid.pirs pir JOIN icid.properties p" in one_line
+        assert "INSERT INTO icid.flags" in one_line
+        assert ("FROM icid.pir_pages page JOIN icid.pirs pir ON pir.id = page.pir_id JOIN icid.properties p"
+                in one_line)
+        assert "WHERE page.pir_page_id = %s AND page.deleted_at IS NULL" in one_line
+        assert run.call_args.args[1][CREATOR + 1] == PAGE_ID
         assert "ci.contract_item_id = %s::uuid AND ci.project_id = p.project_id" in one_line
         assert "COALESCE(f.reported_quantity, f.computed_quantity) AS quantity" in one_line
         assert "%s::real" in one_line and "%s::jsonb" in one_line  # a NULL parameter is typed, not text
@@ -142,14 +154,14 @@ class TestCreateFlag:
         ({"r": -2, "theta": 1}, "arc"),
     ])
     def test_dimensions_that_dont_fit_the_shape_are_422(self, admin_client, dimensions, shape):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS) as run:
             response = admin_client.post(FLAGS_URL, json={**BODY, "shape": shape, "dimensions": dimensions})
         assert response.status_code == 422
         run.assert_not_called()
 
     def test_a_degenerate_polygon_says_why(self, admin_client):
         collinear = {"vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 1}, {"x": 2, "y": 2}]}
-        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS):
             response = admin_client.post(FLAGS_URL, json={**BODY, "shape": "polygon", "dimensions": collinear})
         assert "must enclose an area" in error_messages(response)
 
@@ -165,7 +177,7 @@ class TestCreateFlag:
         ({"surveyed_non_assessable_reason": "aliens", "surveyed_is_assessable": False}, "Input should be"),
     ])
     def test_a_flag_that_breaks_a_rule_is_422(self, admin_client, changes, message):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS) as run:
             response = admin_client.post(FLAGS_URL, json={**BODY, **changes})
         assert response.status_code == 422 and message in error_messages(response)
         run.assert_not_called()
@@ -174,13 +186,13 @@ class TestCreateFlag:
         body = {**BODY, "added_in_field": True, "surveyed_mark": "none", "surveyed_is_assessable": False,
                 "surveyed_non_assessable_reason": "hydrant", "reported_quantity": 18.5,
                 "quantity_delta_reason": "measured on site"}
-        with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
             assert admin_client.post(FLAGS_URL, json=body).status_code == 201
         values = written(run)
         assert values["reported_quantity"] == Decimal("18.5") and values["computed_quantity"] == Decimal("20.00")
 
     def test_a_pay_item_of_the_project_is_taken(self, admin_client):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(CONTRACT, return_value=[PAY_ITEM_ROW]) as items, \
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[PAY_ITEM_ROW]) as items, \
                 patch(FLAGS, return_value=[{**FLAG_ROW, "pay_item_id": PAY_ITEM_ID}]) as run:
             response = admin_client.post(FLAGS_URL, json={**BODY, "pay_item_id": str(PAY_ITEM_ID)})
         assert response.status_code == 201
@@ -188,55 +200,59 @@ class TestCreateFlag:
         assert written(run)["pay_item_id"] == PAY_ITEM_ID
 
     def test_a_pay_item_of_another_project_is_400(self, admin_client):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(CONTRACT, return_value=[]), patch(FLAGS) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[]), patch(FLAGS) as run:
             response = admin_client.post(FLAGS_URL, json={**BODY, "pay_item_id": str(PAY_ITEM_ID)})
         assert response.status_code == 400 and response.json() == {"detail": "Pay item belongs to a different project"}
         run.assert_not_called()
 
     def test_a_user_who_isnt_on_the_project_is_forbidden(self):
-        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), patch(PROJECTS, return_value=[]), \
+        with signed_in(MEMBER_ROW) as member, patch(PAGES, return_value=[PAGE_ROW]), patch(PROJECTS, return_value=[]), \
                 patch(FLAGS) as run:
             response = member.post(FLAGS_URL, json=BODY)
         assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
         run.assert_not_called()
 
     def test_a_demo_user_cant_add_on_their_own_project(self, demo_client):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS) as run:
             response = demo_client.post(FLAGS_URL, json=BODY)
         assert response.status_code == 403 and response.json() == {"detail": "Demo mode: flags are read-only"}
         run.assert_not_called()
 
     def test_a_demo_user_gets_404_on_another_project(self, demo_client):
-        with patch(PIRS, return_value=[PIR_ROW]), patch(PROJECTS, return_value=[]), patch(FLAGS) as run:
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(PROJECTS, return_value=[]), patch(FLAGS) as run:
             response = demo_client.post(FLAGS_URL, json=BODY)
-        assert response.status_code == 404 and response.json() == {"detail": "PIR not found"}
+        assert response.status_code == 404 and response.json() == {"detail": "Page not found"}
         run.assert_not_called()
 
-    def test_a_member_cant_add_to_a_deleted_pir(self):
-        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[{**PIR_ROW, "deleted_at": DELETED}]), \
-                patch(PROJECTS, return_value=ON_PROJECT), patch(PROPS, return_value=[PROPERTY_ROW]), \
-                patch(FLAGS) as run:
+    @pytest.mark.parametrize("parent,detail", [("pir_deleted_at", "PIR is deleted"),
+                                               ("property_deleted_at", "Property is deleted")])
+    def test_a_member_cant_add_under_a_deleted_pir_or_property(self, parent, detail):
+        with signed_in(MEMBER_ROW) as member, patch(PAGES, return_value=[{**PAGE_ROW, parent: DELETED}]), \
+                patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS) as run:
             response = member.post(FLAGS_URL, json=BODY)
-        assert response.status_code == 400 and response.json() == {"detail": "PIR is deleted"}
+        assert response.status_code == 400 and response.json() == {"detail": detail}
         run.assert_not_called()
 
-    def test_a_member_cant_add_to_a_pir_of_a_deleted_property(self):
-        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
-                patch(PROJECTS, return_value=ON_PROJECT), \
-                patch(PROPS, return_value=[{**PROPERTY_ROW, "deleted_at": DELETED}]), patch(FLAGS) as run:
-            response = member.post(FLAGS_URL, json=BODY)
-        assert response.status_code == 400 and response.json() == {"detail": "Property is deleted"}
-        run.assert_not_called()
-
-    def test_an_admin_adds_to_a_deleted_pir(self, admin_client):
-        with patch(PIRS, return_value=[{**PIR_ROW, "deleted_at": DELETED}]), patch(PROPS) as props, \
+    def test_an_admin_adds_under_a_deleted_pir(self, admin_client):
+        with patch(PAGES, return_value=[{**PAGE_ROW, "pir_deleted_at": DELETED}]), \
                 patch(FLAGS, return_value=[FLAG_ROW]):
             assert admin_client.post(FLAGS_URL, json=BODY).status_code == 201
-        props.assert_not_called()
 
-    def test_an_unknown_pir_is_404(self, admin_client):
-        with patch(PIRS, return_value=[]), patch(FLAGS) as run:
-            assert admin_client.post(FLAGS_URL, json=BODY).status_code == 404
+    def test_nobody_adds_to_a_replaced_page(self, admin_client):
+        with patch(PAGES, return_value=[{**PAGE_ROW, "deleted_at": DELETED}]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 400 and response.json() == {"detail": "Page is deleted"}
+        run.assert_not_called()
+
+    def test_a_page_replaced_between_the_check_and_the_statement_is_400(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[]):
+            response = admin_client.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 400 and response.json() == {"detail": "Page is deleted"}
+
+    def test_an_unknown_page_is_404(self, admin_client):
+        with patch(PAGES, return_value=[]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 404 and response.json() == {"detail": "Page not found"}
         run.assert_not_called()
 
 
@@ -244,21 +260,23 @@ class TestListAndReadFlags:
     def test_a_member_lists_the_live_flags_in_display_order(self):
         with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
                 patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS, return_value=[FLAG_ROW]) as run:
-            response = member.get(FLAGS_URL, params={"include_deleted": "true"})
+            response = member.get(PIR_FLAGS_URL, params={"include_deleted": "true"})
         assert response.status_code == 200 and len(response.json()["data"]) == 1
         sql, params = run.call_args.args
-        assert "(%s OR f.deleted_at IS NULL)" in sql and "ORDER BY f.display_order, f.created_at;" in sql
+        assert "(%s OR (f.deleted_at IS NULL AND pg.deleted_at IS NULL))" in sql
+        assert "LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id" in sql
+        assert "ORDER BY f.display_order, f.created_at;" in sql
         assert params == (PIR_ID, False)  # include_deleted from a member is ignored
 
     def test_an_admin_can_ask_for_the_deleted_ones_too(self, admin_client):
         with patch(PIRS, return_value=[PIR_ROW]), patch(FLAGS, return_value=[FLAG_ROW, DELETED_ROW]) as run:
-            response = admin_client.get(FLAGS_URL, params={"include_deleted": "true"})
+            response = admin_client.get(PIR_FLAGS_URL, params={"include_deleted": "true"})
         assert len(response.json()["data"]) == 2 and run.call_args.args[1] == (PIR_ID, True)
 
     def test_a_user_who_isnt_on_the_project_cant_list(self):
         with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[PIR_ROW]), \
                 patch(PROJECTS, return_value=[]), patch(FLAGS) as run:
-            assert member.get(FLAGS_URL).status_code == 403
+            assert member.get(PIR_FLAGS_URL).status_code == 403
         run.assert_not_called()
 
     def test_a_member_reads_one_flag(self):
@@ -362,18 +380,17 @@ class TestUpdateFlag:
 
     def test_a_member_edits_a_flag(self):
         with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), \
-                patch(PIRS, return_value=[PIR_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]), \
                 patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]):
             assert member.patch(URL, json={"display_order": 3}).status_code == 200
 
-    @pytest.mark.parametrize("flag,pir,owner,detail", [
-        (DELETED_ROW, PIR_ROW, PROPERTY_ROW, "Flag is deleted"),
-        (FLAG_ROW, {**PIR_ROW, "deleted_at": DELETED}, PROPERTY_ROW, "PIR is deleted"),
-        (FLAG_ROW, PIR_ROW, {**PROPERTY_ROW, "deleted_at": DELETED}, "Property is deleted"),
+    @pytest.mark.parametrize("flag,detail", [
+        (DELETED_ROW, "Flag is deleted"),
+        ({**FLAG_ROW, "page_deleted_at": DELETED}, "Page is deleted"),
+        ({**FLAG_ROW, "pir_deleted_at": DELETED}, "PIR is deleted"),
+        ({**FLAG_ROW, "property_deleted_at": DELETED}, "Property is deleted"),
     ])
-    def test_a_member_cant_edit_under_something_deleted(self, flag, pir, owner, detail):
+    def test_a_member_cant_edit_under_something_deleted(self, flag, detail):
         with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), \
-                patch(PIRS, return_value=[pir]), patch(PROPS, return_value=[owner]), \
                 patch(FLAGS, return_value=[flag]) as run:
             response = member.patch(URL, json={"display_order": 3})
         assert response.status_code == 400 and response.json() == {"detail": detail}
@@ -452,3 +469,104 @@ def test_every_flag_statement_is_in_the_icid_schema():
         list_flags(PIR_ID)
     sql = run.call_args.args[0]
     assert "FROM icid.flags f" in sql and "JOIN icid.pirs pir" in sql and "JOIN icid.properties p" in sql
+
+
+class TestPageFlags:
+    def test_a_member_lists_a_pages_live_flags(self):
+        with signed_in(MEMBER_ROW) as member, patch(PAGES, return_value=[PAGE_ROW]), \
+                patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = member.get(FLAGS_URL)
+        assert response.status_code == 200 and response.json()["data"][0]["pir_page_id"] == str(PAGE_ID)
+        sql, params = run.call_args.args
+        assert "WHERE f.pir_page_id = %s AND f.deleted_at IS NULL" in sql and params == (PAGE_ID,)
+
+    def test_a_user_who_isnt_on_the_project_cant_list_them(self):
+        with signed_in(MEMBER_ROW) as member, patch(PAGES, return_value=[PAGE_ROW]), \
+                patch(PROJECTS, return_value=[]), patch(FLAGS) as run:
+            response = member.get(FLAGS_URL)
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+        run.assert_not_called()
+
+    def test_a_demo_user_gets_404_for_another_projects_page(self, demo_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(PROJECTS, return_value=[]), patch(FLAGS) as run:
+            response = demo_client.get(FLAGS_URL)
+        assert response.status_code == 404 and response.json() == {"detail": "Page not found"}
+        run.assert_not_called()
+
+
+class TestDeprecatedCreateOnPir:
+    def test_it_puts_the_flag_on_page_1(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PAGES, return_value=[PAGE_ROW]) as pages, \
+                patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(PIR_FLAGS_URL, json=BODY)
+        assert response.status_code == 201
+        assert pages.call_args.args[1] == (PIR_ID,) and run.call_args.args[1][CREATOR + 1] == PAGE_ID
+
+    def test_a_pir_without_pages_is_400(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PAGES, return_value=[]), patch(FLAGS) as run:
+            response = admin_client.post(PIR_FLAGS_URL, json=BODY)
+        assert response.status_code == 400 and response.json() == {"detail": "Upload the PIR image first"}
+        run.assert_not_called()
+
+    def test_a_member_cant_add_to_a_deleted_pir(self):
+        with signed_in(MEMBER_ROW) as member, patch(PIRS, return_value=[{**PIR_ROW, "deleted_at": DELETED}]), \
+                patch(PROJECTS, return_value=ON_PROJECT), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(PAGES) as pages, patch(FLAGS) as run:
+            response = member.post(PIR_FLAGS_URL, json=BODY)
+        assert response.status_code == 400 and response.json() == {"detail": "PIR is deleted"}
+        pages.assert_not_called()
+        run.assert_not_called()
+
+
+class TestMemberDelete:
+    def test_a_member_soft_deletes_a_flag(self):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(FLAGS, side_effect=[[FLAG_ROW], [{**DELETED_ROW, "deleted_by": MEMBER_ID}]]) as run:
+            response = member.delete(URL)
+        assert response.status_code == 204 and response.content == b""
+        sql, params = run.call_args.args
+        assert "SET deleted_at = now(), deleted_by = %s" in sql and "DELETE" not in sql
+        assert params == (MEMBER_ID, FLAG_ID)
+
+    def test_deleting_it_again_changes_nothing(self, admin_client):
+        with patch(FLAGS, return_value=[DELETED_ROW]) as run:
+            assert admin_client.delete(URL).status_code == 204
+        assert run.call_count == 1
+
+    @pytest.mark.parametrize("parent,detail", [("page_deleted_at", "Page is deleted"), ("pir_deleted_at", "PIR is deleted"),
+                                               ("property_deleted_at", "Property is deleted")])
+    def test_a_member_cant_delete_under_something_deleted(self, parent, detail):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(FLAGS, return_value=[{**FLAG_ROW, parent: DELETED}]) as run:
+            response = member.delete(URL)
+        assert response.status_code == 400 and response.json() == {"detail": detail}
+        assert run.call_count == 1
+
+    def test_a_demo_user_cant_delete(self, demo_client):
+        with patch(PROJECTS, return_value=ON_PROJECT), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = demo_client.delete(URL)
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: flags are read-only"}
+        assert run.call_count == 1
+
+    def test_a_user_who_isnt_on_the_project_cant_delete(self):
+        with signed_in(MEMBER_ROW) as member, patch(PROJECTS, return_value=[]), patch(FLAGS, return_value=[FLAG_ROW]):
+            assert member.delete(URL).status_code == 403
+
+
+class TestUndeleteNeedsALivePage:
+    def test_a_flag_from_before_pages_cant_come_back(self, admin_client):
+        with patch(FLAGS, return_value=[{**DELETED_ROW, "pir_page_id": None, "page_deleted_at": None}]) as run:
+            response = admin_client.post(f"{URL}/admin/undelete")
+        assert response.status_code == 400 and response.json() == {"detail": "This flag has no page; draw it again"}
+        assert run.call_count == 1
+
+    def test_a_flag_whose_page_was_replaced_cant_come_back(self, admin_client):
+        with patch(FLAGS, return_value=[{**DELETED_ROW, "page_deleted_at": DELETED}]) as run:
+            response = admin_client.post(f"{URL}/admin/undelete")
+        assert response.status_code == 400 and response.json() == {"detail": "Its page was replaced"}
+        assert run.call_count == 1
+
+    def test_the_statement_brings_it_back_only_onto_a_live_page(self, admin_client):
+        with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW]]) as run:
+            assert admin_client.post(f"{URL}/admin/undelete").status_code == 200
+        assert "page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL" in " ".join(run.call_args.args[0].split())

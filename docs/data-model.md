@@ -1,7 +1,7 @@
 # ICID data model
 
-Developer reference for the `icid` schema as of migration 032 (Slice R1b). The diagram below is the ER
-diagram; it was last checked against `schema.sql` in Slice R1b.
+Developer reference for the `icid` schema as of migration 033 (Slice R1e). The diagram below is the ER
+diagram; it was last checked against `schema.sql` in Slice R1e.
 `schema.sql` is the authoritative DDL; this doc explains it. If the two ever disagree,
 `schema.sql` wins and this file needs fixing.
 
@@ -34,6 +34,7 @@ projects ──< properties                        project_id; soft-deleted, uni
 projects ──< task_orders ──< task_order_properties >── properties
                                                both FKs ON DELETE CASCADE; both sides share a project
 properties ──< pirs                            property_id, no cascade; one live PIR per property
+pirs ──< pir_pages ──< flags                   pir_id ON DELETE CASCADE; flags.pir_page_id no action (live flags only)
 pirs ──< flags ··· contract_items              pir_id, no cascade; pay_item_id optional, ON DELETE SET NULL
 
 users is also referenced by (none cascades):
@@ -41,7 +42,7 @@ users is also referenced by (none cascades):
     idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by, properties.created_by,
     task_orders.created_by, task_order_properties.added_by, pirs.digitized_by, flags.created_by
     users.deleted_by, properties.deleted_by, task_orders.deleted_by, pirs.deleted_by,
-    pirs.as_built_signed_by, flags.deleted_by (ON DELETE SET NULL)
+    pirs.as_built_signed_by, flags.deleted_by, pir_pages.deleted_by (ON DELETE SET NULL)
 ```
 
 `──<` reads "has many". Deleting an IDR's row takes everything drawn under it; nothing cascades from a user, a
@@ -64,8 +65,8 @@ client or a project except a project's `contract_items`. `quantities.reporter_uu
 - **task_orders** bundle a project's properties (**task_order_properties**, the join); a property can be in
   several. See [task_orders](#task_orders).
 - A **PIR** is a property's digitized DOT survey sheet; a property has at most one that isn't deleted. See
-  [pirs](#pirs). Its **flags** are the marked pieces of sidewalk on it, each with a shape and the area it comes
-  to. See [flags](#flags).
+  [pirs](#pirs). Its scan is a set of **pages** ([pir_pages](#pir_pages)), and its **flags** are the marked
+  pieces of sidewalk drawn on them, each with a shape and the area it comes to. See [flags](#flags).
 - An IDR is **soft-deleted** by an admin (`status = 'deleted'`, `deleted_at`, `deleted_by`): the row and
   everything under it stay, and it can be brought back. Only a soft-deleted IDR can then be deleted for good,
   which removes the row and, by the cascades above, everything under it. See [idrs](#idrs).
@@ -121,7 +122,7 @@ admin role and demo flag (`/v1/admin/users`); a password is changed by its user 
   same email.
 - `DELETE .../permanent` deletes the row of a user who is soft-deleted, and only when no row names them: every
   foreign key to `users.uuid` (see the diagram) is `NO ACTION` and refuses the delete, except
-  the `deleted_by` of users, properties, task orders, PIRs and flags and `pirs.as_built_signed_by`, which (but
+  the `deleted_by` of users, properties, task orders, PIRs, flags and PIR pages and `pirs.as_built_signed_by`, which (but
   for `users.deleted_by`) are counted all the same. So only a user who never reported, reviewed, edited,
   uploaded, held a role, created or deleted a property, a task order or a flag, bundled a property, or
   digitized, signed or deleted a PIR, can go;
@@ -438,8 +439,6 @@ Demo users only read (since S2).
 |---|---|---|
 | `id` | UUID PK | `gen_random_uuid()` |
 | `property_id` | UUID NOT NULL | FK → `properties.id`, no cascade (a PIR is a record of its own). One per property among PIRs that aren't deleted (`uq_pirs_property`, `WHERE deleted_at IS NULL`) |
-| `source_image_url` | TEXT | The scanned sheet: its **Storage path** in the `pir-images` bucket (`pirs/{pir id}/{random}.png` or `.jpg`), not a URL. Set and cleared by the image routes since R1d |
-| `source_image_scale` | REAL | The image's scale in **pixels per foot**; set with the image, and changed alone by `PATCH /v1/pirs/{id}/image` |
 | `inspector_initials` | TEXT NOT NULL | Trimmed, at most 16 characters |
 | `inspector_sign_date` | DATE NOT NULL | When the inspector signed the sheet |
 | `digitized_by` | UUID NOT NULL | The signed-in user who created the row: any project member or admin; FK → `users.uuid` |
@@ -452,6 +451,25 @@ Demo users only read (since S2).
 A soft-deleted PIR frees its property, so a replacement can be created while the old one is kept; un-deleting
 the old one is then refused (409). No PIR can be created on a soft-deleted property.
 
+### pir_pages
+
+One page of a PIR's scan, rendered to PNG in the `pir-images` bucket. Added by migration 033, replacing R1d's
+`pirs.source_image_url` / `source_image_scale` (dropped). Uploading a scan replaces the PIR's live pages: they, and
+their live flags, are soft-deleted in the same statement, and the new pages are inserted; their files are kept.
+
+| Column | Type | Notes |
+|---|---|---|
+| `pir_page_id` | UUID PK | `gen_random_uuid()` |
+| `pir_id` | UUID NOT NULL | FK → `pirs.id`, ON DELETE CASCADE; `pir_pages_pir_idx` |
+| `page_number` | INT NOT NULL | ≥ 1; unique per PIR among live pages (`pir_pages_pir_page_num_live_uq`, `WHERE deleted_at IS NULL`) |
+| `image_path` | TEXT NOT NULL | The PNG's **Storage path**, `pirs/{pir id}/{upload uuid}/page-{n}.png`, not a URL |
+| `image_mime` | TEXT NOT NULL | `image/png` |
+| `width_px`, `height_px` | INT NOT NULL | > 0; a PDF page at `PIR_IMAGE_RENDER_DPI` (150) |
+| `scale_px_per_ft` | NUMERIC(10,4) | Pixels per foot, > 0; NULL until set |
+| `rotation_deg` | INT NOT NULL | 0, 90, 180 or 270; default 0 |
+| `deleted_at` | TIMESTAMPTZ | When the page was replaced (a re-upload) or deleted. NULL for a live page |
+| `deleted_by` | UUID | Who did; FK → `users.uuid`, **ON DELETE SET NULL** |
+
 ### flags
 
 The marked pieces of sidewalk on a PIR, one row each. Added by migration 032. Anyone on the project, and any admin,
@@ -462,12 +480,13 @@ Demo users only read.
 |---|---|---|
 | `id` | UUID PK | `gen_random_uuid()` |
 | `pir_id` | UUID NOT NULL | FK → `pirs.id`, no cascade; `idx_flags_pir` (live flags) |
+| `pir_page_id` | UUID | The page it is drawn on; FK → `pir_pages.pir_page_id`, no action (flags are never hard-deleted); `flags_pir_page_idx`. A live flag has one (`chk_flags_live_on_a_page`); only a soft-deleted flag from before pages has none. Migration 033 |
 | `display_order` | INT NOT NULL | ≥ 0 (`chk_flags_display_order`); not unique |
 | `added_in_field` | BOOLEAN NOT NULL | Default false. True for a flag added on site, which has the mark `none` |
 | `shape` | TEXT NOT NULL | `rectangle`, `trapezoid`, `triangle`, `polygon` or `arc`; CHECK `chk_flags_shape` |
 | `dimensions` | JSONB NOT NULL | Per shape, in feet; checked by the API, not the database |
-| `sketch_x`, `sketch_y` | REAL | Where it sits on the sketch |
-| `rotation` | REAL NOT NULL | Degrees, default 0 |
+| `sketch_x`, `sketch_y` | REAL | Where it sits on its page (pixels) |
+| `rotation` | REAL NOT NULL | Degrees on its page, default 0 |
 | `surveyed_mark` | TEXT NOT NULL | `number_only`, `cross`, `cross_with_number`, `tick` or `none`; CHECK `chk_flags_surveyed_mark` |
 | `surveyed_is_assessable` | BOOLEAN NOT NULL | |
 | `surveyed_non_assessable_reason` | TEXT | Required when not assessable, empty when assessable (the API checks the pairing); CHECK `chk_flags_non_assessable_reason` on the nine values |
@@ -528,13 +547,12 @@ IDR keeps from submit, and `idrs/{idr id}/re_{random}.png` for the approver's co
 (`idrs.re_signature_path`). A copy is never replaced, and removed only when an admin deletes its IDR for good,
 which empties `idrs/{idr id}/`.
 
-### PIR image files (Storage bucket `pir-images`)
+### PIR page files (Storage bucket `pir-images`)
 
 Private; only the backend reads and writes it (`migrations/031b_pir_images_bucket.sql`). 10 MB per file; PNG, JPEG
-and PDF. `pirs/{pir id}/uploads/{random}` is a raw upload, PUT by the client through a signed URL and removed once
-the backend has stored the image; `pirs/{pir id}/{random}.png` or `.jpg` is a PIR's image, a PDF's first page
-rendered to PNG. Each upload gets a new path; the old image is removed after `pirs.source_image_url` points at the
-new one.
+and PDF. `staging/{pir id}/{uuid}.{pdf|png|jpg}` is a raw upload, PUT by the client through a signed URL and removed
+once the backend has stored its pages; `pirs/{pir id}/{upload uuid}/page-{n}.png` is one page, a PDF page rendered
+to PNG (or the one image). Each upload gets a new folder. A replaced page's file is kept, for its flags' history.
 
 ### Export files (Storage bucket `idr-exports`)
 
@@ -724,6 +742,7 @@ content as TEXT, linked to a report and a form template).
 | 031 | `031_pirs.sql` | R1a | Created `pirs` (FK to `properties` with no cascade; FKs to `users` for `digitized_by` and, ON DELETE SET NULL, `as_built_signed_by` and `deleted_by`) with the partial unique index `uq_pirs_property`. No existing table or row changed. |
 | 031b | `031b_pir_images_bucket.sql` | R1d | Created the private Storage bucket `pir-images` (10 MB per file; PNG, JPEG and PDF). No `icid` table changes. |
 | 032 | `032_flags.sql` | R1b | Created `flags` (FK to `pirs` with no cascade; FK to `contract_items` ON DELETE SET NULL; FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`; CHECKs on `display_order`, `shape`, `surveyed_mark`, `surveyed_non_assessable_reason`, `surveyed_thickness` and `reported_quantity`) with the partial indexes `idx_flags_pir` and `idx_flags_pay_item`. No existing table or row changed. |
+| 033 | `033_pir_pages_and_flag_coords.sql` | R1e | Created `pir_pages` (FK to `pirs` ON DELETE CASCADE, FK to `users` for `deleted_by` ON DELETE SET NULL, CHECKs on `page_number`, `width_px`, `height_px`, `scale_px_per_ft` and `rotation_deg`) with the partial unique index `pir_pages_pir_page_num_live_uq` and `pir_pages_pir_idx`. Dropped `pirs.source_image_url` and `source_image_scale` (no PIR had an image). Soft-deleted the 3 flags made through R1b's form, then added `flags.pir_page_id` (FK to `pir_pages`, no action), CHECK `chk_flags_live_on_a_page` and `flags_pir_page_idx`. |
 
 Where each current column came from:
 
@@ -741,7 +760,8 @@ Where each current column came from:
 | `properties` | all | 029 |
 | `task_orders`, `task_order_properties` | all | 030 |
 | `pirs` | all | 031 |
-| `flags` | all | 032 |
+| `flags` | all but `pir_page_id` | 032 |
+| `pir_pages`; `flags.pir_page_id` | all | 033 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

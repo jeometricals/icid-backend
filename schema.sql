@@ -330,8 +330,6 @@ CREATE INDEX idx_task_order_properties_property ON icid.task_order_properties (p
 CREATE TABLE icid.pirs (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     property_id          UUID NOT NULL REFERENCES icid.properties(id),
-    source_image_url     TEXT,
-    source_image_scale   REAL,
     inspector_initials   TEXT NOT NULL,
     inspector_sign_date  DATE NOT NULL,
     digitized_by         UUID NOT NULL REFERENCES icid.users(uuid),
@@ -348,13 +346,40 @@ CREATE TABLE icid.pirs (
 CREATE UNIQUE INDEX uq_pirs_property ON icid.pirs (property_id) WHERE deleted_at IS NULL;
 
 ------------------------------------------------------------
+-- PIR PAGE (one page of a PIR's scan, rendered to PNG in the pir-images bucket; migrations/033)
+-- a re-upload or a delete replaces (soft-deletes) a PIR's live pages; their files are kept for flag history
+------------------------------------------------------------
+CREATE TABLE icid.pir_pages (
+    pir_page_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pir_id           UUID NOT NULL REFERENCES icid.pirs(id) ON DELETE CASCADE,
+    page_number      INT NOT NULL CHECK (page_number >= 1),
+    image_path       TEXT NOT NULL,
+    image_mime       TEXT NOT NULL,
+    width_px         INT NOT NULL CHECK (width_px > 0),
+    height_px        INT NOT NULL CHECK (height_px > 0),
+    scale_px_per_ft  NUMERIC(10,4) CHECK (scale_px_per_ft IS NULL OR scale_px_per_ft > 0),
+    rotation_deg     INT NOT NULL DEFAULT 0 CHECK (rotation_deg IN (0, 90, 180, 270)),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at       TIMESTAMPTZ,
+    deleted_by       UUID REFERENCES icid.users(uuid) ON DELETE SET NULL
+);
+
+-- One live page per number in a PIR; replaced pages keep theirs
+CREATE UNIQUE INDEX pir_pages_pir_page_num_live_uq ON icid.pir_pages (pir_id, page_number) WHERE deleted_at IS NULL;
+CREATE INDEX pir_pages_pir_idx ON icid.pir_pages (pir_id);
+
+------------------------------------------------------------
 -- FLAG (a marked piece of sidewalk on a PIR: shape, survey classification, quantity; soft-deleted; migrations/032)
 -- dimensions are checked per shape by the API; computed_quantity is the shape's area (sq ft), reported_quantity an
--- override (NULL: none). pay_item_id is SET NULL on delete: pay items are hard-deleted by the admin routes
+-- override (NULL: none). pay_item_id is SET NULL on delete: pay items are hard-deleted by the admin routes.
+-- pir_page_id (migrations/033) is the page it is drawn on, sketch_x / sketch_y / rotation its place there; a live flag
+-- has one (chk_flags_live_on_a_page), and the foreign key has no action: flags are never hard-deleted
 ------------------------------------------------------------
 CREATE TABLE icid.flags (
     id                              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     pir_id                          UUID NOT NULL REFERENCES icid.pirs(id),
+    pir_page_id                     UUID REFERENCES icid.pir_pages(pir_page_id),
     display_order                   INT NOT NULL,
     added_in_field                  BOOLEAN NOT NULL DEFAULT false,
     shape                           TEXT NOT NULL,
@@ -384,11 +409,13 @@ CREATE TABLE icid.flags (
         surveyed_non_assessable_reason IN ('tree_damage', 'city_tree', 'transition', 'no_driveway', 'hydrant',
                                            'fronting_city', 'utility', 'settlement', 'other')),
     CONSTRAINT chk_flags_thickness CHECK (surveyed_thickness IN ('4in', '7in', '7in_as_4in')),
-    CONSTRAINT chk_flags_reported_quantity CHECK (reported_quantity IS NULL OR reported_quantity > 0)
+    CONSTRAINT chk_flags_reported_quantity CHECK (reported_quantity IS NULL OR reported_quantity > 0),
+    CONSTRAINT chk_flags_live_on_a_page CHECK (pir_page_id IS NOT NULL OR deleted_at IS NOT NULL)
 );
 
 CREATE INDEX idx_flags_pir ON icid.flags (pir_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_flags_pay_item ON icid.flags (pay_item_id) WHERE deleted_at IS NULL AND pay_item_id IS NOT NULL;
+CREATE INDEX flags_pir_page_idx ON icid.flags (pir_page_id);
 
 ------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)

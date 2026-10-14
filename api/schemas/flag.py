@@ -157,12 +157,14 @@ class FlagUpdate(BaseModel):
 
 class FlagOut(BaseModel):
     """
-    A flag: a row of icid.flags, with its PIR's property and project. quantity is what counts (the override, or
-    else the computed area) and is_overridden says which.
+    A flag: a row of icid.flags, with its PIR's property and project. pir_page_id is the page it is drawn on (None
+    only for a deleted flag from before pages), sketch_x / sketch_y / rotation its place there. quantity is what
+    counts (the override, or else the computed area) and is_overridden says which.
     """
 
     id: UUID
     pir_id: UUID
+    pir_page_id: Optional[UUID] = None
     property_id: UUID
     project_id: str
     display_order: int

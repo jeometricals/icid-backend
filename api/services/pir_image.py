@@ -1,47 +1,53 @@
 """
-A PIR's image: the scanned sheet, kept in the private pir-images bucket.
+A PIR's scan, as pages, kept in the private pir-images bucket.
 
-    pirs/{pir id}/uploads/{random}        a raw upload: the client PUTs the file there through a signed URL
-    pirs/{pir id}/{random}.png | .jpg     the PIR's image; each upload gets a new path
+    staging/{pir id}/{uuid}.{pdf|png|jpg}             a raw upload: the client PUTs the file there through a signed URL
+    pirs/{pir id}/{upload uuid}/page-{n}.png          the PIR's pages, one PNG each; each upload gets a new folder
 
-Setting one takes two steps, like a signature: ask for a signed upload URL, PUT the file (PDF, PNG or JPEG) to it,
-then complete. Completing reads the file back, checks what it is by its first bytes, renders a PDF's first page to
-PNG, stores the image at a new path, points the PIR at it, and then removes the PIR's previous image and the raw
-upload, best-effort. So the PIR always points at a file that exists.
+Uploading takes two steps, like a signature: ask for a signed upload URL, PUT the file (PDF, PNG or JPEG) to it, then
+complete. Completing reads the file back, checks what it is by its first bytes, renders every page of a PDF (or the
+one image) to PNG within the caps, stores the pages in a new folder, and then, in one statement, replaces the PIR's
+pages (its live flags and pages are soft-deleted; the new pages go in). The old pages' files are kept: flags that
+were on them keep their history. The raw upload is removed, best-effort.
 """
 
 import io
 import logging
-import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
 import pypdfium2 as pdfium
+from PIL import Image
 
 from api.core.config import (
     PIR_IMAGE_BUCKET_NAME,
     PIR_IMAGE_MAX_BYTES,
     PIR_IMAGE_RENDER_DPI,
     PIR_IMAGE_URL_EXPIRY_SECONDS,
+    PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE,
+    PIR_UPLOAD_MAX_PAGES,
 )
-from api.queries.pirs import clear_pir_image, set_pir_image
+from api.queries.pir_pages import delete_pages_for_pir, replace_pages
 from api.services.attachments import SUPABASE_UPLOAD_URL_LIFETIME_SECONDS, remove_storage_files
 from api.storage.client import create_signed_upload_url, create_signed_url, download_file, object_exists, upload_file
 
 logger = logging.getLogger(__name__)
 
-# The types an upload may declare and be; PDF points at 72 to the inch
-UPLOAD_TYPES = ("application/pdf", "image/png", "image/jpeg")
+# The types an upload may be, and the extension its staging file gets; PDF points are 72 to the inch
+UPLOAD_EXTENSIONS = {"application/pdf": "pdf", "image/png": "png", "image/jpeg": "jpg"}
 PDF_POINTS_PER_INCH = 72
+PAGE_MIME = "image/png"
 
 
 class PirImageError(Exception):
-    """An image the request can't have: its status (400 or 413) and what to say."""
+    """An upload the request can't have: its status (400 or 413) and what to say."""
 
     def __init__(self, status_code: int, detail: str) -> None:
         """
-        Record why the image was refused.
+        Record why the upload was refused.
         Takes the HTTP status and the message.
         Returns nothing.
         """
@@ -54,13 +60,13 @@ class PirImageStorageError(Exception):
     """Storage couldn't do its part (sign, read or store a file): a 502."""
 
 
-def _uploads_folder(pir_id: UUID) -> str:
+def _staging_folder(pir_id: UUID) -> str:
     """
     Where a PIR's raw uploads go.
     Takes the PIR's id.
     Returns the folder path, with its trailing slash.
     """
-    return f"pirs/{pir_id}/uploads/"
+    return f"staging/{pir_id}/"
 
 
 def sniff_type(data: bytes) -> Optional[str]:
@@ -78,131 +84,213 @@ def sniff_type(data: bytes) -> Optional[str]:
     return None
 
 
-def render_pdf_first_page(data: bytes, dpi: int = PIR_IMAGE_RENDER_DPI) -> bytes:
+def _check_megapixels(width: float, height: float, what: str) -> None:
     """
-    Render a PDF's first page to PNG.
+    Refuse a page larger than PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE.
+    Takes its size in pixels and how to name it in the message.
+    Returns nothing; raises PirImageError (400) naming the cap when it is over.
+    """
+    megapixels = width * height / 1_000_000
+    if megapixels > PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE:
+        raise PirImageError(
+            400,
+            f"{what} is {megapixels:.1f} megapixels; a page can be at most {PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE:g} "
+            "(PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE)",
+        )
+
+
+def _png(image: Image.Image) -> bytes:
+    """
+    Encode an image as PNG.
+    Takes the PIL image.
+    Returns the PNG's bytes.
+    """
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def render_pdf_pages(data: bytes, dpi: int = PIR_IMAGE_RENDER_DPI) -> list[tuple[bytes, int, int]]:
+    """
+    Render every page of a PDF to PNG, after checking the caps: at most PIR_UPLOAD_MAX_PAGES pages, each at most PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE at the resolution.
     Takes the PDF's bytes and the resolution in dots per inch.
-    Returns the PNG's bytes; raises PirImageError (400) for a PDF that can't be read or has no pages.
+    Returns each page as (PNG bytes, width px, height px), in order; raises PirImageError (400) for a PDF that can't be read, has no pages, or trips a cap (the message names it).
     """
     try:
         document = pdfium.PdfDocument(data)
     except Exception as exc:
         raise PirImageError(400, "Could not read the PDF") from exc
     try:
-        if len(document) == 0:
+        count = len(document)
+        if count == 0:
             raise PirImageError(400, "The PDF has no pages")
-        image = document[0].render(scale=dpi / PDF_POINTS_PER_INCH).to_pil()
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue()
+        if count > PIR_UPLOAD_MAX_PAGES:
+            raise PirImageError(
+                400, f"The PDF has {count} pages; a PIR can have at most {PIR_UPLOAD_MAX_PAGES} (PIR_UPLOAD_MAX_PAGES)"
+            )
+        zoom = dpi / PDF_POINTS_PER_INCH
+        for index in range(count):
+            width, height = document[index].get_size()
+            _check_megapixels(width * zoom, height * zoom, f"Page {index + 1} at {dpi} DPI")
+        pages = []
+        for index in range(count):
+            image = document[index].render(scale=zoom).to_pil()
+            pages.append((_png(image), image.width, image.height))
+        return pages
     finally:
         document.close()
 
 
-def request_pir_image_upload(pir_id: UUID, content_type: str) -> dict[str, Any]:
+def image_to_page(data: bytes) -> tuple[bytes, int, int]:
     """
-    Start setting a PIR's image: sign a URL the client PUTs the file to, at a fresh path under the PIR's uploads.
-    Takes the PIR's id and the file's declared type.
-    Returns {upload_url, upload_path, expires_in}; raises PirImageError (400) for a type that isn't a PDF, PNG or JPEG, and PirImageStorageError if Storage can't sign one.
+    Turn an uploaded PNG or JPEG into the PIR's one page: a PNG is kept as it is, a JPEG converted to PNG; within the megapixel cap.
+    Takes the image's bytes.
+    Returns (PNG bytes, width px, height px); raises PirImageError (400) for an image that can't be read or is over the cap.
     """
-    if content_type not in UPLOAD_TYPES:
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception as exc:
+        raise PirImageError(400, "Could not read the image") from exc
+    _check_megapixels(image.width, image.height, "The image")
+    png = data if image.format == "PNG" else _png(image.convert("RGB") if image.mode not in ("RGB", "L") else image)
+    return png, image.width, image.height
+
+
+def request_pir_upload(pir_id: UUID, mime: str, size_bytes: Optional[int] = None) -> dict[str, Any]:
+    """
+    Start a PIR upload: sign a URL the client PUTs the file to, at a fresh staging path.
+    Takes the PIR's id, the file's type and, when known, its size.
+    Returns {upload_url, staging_path, expires_at, upload_path, expires_in}; raises PirImageError (400 for a type that isn't a PDF, PNG or JPEG, 413 for a size over PIR_IMAGE_MAX_BYTES) and PirImageStorageError if Storage can't sign one.
+    """
+    extension = UPLOAD_EXTENSIONS.get(mime)
+    if extension is None:
         raise PirImageError(400, "Unsupported file type")
-    path = f"{_uploads_folder(pir_id)}{secrets.token_hex(16)}"
+    if size_bytes is not None and size_bytes > PIR_IMAGE_MAX_BYTES:
+        raise PirImageError(413, "File too large")
+    path = f"{_staging_folder(pir_id)}{uuid.uuid4().hex}.{extension}"
     try:
         upload_url = create_signed_upload_url(path, PIR_IMAGE_BUCKET_NAME)
     except Exception as exc:
-        logger.error("Storage could not sign a PIR image upload for %s: %s", path, exc)
+        logger.error("Storage could not sign a PIR upload for %s: %s", path, exc)
         raise PirImageStorageError("Could not create an upload link") from exc
-    return {"upload_url": upload_url, "upload_path": path, "expires_in": SUPABASE_UPLOAD_URL_LIFETIME_SECONDS}
+    # Supabase fixes a signed upload URL's lifetime; it can't be shortened from here
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=SUPABASE_UPLOAD_URL_LIFETIME_SECONDS)
+    return {
+        "upload_url": upload_url, "staging_path": path, "expires_at": expires_at,
+        "upload_path": path, "expires_in": SUPABASE_UPLOAD_URL_LIFETIME_SECONDS,
+    }
 
 
-def _read_upload(pir_id: UUID, upload_path: str) -> bytes:
+def _read_staged(pir_id: UUID, staging_path: str) -> bytes:
     """
     Read a raw upload back from Storage, once it is known to be this PIR's and to be there.
-    Takes the PIR's id and the upload's path.
+    Takes the PIR's id and the staging path.
     Returns its bytes; raises PirImageError (400) for a path that isn't one of the PIR's uploads or has no file, PirImageError (413) for one over PIR_IMAGE_MAX_BYTES, and PirImageStorageError when Storage fails.
     """
-    folder = _uploads_folder(pir_id)
-    name = upload_path[len(folder):] if upload_path.startswith(folder) else ""
+    folder = _staging_folder(pir_id)
+    name = staging_path[len(folder):] if staging_path.startswith(folder) else ""
     if not name or "/" in name or ".." in name:
-        raise PirImageError(400, "upload_path is not an upload of this PIR")
+        raise PirImageError(400, "staging_path is not an upload of this PIR")
     try:
-        if not object_exists(PIR_IMAGE_BUCKET_NAME, upload_path):
+        if not object_exists(PIR_IMAGE_BUCKET_NAME, staging_path):
             raise PirImageError(400, "Upload the file before completing")
-        data = download_file(upload_path, PIR_IMAGE_BUCKET_NAME)
+        data = download_file(staging_path, PIR_IMAGE_BUCKET_NAME)
     except PirImageError:
         raise
     except Exception as exc:
-        logger.error("Storage could not read the PIR image upload %s: %s", upload_path, exc)
+        logger.error("Storage could not read the PIR upload %s: %s", staging_path, exc)
         raise PirImageStorageError("Could not read the uploaded file") from exc
     if len(data) > PIR_IMAGE_MAX_BYTES:
-        remove_storage_files([upload_path], PIR_IMAGE_BUCKET_NAME)
+        remove_storage_files([staging_path], PIR_IMAGE_BUCKET_NAME)
         raise PirImageError(413, "File too large")
     return data
 
 
-def complete_pir_image_upload(pir_id: UUID, upload_path: str, scale: float) -> Optional[dict[str, Any]]:
+def _render(data: bytes) -> list[tuple[bytes, int, int]]:
     """
-    Finish setting a PIR's image: read the upload, check what it is, render a PDF's first page to PNG, store the image at a new path, point the PIR at it with its scale, then remove the previous image and the upload, best-effort.
-    Takes the PIR's id, the path the file was uploaded to and the scale (pixels per foot of the stored image).
-    Returns the updated PIR dict (with previous_image_path), or None if the PIR is gone; raises PirImageError (400 for a file that isn't a PDF, PNG or JPEG or a PDF that can't be read, 413 for one too large) and PirImageStorageError when Storage fails.
+    Turn an upload into its pages, by what its first bytes say it is.
+    Takes the file's bytes.
+    Returns each page as (PNG bytes, width px, height px); raises PirImageError (400) for a file that isn't a PDF, PNG or JPEG, or that can't be read or trips a cap.
     """
-    data = _read_upload(pir_id, upload_path)
     kind = sniff_type(data)
     if kind is None:
-        remove_storage_files([upload_path], PIR_IMAGE_BUCKET_NAME)
         raise PirImageError(400, "Unsupported file type")
-    if kind == "application/pdf":
-        try:
-            data, kind = render_pdf_first_page(data), "image/png"
-        except PirImageError:
-            remove_storage_files([upload_path], PIR_IMAGE_BUCKET_NAME)
-            raise
+    return render_pdf_pages(data) if kind == "application/pdf" else [image_to_page(data)]
 
-    path = f"pirs/{pir_id}/{secrets.token_hex(16)}.{'png' if kind == 'image/png' else 'jpg'}"
-    try:
-        upload_file(PIR_IMAGE_BUCKET_NAME, path, data, kind)
-    except Exception as exc:
-        logger.error("Storage could not store the PIR image %s: %s", path, exc)
-        raise PirImageStorageError("Could not store the image") from exc
 
+def complete_pir_upload(
+    pir_id: UUID, staging_path: str, scale_px_per_ft: Optional[Decimal], user_uuid: UUID
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Finish a PIR upload: read the file, render its pages, store them in a new folder, and replace the PIR's pages with them (its live flags and pages soft-deleted in the same statement); then remove the raw upload, best-effort.
+    Takes the PIR's id, the staging path, the scale for every page (None for none) and the uuid of the user uploading.
+    Returns the new page dicts, or None if the statement failed; raises PirImageError (400 or 413, the upload removed) and PirImageStorageError when Storage fails.
+    """
+    data = _read_staged(pir_id, staging_path)
     try:
-        row = set_pir_image(pir_id, path, scale)
-    except Exception:
-        remove_storage_files([path], PIR_IMAGE_BUCKET_NAME)
+        rendered = _render(data)
+    except PirImageError:
+        remove_storage_files([staging_path], PIR_IMAGE_BUCKET_NAME)
         raise
-    if row is None:
-        remove_storage_files([path], PIR_IMAGE_BUCKET_NAME)
+
+    folder = f"pirs/{pir_id}/{uuid.uuid4().hex}"
+    stored: list[str] = []
+    pages: list[dict[str, Any]] = []
+    try:
+        for number, (png, width, height) in enumerate(rendered, start=1):
+            path = f"{folder}/page-{number}.png"
+            upload_file(PIR_IMAGE_BUCKET_NAME, path, png, PAGE_MIME)
+            stored.append(path)
+            pages.append({"page_number": number, "image_path": path, "image_mime": PAGE_MIME, "width_px": width,
+                          "height_px": height, "scale_px_per_ft": scale_px_per_ft})
+    except Exception as exc:
+        logger.error("Storage could not store the pages of %s: %s", staging_path, exc)
+        remove_storage_files(stored, PIR_IMAGE_BUCKET_NAME)
+        raise PirImageStorageError("Could not store the pages") from exc
+
+    try:
+        rows = replace_pages(pir_id, pages, user_uuid)
+    except Exception:
+        remove_storage_files(stored, PIR_IMAGE_BUCKET_NAME)
+        raise
+    if rows is None:
+        remove_storage_files(stored, PIR_IMAGE_BUCKET_NAME)
         return None
 
-    leftovers = [upload_path] + ([row["previous_image_path"]] if row["previous_image_path"] not in (None, path) else [])
-    remove_storage_files(leftovers, PIR_IMAGE_BUCKET_NAME)
-    return row
+    remove_storage_files([staging_path], PIR_IMAGE_BUCKET_NAME)
+    return rows
 
 
-def remove_pir_image(pir_id: UUID) -> Optional[dict[str, Any]]:
+def remove_pir_pages(pir_id: UUID, user_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Take a PIR's image away: clear its path and scale, then remove the file, best-effort. A PIR without one is left as it is.
-    Takes the PIR's id.
-    Returns the updated PIR dict (with previous_image_path), or None if no PIR matches.
+    Take a PIR's pages away: its live flags and pages are soft-deleted in one statement. The files are kept, for the flags' history.
+    Takes the PIR's id and the uuid of the user deleting them.
+    Returns the pages deleted (empty when it had none), or None on failure.
     """
-    row = clear_pir_image(pir_id)
-    if row is not None and row["previous_image_path"]:
-        remove_storage_files([row["previous_image_path"]], PIR_IMAGE_BUCKET_NAME)
-    return row
+    return delete_pages_for_pir(pir_id, user_uuid)
 
 
-def pir_image_signed_url(pir_id: UUID, path: str) -> dict[str, Any]:
+def signed_page_url(path: str, download_name: str) -> dict[str, Any]:
     """
-    Sign a URL to a PIR's image, good for PIR_IMAGE_URL_EXPIRY_SECONDS.
-    Takes the PIR's id (for the file's name) and the image's Storage path.
-    Returns {signed_url, expires_at}; raises PirImageStorageError when Storage can't sign one.
+    Sign a URL to a page's PNG, good for PIR_IMAGE_URL_EXPIRY_SECONDS.
+    Takes the page's Storage path and the name the browser should save it as.
+    Returns {url, expires_at}; raises PirImageStorageError when Storage can't sign one.
     """
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=PIR_IMAGE_URL_EXPIRY_SECONDS)
     try:
-        url = create_signed_url(path, PIR_IMAGE_URL_EXPIRY_SECONDS, f"pir-{pir_id}.{path.rsplit('.', 1)[-1]}",
-                                PIR_IMAGE_BUCKET_NAME)
+        url = create_signed_url(path, PIR_IMAGE_URL_EXPIRY_SECONDS, download_name, PIR_IMAGE_BUCKET_NAME)
     except Exception as exc:
-        logger.error("Storage could not sign the PIR image %s: %s", path, exc)
+        logger.error("Storage could not sign the PIR page %s: %s", path, exc)
         raise PirImageStorageError("Could not create a link to the image") from exc
-    return {"signed_url": url, "expires_at": expires_at}
+    return {"url": url, "expires_at": expires_at}
+
+
+def with_signed_url(page: dict[str, Any]) -> dict[str, Any]:
+    """
+    Give a page row its signed URL.
+    Takes the page dict.
+    Returns it with image_url and image_url_expires_at; raises PirImageStorageError when Storage can't sign one.
+    """
+    link = signed_page_url(page["image_path"], f"pir-{page['pir_id']}-page-{page['page_number']}.png")
+    return {**page, "image_url": link["url"], "image_url_expires_at": link["expires_at"]}

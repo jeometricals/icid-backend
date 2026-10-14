@@ -1,17 +1,19 @@
 """
 What more than one router needs: reading the date and discipline filters, reading a text field off a request body,
-checking a new password, shaping the rows of an IDR list, and keeping soft-deleted rows for admins.
+checking a new password, shaping the rows of an IDR list, keeping soft-deleted rows (and their children) for
+admins, and the gate on a PIR's writes.
 Not a router itself.
 """
 
 from datetime import date
 from typing import Any, Optional
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 
 from api.schemas.auth import UserOut
 from api.schemas.idr import IdrListItem
-from api.services.auth import MAX_PASSWORD_BYTES
+from api.queries.properties import get_property
+from api.services.auth import MAX_PASSWORD_BYTES, no_demo_pir_writes, pir_member
 from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
 
 # The shortest password sign-in takes
@@ -71,6 +73,44 @@ def refuse_deleted_for_member(row: dict[str, Any], user: UserOut, detail: str) -
     """
     if row["deleted_at"] is not None and user.role != "admin":
         raise HTTPException(status_code=400, detail=detail)
+
+
+# What a member who isn't an admin is told when they change something under a soft-deleted row
+PIR_DELETED = "PIR is deleted"
+PROPERTY_DELETED = "Property is deleted"
+PAGE_DELETED = "Page is deleted"
+
+
+def refuse_deleted_chain(row: dict[str, Any], user: UserOut, checks: list[tuple[str, str]]) -> None:
+    """
+    Keep a row whose parents are soft-deleted for admins, by the deleted states the row was read with.
+    Takes the row, the signed-in user and the checks, each (the column holding a parent's deleted_at, the 400's detail), in order.
+    Returns nothing; raises 400 with the first matching detail for a user who isn't an admin.
+    """
+    for column, detail in checks:
+        refuse_deleted_for_member({"deleted_at": row[column]}, user, detail)
+
+
+def refuse_deleted_pir_for_member(pir: dict[str, Any], user: UserOut) -> None:
+    """
+    Keep a soft-deleted PIR, and a PIR of a soft-deleted property, for admins: a member who isn't one can't change it.
+    Takes the PIR dict and the signed-in user.
+    Returns nothing; raises 400 "PIR is deleted" or "Property is deleted" for a user who isn't an admin.
+    """
+    refuse_deleted_for_member(pir, user, PIR_DELETED)
+    if user.role != "admin":
+        owner = get_property(pir["property_id"])
+        if owner is not None:
+            refuse_deleted_for_member(owner, user, PROPERTY_DELETED)
+
+
+def writable_pir(found: dict = Depends(pir_member), user: UserOut = Depends(no_demo_pir_writes)) -> dict:
+    """
+    FastAPI dependency for the writes to one PIR: the signed-in user must be on its property's project (or an admin), and not a demo user.
+    Takes the PIR (loaded and checked by pir_member, so 404 and 403 come first) and the user (refused when a demo user).
+    Returns the PIR dict; raises 403 for a demo user.
+    """
+    return found
 
 
 def clean_text(value: Optional[str], field: str, max_length: int, required: bool = True) -> Optional[str]:
