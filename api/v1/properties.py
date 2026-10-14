@@ -17,6 +17,7 @@ from api.schemas.auth import UserOut
 from api.schemas.property import (
     PropertyConflict,
     PropertyCreate,
+    PropertyListItem,
     PropertyListResponse,
     PropertyOut,
     PropertyResponse,
@@ -98,7 +99,7 @@ def list_project_properties(
     project_id: str, include_deleted: bool = False, user: UserOut = Depends(project_member)
 ) -> PropertyListResponse:
     """
-    List a project's properties, by address. For a user on the project, or an admin; only an admin gets soft-deleted ones, and only when asked (include_deleted from anyone else is ignored).
+    List a project's properties, by address, each with its live PIR's status. For a user on the project, or an admin; only an admin gets soft-deleted ones, and only when asked (include_deleted from anyone else is ignored).
     Takes the project id as a path parameter, the include_deleted flag and the signed-in user.
     Returns a PropertyListResponse; raises 403 for a user who isn't on the project, 404 for an unknown project and 500 if the list can't be read.
     """
@@ -108,7 +109,7 @@ def list_project_properties(
         raise HTTPException(status_code=500, detail="Failed to fetch properties")
 
     return PropertyListResponse(
-        status="success", message="Properties retrieved", data=[PropertyOut.model_validate(row) for row in rows]
+        status="success", message="Properties retrieved", data=[PropertyListItem.model_validate(row) for row in rows]
     )
 
 

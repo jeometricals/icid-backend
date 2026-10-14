@@ -69,7 +69,7 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `GET /v1/projects/{project_id}/roles` — admin only: who holds which role on the project, one entry per user and role (demo users left out)
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `GET /v1/projects/{project_id}/quantities?from=&to=&pay_item=&budget_code=&discipline=&inspector_uuid=&cumulative=` — the pay-item quantities of the project's approved IDRs, newest work date first, and what they come to against the project's contract items: `{range, rows, totals_by_unit, row_count, truncated, pay_items, totals_by_budget_code, project_total, unbudgeted_total}` under `data`. All filters optional; `pay_item`, `budget_code` and `discipline` repeat; `cumulative=true` leaves `from` and `to` unapplied. For a user on the project, or an admin: 403 otherwise, 404 for an unknown project, 400 for a bad date, `from` after `to`, or an unknown discipline
-- `GET /v1/projects/{project_id}/properties?include_deleted=` — the project's properties, by address, under `data` (see "Properties"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
+- `GET /v1/projects/{project_id}/properties?include_deleted=` — the project's properties, by address, each with `pir_status` (`none`, `dot_signed` or `as_built_signed`), under `data` (see "Properties"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
 - `POST /v1/projects/{project_id}/properties` — admin only: body `{bbl, address, property_type, notes?}`; creates the property, its creator the admin, and returns it under `data`, 201. 400 for a blank or over-long value, 422 for an unknown `property_type`, 404 for an unknown project, 409 `{detail, existing_property_id}` when a live property of the project has the BBL
 - `GET /v1/properties/{property_id}` — one property, soft-deleted or not, under `data`. For a user on its project, or an admin: 403 otherwise, 404 for an unknown property
 - `PATCH /v1/properties/{property_id}` — admin only: any of `bbl`, `address`, `property_type`, `notes`; returns the property under `data`. 400 when nothing is sent (a null counts as not sent, except `notes`, which it clears) or a value doesn't fit, 422 for an unknown `property_type`, 404 for an unknown property, 409 as on create
@@ -816,6 +816,10 @@ Any change must follow these.
     `expedited` (a Pydantic `Literal`, so anything else is FastAPI's 422, unlike the admin forms' 400s; the table
     has the same CHECK). The response also carries `id`, `project_id`, `created_at`, `updated_at`, `created_by`,
     `deleted_at` and `deleted_by`. Every write sets `updated_at`.
+  - **The list carries `pir_status`** (`PropertyListItem`): `none` when the property has no live PIR,
+    `dot_signed` when it has one, `as_built_signed` once that PIR's `as_built_signed_at` is set. It is read in
+    the list's own statement (a LEFT JOIN to the live PIR, which `uq_pirs_property` keeps to one), and only the
+    list has it: `GET /v1/properties/{id}` and a task order's `properties` don't.
   - **The BBL is unique per project among live properties** (`uq_properties_project_bbl`, partial,
     `WHERE deleted_at IS NULL`), matched exactly; the same BBL in another project is fine. Create is
     `ON CONFLICT DO NOTHING` (no target, as for `create_idr`); edit and un-delete check with `NOT EXISTS` in the

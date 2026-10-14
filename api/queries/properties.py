@@ -13,15 +13,22 @@ _PROPERTY_COLUMNS = """
 
 def list_properties(project_id: str, include_deleted: bool = False) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch a project's properties, the soft-deleted ones only when asked for.
+    Fetch a project's properties, the soft-deleted ones only when asked for, each with how far its live PIR has got.
     Takes the project id and whether to include soft-deleted properties.
-    Returns the property dicts ordered by address then BBL, or None on failure.
+    Returns the property dicts, each with pir_status ('none', 'dot_signed' or 'as_built_signed'), ordered by address then BBL, or None on failure.
     """
+    # At most one live PIR per property (uq_pirs_property), so the join never repeats a property
     sql = (
         "\n        SELECT"
         + _PROPERTY_COLUMNS
-        + """
+        + """,
+            CASE
+                WHEN pir.id IS NULL THEN 'none'
+                WHEN pir.as_built_signed_at IS NOT NULL THEN 'as_built_signed'
+                ELSE 'dot_signed'
+            END AS pir_status
         FROM icid.properties p
+        LEFT JOIN icid.pirs pir ON pir.property_id = p.id AND pir.deleted_at IS NULL
         WHERE p.project_id = %s AND (%s OR p.deleted_at IS NULL)
         ORDER BY p.address, p.bbl;"""
     )

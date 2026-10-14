@@ -45,6 +45,12 @@ class PropertyOut(BaseModel):
     deleted_by: Optional[UUID] = None
 
 
+class PropertyListItem(PropertyOut):
+    """A property in a project's list, with how far its live PIR has got: none, signed by DOT, or signed as built too."""
+
+    pir_status: Literal["none", "dot_signed", "as_built_signed"]
+
+
 class PropertyResponse(BaseModel):
     status: str
     message: str
@@ -54,7 +60,7 @@ class PropertyResponse(BaseModel):
 class PropertyListResponse(BaseModel):
     status: str
     message: str
-    data: list[PropertyOut]
+    data: list[PropertyListItem]
 
 
 class PropertyConflict(BaseModel):

@@ -30,7 +30,10 @@ PROPERTY_ROW = {"id": PROPERTY_ID, "project_id": "HWS0023", "bbl": "4012340056",
                 "created_by": ADMIN_ID, "deleted_at": None, "deleted_by": None}
 DELETED_ROW = {**PROPERTY_ROW, "deleted_at": DELETED, "deleted_by": ADMIN_ID, "updated_at": DELETED}
 OTHER_ROW = {**PROPERTY_ROW, "id": OTHER_ID, "bbl": "4012340057", "address": "12-36 56th Ave"}
-BODY = {"bbl": "4012340056", "address": "12-34 56th Ave", "property_type": "1_3_family"}
+# Rows as the list returns them: with the live PIR's status
+LISTED_ROW = {**PROPERTY_ROW, "pir_status": "none"}
+LISTED_DELETED_ROW = {**DELETED_ROW, "pir_status": "dot_signed"}
+BODY ={"bbl": "4012340056", "address": "12-34 56th Ave", "property_type": "1_3_family"}
 
 # A regular user, on the project or not; and an inspector on another project, for the per-property checks
 INSPECTOR_ROW = {**ADMIN_USER_ROW, "uuid": UUID("b0000000-0000-4000-8000-000000000002"), "role": None}
@@ -128,7 +131,7 @@ class TestCreateProperty:
 
 class TestListProperties:
     def test_an_admin_gets_the_live_properties_by_default(self, admin_client):
-        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]) as run:
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, return_value=[LISTED_ROW]) as run:
             response = admin_client.get(LIST_URL)
         assert response.status_code == 200 and len(response.json()["data"]) == 1
         sql, params = run.call_args.args
@@ -138,7 +141,7 @@ class TestListProperties:
 
     def test_an_admin_can_ask_for_the_deleted_ones_too(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), \
-                patch(PROPS, return_value=[PROPERTY_ROW, DELETED_ROW]) as run:
+                patch(PROPS, return_value=[LISTED_ROW, LISTED_DELETED_ROW]) as run:
             response = admin_client.get(LIST_URL, params={"include_deleted": "true"})
         assert response.status_code == 200 and len(response.json()["data"]) == 2
         assert response.json()["data"][1]["deleted_at"] is not None
@@ -146,10 +149,29 @@ class TestListProperties:
 
     def test_include_deleted_from_a_user_who_isnt_an_admin_is_ignored(self):
         with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=ON_PROJECT), \
-                patch(PROPS, return_value=[PROPERTY_ROW]) as run:
+                patch(PROPS, return_value=[LISTED_ROW]) as run:
             response = inspector.get(LIST_URL, params={"include_deleted": "true"})
         assert response.status_code == 200
         assert run.call_args.args[1] == ("HWS0023", False)
+
+    @pytest.mark.parametrize("status", ["none", "dot_signed", "as_built_signed"])
+    def test_each_row_carries_its_pir_status(self, admin_client, status):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), \
+                patch(PROPS, return_value=[{**PROPERTY_ROW, "pir_status": status}]):
+            response = admin_client.get(LIST_URL)
+        assert response.json()["data"][0]["pir_status"] == status
+
+    def test_the_status_reads_the_live_pir_only(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, return_value=[]) as run:
+            admin_client.get(LIST_URL)
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "LEFT JOIN icid.pirs pir ON pir.property_id = p.id AND pir.deleted_at IS NULL" in one_line
+        assert ("CASE WHEN pir.id IS NULL THEN 'none' WHEN pir.as_built_signed_at IS NOT NULL THEN 'as_built_signed' "
+                "ELSE 'dot_signed' END AS pir_status") in one_line
+
+    def test_the_other_property_responses_have_no_pir_status(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]):
+            assert "pir_status" not in admin_client.get(URL).json()["data"]
 
     def test_a_user_who_isnt_on_the_project_is_forbidden(self):
         with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=OFF_PROJECT), patch(PROPS) as run:
