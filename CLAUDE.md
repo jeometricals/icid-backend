@@ -76,13 +76,13 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/properties/{property_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by` and returns the property under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown property
 - `POST /v1/properties/{property_id}/admin/undelete` — admin only: clears both and returns the property under `data`. 404 for an unknown property or `Property is not deleted`, 409 `{detail, existing_property_id}` when another live property of the project now has its BBL
 - `GET /v1/projects/{project_id}/task-orders?include_deleted=` — the project's task orders, by number, each with `property_count` (its bundled properties that aren't deleted) instead of the properties, under `data` (see "Task orders"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
-- `POST /v1/projects/{project_id}/task-orders` — admin only: body `{task_order_number, issued_date?, estimate_notes?}`; creates the task order, its creator the admin, and returns it with `properties: []` under `data`, 201. 400 for a blank or over-long value, 422 for a malformed date, 404 for an unknown project, 409 `{detail, existing_task_order_id}` when a live task order of the project has the number
+- `POST /v1/projects/{project_id}/task-orders` — project members (any role) and admins: body `{task_order_number, issued_date?, estimate_notes?}`; creates the task order, its creator the signed-in user, and returns it with `properties: []` under `data`, 201. 403 for a user who isn't on the project or a demo user (`Demo mode: task orders are read-only`); 400 for a blank or over-long value, 422 for a malformed date, 404 for an unknown project, 409 `{detail, existing_task_order_id}` when a live task order of the project has the number
 - `GET /v1/task-orders/{task_order_id}` — one task order, soft-deleted or not, with `properties`: its bundled properties that aren't deleted, by address, each as `/v1/properties/{id}` returns one. For a user on its project, or an admin: 403 otherwise, 404 for an unknown task order
-- `PATCH /v1/task-orders/{task_order_id}` — admin only: any of `task_order_number`, `issued_date`, `estimate_notes`; returns the task order with its properties under `data`. 400 when nothing is sent (a null number counts as not sent; a null date or notes clears them) or a value doesn't fit, 422 for a malformed date, 404 for an unknown task order, 409 as on create
+- `PATCH /v1/task-orders/{task_order_id}` — project members and admins: any of `task_order_number`, `issued_date`, `estimate_notes`; returns the task order with its properties under `data`. 403 for a user who isn't on its project or a demo user; 400 when nothing is sent (a null number counts as not sent; a null date or notes clears them), a value doesn't fit, or a user who isn't an admin edits a soft-deleted task order (`Task order is deleted`), 422 for a malformed date, 404 for an unknown task order, 409 as on create
 - `POST /v1/task-orders/{task_order_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by`, keeps the bundle, and returns the task order under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown task order
 - `POST /v1/task-orders/{task_order_id}/admin/undelete` — admin only: clears both and returns the task order, its bundle as it was, under `data`. 404 for an unknown task order or `Task order is not deleted`, 409 `{detail, existing_task_order_id}` when another live task order of the project now has its number
-- `POST /v1/task-orders/{task_order_id}/properties/{property_id}` — admin only: bundles the property into the task order and returns the task order with its properties, 201. 404 for an unknown task order or property; 400 for a property of another project (`Property belongs to a different project`), a deleted task order or a deleted property; 409 `Property is already in this task order`
-- `DELETE /v1/task-orders/{task_order_id}/properties/{property_id}` — admin only: takes the property out, 204, whether or not either is deleted. 404 for an unknown task order or `Property is not in this task order`
+- `POST /v1/task-orders/{task_order_id}/properties/{property_id}` — project members and admins: bundles the property into the task order, `added_by` the signed-in user, and returns the task order with its properties, 201. 403 for a user who isn't on its project or a demo user; 404 for an unknown task order or property; 400 for a property of another project (`Property belongs to a different project`), a deleted task order or a deleted property; 409 `Property is already in this task order`
+- `DELETE /v1/task-orders/{task_order_id}/properties/{property_id}` — project members and admins: takes the property out, 204, whether or not the property is deleted; only an admin unbundles from a soft-deleted task order (400 `Task order is deleted` for anyone else). 403 for a user who isn't on its project or a demo user; 404 for an unknown task order or `Property is not in this task order`
 - `GET /v1/properties/{property_id}/pir` — the property's live PIR under `data` (see "PIRs"). For a user on its project, or an admin: 403 otherwise, 404 for an unknown property or `No PIR for this property`
 - `GET /v1/properties/{property_id}/pirs?include_deleted=` — the property's PIRs, most recently digitized first, under `data`: the live one, plus the soft-deleted ones for an admin who sends `include_deleted=true` (ignored for anyone else). Same access as above
 - `POST /v1/properties/{property_id}/pir` — admin only: body `{inspector_initials, inspector_sign_date}`; creates the PIR, `digitized_by` the admin and `digitized_at` now, and returns it under `data`, 201. 400 for blank or over-long initials or a soft-deleted property, 422 for a malformed date, 404 for an unknown property, 409 `{detail, existing_pir_id}` when the property already has a live PIR
@@ -179,11 +179,13 @@ Any change must follow these.
     admin-only routes are `/v1/admin/cleanup-demos`, the seven under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
     `/v1/admin/projects/{project_id}/pay-items`, the two under
     `/v1/projects/{project_id}/roles`, `POST /v1/projects/{project_id}/properties`, `PATCH /v1/properties/{property_id}`
-    and its `/admin/soft-delete` and `/admin/undelete`, `POST /v1/projects/{project_id}/task-orders`, everything
-    under `/v1/task-orders/{task_order_id}` but its GET, `POST /v1/properties/{property_id}/pir`, everything
+    and its `/admin/soft-delete` and `/admin/undelete`, `/v1/task-orders/{task_order_id}/admin/soft-delete` and
+    `/admin/undelete`, `POST /v1/properties/{property_id}/pir`, everything
     under `/v1/pirs/{pir_id}` but its GET, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`,
     `/admin/undelete` and `/admin/permanent`. The property, task-order and PIR reads take `project_member`, or,
     by id, `property_member`, `task_order_member` and `pir_member` (all three through `_readable_on_project`).
+    Task orders are the one resource project members write: creating, editing, bundling and unbundling take
+    `project_member` or `task_order_member` (see "Task orders").
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
     user's first and last name, email, admin role and demo flag, a demo user's included, and reset their password; a name can't be cleared. The route checks the values itself, so a bad one is a 400, not FastAPI's 422. Names
@@ -842,18 +844,29 @@ Any change must follow these.
   - **A task order** follows Properties in everything: `task_order_number` (at most 50 characters, trimmed, a
     blank one 400) is unique per project among live task orders (`uq_task_orders_project_number`, partial),
     matched exactly; `issued_date` is a date (malformed is 422) and `estimate_notes` text (2000, blank is
-    NULL). Create, edit and un-delete answer a taken number with 409 `{detail, existing_task_order_id}`. Reads
-    take a user on the project or an admin; writes are admin only; `include_deleted` from anyone else is
-    ignored. Soft delete again is a 200 no-op; un-deleting a live one is 404.
+    NULL). Create, edit and un-delete answer a taken number with 409 `{detail, existing_task_order_id}`.
+    `include_deleted` from anyone but an admin is ignored. Soft delete again is a 200 no-op; un-deleting a
+    live one is 404.
+  - **Who (S1).** Reading, **creating, editing, bundling and unbundling** take a user on the project in any
+    role (`inspector`, `oe`, `re`), or an admin: `project_member` for create, `task_order_member` (inside
+    `_writable_task_order`) for the rest, so a user on another project gets 403. **Soft delete and un-delete
+    stay admin only**, as for properties, PIRs and IDRs.
+    - **Demo users only read** (403 `Demo mode: task orders are read-only`, `no_demo_task_order_writes`).
+      `created_by` and `added_by` are `NO ACTION` foreign keys, so a task order a demo user wrote would block
+      deleting them at sign-out, and would make `cleanup_abandoned_demo_users()` fail for every stale demo
+      user at once. A demo user on another project still gets 404 first.
+    - **A soft-deleted task order is the admin's.** A user who isn't an admin gets 400 `Task order is deleted`
+      on PATCH and unbundle (bundling into one is 400 for everyone), so nobody changes what an admin's
+      un-delete would restore.
   - **Two shapes.** The list gives each task order's `property_count` and no properties
     (`TaskOrderListItem`); every other route that returns a task order gives it with `properties`
     (`TaskOrderDetail`), read in the same statement (`jsonb_agg(to_jsonb(p))`, by address).
   - **Bundling** (`POST .../properties/{property_id}`) adds a row to `task_order_properties`, with `added_by`
-    the admin. The property must be of the task order's project and neither may be soft-deleted (400); the
+    the signed-in user (any project member, not necessarily an admin). The property must be of the task order's project and neither may be soft-deleted (400); the
     INSERT itself only matches when that holds (`INSERT ... SELECT ... JOIN ... ON p.project_id =
     t.project_id`), so the checks before it can't be raced past. A property already in the task order is 409.
-    A property can be in several task orders, once in each. **Unbundling** deletes the row, 204, whatever
-    either side's state, so an admin can always clean up.
+    A property can be in several task orders, once in each. **Unbundling** deletes the row, 204, whatever the
+    property's state; an admin can also unbundle from a soft-deleted task order, so they can always clean up.
   - **Soft deletes never touch the bundle.** A soft-deleted task order keeps its rows, so un-deleting it
     restores the full bundle. **A soft-deleted property stays bundled but hides**: the detail's `properties`
     and the list's `property_count` both filter `properties.deleted_at IS NULL`, so it disappears from every

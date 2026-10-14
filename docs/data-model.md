@@ -390,8 +390,9 @@ project, so there is no separate project index.
 
 ### task_orders
 
-A project's task orders. Added by migration 030. Admins add, change, soft-delete and restore them, and bundle
-properties into them; anyone on the project reads them (`/v1/projects/{id}/task-orders`, `/v1/task-orders/{id}`).
+A project's task orders. Added by migration 030. Anyone on the project, in any role, and any admin reads them,
+adds and changes them and bundles properties into them (`/v1/projects/{id}/task-orders`, `/v1/task-orders/{id}`);
+only admins soft-delete and restore them. Demo users only read (since S1).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -400,7 +401,7 @@ properties into them; anyone on the project reads them (`/v1/projects/{id}/task-
 | `task_order_number` | TEXT NOT NULL | Trimmed; matched exactly. Unique per project among task orders that aren't deleted (`uq_task_orders_project_number`, `WHERE deleted_at IS NULL`) |
 | `issued_date` | DATE | |
 | `estimate_notes` | TEXT | Blank is NULL |
-| `created_by` | UUID NOT NULL | The admin who added it; FK → `users.uuid` |
+| `created_by` | UUID NOT NULL | Who added it: any project member or admin; FK → `users.uuid` |
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
 
@@ -414,7 +415,7 @@ several task orders (a re-issue is a new task order), once in each. Migration 03
 | `task_order_id` | UUID NOT NULL | FK → `task_orders.id`, **ON DELETE CASCADE** |
 | `property_id` | UUID NOT NULL | FK → `properties.id`, **ON DELETE CASCADE**; `idx_task_order_properties_property` |
 | `added_at` | TIMESTAMPTZ NOT NULL | `now()` |
-| `added_by` | UUID NOT NULL | The admin who bundled it; FK → `users.uuid` |
+| `added_by` | UUID NOT NULL | Who bundled it: any project member or admin; FK → `users.uuid` |
 
 - **Same project.** No constraint says the two sides share a project; the statement that bundles only inserts
   when they do (and neither is deleted). Neither row's `project_id` can change, so that holds.

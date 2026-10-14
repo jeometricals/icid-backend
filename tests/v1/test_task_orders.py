@@ -91,13 +91,6 @@ class TestCreateTaskOrder:
         assert response.status_code == 201 and response.json()["data"]["project_id"] == "HWK2026"
         assert run.call_args.args[1][:2] == ("HWK2026", "TO-001")
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS) as projects, patch(TASKS) as run:
-            response = inspector.post(LIST_URL, json=BODY)
-        assert (response.status_code, response.json()) == FORBIDDEN
-        projects.assert_not_called()
-        run.assert_not_called()
-
     def test_a_blank_number_is_400(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(TASKS) as run:
             response = admin_client.post(LIST_URL, json={"task_order_number": "  "})
@@ -200,13 +193,13 @@ class TestUpdateTaskOrder:
         assert run.call_args.args[1] == (None, True, None, True, None, TASK_ORDER_ID, None)
 
     def test_a_null_number_alone_is_nothing_to_change(self, admin_client):
-        with patch(TASKS) as run:
+        with patch(TASKS, return_value=[DETAIL_ROW]) as run:
             response = admin_client.patch(URL, json={"task_order_number": None})
         assert response.status_code == 400 and response.json() == {"detail": "Send at least one field to change"}
-        run.assert_not_called()
+        assert run.call_count == 1  # the task order read, nothing written
 
     def test_a_number_another_task_order_of_the_project_has_is_409(self, admin_client):
-        with patch(TASKS, side_effect=[[], [DETAIL_ROW], [OTHER_ROW]]) as run:
+        with patch(TASKS, side_effect=[[DETAIL_ROW], [], [DETAIL_ROW], [OTHER_ROW]]) as run:
             response = admin_client.patch(URL, json={"task_order_number": "TO-002"})
         assert response.status_code == 409
         assert response.json()["existing_task_order_id"] == str(OTHER_TASK_ORDER_ID)
@@ -216,11 +209,9 @@ class TestUpdateTaskOrder:
         with patch(TASKS, side_effect=[[], []]):
             assert admin_client.patch(URL, json={"estimate_notes": "x"}).status_code == 404
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(TASKS) as run:
-            response = inspector.patch(URL, json={"estimate_notes": "x"})
-        assert (response.status_code, response.json()) == FORBIDDEN
-        run.assert_not_called()
+    def test_an_admin_edits_a_deleted_one(self, admin_client):
+        with patch(TASKS, return_value=[DELETED_ROW]):
+            assert admin_client.patch(URL, json={"estimate_notes": "x"}).status_code == 200
 
 
 class TestSoftDeleteAndUndeleteTaskOrder:
@@ -266,8 +257,9 @@ class TestSoftDeleteAndUndeleteTaskOrder:
                                    "existing_task_order_id": str(OTHER_TASK_ORDER_ID)}
 
     @pytest.mark.parametrize("action", ["soft-delete", "undelete"])
-    def test_a_user_who_isnt_an_admin_is_forbidden(self, action):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(TASKS) as run:
+    def test_a_project_member_who_isnt_an_admin_is_forbidden(self, action):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT[1]), \
+                patch(TASKS) as run:
             response = inspector.post(f"{URL}/admin/{action}")
         assert (response.status_code, response.json()) == FORBIDDEN
         run.assert_not_called()
@@ -315,12 +307,6 @@ class TestBundle:
         assert response.status_code == 404 and response.json() == {"detail": "Task order not found"}
         props.assert_not_called()
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(TASKS) as run:
-            response = inspector.post(BUNDLE_URL)
-        assert (response.status_code, response.json()) == FORBIDDEN
-        run.assert_not_called()
-
 
 class TestUnbundle:
     def test_an_admin_unbundles_a_property(self, admin_client):
@@ -339,11 +325,98 @@ class TestUnbundle:
             response = admin_client.delete(BUNDLE_URL)
         assert response.status_code == 404 and response.json() == {"detail": "Property is not in this task order"}
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(TASKS) as run:
-            response = inspector.delete(BUNDLE_URL)
-        assert (response.status_code, response.json()) == FORBIDDEN
+
+class TestProjectMembersWrite:
+    """Create, edit, bundle and unbundle are open to anyone on the project; demo users and outsiders stay out."""
+
+    def test_a_member_creates_a_task_order_as_its_creator(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=ON_PROJECT), \
+                patch(TASKS, return_value=[{**DETAIL_ROW, "created_by": INSPECTOR_ROW["uuid"]}]) as run:
+            response = inspector.post(LIST_URL, json=BODY)
+        assert response.status_code == 201
+        assert response.json()["data"]["created_by"] == str(INSPECTOR_ROW["uuid"])
+        assert run.call_args.args[1][-1] == INSPECTOR_ROW["uuid"]
+
+    def test_a_member_edits_a_task_order(self):
+        changed = {**DETAIL_ROW, "estimate_notes": "two crews"}
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT[1]), \
+                patch(TASKS, return_value=[changed]):
+            response = inspector.patch(URL, json={"estimate_notes": "two crews"})
+        assert response.status_code == 200 and response.json()["data"]["estimate_notes"] == "two crews"
+
+    def test_a_member_bundles_a_property_as_its_adder(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT[1]), \
+                patch(TASKS, side_effect=[[DETAIL_ROW], [JOIN_ROW], [BUNDLED_ROW]]) as run, \
+                patch(PROPS, return_value=[PROPERTY_ROW]):
+            response = inspector.post(BUNDLE_URL)
+        assert response.status_code == 201
+        assert run.call_args_list[1].args[1] == (INSPECTOR_ROW["uuid"], TASK_ORDER_ID, PROPERTY_ID)
+
+    def test_a_member_unbundles_a_property(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT[1]), \
+                patch(TASKS, side_effect=[[DETAIL_ROW], [{"task_order_id": TASK_ORDER_ID}]]):
+            assert inspector.delete(BUNDLE_URL).status_code == 204
+
+    @pytest.mark.parametrize("method,url,body", [("patch", URL, {"estimate_notes": "x"}), ("delete", BUNDLE_URL, None)])
+    def test_a_member_cant_change_a_deleted_task_order(self, method, url, body):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT[1]), \
+                patch(TASKS, return_value=[DELETED_ROW]) as run:
+            response = inspector.request(method, url, json=body)
+        assert response.status_code == 400 and response.json() == {"detail": "Task order is deleted"}
+        assert run.call_count == 1  # read, nothing written
+
+    def test_a_member_cant_bundle_into_a_deleted_task_order(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT[1]), \
+                patch(TASKS, return_value=[DELETED_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]):
+            response = inspector.post(BUNDLE_URL)
+        assert response.status_code == 400 and response.json() == {"detail": "Cannot bundle into a deleted task order"}
+
+    def test_a_user_who_isnt_on_the_project_cant_create(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=OFF_PROJECT), patch(TASKS) as run:
+            response = inspector.post(LIST_URL, json=BODY)
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
         run.assert_not_called()
+
+    @pytest.mark.parametrize("method,url,body", [
+        ("patch", URL, {"estimate_notes": "x"}), ("post", BUNDLE_URL, None), ("delete", BUNDLE_URL, None),
+    ])
+    def test_a_user_who_isnt_on_the_project_cant_change_its_task_orders(self, method, url, body):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=[]), \
+                patch(TASKS, return_value=[DETAIL_ROW]) as run, patch(PROPS) as props:
+            response = inspector.request(method, url, json=body)
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+        assert run.call_count == 1  # the task order read for the check
+        props.assert_not_called()
+
+    def test_a_demo_user_cant_create_on_their_own_project(self, demo_client):
+        with patch(PROJECTS, return_value=ON_PROJECT[1]), patch(TASKS) as run:
+            response = demo_client.post("/v1/projects/DEMO01/task-orders", json=BODY)
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: task orders are read-only"}
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("method,url,body", [
+        ("patch", URL, {"estimate_notes": "x"}), ("post", BUNDLE_URL, None), ("delete", BUNDLE_URL, None),
+    ])
+    def test_a_demo_user_cant_change_their_projects_task_orders(self, demo_client, method, url, body):
+        with patch(PROJECTS, return_value=ON_PROJECT[1]), patch(TASKS, return_value=[DETAIL_ROW]) as run, \
+                patch(PROPS) as props:
+            response = demo_client.request(method, url, json=body)
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: task orders are read-only"}
+        assert run.call_count == 1
+        props.assert_not_called()
+
+    def test_a_demo_user_gets_404_creating_on_another_project(self, demo_client):
+        with patch(PROJECTS, return_value=[]), patch(TASKS) as run:
+            assert demo_client.post(LIST_URL, json=BODY).status_code == 404
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("method,url,body", [
+        ("patch", URL, {"estimate_notes": "x"}), ("post", BUNDLE_URL, None), ("delete", BUNDLE_URL, None),
+    ])
+    def test_a_demo_user_gets_404_for_another_projects_task_order(self, demo_client, method, url, body):
+        with patch(PROJECTS, return_value=[]), patch(TASKS, return_value=[DETAIL_ROW]):
+            response = demo_client.request(method, url, json=body)
+        assert response.status_code == 404 and response.json() == {"detail": "Task order not found"}
 
 
 class TestSoftDeletedPropertiesStayBundled:

@@ -355,6 +355,15 @@ def no_demo_signatures(user: UserOut = Depends(current_user)) -> UserOut:
     return _refuse_demo(user, "Demo mode: signatures are not available")
 
 
+def no_demo_task_order_writes(user: UserOut = Depends(current_user)) -> UserOut:
+    """
+    FastAPI dependency for the task-order writes project members make: demo users only read task orders (what they wrote would outlive their own deletion).
+    Takes the current user.
+    Returns them; raises 403 for a demo user.
+    """
+    return _refuse_demo(user, "Demo mode: task orders are read-only")
+
+
 def demo_idr_fence(request: Request, user: UserOut = Depends(current_user)) -> None:
     """
     FastAPI dependency for routes under an IDR: a demo user reaches only the IDRs they are the reporter of.

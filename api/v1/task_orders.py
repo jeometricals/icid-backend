@@ -27,7 +27,14 @@ from api.schemas.task_order import (
     TaskOrderResponse,
     TaskOrderUpdate,
 )
-from api.services.auth import current_admin, current_user, demo_project_fence, project_member, task_order_member
+from api.services.auth import (
+    current_admin,
+    current_user,
+    demo_project_fence,
+    no_demo_task_order_writes,
+    project_member,
+    task_order_member,
+)
 from api.v1._shared import clean_text
 
 # A second router under /v1/projects, for a project's task orders. A demo user reaches only their own project.
@@ -102,6 +109,27 @@ def _response(row: dict[str, Any], message: str) -> TaskOrderResponse:
     return TaskOrderResponse(status="success", message=message, data=TaskOrderDetail.model_validate(row))
 
 
+def _writable_task_order(
+    found: dict = Depends(task_order_member), user: UserOut = Depends(no_demo_task_order_writes)
+) -> dict:
+    """
+    FastAPI dependency for the writes under one task order: the signed-in user must be on its project (or an admin), and not a demo user.
+    Takes the task order (loaded and checked by task_order_member, so 404 and 403 come first) and the user (refused when a demo user).
+    Returns the task order dict, with its live bundled properties; raises 403 for a demo user.
+    """
+    return found
+
+
+def _refuse_deleted_for_member(task_order: dict[str, Any], user: UserOut) -> None:
+    """
+    Keep a soft-deleted task order for its admins: a member who isn't one can't change it.
+    Takes the task order dict and the signed-in user.
+    Returns nothing; raises 400 for a deleted task order and a user who isn't an admin.
+    """
+    if task_order["deleted_at"] is not None and user.role != "admin":
+        raise HTTPException(status_code=400, detail="Task order is deleted")
+
+
 def _bundle_refusal(task_order: dict[str, Any], found: Optional[dict[str, Any]]) -> Optional[HTTPException]:
     """
     Say why a property can't go into a task order, if it can't.
@@ -143,15 +171,15 @@ def list_project_task_orders(
     response_model=TaskOrderResponse,
     status_code=201,
     responses=CONFLICT,
-    dependencies=[Depends(current_admin)],
+    dependencies=[Depends(no_demo_task_order_writes)],
 )
 def create_project_task_order(
     project_id: str, body: TaskOrderCreate, user: UserOut = Depends(project_member)
 ) -> TaskOrderResponse | JSONResponse:
     """
-    Add a task order to a project, created by the signed-in admin, with no properties yet. Admins only.
-    Takes the project id as a path parameter, the number and the optional issued date and estimate notes in the body (text trimmed; blank notes are none) and the admin.
-    Returns 201 with a TaskOrderResponse; raises 400 for a blank or over-long value, 403 for a user who isn't an admin, 404 for an unknown project, 422 for a malformed date and 409 (with existing_task_order_id) when a live task order of the project has the number.
+    Add a task order to a project, created by the signed-in user, with no properties yet. For a user on the project, in any role, or an admin; not a demo user.
+    Takes the project id as a path parameter, the number and the optional issued date and estimate notes in the body (text trimmed; blank notes are none) and the user.
+    Returns 201 with a TaskOrderResponse; raises 400 for a blank or over-long value, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for a malformed date and 409 (with existing_task_order_id) when a live task order of the project has the number.
     """
     fields = _clean_fields(body)
     row = create_task_order(project_id, user.uuid, fields)
@@ -172,15 +200,19 @@ def get_task_order_record(found: dict = Depends(task_order_member)) -> TaskOrder
     return _response(found, "Task order retrieved")
 
 
-@router.patch(
-    "/{task_order_id}", response_model=TaskOrderResponse, responses=CONFLICT, dependencies=[Depends(current_admin)]
-)
-def update_task_order_record(task_order_id: UUID, body: TaskOrderUpdate) -> TaskOrderResponse | JSONResponse:
+@router.patch("/{task_order_id}", response_model=TaskOrderResponse, responses=CONFLICT)
+def update_task_order_record(
+    task_order_id: UUID,
+    body: TaskOrderUpdate,
+    found: dict = Depends(_writable_task_order),
+    user: UserOut = Depends(current_user),
+) -> TaskOrderResponse | JSONResponse:
     """
-    Change some of a task order, soft-deleted or not. Admins only. A number left out or sent as null keeps its value; a null issued date, or null or blank notes, clear them.
-    Takes the task order's id as a path parameter and the fields to change in the body.
-    Returns a TaskOrderResponse with the task order as it now is; raises 400 when nothing is sent or a value doesn't fit, 403 for a user who isn't an admin, 404 for an unknown task order, 422 for a malformed date and 409 (with existing_task_order_id) when another live task order of its project has the number it would end up with.
+    Change some of a task order. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A number left out or sent as null keeps its value; a null issued date, or null or blank notes, clear them.
+    Takes the task order's id as a path parameter, the fields to change in the body, the task order (loaded by _writable_task_order) and the user.
+    Returns a TaskOrderResponse with the task order as it now is; raises 400 when nothing is sent, a value doesn't fit, or a user who isn't an admin edits a deleted task order, 403 for a demo user or a user who isn't on its project, 404 for an unknown task order, 422 for a malformed date and 409 (with existing_task_order_id) when another live task order of its project has the number it would end up with.
     """
+    _refuse_deleted_for_member(found, user)
     fields = _clean_fields(body)
 
     if not fields:
@@ -253,20 +285,22 @@ def undelete_task_order_record(task_order_id: UUID) -> TaskOrderResponse | JSONR
     "/{task_order_id}/properties/{property_id}", response_model=TaskOrderResponse, status_code=201
 )
 def bundle_task_order_property(
-    task_order_id: UUID, property_id: UUID, admin: UserOut = Depends(current_admin)
+    task_order_id: UUID,
+    property_id: UUID,
+    task_order: dict = Depends(_writable_task_order),
+    user: UserOut = Depends(current_user),
 ) -> TaskOrderResponse:
     """
-    Put a property into a task order, added by the signed-in admin. Admins only. The property must belong to the task order's project, and neither may be deleted.
-    Takes the task order's and the property's ids as path parameters and the admin.
-    Returns 201 with a TaskOrderResponse, the task order with its properties; raises 400 for a deleted task order or property or one of another project, 403 for a user who isn't an admin, 404 for an unknown task order or property, and 409 when the property is already in the task order.
+    Put a property into a task order, added by the signed-in user. For a user on its project, or an admin; not a demo user. The property must belong to the task order's project, and neither may be deleted.
+    Takes the task order's and the property's ids as path parameters, the task order (loaded by _writable_task_order) and the user.
+    Returns 201 with a TaskOrderResponse, the task order with its properties; raises 400 for a deleted task order or property or one of another project, 403 for a demo user or a user who isn't on its project, 404 for an unknown task order or property, and 409 when the property is already in the task order.
     """
-    task_order = _load_task_order(task_order_id)
     refusal = _bundle_refusal(task_order, get_property(property_id))
 
     if refusal is not None:
         raise refusal
 
-    if bundle_property(task_order_id, property_id, admin.uuid) is None:
+    if bundle_property(task_order_id, property_id, user.uuid) is None:
         if is_property_bundled(task_order_id, property_id):
             raise HTTPException(status_code=409, detail="Property is already in this task order")
 
@@ -277,19 +311,19 @@ def bundle_task_order_property(
     return _response(_load_task_order(task_order_id), "Property bundled")
 
 
-@router.delete(
-    "/{task_order_id}/properties/{property_id}",
-    status_code=204,
-    response_class=Response,
-    dependencies=[Depends(current_admin)],
-)
-def unbundle_task_order_property(task_order_id: UUID, property_id: UUID) -> None:
+@router.delete("/{task_order_id}/properties/{property_id}", status_code=204, response_class=Response)
+def unbundle_task_order_property(
+    task_order_id: UUID,
+    property_id: UUID,
+    found: dict = Depends(_writable_task_order),
+    user: UserOut = Depends(current_user),
+) -> None:
     """
-    Take a property out of a task order, whether or not either is deleted. Admins only.
-    Takes the task order's and the property's ids as path parameters.
-    Returns nothing (204); raises 403 for a user who isn't an admin and 404 for an unknown task order or a property that isn't in it.
+    Take a property out of a task order, whether or not the property is deleted. For a user on its project, or an admin; not a demo user. Only an admin unbundles from a soft-deleted task order.
+    Takes the task order's and the property's ids as path parameters, the task order (loaded by _writable_task_order) and the user.
+    Returns nothing (204); raises 400 when a user who isn't an admin unbundles from a deleted task order, 403 for a demo user or a user who isn't on its project, and 404 for an unknown task order or a property that isn't in it.
     """
-    _load_task_order(task_order_id)
+    _refuse_deleted_for_member(found, user)
 
     if not unbundle_property(task_order_id, property_id):
         raise HTTPException(status_code=404, detail="Property is not in this task order")
