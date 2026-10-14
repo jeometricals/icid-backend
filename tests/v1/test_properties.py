@@ -80,13 +80,6 @@ class TestCreateProperty:
             admin_client.post(LIST_URL, json={**BODY, "notes": " corner lot "})
         assert run.call_args.args[1][4] == "corner lot"
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS) as projects, patch(PROPS) as run:
-            response = inspector.post(LIST_URL, json=BODY)
-        assert (response.status_code, response.json()) == FORBIDDEN
-        projects.assert_not_called()
-        run.assert_not_called()
-
     def test_a_duplicate_bbl_in_the_project_is_409(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, side_effect=[[], [OTHER_ROW]]) as run:
             response = admin_client.post(LIST_URL, json=BODY)
@@ -236,24 +229,28 @@ class TestUpdateProperty:
         assert run.call_args.args[1][3:5] == (True, None)
 
     def test_an_unknown_property_type_is_422(self, admin_client):
-        with patch(PROPS) as run:
+        with patch(PROPS, return_value=[PROPERTY_ROW]) as run:
             response = admin_client.patch(URL, json={"property_type": "castle"})
         assert response.status_code == 422
-        run.assert_not_called()
+        assert not any("UPDATE" in call.args[0] for call in run.call_args_list)
 
     def test_nothing_to_change_is_400(self, admin_client):
-        with patch(PROPS) as run:
+        with patch(PROPS, return_value=[PROPERTY_ROW]) as run:
             response = admin_client.patch(URL, json={"bbl": None})
         assert response.status_code == 400 and response.json() == {"detail": "Send at least one field to change"}
-        run.assert_not_called()
+        assert run.call_count == 1  # the property read, nothing written
 
     def test_a_blank_bbl_is_400(self, admin_client):
-        with patch(PROPS) as run:
+        with patch(PROPS, return_value=[PROPERTY_ROW]) as run:
             assert admin_client.patch(URL, json={"bbl": " "}).status_code == 400
-        run.assert_not_called()
+        assert run.call_count == 1
+
+    def test_an_admin_edits_a_deleted_one(self, admin_client):
+        with patch(PROPS, return_value=[DELETED_ROW]):
+            assert admin_client.patch(URL, json={"notes": "x"}).status_code == 200
 
     def test_a_bbl_another_property_of_the_project_has_is_409(self, admin_client):
-        with patch(PROPS, side_effect=[[], [PROPERTY_ROW], [OTHER_ROW]]) as run:
+        with patch(PROPS, side_effect=[[PROPERTY_ROW], [], [PROPERTY_ROW], [OTHER_ROW]]) as run:
             response = admin_client.patch(URL, json={"bbl": "4012340057"})
         assert response.status_code == 409
         assert response.json()["existing_property_id"] == str(OTHER_ID)
@@ -264,9 +261,69 @@ class TestUpdateProperty:
             response = admin_client.patch(URL, json={"address": "1 Main St"})
         assert response.status_code == 404 and response.json() == {"detail": "Property not found"}
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(PROPS) as run:
+
+class TestProjectMembersWriteProperties:
+    """Creating and editing a property are open to anyone on the project; demo users and outsiders stay out."""
+
+    def test_a_member_creates_a_property_as_its_creator(self):
+        mine = {**PROPERTY_ROW, "created_by": INSPECTOR_ROW["uuid"]}
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=ON_PROJECT), \
+                patch(PROPS, return_value=[mine]) as run:
+            response = inspector.post(LIST_URL, json=BODY)
+        assert response.status_code == 201
+        assert response.json()["data"]["created_by"] == str(INSPECTOR_ROW["uuid"])
+        assert run.call_args.args[1][-1] == INSPECTOR_ROW["uuid"]
+
+    def test_a_member_edits_a_property(self):
+        changed = {**PROPERTY_ROW, "address": "1 Main St"}
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=[{"?column?": 1}]), \
+                patch(PROPS, return_value=[changed]):
             response = inspector.patch(URL, json={"address": "1 Main St"})
+        assert response.status_code == 200 and response.json()["data"]["address"] == "1 Main St"
+
+    def test_a_member_cant_edit_a_deleted_property(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=[{"?column?": 1}]), \
+                patch(PROPS, return_value=[DELETED_ROW]) as run:
+            response = inspector.patch(URL, json={"address": "1 Main St"})
+        assert response.status_code == 400 and response.json() == {"detail": "Property is deleted"}
+        assert run.call_count == 1  # read, nothing written
+
+    def test_a_user_who_isnt_on_the_project_cant_create(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=OFF_PROJECT), patch(PROPS) as run:
+            response = inspector.post(LIST_URL, json=BODY)
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+        run.assert_not_called()
+
+    def test_a_user_who_isnt_on_the_project_cant_edit(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=[]), \
+                patch(PROPS, return_value=[PROPERTY_ROW]) as run:
+            response = inspector.patch(URL, json={"address": "1 Main St"})
+        assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+        assert run.call_count == 1
+
+    def test_a_demo_user_cant_create_on_their_own_project(self, demo_client):
+        with patch(PROJECTS, return_value=[{"?column?": 1}]), patch(PROPS) as run:
+            response = demo_client.post("/v1/projects/DEMO01/properties", json=BODY)
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: properties are read-only"}
+        run.assert_not_called()
+
+    def test_a_demo_user_cant_edit_their_projects_property(self, demo_client):
+        with patch(PROJECTS, return_value=[{"?column?": 1}]), patch(PROPS, return_value=[PROPERTY_ROW]) as run:
+            response = demo_client.patch(URL, json={"address": "1 Main St"})
+        assert response.status_code == 403 and response.json() == {"detail": "Demo mode: properties are read-only"}
+        assert run.call_count == 1
+
+    def test_a_demo_user_gets_404_on_another_project(self, demo_client):
+        with patch(PROJECTS, return_value=[]), patch(PROPS, return_value=[PROPERTY_ROW]):
+            assert demo_client.post(LIST_URL, json=BODY).status_code == 404
+            response = demo_client.patch(URL, json={"address": "1 Main St"})
+        assert response.status_code == 404 and response.json() == {"detail": "Property not found"}
+
+    @pytest.mark.parametrize("action", ["soft-delete", "undelete"])
+    def test_a_member_who_isnt_an_admin_cant_delete_or_restore(self, action):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=[{"?column?": 1}]), \
+                patch(PROPS) as run:
+            response = inspector.post(f"{URL}/admin/{action}")
         assert (response.status_code, response.json()) == FORBIDDEN
         run.assert_not_called()
 

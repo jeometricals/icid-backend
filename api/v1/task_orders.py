@@ -35,7 +35,10 @@ from api.services.auth import (
     project_member,
     task_order_member,
 )
-from api.v1._shared import clean_text
+from api.v1._shared import clean_text, refuse_deleted_for_member
+
+# What a member who isn't an admin is told when they change a soft-deleted task order
+TASK_ORDER_DELETED = "Task order is deleted"
 
 # A second router under /v1/projects, for a project's task orders. A demo user reaches only their own project.
 project_router = APIRouter(
@@ -120,16 +123,6 @@ def _writable_task_order(
     return found
 
 
-def _refuse_deleted_for_member(task_order: dict[str, Any], user: UserOut) -> None:
-    """
-    Keep a soft-deleted task order for its admins: a member who isn't one can't change it.
-    Takes the task order dict and the signed-in user.
-    Returns nothing; raises 400 for a deleted task order and a user who isn't an admin.
-    """
-    if task_order["deleted_at"] is not None and user.role != "admin":
-        raise HTTPException(status_code=400, detail="Task order is deleted")
-
-
 def _bundle_refusal(task_order: dict[str, Any], found: Optional[dict[str, Any]]) -> Optional[HTTPException]:
     """
     Say why a property can't go into a task order, if it can't.
@@ -212,7 +205,7 @@ def update_task_order_record(
     Takes the task order's id as a path parameter, the fields to change in the body, the task order (loaded by _writable_task_order) and the user.
     Returns a TaskOrderResponse with the task order as it now is; raises 400 when nothing is sent, a value doesn't fit, or a user who isn't an admin edits a deleted task order, 403 for a demo user or a user who isn't on its project, 404 for an unknown task order, 422 for a malformed date and 409 (with existing_task_order_id) when another live task order of its project has the number it would end up with.
     """
-    _refuse_deleted_for_member(found, user)
+    refuse_deleted_for_member(found, user, TASK_ORDER_DELETED)
     fields = _clean_fields(body)
 
     if not fields:
@@ -323,7 +316,7 @@ def unbundle_task_order_property(
     Takes the task order's and the property's ids as path parameters, the task order (loaded by _writable_task_order) and the user.
     Returns nothing (204); raises 400 when a user who isn't an admin unbundles from a deleted task order, 403 for a demo user or a user who isn't on its project, and 404 for an unknown task order or a property that isn't in it.
     """
-    _refuse_deleted_for_member(found, user)
+    refuse_deleted_for_member(found, user, TASK_ORDER_DELETED)
 
     if not unbundle_property(task_order_id, property_id):
         raise HTTPException(status_code=404, detail="Property is not in this task order")

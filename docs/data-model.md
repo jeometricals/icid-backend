@@ -369,8 +369,9 @@ them back for an IDR that comes back approved. So it only ever holds IDRs that a
 ### properties
 
 A project's properties: the tax lots its work is done on, one row each, named by BBL (borough, block and lot).
-Added by migration 029. Admins add and change them; anyone on the project reads them (`/v1/projects/{id}/properties`,
-`/v1/properties/{id}`).
+Added by migration 029. Anyone on the project, in any role, and any admin reads, adds and changes them
+(`/v1/projects/{id}/properties`, `/v1/properties/{id}`); only admins soft-delete and restore them. Demo users only
+read (since S2).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -380,7 +381,7 @@ Added by migration 029. Admins add and change them; anyone on the project reads 
 | `address` | TEXT NOT NULL | Trimmed |
 | `property_type` | TEXT NOT NULL | `1_3_family`, `4_plus_family` or `expedited`; CHECK `chk_properties_type` |
 | `notes` | TEXT | Blank is NULL |
-| `created_by` | UUID NOT NULL | The admin who added it; FK → `users.uuid` |
+| `created_by` | UUID NOT NULL | The signed-in user who added it: any project member or admin; FK → `users.uuid` |
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
 
@@ -401,7 +402,7 @@ only admins soft-delete and restore them. Demo users only read (since S1).
 | `task_order_number` | TEXT NOT NULL | Trimmed; matched exactly. Unique per project among task orders that aren't deleted (`uq_task_orders_project_number`, `WHERE deleted_at IS NULL`) |
 | `issued_date` | DATE | |
 | `estimate_notes` | TEXT | Blank is NULL |
-| `created_by` | UUID NOT NULL | Who added it: any project member or admin; FK → `users.uuid` |
+| `created_by` | UUID NOT NULL | The signed-in user who added it: any project member or admin; FK → `users.uuid` |
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
 
@@ -415,7 +416,7 @@ several task orders (a re-issue is a new task order), once in each. Migration 03
 | `task_order_id` | UUID NOT NULL | FK → `task_orders.id`, **ON DELETE CASCADE** |
 | `property_id` | UUID NOT NULL | FK → `properties.id`, **ON DELETE CASCADE**; `idx_task_order_properties_property` |
 | `added_at` | TIMESTAMPTZ NOT NULL | `now()` |
-| `added_by` | UUID NOT NULL | Who bundled it: any project member or admin; FK → `users.uuid` |
+| `added_by` | UUID NOT NULL | The signed-in user who bundled it: any project member or admin; FK → `users.uuid` |
 
 - **Same project.** No constraint says the two sides share a project; the statement that bundles only inserts
   when they do (and neither is deleted). Neither row's `project_id` can change, so that holds.
@@ -426,9 +427,10 @@ several task orders (a re-issue is a new task order), once in each. Migration 03
 
 ### pirs
 
-A property's PIR: the DOT survey sheet an inspector signed off, digitized by an admin. Added by migration 031.
-Admins create, edit, soft-delete and restore them; anyone on the property's project reads them
-(`/v1/properties/{id}/pir`, `/v1/properties/{id}/pirs`, `/v1/pirs/{id}`).
+A property's PIR: the DOT survey sheet an inspector signed off, digitized by a project member or an admin. Added by
+migration 031. Anyone on the property's project, in any role, and any admin reads, creates and edits them
+(`/v1/properties/{id}/pir`, `/v1/properties/{id}/pirs`, `/v1/pirs/{id}`); only admins soft-delete and restore them.
+Demo users only read (since S2).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -438,7 +440,7 @@ Admins create, edit, soft-delete and restore them; anyone on the property's proj
 | `source_image_scale` | REAL | Likewise |
 | `inspector_initials` | TEXT NOT NULL | Trimmed, at most 16 characters |
 | `inspector_sign_date` | DATE NOT NULL | When the inspector signed the sheet |
-| `digitized_by` | UUID NOT NULL | The admin who created the row, from the session; FK → `users.uuid` |
+| `digitized_by` | UUID NOT NULL | The signed-in user who created the row: any project member or admin; FK → `users.uuid` |
 | `digitized_at` | TIMESTAMPTZ NOT NULL | `now()` at creation |
 | `as_built_signed_by` | UUID | FK → `users.uuid`, **ON DELETE SET NULL**. Set by a later slice's sign route; no route writes it yet |
 | `as_built_signed_at` | TIMESTAMPTZ | Likewise |

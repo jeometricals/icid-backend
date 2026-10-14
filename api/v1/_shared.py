@@ -1,6 +1,6 @@
 """
 What more than one router needs: reading the date and discipline filters, reading a text field off a request body,
-checking a new password, and shaping the rows of an IDR list.
+checking a new password, shaping the rows of an IDR list, and keeping soft-deleted rows for admins.
 Not a router itself.
 """
 
@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from fastapi import HTTPException
 
+from api.schemas.auth import UserOut
 from api.schemas.idr import IdrListItem
 from api.services.auth import MAX_PASSWORD_BYTES
 from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
@@ -60,6 +61,16 @@ def report_types_for(disciplines: Optional[list[str]]) -> Optional[list[str]]:
             raise HTTPException(status_code=400, detail=f"Unknown discipline: {discipline}")
         report_types += [report_type for report_type in covered if report_type not in report_types]
     return report_types
+
+
+def refuse_deleted_for_member(row: dict[str, Any], user: UserOut, detail: str) -> None:
+    """
+    Keep a soft-deleted row for admins: a project member who isn't one can't change it.
+    Takes the row (anything with deleted_at), the signed-in user and the 400's detail.
+    Returns nothing; raises 400 with that detail for a deleted row and a user who isn't an admin.
+    """
+    if row["deleted_at"] is not None and user.role != "admin":
+        raise HTTPException(status_code=400, detail=detail)
 
 
 def clean_text(value: Optional[str], field: str, max_length: int, required: bool = True) -> Optional[str]:

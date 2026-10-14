@@ -16,8 +16,14 @@ from api.queries.pirs import (
 from api.queries.properties import get_property
 from api.schemas.auth import UserOut
 from api.schemas.pir import PirConflict, PirCreate, PirListResponse, PirOut, PirResponse, PirUpdate
-from api.services.auth import current_admin, current_user, pir_member, property_member
-from api.v1._shared import clean_text
+from api.services.auth import (
+    current_admin,
+    current_user,
+    no_demo_pir_writes,
+    pir_member,
+    property_member,
+)
+from api.v1._shared import clean_text, refuse_deleted_for_member
 
 # A second router under /v1/properties, for a property's PIR. property_member keeps demo users to their own project.
 property_router = APIRouter(prefix="/v1/properties", tags=["PIRs"], dependencies=[Depends(current_user)])
@@ -27,6 +33,29 @@ router = APIRouter(prefix="/v1/pirs", tags=["PIRs"], dependencies=[Depends(curre
 # The longest initials the field takes
 MAX_INITIALS_LENGTH = 16
 CONFLICT = {409: {"model": PirConflict}}
+# What a member who isn't an admin is told when they change a soft-deleted PIR, or a PIR of a soft-deleted property
+PIR_DELETED = "PIR is deleted"
+PROPERTY_DELETED = "Property is deleted"
+
+
+def _pir_writer_on_property(
+    found: dict = Depends(property_member), user: UserOut = Depends(no_demo_pir_writes)
+) -> dict:
+    """
+    FastAPI dependency for creating a property's PIR: the signed-in user must be on its project (or an admin), and not a demo user.
+    Takes the property (loaded and checked by property_member, so 404 and 403 come first) and the user (refused when a demo user).
+    Returns the property dict; raises 403 for a demo user.
+    """
+    return found
+
+
+def _writable_pir(found: dict = Depends(pir_member), user: UserOut = Depends(no_demo_pir_writes)) -> dict:
+    """
+    FastAPI dependency for the writes to one PIR: the signed-in user must be on its property's project (or an admin), and not a demo user.
+    Takes the PIR (loaded and checked by pir_member, so 404 and 403 come first) and the user (refused when a demo user).
+    Returns the PIR dict; raises 403 for a demo user.
+    """
+    return found
 
 
 def _clean_fields(body: PirCreate | PirUpdate) -> dict[str, Any]:
@@ -111,15 +140,14 @@ def list_property_pirs(
     response_model=PirResponse,
     status_code=201,
     responses=CONFLICT,
-    dependencies=[Depends(current_admin)],
 )
 def create_property_pir(
-    body: PirCreate, found: dict = Depends(property_member), user: UserOut = Depends(current_admin)
+    body: PirCreate, found: dict = Depends(_pir_writer_on_property), user: UserOut = Depends(current_user)
 ) -> PirResponse | JSONResponse:
     """
-    Digitize a PIR for a property: digitized by the signed-in admin, now. Admins only.
-    Takes the inspector's initials (trimmed) and sign date in the body, the property (loaded by property_member) and the admin.
-    Returns 201 with a PirResponse; raises 400 for blank or over-long initials or a deleted property, 403 for a user who isn't an admin, 404 for an unknown property, 422 for a malformed date and 409 (with existing_pir_id) when the property already has a live PIR.
+    Digitize a PIR for a property: digitized by the signed-in user, now. For a user on its project, in any role, or an admin; not a demo user.
+    Takes the inspector's initials (trimmed) and sign date in the body, the property (loaded by _pir_writer_on_property) and the user.
+    Returns 201 with a PirResponse; raises 400 for blank or over-long initials or a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for a malformed date and 409 (with existing_pir_id) when the property already has a live PIR.
     """
     if found["deleted_at"] is not None:
         raise HTTPException(status_code=400, detail="Cannot add a PIR to a deleted property")
@@ -153,13 +181,20 @@ def get_pir_record(found: dict = Depends(pir_member)) -> PirResponse:
     return _response(found, "PIR retrieved")
 
 
-@router.patch("/{pir_id}", response_model=PirResponse, dependencies=[Depends(current_admin)])
-def update_pir_record(pir_id: UUID, body: PirUpdate) -> PirResponse:
+@router.patch("/{pir_id}", response_model=PirResponse)
+def update_pir_record(
+    pir_id: UUID, body: PirUpdate, found: dict = Depends(_writable_pir), user: UserOut = Depends(current_user)
+) -> PirResponse:
     """
-    Change a PIR's inspector initials or sign date, soft-deleted or not. Admins only. A field left out, or sent as null, keeps its value; the as-built signature is never changed here.
-    Takes the PIR's id as a path parameter and the fields to change in the body.
-    Returns a PirResponse with the PIR as it now is; raises 400 when nothing is sent or the initials don't fit, 403 for a user who isn't an admin, 404 for an unknown PIR and 422 for a malformed date.
+    Change a PIR's inspector initials or sign date. For a user on its property's project, or an admin; not a demo user. Only an admin changes a soft-deleted PIR, or a PIR of a soft-deleted property. A field left out, or sent as null, keeps its value; the as-built signature is never changed here.
+    Takes the PIR's id as a path parameter, the fields to change in the body, the PIR (loaded by _writable_pir) and the user.
+    Returns a PirResponse with the PIR as it now is; raises 400 when nothing is sent, the initials don't fit, or a user who isn't an admin edits a deleted PIR or one of a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown PIR and 422 for a malformed date.
     """
+    refuse_deleted_for_member(found, user, PIR_DELETED)
+    if user.role != "admin":
+        owner = get_property(found["property_id"])
+        if owner is not None:
+            refuse_deleted_for_member(owner, user, PROPERTY_DELETED)
     fields = _clean_fields(body)
 
     if not fields:

@@ -65,13 +65,6 @@ class TestCreatePir:
             admin_client.post(PROPERTY_PIR_URL, json={**BODY, "digitized_by": other, "digitized_at": "2020-01-01"})
         assert run.call_args.args[1][2] == ADMIN_ID
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(PROPS) as props, patch(PIRS) as run:
-            response = inspector.post(PROPERTY_PIR_URL, json=BODY)
-        assert (response.status_code, response.json()) == FORBIDDEN
-        props.assert_not_called()
-        run.assert_not_called()
-
     def test_a_second_live_pir_on_the_property_is_409(self, admin_client):
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(PIRS, side_effect=[[], [OTHER_ROW]]):
             response = admin_client.post(PROPERTY_PIR_URL, json=BODY)
@@ -214,31 +207,105 @@ class TestUpdatePir:
         assert run.call_args.args[1] == (None, date(2026, 10, 1), PIR_ID)
 
     def test_nothing_to_change_is_400(self, admin_client):
-        with patch(PIRS) as run:
+        with patch(PIRS, return_value=[PIR_ROW]) as run:
             response = admin_client.patch(URL, json={"inspector_initials": None, "inspector_sign_date": None})
         assert response.status_code == 400 and response.json() == {"detail": "Send at least one field to change"}
-        run.assert_not_called()
+        assert run.call_count == 1  # the PIR read, nothing written
 
     def test_the_as_built_signature_cant_be_set_here(self, admin_client):
-        with patch(PIRS) as run:
+        with patch(PIRS, return_value=[PIR_ROW]) as run:
             response = admin_client.patch(URL, json={"as_built_signed_by": str(ADMIN_ID),
                                                      "as_built_signed_at": "2026-10-14T09:00:00Z"})
         assert response.status_code == 400  # the fields aren't PirUpdate's, so nothing is sent
-        run.assert_not_called()
+        assert run.call_count == 1
 
     def test_blank_initials_are_400(self, admin_client):
-        with patch(PIRS) as run:
+        with patch(PIRS, return_value=[PIR_ROW]) as run:
             assert admin_client.patch(URL, json={"inspector_initials": " "}).status_code == 400
-        run.assert_not_called()
+        assert run.call_count == 1
+
+    def test_an_admin_edits_a_deleted_pir_or_one_of_a_deleted_property(self, admin_client):
+        with patch(PIRS, return_value=[DELETED_ROW]), patch(PROPS) as props:
+            assert admin_client.patch(URL, json={"inspector_initials": "JD"}).status_code == 200
+        props.assert_not_called()  # an admin's edit doesn't look at the property
 
     def test_an_unknown_pir_is_404(self, admin_client):
         with patch(PIRS, return_value=[]):
             response = admin_client.patch(URL, json={"inspector_initials": "JD"})
         assert response.status_code == 404 and response.json() == {"detail": "PIR not found"}
 
-    def test_a_user_who_isnt_an_admin_is_forbidden(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(PIRS) as run:
-            response = inspector.patch(URL, json={"inspector_initials": "JD"})
+
+class TestProjectMembersWritePirs:
+    """Creating and editing a PIR are open to anyone on the property's project; demo users and outsiders stay out."""
+
+    def test_a_member_digitizes_a_pir_as_themselves(self):
+        mine = {**PIR_ROW, "digitized_by": INSPECTOR_ROW["uuid"]}
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PROPS, return_value=[PROPERTY_ROW]), patch(PIRS, return_value=[mine]) as run:
+            response = inspector.post(PROPERTY_PIR_URL, json=BODY)
+        assert response.status_code == 201
+        assert response.json()["data"]["digitized_by"] == str(INSPECTOR_ROW["uuid"])
+        assert run.call_args.args[1][2] == INSPECTOR_ROW["uuid"]
+
+    def test_a_member_cant_add_a_pir_to_a_deleted_property(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PROPS, return_value=[{**PROPERTY_ROW, "deleted_at": DELETED}]), patch(PIRS) as run:
+            response = inspector.post(PROPERTY_PIR_URL, json=BODY)
+        assert response.status_code == 400 and response.json() == {"detail": "Cannot add a PIR to a deleted property"}
+        run.assert_not_called()
+
+    def test_a_member_edits_a_pir(self):
+        changed = {**PIR_ROW, "inspector_initials": "MK"}
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PIRS, return_value=[changed]), patch(PROPS, return_value=[PROPERTY_ROW]):
+            response = inspector.patch(URL, json={"inspector_initials": "MK"})
+        assert response.status_code == 200 and response.json()["data"]["inspector_initials"] == "MK"
+
+    def test_a_member_cant_edit_a_deleted_pir(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PIRS, return_value=[DELETED_ROW]) as run, patch(PROPS, return_value=[PROPERTY_ROW]):
+            response = inspector.patch(URL, json={"inspector_initials": "MK"})
+        assert response.status_code == 400 and response.json() == {"detail": "PIR is deleted"}
+        assert run.call_count == 1  # read, nothing written
+
+    def test_a_member_cant_edit_a_live_pir_of_a_deleted_property(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT), \
+                patch(PIRS, return_value=[PIR_ROW]) as run, \
+                patch(PROPS, return_value=[{**PROPERTY_ROW, "deleted_at": DELETED}]):
+            response = inspector.patch(URL, json={"inspector_initials": "MK"})
+        assert response.status_code == 400 and response.json() == {"detail": "Property is deleted"}
+        assert run.call_count == 1
+
+    def test_a_user_who_isnt_on_the_project_cant_create_or_edit(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=[]), \
+                patch(PROPS, return_value=[PROPERTY_ROW]), patch(PIRS, return_value=[PIR_ROW]) as run:
+            created = inspector.post(PROPERTY_PIR_URL, json=BODY)
+            edited = inspector.patch(URL, json={"inspector_initials": "MK"})
+        for response in (created, edited):
+            assert response.status_code == 403 and response.json() == {"detail": "Project access required"}
+        assert run.call_count == 1  # only the PIR read for the edit's check
+
+    def test_a_demo_user_cant_create_or_edit_on_their_own_project(self, demo_client):
+        with patch(PROJECTS, return_value=ON_PROJECT), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(PIRS, return_value=[PIR_ROW]) as run:
+            created = demo_client.post(PROPERTY_PIR_URL, json=BODY)
+            edited = demo_client.patch(URL, json={"inspector_initials": "MK"})
+        for response in (created, edited):
+            assert response.status_code == 403 and response.json() == {"detail": "Demo mode: PIRs are read-only"}
+        assert run.call_count == 1
+
+    def test_a_demo_user_gets_404_on_another_project(self, demo_client):
+        with patch(PROJECTS, return_value=[]), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(PIRS, return_value=[PIR_ROW]):
+            created = demo_client.post(PROPERTY_PIR_URL, json=BODY)
+            edited = demo_client.patch(URL, json={"inspector_initials": "MK"})
+        assert created.status_code == 404 and created.json() == {"detail": "Property not found"}
+        assert edited.status_code == 404 and edited.json() == {"detail": "PIR not found"}
+
+    @pytest.mark.parametrize("action", ["soft-delete", "undelete"])
+    def test_a_member_who_isnt_an_admin_cant_delete_or_restore(self, action):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=ON_PROJECT), patch(PIRS) as run:
+            response = inspector.post(f"{URL}/admin/{action}")
         assert (response.status_code, response.json()) == FORBIDDEN
         run.assert_not_called()
 

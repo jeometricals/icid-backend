@@ -23,8 +23,15 @@ from api.schemas.property import (
     PropertyResponse,
     PropertyUpdate,
 )
-from api.services.auth import current_admin, current_user, demo_project_fence, project_member, property_member
-from api.v1._shared import clean_text
+from api.services.auth import (
+    current_admin,
+    current_user,
+    demo_project_fence,
+    no_demo_property_writes,
+    project_member,
+    property_member,
+)
+from api.v1._shared import clean_text, refuse_deleted_for_member
 
 # A second router under /v1/projects, for a project's properties. A demo user reaches only their own project.
 project_router = APIRouter(
@@ -38,6 +45,19 @@ MAX_BBL_LENGTH = 32
 MAX_ADDRESS_LENGTH = 200
 MAX_NOTES_LENGTH = 2000
 CONFLICT = {409: {"model": PropertyConflict}}
+# What a member who isn't an admin is told when they change a soft-deleted property
+PROPERTY_DELETED = "Property is deleted"
+
+
+def _writable_property(
+    found: dict = Depends(property_member), user: UserOut = Depends(no_demo_property_writes)
+) -> dict:
+    """
+    FastAPI dependency for the writes to one property: the signed-in user must be on its project (or an admin), and not a demo user.
+    Takes the property (loaded and checked by property_member, so 404 and 403 come first) and the user (refused when a demo user).
+    Returns the property dict; raises 403 for a demo user.
+    """
+    return found
 
 
 def _clean_fields(body: PropertyCreate | PropertyUpdate) -> dict[str, Any]:
@@ -118,15 +138,15 @@ def list_project_properties(
     response_model=PropertyResponse,
     status_code=201,
     responses=CONFLICT,
-    dependencies=[Depends(current_admin)],
+    dependencies=[Depends(no_demo_property_writes)],
 )
 def create_project_property(
     project_id: str, body: PropertyCreate, user: UserOut = Depends(project_member)
 ) -> PropertyResponse | JSONResponse:
     """
-    Add a property to a project, created by the signed-in admin. Admins only.
-    Takes the project id as a path parameter, the BBL, address, property type and optional notes in the body (text trimmed; blank notes are none) and the admin.
-    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value, 403 for a user who isn't an admin, 404 for an unknown project, 422 for an unknown property type and 409 (with existing_property_id) when a live property of the project has the BBL.
+    Add a property to a project, created by the signed-in user. For a user on the project, in any role, or an admin; not a demo user.
+    Takes the project id as a path parameter, the BBL, address, property type and optional notes in the body (text trimmed; blank notes are none) and the user.
+    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown property type and 409 (with existing_property_id) when a live property of the project has the BBL.
     """
     fields = _clean_fields(body)
     row = create_property(project_id, user.uuid, fields)
@@ -147,15 +167,19 @@ def get_property_record(found: dict = Depends(property_member)) -> PropertyRespo
     return _response(found, "Property retrieved")
 
 
-@router.patch(
-    "/{property_id}", response_model=PropertyResponse, responses=CONFLICT, dependencies=[Depends(current_admin)]
-)
-def update_property_record(property_id: UUID, body: PropertyUpdate) -> PropertyResponse | JSONResponse:
+@router.patch("/{property_id}", response_model=PropertyResponse, responses=CONFLICT)
+def update_property_record(
+    property_id: UUID,
+    body: PropertyUpdate,
+    found: dict = Depends(_writable_property),
+    user: UserOut = Depends(current_user),
+) -> PropertyResponse | JSONResponse:
     """
-    Change some of a property, soft-deleted or not. Admins only. A field left out, or sent as null, keeps its value; null or blank notes clear them.
-    Takes the property's id as a path parameter and the fields to change in the body.
-    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent or a value doesn't fit, 403 for a user who isn't an admin, 404 for an unknown property, 422 for an unknown property type and 409 (with existing_property_id) when another live property of its project has the BBL it would end up with.
+    Change some of a property. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes clear them.
+    Takes the property's id as a path parameter, the fields to change in the body, the property (loaded by _writable_property) and the user.
+    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, a value doesn't fit, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown property type and 409 (with existing_property_id) when another live property of its project has the BBL it would end up with.
     """
+    refuse_deleted_for_member(found, user, PROPERTY_DELETED)
     fields = _clean_fields(body)
 
     if not fields:

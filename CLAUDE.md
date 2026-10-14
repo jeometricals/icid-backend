@@ -70,9 +70,9 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `GET /v1/projects/{project_id}/quantities?from=&to=&pay_item=&budget_code=&discipline=&inspector_uuid=&cumulative=` — the pay-item quantities of the project's approved IDRs, newest work date first, and what they come to against the project's contract items: `{range, rows, totals_by_unit, row_count, truncated, pay_items, totals_by_budget_code, project_total, unbudgeted_total}` under `data`. All filters optional; `pay_item`, `budget_code` and `discipline` repeat; `cumulative=true` leaves `from` and `to` unapplied. For a user on the project, or an admin: 403 otherwise, 404 for an unknown project, 400 for a bad date, `from` after `to`, or an unknown discipline
 - `GET /v1/projects/{project_id}/properties?include_deleted=` — the project's properties, by address, each with `pir_status` (`none`, `dot_signed` or `as_built_signed`), under `data` (see "Properties"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
-- `POST /v1/projects/{project_id}/properties` — admin only: body `{bbl, address, property_type, notes?}`; creates the property, its creator the admin, and returns it under `data`, 201. 400 for a blank or over-long value, 422 for an unknown `property_type`, 404 for an unknown project, 409 `{detail, existing_property_id}` when a live property of the project has the BBL
+- `POST /v1/projects/{project_id}/properties` — project members (any role) and admins: body `{bbl, address, property_type, notes?}`; creates the property, its creator the signed-in user, and returns it under `data`, 201. 403 for a user who isn't on the project or a demo user (`Demo mode: properties are read-only`); 400 for a blank or over-long value, 422 for an unknown `property_type`, 404 for an unknown project, 409 `{detail, existing_property_id}` when a live property of the project has the BBL
 - `GET /v1/properties/{property_id}` — one property, soft-deleted or not, under `data`. For a user on its project, or an admin: 403 otherwise, 404 for an unknown property
-- `PATCH /v1/properties/{property_id}` — admin only: any of `bbl`, `address`, `property_type`, `notes`; returns the property under `data`. 400 when nothing is sent (a null counts as not sent, except `notes`, which it clears) or a value doesn't fit, 422 for an unknown `property_type`, 404 for an unknown property, 409 as on create
+- `PATCH /v1/properties/{property_id}` — project members and admins: any of `bbl`, `address`, `property_type`, `notes`; returns the property under `data`. 403 for a user who isn't on its project or a demo user; 400 when nothing is sent (a null counts as not sent, except `notes`, which it clears), a value doesn't fit, or a user who isn't an admin edits a soft-deleted property (`Property is deleted`), 422 for an unknown `property_type`, 404 for an unknown property, 409 as on create
 - `POST /v1/properties/{property_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by` and returns the property under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown property
 - `POST /v1/properties/{property_id}/admin/undelete` — admin only: clears both and returns the property under `data`. 404 for an unknown property or `Property is not deleted`, 409 `{detail, existing_property_id}` when another live property of the project now has its BBL
 - `GET /v1/projects/{project_id}/task-orders?include_deleted=` — the project's task orders, by number, each with `property_count` (its bundled properties that aren't deleted) instead of the properties, under `data` (see "Task orders"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
@@ -85,9 +85,9 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `DELETE /v1/task-orders/{task_order_id}/properties/{property_id}` — project members and admins: takes the property out, 204, whether or not the property is deleted; only an admin unbundles from a soft-deleted task order (400 `Task order is deleted` for anyone else). 403 for a user who isn't on its project or a demo user; 404 for an unknown task order or `Property is not in this task order`
 - `GET /v1/properties/{property_id}/pir` — the property's live PIR under `data` (see "PIRs"). For a user on its project, or an admin: 403 otherwise, 404 for an unknown property or `No PIR for this property`
 - `GET /v1/properties/{property_id}/pirs?include_deleted=` — the property's PIRs, most recently digitized first, under `data`: the live one, plus the soft-deleted ones for an admin who sends `include_deleted=true` (ignored for anyone else). Same access as above
-- `POST /v1/properties/{property_id}/pir` — admin only: body `{inspector_initials, inspector_sign_date}`; creates the PIR, `digitized_by` the admin and `digitized_at` now, and returns it under `data`, 201. 400 for blank or over-long initials or a soft-deleted property, 422 for a malformed date, 404 for an unknown property, 409 `{detail, existing_pir_id}` when the property already has a live PIR
+- `POST /v1/properties/{property_id}/pir` — project members (any role) and admins: body `{inspector_initials, inspector_sign_date}`; creates the PIR, `digitized_by` the signed-in user and `digitized_at` now, and returns it under `data`, 201. 403 for a user who isn't on its project or a demo user (`Demo mode: PIRs are read-only`); 400 for blank or over-long initials or a soft-deleted property, 422 for a malformed date, 404 for an unknown property, 409 `{detail, existing_pir_id}` when the property already has a live PIR
 - `GET /v1/pirs/{pir_id}` — one PIR, soft-deleted or not, under `data`. For a user on its property's project, or an admin: 403 otherwise, 404 for an unknown PIR
-- `PATCH /v1/pirs/{pir_id}` — admin only: `inspector_initials` and/or `inspector_sign_date`; returns the PIR under `data`. 400 when nothing is sent (a null counts as not sent) or the initials don't fit, 422 for a malformed date, 404 for an unknown PIR
+- `PATCH /v1/pirs/{pir_id}` — project members and admins: `inspector_initials` and/or `inspector_sign_date`; returns the PIR under `data`. 403 for a user who isn't on its project or a demo user; 400 when nothing is sent (a null counts as not sent), the initials don't fit, or a user who isn't an admin edits a soft-deleted PIR (`PIR is deleted`) or a PIR of a soft-deleted property (`Property is deleted`), 422 for a malformed date, 404 for an unknown PIR
 - `POST /v1/pirs/{pir_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by`, freeing the property for a new PIR, and returns the PIR under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown PIR
 - `POST /v1/pirs/{pir_id}/admin/undelete` — admin only: clears both and returns the PIR under `data`. 404 for an unknown PIR or `PIR is not deleted`, 409 `{detail, existing_pir_id}` when the property now has another live PIR
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
@@ -178,14 +178,18 @@ Any change must follow these.
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
     admin-only routes are `/v1/admin/cleanup-demos`, the seven under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
     `/v1/admin/projects/{project_id}/pay-items`, the two under
-    `/v1/projects/{project_id}/roles`, `POST /v1/projects/{project_id}/properties`, `PATCH /v1/properties/{property_id}`
-    and its `/admin/soft-delete` and `/admin/undelete`, `/v1/task-orders/{task_order_id}/admin/soft-delete` and
-    `/admin/undelete`, `POST /v1/properties/{property_id}/pir`, everything
-    under `/v1/pirs/{pir_id}` but its GET, and `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`,
-    `/admin/undelete` and `/admin/permanent`. The property, task-order and PIR reads take `project_member`, or,
-    by id, `property_member`, `task_order_member` and `pir_member` (all three through `_readable_on_project`).
-    Task orders are the one resource project members write: creating, editing, bundling and unbundling take
-    `project_member` or `task_order_member` (see "Task orders").
+    `/v1/projects/{project_id}/roles`, `/admin/soft-delete` and `/admin/undelete` under
+    `/v1/properties/{property_id}`, `/v1/task-orders/{task_order_id}` and `/v1/pirs/{pir_id}`, and
+    `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`, `/admin/undelete` and `/admin/permanent`. The property,
+    task-order and PIR reads take `project_member`, or, by id, `property_member`, `task_order_member` and
+    `pir_member` (all three through `_readable_on_project`).
+  - **Project members write properties, task orders and PIRs** (S1, S2). Creating and editing each, and
+    bundling and unbundling, take a user on the project in any role, or an admin; deleting and restoring stay
+    admin only. Each write route checks membership first (404 / 403), then refuses a demo user with 403
+    (`no_demo_property_writes`, `no_demo_task_order_writes`, `no_demo_pir_writes`: their rows would block
+    deleting them, and `cleanup_abandoned_demo_users()` with them). A soft-deleted row is the admin's: anyone
+    else gets 400 on changing it (`refuse_deleted_for_member` in `api/v1/_shared.py`). `created_by`,
+    `added_by` and `digitized_by` are the signed-in user.
   - **Admin user routes** (`api/v1/admin_users.py`) are their own router, taking `current_admin`: the
     `/v1/admin` router takes `admin_or_cron`, which the scheduler's secret also passes. An admin can change a
     user's first and last name, email, admin role and demo flag, a demo user's included, and reset their password; a name can't be cleared. The route checks the values itself, so a bad one is a 400, not FastAPI's 422. Names
@@ -828,13 +832,17 @@ Any change must follow these.
     statement, and the index backs them. Each answers a clash with 409 `{detail, existing_property_id}`.
   - **Who:** reading takes a user on the project in any role, or an admin (`project_member` for the list,
     `property_member` by id; 403 `Project access required`). A demo user gets 404 for another project's
-    property, as the project fence does. Every write is admin only. `include_deleted=true` on the list from
-    anyone but an admin is ignored, not refused (the IDR list refuses it).
+    property, as the project fence does. **Creating and editing** take the same (S2; `project_member` for
+    create, `property_member` inside `_writable_property` for edit), but not a demo user (403 `Demo mode:
+    properties are read-only`); `created_by` is the signed-in user. A user who isn't an admin can't edit a
+    soft-deleted property (400 `Property is deleted`). Soft delete and un-delete stay admin only.
+    `include_deleted=true` on the list from anyone but an admin is ignored, not refused (the IDR list refuses
+    it).
   - **Soft delete, IDR-style:** `POST .../admin/soft-delete` sets `deleted_at` and `deleted_by` and frees the
     BBL; again is a 200 that changes nothing. `POST .../admin/undelete` clears both; 404 `Property is not
-    deleted` for one that isn't. There is no permanent delete. A deleted property can still be read by id and
-    edited; an edit of a deleted one isn't checked against the live BBLs (un-deleting it is).
-  - `created_by` is NOT NULL and `NO ACTION`, so an admin who added a property can't be permanently deleted:
+    deleted` for one that isn't. There is no permanent delete. A deleted property can still be read by id, and
+    edited by an admin; an edit of a deleted one isn't checked against the live BBLs (un-deleting it is).
+  - `created_by` is NOT NULL and `NO ACTION`, so a user who added a property can't be permanently deleted:
     `count_user_references` counts properties they created or deleted.
   - **Migration 029 must be in the database before this code runs**: the routes and the user-reference count
     name the table.
@@ -850,7 +858,8 @@ Any change must follow these.
   - **Who (S1).** Reading, **creating, editing, bundling and unbundling** take a user on the project in any
     role (`inspector`, `oe`, `re`), or an admin: `project_member` for create, `task_order_member` (inside
     `_writable_task_order`) for the rest, so a user on another project gets 403. **Soft delete and un-delete
-    stay admin only**, as for properties, PIRs and IDRs.
+    stay admin only**, as for properties, PIRs and IDRs. The check on a deleted row is the shared
+    `refuse_deleted_for_member`.
     - **Demo users only read** (403 `Demo mode: task orders are read-only`, `no_demo_task_order_writes`).
       `created_by` and `added_by` are `NO ACTION` foreign keys, so a task order a demo user wrote would block
       deleting them at sign-out, and would make `cleanup_abandoned_demo_users()` fail for every stale demo
@@ -882,19 +891,23 @@ Any change must follow these.
     PIR frees the property, so a replacement can be created while the old one is kept; un-deleting the old
     one is then a 409 `{detail, existing_pir_id}`, as is creating a second live one. No PIR can be created on
     a soft-deleted property (400); the INSERT itself selects only a live property.
-  - **Who made it is the server's.** `digitized_by` is the signed-in admin and `digitized_at` is `now()`; the
+  - **Who made it is the server's.** `digitized_by` is the signed-in user and `digitized_at` is `now()`; the
     body can't carry either. The body is `inspector_initials` (trimmed, at most 16 characters, blank is 400)
     and `inspector_sign_date` (a date; malformed is 422).
   - **The as-built signature is not editable.** `as_built_signed_by` and `as_built_signed_at` are a
     signature: a later slice adds sign and unsign routes for them, as approve-stage2 signs an IDR. PATCH
-    takes only the initials and the sign date, and a null counts as not sent, as on the other admin PATCHes.
+    takes only the initials and the sign date, and a null counts as not sent, as on the other PATCHes.
   - `source_image_url` and `source_image_scale` are in every response but nothing writes them until R1d.
   - **Finding a deleted PIR.** `GET /v1/properties/{id}/pir` gives only the live one; an admin finds the
     soft-deleted ones (to un-delete) with `GET /v1/properties/{id}/pirs?include_deleted=true`.
   - Each response carries the property's `project_id` (read in the same statement), which `pir_member`
-    checks. Reads take a user on the project or an admin; a demo user gets 404 for another project's. Writes
-    are admin only. Soft delete again is a 200 no-op; un-deleting a live PIR is 404. A PIR can be edited while
-    soft-deleted.
+    checks. Reads take a user on the project or an admin; a demo user gets 404 for another project's.
+    **Creating and editing** take the same (S2; `property_member` inside `_pir_writer_on_property` for create,
+    `pir_member` inside `_writable_pir` for edit), but not a demo user (403 `Demo mode: PIRs are read-only`).
+    Soft delete and un-delete stay admin only; again is a 200 no-op, and un-deleting a live PIR is 404.
+  - **A deleted PIR, or a live PIR of a deleted property, is the admin's.** A user who isn't an admin gets
+    400 `PIR is deleted` or `Property is deleted` on PATCH, so a deleted property's children are no
+    loophole; an admin can edit either, to clean up.
   - `property_id` doesn't cascade: a permanent delete of a property, if one is ever built, must refuse while it
     has PIRs.
   - **Migration 031 must be in the database before this code runs**: the routes and the user-reference count
