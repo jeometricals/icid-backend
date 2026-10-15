@@ -274,24 +274,51 @@ CREATE INDEX idx_quantities_project_budget ON icid.quantities(project_id, budget
 CREATE INDEX idx_quantities_idr ON icid.quantities(idr_id);
 
 ------------------------------------------------------------
--- PROPERTY (a project's tax lots, by BBL; soft-deleted like users and idrs; migrations/029)
+-- PROPERTY (a project's tax lots, by BBL, and its pedestrian ramps; soft-deleted like users and idrs;
+-- migrations/029, the kinds 035). A sidewalk has a BBL, an address and a property type; a ped ramp has an
+-- intersection, a quadrant, the street it faces and a ramp type instead. Both have a borough.
 ------------------------------------------------------------
+CREATE TYPE icid.property_kind AS ENUM ('sidewalk', 'ped_ramp');
+CREATE TYPE icid.boro AS ENUM ('Manhattan', 'Bronx', 'Brooklyn', 'Queens', 'Staten Island');
+CREATE TYPE icid.quadrant AS ENUM ('NE', 'NW', 'SE', 'SW');
+CREATE TYPE icid.facing_street AS ENUM ('street_1', 'street_2');
+CREATE TYPE icid.ramp_type AS ENUM ('PERPENDICULAR', 'PARALLEL', 'CUT_THROUGH');
+
 CREATE TABLE icid.properties (
-    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id     TEXT NOT NULL REFERENCES icid.projects(project_id),
-    bbl            TEXT NOT NULL,
-    address        TEXT NOT NULL,
-    property_type  TEXT NOT NULL,
-    notes          TEXT,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_by     UUID NOT NULL REFERENCES icid.users(uuid),
-    deleted_at     TIMESTAMPTZ,
-    deleted_by     UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
-    CONSTRAINT chk_properties_type CHECK (property_type IN ('1_3_family', '4_plus_family', 'expedited'))
+    id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id             TEXT NOT NULL REFERENCES icid.projects(project_id),
+    bbl                    TEXT,
+    address                TEXT,
+    property_type          TEXT,
+    notes                  TEXT,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by             UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at             TIMESTAMPTZ,
+    deleted_by             UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    kind                   icid.property_kind NOT NULL DEFAULT 'sidewalk',
+    boro                   icid.boro NOT NULL,
+    violation_no           TEXT,
+    intersection_street_1  TEXT,
+    intersection_street_2  TEXT,
+    quadrant               icid.quadrant,
+    facing_street          icid.facing_street,
+    ramp_type              icid.ramp_type,
+    CONSTRAINT chk_properties_type CHECK (property_type IN ('1_3_family', '4_plus_family', 'expedited')),
+    CONSTRAINT properties_kind_fields_consistent CHECK (
+        (kind = 'sidewalk' AND
+         bbl IS NOT NULL AND address IS NOT NULL AND property_type IS NOT NULL AND
+         intersection_street_1 IS NULL AND intersection_street_2 IS NULL AND
+         quadrant IS NULL AND facing_street IS NULL AND ramp_type IS NULL)
+        OR
+        (kind = 'ped_ramp' AND
+         bbl IS NULL AND address IS NULL AND property_type IS NULL AND violation_no IS NULL AND
+         intersection_street_1 IS NOT NULL AND intersection_street_2 IS NOT NULL AND
+         quadrant IS NOT NULL AND facing_street IS NOT NULL AND ramp_type IS NOT NULL)
+    )
 );
 
--- One live property per BBL in a project; a soft-deleted one frees its BBL
+-- One live property per BBL in a project; a soft-deleted one frees its BBL (a ped ramp has none, so never clashes)
 CREATE UNIQUE INDEX uq_properties_project_bbl ON icid.properties (project_id, bbl) WHERE deleted_at IS NULL;
 
 ------------------------------------------------------------

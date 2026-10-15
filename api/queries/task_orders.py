@@ -4,6 +4,7 @@ from uuid import UUID
 from psycopg.errors import UniqueViolation
 
 from api.db.runner import run_query
+from api.queries.properties import PROPERTY_ORDER
 
 # A task order's own columns
 _TASK_ORDER_COLUMNS = """
@@ -15,9 +16,9 @@ _PROPERTY_COUNT = """,
              FROM icid.task_order_properties tp
              JOIN icid.properties p ON p.id = tp.property_id
              WHERE tp.task_order_id = t.id AND p.deleted_at IS NULL) AS property_count"""
-# Its bundled properties that aren't deleted, each as a row of icid.properties, by address
+# Its bundled properties that aren't deleted, each as a row of icid.properties, ordered as a project's list is
 _BUNDLED_PROPERTIES = """,
-            COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY p.address, p.bbl)
+            COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY """ + PROPERTY_ORDER + """)
                       FROM icid.task_order_properties tp
                       JOIN icid.properties p ON p.id = tp.property_id
                       WHERE tp.task_order_id = t.id AND p.deleted_at IS NULL), '[]'::jsonb) AS properties"""

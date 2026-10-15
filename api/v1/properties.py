@@ -1,3 +1,4 @@
+import re
 from typing import Any, Optional
 from uuid import UUID
 
@@ -15,6 +16,8 @@ from api.queries.properties import (
 )
 from api.schemas.auth import UserOut
 from api.schemas.property import (
+    BOROUGH_BY_BBL_DIGIT,
+    Kind,
     PropertyConflict,
     PropertyCreate,
     PropertyListItem,
@@ -31,7 +34,8 @@ from api.services.auth import (
     project_member,
     property_member,
 )
-from api.v1._shared import clean_text, refuse_deleted_for_member
+from api.services.export_common import FORM_TIMEZONE
+from api.v1._shared import clean_text, refuse_deleted_for_member, validated
 
 # A second router under /v1/projects, for a project's properties. A demo user reaches only their own project.
 project_router = APIRouter(
@@ -44,6 +48,19 @@ router = APIRouter(prefix="/v1/properties", tags=["Properties"], dependencies=[D
 MAX_BBL_LENGTH = 32
 MAX_ADDRESS_LENGTH = 200
 MAX_NOTES_LENGTH = 2000
+MAX_STREET_LENGTH = 200
+MAX_VIOLATION_NO_LENGTH = 200
+# The text fields a null leaves alone, and the ones it clears (blank is none), each with its longest value
+_REQUIRED_TEXT = {
+    "bbl": MAX_BBL_LENGTH, "address": MAX_ADDRESS_LENGTH,
+    "intersection_street_1": MAX_STREET_LENGTH, "intersection_street_2": MAX_STREET_LENGTH,
+}
+_OPTIONAL_TEXT = {"violation_no": MAX_VIOLATION_NO_LENGTH, "notes": MAX_NOTES_LENGTH}
+# The fields that take one of a set of values, checked by the body's model
+_CHOICES = ("kind", "boro", "property_type", "quadrant", "facing_street", "ramp_type")
+# A BBL: the borough's digit (1-5), then the block (5 digits) and the lot (4)
+BBL_PATTERN = re.compile(r"[1-5][0-9]{9}")
+KIND_CHANGED = "Property kind cannot be changed. Delete and recreate."
 CONFLICT = {409: {"model": PropertyConflict}}
 # What a member who isn't an admin is told when they change a soft-deleted property
 PROPERTY_DELETED = "Property is deleted"
@@ -62,20 +79,37 @@ def _writable_property(
 
 def _clean_fields(body: PropertyCreate | PropertyUpdate) -> dict[str, Any]:
     """
-    Read a property's fields off the request: text trimmed, BBL and address refused when blank or too long. A field sent as null is left out; notes are optional, and blank or null ones are None.
+    Read a property's fields off the request: text trimmed, BBL, address and streets refused when blank or too long. A field sent as null is left out, but for notes and violation_no, which are optional: blank or null ones are None.
     Takes the request body.
-    Returns the values keyed by column, for the fields sent; raises 400 for a value that doesn't fit.
+    Returns the values keyed by column, for the fields sent (and a create's kind); raises 400 for a value that doesn't fit.
     """
     fields: dict[str, Any] = {}
-    if body.bbl is not None:
-        fields["bbl"] = clean_text(body.bbl, "bbl", MAX_BBL_LENGTH)
-    if body.address is not None:
-        fields["address"] = clean_text(body.address, "address", MAX_ADDRESS_LENGTH)
-    if body.property_type is not None:
-        fields["property_type"] = body.property_type
-    if "notes" in body.model_fields_set:
-        fields["notes"] = clean_text(body.notes, "notes", MAX_NOTES_LENGTH, required=False)
+    for field, longest in _REQUIRED_TEXT.items():
+        if getattr(body, field) is not None:
+            fields[field] = clean_text(getattr(body, field), field, longest)
+    for field, longest in _OPTIONAL_TEXT.items():
+        if field in body.model_fields_set:
+            fields[field] = clean_text(getattr(body, field), field, longest, required=False)
+    for field in _CHOICES:
+        if getattr(body, field) is not None:
+            fields[field] = getattr(body, field)
     return fields
+
+
+def _with_bbl_borough(fields: dict[str, Any], sent_boro: Optional[str]) -> dict[str, Any]:
+    """
+    Check a sidewalk's BBL and take its borough from it.
+    Takes the sidewalk's values keyed by column (its bbl among them) and the borough the request sent, if any.
+    Returns the values with boro the BBL's; raises 400 for a BBL that isn't 10 digits starting 1-5, or a borough sent that isn't the BBL's.
+    """
+    if not BBL_PATTERN.fullmatch(fields["bbl"]):
+        raise HTTPException(
+            status_code=400, detail="bbl must be 10 digits: the borough (1-5), the block (5) and the lot (4)"
+        )
+    borough = BOROUGH_BY_BBL_DIGIT[fields["bbl"][0]]
+    if sent_boro is not None and sent_boro != borough:
+        raise HTTPException(status_code=400, detail=f"boro must be {borough}, the BBL's borough")
+    return {**fields, "boro": borough}
 
 
 def _conflict(project_id: str, bbl: str, property_id: Optional[UUID] = None) -> JSONResponse:
@@ -116,14 +150,17 @@ def _response(row: dict[str, Any], message: str) -> PropertyResponse:
 
 @project_router.get("/{project_id}/properties", response_model=PropertyListResponse)
 def list_project_properties(
-    project_id: str, include_deleted: bool = False, user: UserOut = Depends(project_member)
+    project_id: str,
+    include_deleted: bool = False,
+    kind: Optional[Kind] = None,
+    user: UserOut = Depends(project_member),
 ) -> PropertyListResponse:
     """
-    List a project's properties, by address, each with its live PIR's status. For a user on the project, or an admin; only an admin gets soft-deleted ones, and only when asked (include_deleted from anyone else is ignored).
-    Takes the project id as a path parameter, the include_deleted flag and the signed-in user.
-    Returns a PropertyListResponse; raises 403 for a user who isn't on the project, 404 for an unknown project and 500 if the list can't be read.
+    List a project's properties, of one kind or both, by address, each with its live PIR's status, its status and its latest task order's number. For a user on the project, or an admin; only an admin gets soft-deleted ones, and only when asked (include_deleted from anyone else is ignored).
+    Takes the project id as a path parameter, the include_deleted flag, the kind (sidewalk or ped_ramp; both when left out) and the signed-in user.
+    Returns a PropertyListResponse; raises 403 for a user who isn't on the project, 404 for an unknown project, 422 for an unknown kind and 500 if the list can't be read.
     """
-    rows = list_properties(project_id, include_deleted and user.role == "admin")
+    rows = list_properties(project_id, FORM_TIMEZONE, include_deleted and user.role == "admin", kind)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to fetch properties")
@@ -144,11 +181,13 @@ def create_project_property(
     project_id: str, body: PropertyCreate, user: UserOut = Depends(project_member)
 ) -> PropertyResponse | JSONResponse:
     """
-    Add a property to a project, created by the signed-in user. For a user on the project, in any role, or an admin; not a demo user.
-    Takes the project id as a path parameter, the BBL, address, property type and optional notes in the body (text trimmed; blank notes are none) and the user.
-    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown property type and 409 (with existing_property_id) when a live property of the project has the BBL.
+    Add a property to a project, created by the signed-in user: a sidewalk (its borough read off its BBL) or a ped ramp. For a user on the project, in any role, or an admin; not a demo user.
+    Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes and violation_no are none) and the user.
+    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value, a malformed BBL or a borough that isn't the BBL's, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value or fields that don't fit the kind and 409 (with existing_property_id) when a live property of the project has the BBL.
     """
     fields = _clean_fields(body)
+    if body.kind == "sidewalk":
+        fields = _with_bbl_borough(fields, fields.get("boro"))
     row = create_property(project_id, user.uuid, fields)
 
     if row is None:
@@ -175,21 +214,30 @@ def update_property_record(
     user: UserOut = Depends(current_user),
 ) -> PropertyResponse | JSONResponse:
     """
-    Change some of a property. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes clear them.
+    Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes and violation_no clear them. Its kind can't change.
     Takes the property's id as a path parameter, the fields to change in the body, the property (loaded by _writable_property) and the user.
-    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, a value doesn't fit, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown property type and 409 (with existing_property_id) when another live property of its project has the BBL it would end up with.
+    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live property of its project has the BBL it would end up with.
     """
     refuse_deleted_for_member(found, user, PROPERTY_DELETED)
-    fields = _clean_fields(body)
 
-    if not fields:
+    if body.kind is not None and body.kind != found["kind"]:
+        raise HTTPException(status_code=400, detail=KIND_CHANGED)
+
+    changes = _clean_fields(body)
+    changes.pop("kind", None)
+
+    if not changes:
         raise HTTPException(status_code=400, detail="Send at least one field to change")
 
-    row = update_property(property_id, fields)
+    merged = {**{field: found.get(field) for field in PropertyCreate.model_fields}, **changes}
+    validated(PropertyCreate, merged)
+    if merged["kind"] == "sidewalk":
+        merged = _with_bbl_borough(merged, changes.get("boro"))
+    row = update_property(property_id, merged)
 
     if row is None:
         current = _load_property(property_id)
-        return _conflict(current["project_id"], fields.get("bbl", current["bbl"]), property_id)
+        return _conflict(current["project_id"], merged["bbl"], property_id)
 
     return _response(row, "Property updated")
 
