@@ -71,11 +71,11 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/projects/{project_id}/roles` — admin only: body `{user_uuid, role: "inspector" | "oe" | "re", action: "grant" | "revoke"}`; returns the project's roles as they now stand. Safe to repeat: granting a role already held, or revoking one not held, is a 200 that changes nothing. 404 for an unknown project or user, 400 for a demo user
 - `GET /v1/projects/{project_id}/quantities?from=&to=&pay_item=&budget_code=&discipline=&inspector_uuid=&cumulative=` — the pay-item quantities of the project's approved IDRs, newest work date first, and what they come to against the project's contract items: `{range, rows, totals_by_unit, row_count, truncated, pay_items, totals_by_budget_code, project_total, unbudgeted_total}` under `data`. All filters optional; `pay_item`, `budget_code` and `discipline` repeat; `cumulative=true` leaves `from` and `to` unapplied. For a user on the project, or an admin: 403 otherwise, 404 for an unknown project, 400 for a bad date, `from` after `to`, or an unknown discipline
 - `GET /v1/projects/{project_id}/properties?include_deleted=&kind=` — the project's properties, by address (a ped ramp's intersection), each with `pir_status` (`none`, `dot_signed` or `as_built_signed`), `status` (`{state: none | task_ordered | constructed_on, date}`) and `task_order_no`, under `data` (see "Properties"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else; `kind` (`sidewalk` or `ped_ramp`; 422 for anything else) keeps one kind
-- `POST /v1/projects/{project_id}/properties` — project members (any role) and admins: body `{kind?, notes?}` and a sidewalk's `{bbl, address, property_type, violation_no?, boro?}` (`kind` left out is a sidewalk) or a ped ramp's `{boro, intersection_street_1, intersection_street_2, quadrant, facing_street, ramp_type}`; creates the property, its creator the signed-in user, and returns it under `data`, 201. 403 for a user who isn't on the project or a demo user (`Demo mode: properties are read-only`); 400 for a blank or over-long value, a BBL that isn't 10 digits starting 1-5, or a `boro` that isn't the BBL's; 422 for an unknown value, a field the kind needs left out or a field of the other kind sent; 404 for an unknown project, 409 `{detail, existing_property_id}` when a live property of the project has the BBL
+- `POST /v1/projects/{project_id}/properties` — project members (any role) and admins: body `{kind?, notes?}` and a sidewalk's `{boro, block, lot, address, property_type, violation_no?}` (`kind` left out is a sidewalk) or a ped ramp's `{boro, intersection_street_1, intersection_street_2, quadrant, facing_street, ramp_type}`; creates the property, its creator the signed-in user, and returns it under `data`, 201. 403 for a user who isn't on the project or a demo user (`Demo mode: properties are read-only`); 400 for a blank or over-long value; 422 for an unknown value, a block or lot that isn't a tax map number, a field the kind needs left out or a field of the other kind sent; 404 for an unknown project, 409 `{detail: "A site at Queens Block 123 Lot 45 already exists in this project.", existing_property_id}` when a live sidewalk of the project is at the borough, block and lot
 - `GET /v1/properties/{property_id}` — one property, soft-deleted or not, under `data`. For a user on its project, or an admin: 403 otherwise, 404 for an unknown property
 - `PATCH /v1/properties/{property_id}` — project members and admins: any of its kind's fields and `notes`, merged over the property and checked whole; returns the property under `data`. 403 for a user who isn't on its project or a demo user; 400 when nothing is sent (a null counts as not sent, except `notes` and `violation_no`, which it clears), another `kind` is sent (`Property kind cannot be changed. Delete and recreate.`), a value doesn't fit as on create, or a user who isn't an admin edits a soft-deleted property (`Property is deleted`); 422 as on create, for a field of the other kind; 404 for an unknown property, 409 as on create
 - `POST /v1/properties/{property_id}/admin/soft-delete` — admin only: sets `deleted_at` and `deleted_by` and returns the property under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown property
-- `POST /v1/properties/{property_id}/admin/undelete` — admin only: clears both and returns the property under `data`. 404 for an unknown property or `Property is not deleted`, 409 `{detail, existing_property_id}` when another live property of the project now has its BBL
+- `POST /v1/properties/{property_id}/admin/undelete` — admin only: clears both and returns the property under `data`. 404 for an unknown property or `Property is not deleted`, 409 `{detail, existing_property_id}` when another live sidewalk of the project is now at its borough, block and lot
 - `GET /v1/projects/{project_id}/task-orders?include_deleted=` — the project's task orders, by number, each with `property_count` (its bundled properties that aren't deleted) instead of the properties, under `data` (see "Task orders"). For a user on the project, or an admin: 403 otherwise, 404 for an unknown project. `include_deleted=true` adds the soft-deleted ones for an admin and is ignored for anyone else
 - `POST /v1/projects/{project_id}/task-orders` — project members (any role) and admins: body `{task_order_number, issued_date?, estimate_notes?}`; creates the task order, its creator the signed-in user, and returns it with `properties: []` under `data`, 201. 403 for a user who isn't on the project or a demo user (`Demo mode: task orders are read-only`); 400 for a blank or over-long value, 422 for a malformed date, 404 for an unknown project, 409 `{detail, existing_task_order_id}` when a live task order of the project has the number
 - `GET /v1/task-orders/{task_order_id}` — one task order, soft-deleted or not, with `properties`: its bundled properties that aren't deleted, by address, each as `/v1/properties/{id}` returns one. For a user on its project, or an admin: 403 otherwise, 404 for an unknown task order
@@ -854,24 +854,28 @@ Any change must follow these.
       by that item's price.
 - **Properties.** `icid.properties` (migration 029) holds where a project's work is done, one row per property
   (`api/v1/properties.py`, `api/queries/properties.py`, `api/schemas/property.py`).
-  - **Two kinds** (migration 035): a **sidewalk**, a tax lot named by its BBL, and a **ped ramp**, a corner of an
-    intersection. `kind` is `sidewalk` or `ped_ramp`; a create without it is a sidewalk (as every property was
-    before). A sidewalk has `bbl`, `address` and `property_type` (all required) and an optional `violation_no`; a
+  - **Two kinds** (migration 035): a **sidewalk**, a tax lot named by its borough, block and lot, and a **ped
+    ramp**, a corner of an intersection. `kind` is `sidewalk` or `ped_ramp`; a create without it is a sidewalk (as
+    every property was before). A sidewalk has `block`, `lot`, `address` and `property_type` (all required) and an
+    optional `violation_no`; a
     ped ramp has `intersection_street_1`, `intersection_street_2`, `quadrant` (`NE` `NW` `SE` `SW`),
     `facing_street` (`street_1` or `street_2`) and `ramp_type` (`PERPENDICULAR` `PARALLEL` `CUT_THROUGH`), all
     required. Both have `boro` (the five boroughs spelled out). `PropertyCreate` refuses a field the kind needs
     left out and any field of the other kind (422, before the database's CHECK `properties_kind_fields_consistent`
     can); the text is trimmed, a blank street is 400, streets and `violation_no` at most 200 characters.
-  - **A sidewalk's borough is its BBL's.** The BBL must be 10 digits, the first 1-5 (400 otherwise), and `boro`
-    is set from that digit on create and on every edit; one sent that isn't the BBL's is 400. A ped ramp's is sent.
+  - **Borough, block and lot, no BBL** (migration 036 dropped `bbl`). The borough is sent, for either kind, and
+    can be changed. A block is at most 5 digits and a lot at most 4, sent as text and stored without their leading
+    zeros (`"00123"` is `"123"`, `"0000"` is `"0"`; `_tax_map_number` in `api/schemas/property.py`, a 422 for
+    anything but digits or for too many; the table's CHECKs `chk_properties_block_format` and
+    `chk_properties_lot_format` hold the same). Responses carry `boro`, `block` and `lot` as stored (null for a
+    ped ramp). A BBL, if an export to a city system ever needs one, is the borough's digit and the two padded
+    (`LPAD(block, 5, '0')`, `LPAD(lot, 4, '0')`).
   - **The kind never changes.** PATCH with another `kind` is 400 `Property kind cannot be changed. Delete and
     recreate.`; the same kind counts as nothing sent. PATCH merges the fields sent over the property and checks
     the whole as `PropertyCreate` (a 422 in FastAPI's own shape), then writes the record whole.
   - **Labels are worked out, not stored.** Every property response (task orders' `properties` included) carries
     `display_address`: a sidewalk's `address`, or a ped ramp's `{street 1} & {street 2} — {quadrant} Quadrant
-    (Facing {the street facing_street names})`; and `block_display` and `lot_display`, a sidewalk's BBL digits
-    2-6 and 7-10 without leading zeros (null for a ped ramp). The frontend shows `display_address` wherever it
-    showed `address`.
+    (Facing {the street facing_street names})`. The frontend shows `display_address` wherever it showed `address`.
   - **The list's `status`** (worked out in its statement): `{state: "constructed_on", date}` once the live PIR is
     signed as built (`as_built_signed_at`; `date` its day in `FORM_TIMEZONE`, as the export dates signatures);
     else `{state: "task_ordered", date: null}` when the property is in a live task order; else `{state: "none",
@@ -883,9 +887,10 @@ Any change must follow these.
     parameters (`%s::icid.boro`) and read them back as text.
   - **Migration 035 must be in the database before this code runs** (every property read names `kind`), and the
     code before it can't create a property once it is (its INSERT leaves the NOT NULL `boro` out): deploy right
-    after running it.
-  - **Fields:** `bbl` (10 digits, above), `address` (200) and `notes` (2000, optional; blank is NULL), all
-    trimmed; a blank BBL or address is 400. `property_type` is one of `1_3_family`, `4_plus_family` and
+    after running it. **The same holds for 036**: this code reads `block` and `lot`, and the code before it reads
+    `bbl`, which 036 drops.
+  - **Fields:** `address` (200) and `notes` (2000, optional; blank is NULL), both trimmed; a blank address is
+    400. `property_type` is one of `1_3_family`, `4_plus_family` and
     `expedited` (a Pydantic `Literal`, so anything else is FastAPI's 422, unlike the admin forms' 400s; the table
     has the same CHECK). The response also carries `id`, `project_id`, `created_at`, `updated_at`, `created_by`,
     `deleted_at` and `deleted_by`. Every write sets `updated_at`.
@@ -893,10 +898,13 @@ Any change must follow these.
     `dot_signed` when it has one, `as_built_signed` once that PIR's `as_built_signed_at` is set. It is read in
     the list's own statement (a LEFT JOIN to the live PIR, which `uq_pirs_property` keeps to one), and only the
     list has it: `GET /v1/properties/{id}` and a task order's `properties` don't.
-  - **The BBL is unique per project among live properties** (`uq_properties_project_bbl`, partial,
-    `WHERE deleted_at IS NULL`), matched exactly; the same BBL in another project is fine. Create is
+  - **A borough, block and lot is unique per project among live sidewalks** (`uq_properties_project_sidewalk_bbl`
+    on `(project_id, boro, block, lot)`, partial, `WHERE kind = 'sidewalk' AND deleted_at IS NULL`); the same lot
+    in another project, or in another borough, is fine, and ped ramps have no such rule. Create is
     `ON CONFLICT DO NOTHING` (no target, as for `create_idr`); edit and un-delete check with `NOT EXISTS` in the
-    statement, and the index backs them. Each answers a clash with 409 `{detail, existing_property_id}`.
+    statement, and the index backs them. Each answers a clash with 409 `{detail, existing_property_id}`, the
+    holder found by `get_sidewalk_at`: `A site at {boro} Block {block} Lot {lot} already exists in this project.`
+    (un-delete: `Another site at ... now exists in this project.`).
   - **Who:** reading takes a user on the project in any role, or an admin (`project_member` for the list,
     `property_member` by id; 403 `Project access required`). A demo user gets 404 for another project's
     property, as the project fence does. **Creating and editing** take the same (S2; `project_member` for
@@ -905,10 +913,10 @@ Any change must follow these.
     soft-deleted property (400 `Property is deleted`). Soft delete and un-delete stay admin only.
     `include_deleted=true` on the list from anyone but an admin is ignored, not refused (the IDR list refuses
     it).
-  - **Soft delete, IDR-style:** `POST .../admin/soft-delete` sets `deleted_at` and `deleted_by` and frees the
-    BBL; again is a 200 that changes nothing. `POST .../admin/undelete` clears both; 404 `Property is not
+  - **Soft delete, IDR-style:** `POST .../admin/soft-delete` sets `deleted_at` and `deleted_by` and frees a
+    sidewalk's lot; again is a 200 that changes nothing. `POST .../admin/undelete` clears both; 404 `Property is not
     deleted` for one that isn't. There is no permanent delete. A deleted property can still be read by id, and
-    edited by an admin; an edit of a deleted one isn't checked against the live BBLs (un-deleting it is).
+    edited by an admin; an edit of a deleted one isn't checked against the live sidewalks' lots (un-deleting it is).
   - `created_by` is NOT NULL and `NO ACTION`, so a user who added a property can't be permanently deleted:
     `count_user_references` counts properties they created or deleted.
   - **Migration 029 must be in the database before this code runs**: the routes and the user-reference count

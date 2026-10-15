@@ -30,13 +30,13 @@ DELETED = datetime(2026, 10, 14, 10, 0, tzinfo=timezone.utc)
 
 PROJECT_ROW = {"project_id": "HWS0023", "project_name": "S/W Queens 2025", "project_description": None,
                "registration_code": None, "borough": "Queens", "status": None}
-PROPERTY_ROW = {"id": PROPERTY_ID, "project_id": "HWS0023", "bbl": "4012340056", "address": "12-34 56th Ave",
+PROPERTY_ROW = {"id": PROPERTY_ID, "project_id": "HWS0023", "block": "1234", "lot": "56", "address": "12-34 56th Ave",
                 "kind": "sidewalk", "boro": "Queens", "violation_no": None, "intersection_street_1": None,
                 "intersection_street_2": None, "quadrant": None, "facing_street": None, "ramp_type": None,
                 "property_type": "1_3_family", "notes": None, "created_at": CREATED, "updated_at": CREATED,
                 "created_by": ADMIN_ID, "deleted_at": None, "deleted_by": None}
 # The same property as jsonb hands it back inside a task order
-BUNDLED_JSON = {"id": str(PROPERTY_ID), "project_id": "HWS0023", "bbl": "4012340056", "address": "12-34 56th Ave",
+BUNDLED_JSON = {"id": str(PROPERTY_ID), "project_id": "HWS0023", "block": "1234", "lot": "56", "address": "12-34 56th Ave",
                 "kind": "sidewalk", "boro": "Queens", "violation_no": None, "intersection_street_1": None,
                 "intersection_street_2": None, "quadrant": None, "facing_street": None, "ramp_type": None,
                 "property_type": "1_3_family", "notes": None, "created_at": "2026-10-14T09:00:00+00:00",
@@ -154,7 +154,7 @@ class TestGetTaskOrder:
             response = inspector.get(URL)
         assert response.status_code == 200
         properties = response.json()["data"]["properties"]
-        assert [p["id"] for p in properties] == [str(PROPERTY_ID)] and properties[0]["bbl"] == "4012340056"
+        assert [p["id"] for p in properties] == [str(PROPERTY_ID)] and properties[0]["block"] == "1234"
         assert run.call_args.args[1] == (TASK_ORDER_ID,)
 
     def test_the_detail_leaves_soft_deleted_properties_out(self, admin_client):
@@ -162,7 +162,7 @@ class TestGetTaskOrder:
             admin_client.get(URL)
         one_line = flat(run.call_args.args[0])
         assert ("jsonb_agg(to_jsonb(p) ORDER BY COALESCE(p.address, p.intersection_street_1 || ' & ' || "
-                "p.intersection_street_2), p.quadrant, p.bbl)") in one_line
+                "p.intersection_street_2), p.quadrant, p.boro, p.block, p.lot)") in one_line
         assert "WHERE tp.task_order_id = t.id AND p.deleted_at IS NULL), '[]'::jsonb) AS properties" in one_line
 
     def test_a_user_who_isnt_on_its_project_is_forbidden(self):
@@ -456,10 +456,10 @@ class TestSoftDeletedPropertiesStayBundled:
 
 class TestBundledPropertiesAreLabelled:
     def test_each_bundled_property_carries_its_display_address_block_and_lot(self, admin_client):
-        ramp = {**BUNDLED_JSON, "kind": "ped_ramp", "bbl": None, "address": None, "property_type": None,
+        ramp = {**BUNDLED_JSON, "kind": "ped_ramp", "block": None, "lot": None, "address": None, "property_type": None,
                 "intersection_street_1": "Main St", "intersection_street_2": "1st Ave", "quadrant": "NE",
                 "facing_street": "street_2", "ramp_type": "PARALLEL"}
         with patch(TASKS, return_value=[{**TASK_ORDER_ROW, "properties": [BUNDLED_JSON, ramp]}]):
             properties = admin_client.get(URL).json()["data"]["properties"]
-        assert [(p["display_address"], p["block_display"], p["lot_display"]) for p in properties] == [
+        assert [(p["display_address"], p["block"], p["lot"]) for p in properties] == [
             ("12-34 56th Ave", "1234", "56"), ("Main St & 1st Ave \u2014 NE Quadrant (Facing 1st Ave)", None, None)]

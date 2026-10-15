@@ -1,9 +1,10 @@
 from datetime import date as Date
 from datetime import datetime
-from typing import Literal, Optional
+import re
+from typing import Annotated, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, computed_field, model_validator
+from pydantic import AfterValidator, BaseModel, computed_field, model_validator
 
 from api.schemas.pir_annotation import Boro
 
@@ -17,28 +18,45 @@ RampType = Literal["PERPENDICULAR", "PARALLEL", "CUT_THROUGH"]
 
 # The fields each kind must have, and the ones only it takes
 REQUIRED_BY_KIND: dict[str, tuple[str, ...]] = {
-    "sidewalk": ("bbl", "address", "property_type"),
+    "sidewalk": ("boro", "block", "lot", "address", "property_type"),
     "ped_ramp": ("boro", "intersection_street_1", "intersection_street_2", "quadrant", "facing_street", "ramp_type"),
 }
 ONLY_BY_KIND: dict[str, tuple[str, ...]] = {
-    "sidewalk": ("bbl", "address", "property_type", "violation_no"),
+    "sidewalk": ("block", "lot", "address", "property_type", "violation_no"),
     "ped_ramp": ("intersection_street_1", "intersection_street_2", "quadrant", "facing_street", "ramp_type"),
 }
-# A BBL's first digit, and the borough it names
-BOROUGH_BY_BBL_DIGIT: dict[str, str] = {
-    "1": "Manhattan", "2": "Bronx", "3": "Brooklyn", "4": "Queens", "5": "Staten Island",
-}
+
+
+def _tax_map_number(value: str, name: str, digits: int) -> str:
+    """
+    Read a block or a lot as the tax map numbers it: digits only, its leading zeros dropped ("0" for zero).
+    Takes the value as sent, the field's name and the most digits it has without its leading zeros.
+    Returns the number as text; raises ValueError for anything else.
+    """
+    value = value.strip()
+    if not re.fullmatch(r"[0-9]+", value):
+        raise ValueError(f"{name} must be digits only")
+    number = value.lstrip("0") or "0"
+    if len(number) > digits:
+        raise ValueError(f"{name} can have at most {digits} digits")
+    return number
+
+
+# A sidewalk's block (at most 5 digits) and lot (at most 4), as the table's CHECKs hold them
+Block = Annotated[str, AfterValidator(lambda value: _tax_map_number(value, "block", 5))]
+Lot = Annotated[str, AfterValidator(lambda value: _tax_map_number(value, "lot", 4))]
 
 
 class PropertyCreate(BaseModel):
     """
     A property being added to a project: a sidewalk (the default) or a ped ramp. Each kind must have its own fields
-    and can't carry the other's (a 422). The route trims the text; a sidewalk's borough is read off its BBL.
+    and can't carry the other's (a 422). The route trims the text; a block and a lot lose their leading zeros.
     """
 
     kind: Kind = "sidewalk"
     boro: Optional[Boro] = None
-    bbl: Optional[str] = None
+    block: Optional[Block] = None
+    lot: Optional[Lot] = None
     address: Optional[str] = None
     property_type: Optional[PropertyType] = None
     violation_no: Optional[str] = None
@@ -74,7 +92,8 @@ class PropertyUpdate(BaseModel):
 
     kind: Optional[Kind] = None
     boro: Optional[Boro] = None
-    bbl: Optional[str] = None
+    block: Optional[Block] = None
+    lot: Optional[Lot] = None
     address: Optional[str] = None
     property_type: Optional[PropertyType] = None
     violation_no: Optional[str] = None
@@ -89,14 +108,15 @@ class PropertyUpdate(BaseModel):
 class PropertyOut(BaseModel):
     """
     A property: a row of icid.properties, deleted_at and deleted_by None for one that isn't deleted, with how it is
-    labelled (display_address) and, for a sidewalk, its block and lot as read off the BBL.
+    labelled (display_address).
     """
 
     id: UUID
     project_id: str
     kind: Kind
     boro: Boro
-    bbl: Optional[str] = None
+    block: Optional[str] = None
+    lot: Optional[str] = None
     address: Optional[str] = None
     property_type: Optional[str] = None
     violation_no: Optional[str] = None
@@ -126,37 +146,6 @@ class PropertyOut(BaseModel):
         return (
             f"{self.intersection_street_1} & {self.intersection_street_2} — {self.quadrant} Quadrant (Facing {facing})"
         )
-
-    @computed_field
-    @property
-    def block_display(self) -> Optional[str]:
-        """
-        Read a sidewalk's block off its BBL (digits 2-6), without leading zeros.
-        Takes the property.
-        Returns the block, or None for a ped ramp or a BBL that isn't 10 digits.
-        """
-        return _bbl_part(self.bbl, 1, 6) if self.kind == "sidewalk" else None
-
-    @computed_field
-    @property
-    def lot_display(self) -> Optional[str]:
-        """
-        Read a sidewalk's lot off its BBL (digits 7-10), without leading zeros.
-        Takes the property.
-        Returns the lot, or None for a ped ramp or a BBL that isn't 10 digits.
-        """
-        return _bbl_part(self.bbl, 6, 10) if self.kind == "sidewalk" else None
-
-
-def _bbl_part(bbl: Optional[str], start: int, end: int) -> Optional[str]:
-    """
-    Cut a part out of a 10-digit BBL and drop its leading zeros.
-    Takes the BBL and the part's start and end (Python slice positions).
-    Returns the part ("0" when it is all zeros), or None when the BBL isn't 10 digits.
-    """
-    if bbl is None or len(bbl) != 10 or not bbl.isdigit():
-        return None
-    return bbl[start:end].lstrip("0") or "0"
 
 
 class PropertyStatus(BaseModel):
@@ -193,7 +182,7 @@ class PropertyListResponse(BaseModel):
 
 
 class PropertyConflict(BaseModel):
-    """The 409 body when a project already has a property with the BBL: the reason, and that property."""
+    """The 409 body when a project already has a sidewalk at the borough, block and lot: the reason, and that property."""
 
     detail: str
     existing_property_id: UUID

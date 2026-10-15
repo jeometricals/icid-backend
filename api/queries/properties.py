@@ -7,17 +7,24 @@ from api.db.runner import run_query
 
 # A property as every function here returns it, its enums as text
 _PROPERTY_COLUMNS = """
-            p.id, p.project_id, p.kind::text AS kind, p.boro::text AS boro, p.bbl, p.address, p.property_type,
+            p.id, p.project_id, p.kind::text AS kind, p.boro::text AS boro, p.block, p.lot, p.address, p.property_type,
             p.violation_no, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
             p.facing_street::text AS facing_street, p.ramp_type::text AS ramp_type, p.notes,
             p.created_at, p.updated_at, p.created_by, p.deleted_at, p.deleted_by"""
 # What properties are ordered by: a sidewalk's address, a ped ramp's intersection (then its quadrant)
 PROPERTY_ORDER = (
-    "COALESCE(p.address, p.intersection_street_1 || ' & ' || p.intersection_street_2), p.quadrant, p.bbl"
+    "COALESCE(p.address, p.intersection_street_1 || ' & ' || p.intersection_street_2), p.quadrant, p.boro, p.block, p.lot"
 )
+# Another live sidewalk of the project at the borough, block and lot (the three as placeholders, in that order)
+_SAME_LOT = """
+                  other.project_id = p.project_id
+                  AND other.kind = 'sidewalk'
+                  AND other.boro = %s::icid.boro AND other.block = %s AND other.lot = %s
+                  AND other.id <> p.id
+                  AND other.deleted_at IS NULL"""
 # The columns a create or an edit writes (all of them, on an edit), each with its typed placeholder
 _WRITTEN = (
-    ("boro", "%s::icid.boro"), ("bbl", "%s"), ("address", "%s"), ("property_type", "%s"), ("violation_no", "%s"),
+    ("boro", "%s::icid.boro"), ("block", "%s"), ("lot", "%s"), ("address", "%s"), ("property_type", "%s"), ("violation_no", "%s"),
     ("intersection_street_1", "%s"), ("intersection_street_2", "%s"), ("quadrant", "%s::icid.quadrant"),
     ("facing_street", "%s::icid.facing_street"), ("ramp_type", "%s::icid.ramp_type"), ("notes", "%s"),
 )
@@ -90,28 +97,30 @@ def get_property(property_id: UUID) -> Optional[dict[str, Any]]:
     return rows[0] if rows else None
 
 
-def get_property_by_bbl(project_id: str, bbl: str) -> Optional[dict[str, Any]]:
+def get_sidewalk_at(project_id: str, boro: str, block: str, lot: str) -> Optional[dict[str, Any]]:
     """
-    Fetch the property of a project that holds a BBL: the one that isn't deleted.
-    Takes the project id and the BBL, matched exactly.
-    Returns the property dict, or None if no live property of the project has it.
+    Fetch the sidewalk of a project at a borough, block and lot: the one that isn't deleted.
+    Takes the project id, the borough, and the block and lot as stored (no leading zeros).
+    Returns the property dict, or None if no live sidewalk of the project is there.
     """
     sql = (
         "\n        SELECT"
         + _PROPERTY_COLUMNS
         + """
         FROM icid.properties p
-        WHERE p.project_id = %s AND p.bbl = %s AND p.deleted_at IS NULL;"""
+        WHERE p.project_id = %s AND p.kind = 'sidewalk'
+          AND p.boro = %s::icid.boro AND p.block = %s AND p.lot = %s
+          AND p.deleted_at IS NULL;"""
     )
-    rows = run_query(sql, (project_id, bbl))
+    rows = run_query(sql, (project_id, boro, block, lot))
     return rows[0] if rows else None
 
 
 def create_property(project_id: str, created_by_uuid: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
-    Add a property to a project. Adds nothing when a live property of the project already has the BBL.
-    Takes the project id, the uuid of the user adding it, and the values keyed by column: kind, boro, a sidewalk's bbl, address, property_type and violation_no or a ped ramp's intersection_street_1 and _2, quadrant, facing_street and ramp_type, and notes (one left out is None).
-    Returns the new property dict, or None when the BBL is taken.
+    Add a property to a project. Adds nothing when a live sidewalk of the project is already at its borough, block and lot.
+    Takes the project id, the uuid of the user adding it, and the values keyed by column: kind, boro, a sidewalk's block, lot, address, property_type and violation_no or a ped ramp's intersection_street_1 and _2, quadrant, facing_street and ramp_type, and notes (one left out is None).
+    Returns the new property dict, or None when the borough, block and lot are taken.
     """
     sql = (
         """
@@ -133,7 +142,7 @@ def create_property(project_id: str, created_by_uuid: UUID, data: dict[str, Any]
 
 def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
-    Write a property's record whole, as an edit leaves it (its kind is never written). A live property is left alone when another live property of its project already has the BBL it would end up with.
+    Write a property's record whole, as an edit leaves it (its kind is never written). A live property is left alone when another live sidewalk of its project is already at the borough, block and lot it would end up with.
     Takes the property's id and every written column's value keyed by column (one left out is written as None).
     Returns the updated property dict, or None when no property matches or the change would collide.
     """
@@ -150,28 +159,25 @@ def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[st
               OR NOT EXISTS (
                   SELECT 1
                   FROM icid.properties other
-                  WHERE other.project_id = p.project_id
-                    AND other.bbl = %s
-                    AND other.id <> p.id
-                    AND other.deleted_at IS NULL
+                  WHERE""" + _SAME_LOT + """
               )
           )
         RETURNING"""
         + _PROPERTY_COLUMNS
         + ";"
     )
-    params = (*_written_values(data), property_id, data.get("bbl"))
+    params = (*_written_values(data), property_id, data.get("boro"), data.get("block"), data.get("lot"))
     try:
         rows = run_query(sql, params)
     except UniqueViolation:
-        # Another property took the BBL between the statement's own check and its write
+        # Another sidewalk took the lot between the statement's own check and its write
         return None
     return rows[0] if rows else None
 
 
 def soft_delete_property(property_id: UUID, deleted_by_uuid: UUID) -> Optional[dict[str, Any]]:
     """
-    Mark a property deleted, with when and by whom; it frees its BBL.
+    Mark a property deleted, with when and by whom; a sidewalk frees its borough, block and lot.
     Takes the property's id and the uuid of the admin deleting it.
     Returns the updated property dict, or None if no property matches or it is already deleted.
     """
@@ -192,9 +198,9 @@ def soft_delete_property(property_id: UUID, deleted_by_uuid: UUID) -> Optional[d
 
 def undelete_property(property_id: UUID) -> Optional[dict[str, Any]]:
     """
-    Bring a deleted property back: clear deleted_at and deleted_by. Changes nothing when a live property of its project now has its BBL.
+    Bring a deleted property back: clear deleted_at and deleted_by. Changes nothing when a live sidewalk of its project is now at its borough, block and lot.
     Takes the property's id.
-    Returns the updated property dict, or None if no property matches, it isn't deleted, or its BBL is taken.
+    Returns the updated property dict, or None if no property matches, it isn't deleted, or its lot is taken.
     """
     sql = (
         """
@@ -208,7 +214,8 @@ def undelete_property(property_id: UUID) -> Optional[dict[str, Any]]:
               SELECT 1
               FROM icid.properties other
               WHERE other.project_id = p.project_id
-                AND other.bbl = p.bbl
+                AND other.kind = 'sidewalk'
+                AND other.boro = p.boro AND other.block = p.block AND other.lot = p.lot
                 AND other.id <> p.id
                 AND other.deleted_at IS NULL
           )
@@ -219,6 +226,6 @@ def undelete_property(property_id: UUID) -> Optional[dict[str, Any]]:
     try:
         rows = run_query(sql, (property_id,))
     except UniqueViolation:
-        # Another property took the BBL between the statement's own check and its write
+        # Another sidewalk took the lot between the statement's own check and its write
         return None
     return rows[0] if rows else None

@@ -30,8 +30,8 @@ report_id  │ report_id (ON DELETE CASCADE)
 
 projects ──< contract_items ··· spec_items     project_id ON DELETE CASCADE; spec_item_id optional (legacy catalog)
 projects ──< quantities                        project_id, a copy of the IDR's
-projects ──< properties                        project_id; soft-deleted, unique BBL per project among live ones;
-                                               a sidewalk (by BBL) or a ped ramp (by intersection)
+projects ──< properties                        project_id; soft-deleted; a sidewalk (by borough, block and lot,
+                                               unique per project among live ones) or a ped ramp (by intersection)
 projects ──< task_orders ──< task_order_properties >── properties
                                                both FKs ON DELETE CASCADE; both sides share a project
 properties ──< pirs                            property_id, no cascade; one live PIR per property
@@ -68,7 +68,7 @@ client or a project except a project's `contract_items`. `quantities.reporter_uu
   the bytes live in Supabase Storage.
 - **idr_audit** logs what is done to an IDR from submission on; **idr_field_edits** holds what reviewers
   changed on it. **quantities** holds an approved IDR's pay-item quantities, one row each.
-- **properties** are where a project's work is done: a sidewalk (a tax lot, named by its BBL) or a pedestrian
+- **properties** are where a project's work is done: a sidewalk (a tax lot, named by its borough, block and lot) or a pedestrian
   ramp (a corner of an intersection). Project members add and edit them; an admin soft-deletes and restores
   them. See [properties](#properties).
 - **task_orders** bundle a project's properties (**task_order_properties**, the join); a property can be in
@@ -387,7 +387,8 @@ them back for an IDR that comes back approved. So it only ever holds IDRs that a
 ### properties
 
 A project's properties, one row each, of two kinds (migration 035): a **sidewalk**, the tax lot its work is done
-on, named by BBL (borough, block and lot), and a **ped ramp**, a corner of an intersection. Each kind has its own
+on, named by its borough, block and lot (migration 036; a BBL before it), and a **ped ramp**, a corner of an
+intersection. Each kind has its own
 columns and leaves the other's NULL (CHECK `properties_kind_fields_consistent`); both have a borough. Added by
 migration 029. Anyone on the project, in any role, and any admin reads, adds and changes them
 (`/v1/projects/{id}/properties`, `/v1/properties/{id}`); only admins soft-delete and restore them. Demo users only
@@ -398,8 +399,9 @@ read (since S2).
 | `id` | UUID PK | `gen_random_uuid()` |
 | `project_id` | TEXT NOT NULL | FK → `projects.project_id` |
 | `kind` | `icid.property_kind` NOT NULL | `sidewalk` (the default, which every row before 035 got) or `ped_ramp`. Never changes after create (the API) |
-| `boro` | `icid.boro` NOT NULL | `Manhattan`, `Bronx`, `Brooklyn`, `Queens` or `Staten Island`. A sidewalk's is its BBL's first digit (1-5), set by the API (and by 035's backfill); a ped ramp's is sent |
-| `bbl` | TEXT | Sidewalk only, and required there: 10 digits, the borough's first (the API). Matched exactly. Unique per project among properties that aren't deleted (`uq_properties_project_bbl`, `WHERE deleted_at IS NULL`; a ped ramp's NULL never clashes) |
+| `boro` | `icid.boro` NOT NULL | `Manhattan`, `Bronx`, `Brooklyn`, `Queens` or `Staten Island`, sent for either kind (035 backfilled the rows before it from their BBLs' first digit) |
+| `block` | TEXT | Sidewalk only, required there: at most 5 digits, no leading zeros (`0` for zero); CHECK `chk_properties_block_format` |
+| `lot` | TEXT | Sidewalk only, required there: at most 4 digits, no leading zeros; CHECK `chk_properties_lot_format`. `(project_id, boro, block, lot)` is unique among live sidewalks (`uq_properties_project_sidewalk_bbl`, `WHERE kind = 'sidewalk' AND deleted_at IS NULL`) |
 | `address` | TEXT | Sidewalk only, required there. Trimmed |
 | `property_type` | TEXT | Sidewalk only, required there: `1_3_family`, `4_plus_family` or `expedited`; CHECK `chk_properties_type` |
 | `violation_no` | TEXT | Sidewalk only, optional. Trimmed, blank is NULL |
@@ -412,14 +414,16 @@ read (since S2).
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
 
-A soft-deleted property keeps its row and frees its BBL; un-deleting it is refused (409) while another live
-property of the project has that BBL. There is no permanent delete. The unique index also serves lookups by
-project, so there is no separate project index. Ped ramps have no uniqueness rule: two alike can be added.
+A soft-deleted property keeps its row and frees its lot; un-deleting it is refused (409) while another live
+sidewalk of the project is at that borough, block and lot. There is no permanent delete. Ped ramps have no
+uniqueness rule: two alike can be added. There is no project index: the primary key serves reads by id, and a
+project's list is small.
 
 The five enums are Postgres types (`CREATE TYPE`), unlike the rest of the schema's TEXT-and-CHECK enums; the
 statements cast their parameters (`%s::icid.quadrant`) and read them back `::text`. Nothing about a property's
-label is stored: `display_address`, `block_display` and `lot_display` are worked out by the API (see `CLAUDE.md`).
-**Rolling 035 back** needs every row to have a BBL and an address again first: delete or fill the ped ramps.
+label is stored: `display_address` is worked out by the API (see `CLAUDE.md`). **Rolling 036 back** is
+deterministic: add `bbl` back as the borough's digit, `LPAD(block, 5, '0')` and `LPAD(lot, 4, '0')`.
+**Rolling 035 back** then needs every row to have a BBL and an address again first: delete or fill the ped ramps.
 
 ### task_orders
 
@@ -852,6 +856,7 @@ content as TEXT, linked to a report and a form template).
 | 032 | `032_flags.sql` | R1b | Created `flags` (FK to `pirs` with no cascade; FK to `contract_items` ON DELETE SET NULL; FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`; CHECKs on `display_order`, `shape`, `surveyed_mark`, `surveyed_non_assessable_reason`, `surveyed_thickness` and `reported_quantity`) with the partial indexes `idx_flags_pir` and `idx_flags_pay_item`. No existing table or row changed. |
 | 033 | `033_pir_pages_and_flag_coords.sql` | R1e | Created `pir_pages` (FK to `pirs` ON DELETE CASCADE, FK to `users` for `deleted_by` ON DELETE SET NULL, CHECKs on `page_number`, `width_px`, `height_px`, `scale_px_per_ft` and `rotation_deg`) with the partial unique index `pir_pages_pir_page_num_live_uq` and `pir_pages_pir_idx`. Dropped `pirs.source_image_url` and `source_image_scale` (no PIR had an image). Soft-deleted the 3 flags made through R1b's form, then added `flags.pir_page_id` (FK to `pir_pages`, no action), CHECK `chk_flags_live_on_a_page` and `flags_pir_page_idx`. |
 | 035 | `035_property_subtyping.sql` | Property kinds | Created the enum types `property_kind`, `boro`, `quadrant`, `facing_street` and `ramp_type`. Added `properties.kind` (NOT NULL DEFAULT `sidewalk`), `boro` (backfilled from each BBL's first digit, then NOT NULL), `violation_no`, `intersection_street_1`, `intersection_street_2`, `quadrant`, `facing_street` and `ramp_type`; dropped NOT NULL on `bbl`, `address` and `property_type`; added CHECK `properties_kind_fields_consistent`. The 4 existing rows became sidewalks (3 Brooklyn, 1 Queens). |
+| 036 | `036_split_bbl_into_block_lot.sql` | R1e.3 | Added `properties.block` and `lot` (TEXT, CHECKs `chk_properties_block_format` and `chk_properties_lot_format`), backfilled from each sidewalk's BBL without leading zeros; replaced `properties_kind_fields_consistent` (block and lot where it had bbl); dropped `uq_properties_project_bbl` and the `bbl` column; created `uq_properties_project_sidewalk_bbl` on `(project_id, boro, block, lot)` `WHERE kind = 'sidewalk' AND deleted_at IS NULL`. The 6 rows: 5 sidewalks backfilled, 1 ped ramp untouched. |
 | 034 | `034_smart_pir_data_model.sql` | Smart PIR | Added `flags.defect_codes` (TEXT[] NOT NULL DEFAULT `{}`, CHECK `chk_flags_defect_codes`) and widened `chk_flags_non_assessable_reason` to R1b's nine values plus the R1e.1 survey's (22). Created `non_assessable_areas` (FK to `flags`, no action; partial unique index `nas_flag_order_live_uq`), `features` (FKs to `pir_pages` and `flags`, no action; to `contract_items` ON DELETE SET NULL), `segments` (FK to `pir_pages`, no action; to `contract_items` ON DELETE SET NULL) and `pir_annotations` (keyed by `pir_page_id`, no action), the first three with `created_by` and, ON DELETE SET NULL, `deleted_by` FKs to `users` (20 → 26 FKs to `users`). Added `projects.cost_per_sf_4in` and `cost_per_sf_7in` (NUMERIC(10,4), ≥ 0). No existing row changed; the thickness CHECK already held `7in_as_4in`. |
 
 Where each current column came from:
@@ -869,6 +874,7 @@ Where each current column came from:
 | `quantities` | all | 025 |
 | `properties` | all | 029 |
 | `properties` | `kind`, `boro`, `violation_no`, `intersection_street_1`, `intersection_street_2`, `quadrant`, `facing_street`, `ramp_type`, `properties_kind_fields_consistent`; `bbl`, `address` and `property_type` nullable | 035 |
+| `properties` | `block`, `lot`, `chk_properties_block_format`, `chk_properties_lot_format`, `uq_properties_project_sidewalk_bbl`, the `properties_kind_fields_consistent` of today; `bbl` and `uq_properties_project_bbl` dropped | 036 |
 | `task_orders`, `task_order_properties` | all | 030 |
 | `pirs` | all | 031 |
 | `flags` | all but `pir_page_id` | 032 |
