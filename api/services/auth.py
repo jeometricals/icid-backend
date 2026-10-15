@@ -20,12 +20,15 @@ import jwt
 from fastapi import Depends, Header, HTTPException, Request
 
 from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
+from api.queries.features import get_feature
 from api.queries.flags import get_flag
 from api.queries.idrs import get_idr_by_id
+from api.queries.non_assessable_areas import get_area
 from api.queries.pir_pages import get_page
 from api.queries.pirs import get_pir
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.properties import get_property
+from api.queries.segments import get_segment
 from api.queries.task_orders import get_task_order
 from api.queries.users import create_demo_user, get_user_by_uuid, get_user_for_auth
 from api.schemas.auth import UserOut
@@ -337,6 +340,33 @@ def flag_member(flag_id: UUID, user: UserOut = Depends(current_user)) -> dict:
     Returns the flag dict; raises 404 or 403 as _readable_on_project does.
     """
     return _readable_on_project(get_flag(flag_id), user, "Flag not found")
+
+
+def non_assessable_area_member(non_assessable_area_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one non-assessable area: the signed-in user must be assigned to its flag's PIR's property's project (in any role), or be an admin.
+    Takes the non_assessable_area_id path parameter and the current user.
+    Returns the area dict (with its flag's, page's, PIR's and property's deleted states); raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_area(non_assessable_area_id), user, "Non-assessable area not found")
+
+
+def feature_member(feature_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one feature: the signed-in user must be assigned to its page's PIR's property's project (in any role), or be an admin.
+    Takes the feature_id path parameter and the current user.
+    Returns the feature dict (with its page's, PIR's and property's deleted states); raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_feature(feature_id), user, "Feature not found")
+
+
+def segment_member(segment_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one segment: the signed-in user must be assigned to its page's PIR's property's project (in any role), or be an admin.
+    Takes the segment_id path parameter and the current user.
+    Returns the segment dict (with its page's, PIR's and property's deleted states); raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_segment(segment_id), user, "Segment not found")
 
 
 def task_order_member(task_order_id: UUID, user: UserOut = Depends(current_user)) -> dict:

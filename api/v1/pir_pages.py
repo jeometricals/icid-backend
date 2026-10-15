@@ -4,9 +4,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from api.queries.pir_annotations import get_annotations, upsert_annotations
 from api.queries.pir_pages import list_pages_for_pir, update_page_rotation, update_page_scale
 from api.queries.pirs import get_pir
 from api.schemas.auth import UserOut
+from api.schemas.pir_annotation import PirAnnotationIn, PirAnnotationOut, PirAnnotationResponse
 from api.schemas.pir import PirImage, PirImageResponse, PirImageScale, PirOut, PirResponse
 from api.schemas.pir_page import (
     PirPageListResponse,
@@ -31,9 +33,8 @@ from api.services.pir_image import (
     with_signed_url,
 )
 from api.v1._shared import (
+    PAGE_CHAIN,
     PAGE_DELETED,
-    PIR_DELETED,
-    PROPERTY_DELETED,
     refuse_deleted_chain,
     refuse_deleted_pir_for_member,
     writable_pir,
@@ -44,8 +45,6 @@ pir_router = APIRouter(prefix="/v1/pirs", tags=["PIR pages"], dependencies=[Depe
 # One page by its id
 router = APIRouter(prefix="/v1/pir-pages", tags=["PIR pages"], dependencies=[Depends(current_user)])
 
-# A page is the admin's once it, its PIR or its property is soft-deleted
-PAGE_CHAIN = [("deleted_at", PAGE_DELETED), ("pir_deleted_at", PIR_DELETED), ("property_deleted_at", PROPERTY_DELETED)]
 NO_IMAGE = "No image for this PIR"
 
 
@@ -236,6 +235,36 @@ def set_page_rotation(
     """
     refuse_deleted_chain(found, user, PAGE_CHAIN)
     return _page_response(update_page_rotation(pir_page_id, body.rotation_deg), "Page rotation updated")
+
+
+@router.get("/{pir_page_id}/annotations", response_model=PirAnnotationResponse)
+def get_page_annotations(found: dict = Depends(pir_page_member)) -> PirAnnotationResponse:
+    """
+    Fetch a page's title block. For a user on its project, or an admin.
+    Takes the page (loaded and checked by pir_page_member from the pir_page_id path parameter).
+    Returns a PirAnnotationResponse, its data None when the page has none yet; raises 403 for a user who isn't on its project and 404 for an unknown page.
+    """
+    row = get_annotations(found["pir_page_id"])
+    return PirAnnotationResponse(
+        status="success", message="Annotations retrieved" if row else "No annotations for this page",
+        data=None if row is None else PirAnnotationOut.model_validate(row),
+    )
+
+
+@router.put("/{pir_page_id}/annotations", response_model=PirAnnotationResponse)
+def put_page_annotations(
+    pir_page_id: UUID, body: PirAnnotationIn, found: dict = Depends(_writable_page), user: UserOut = Depends(current_user)
+) -> PirAnnotationResponse:
+    """
+    Set a page's title block, every field at once (a field left out is cleared). Same access as the scale.
+    Takes the page's id as a path parameter, the title block in the body, the page (loaded by _writable_page) and the user.
+    Returns a PirAnnotationResponse with the title block as it now is; raises 400 for a deleted page, PIR or property, 403 and 404 as for the scale, and 422 for a value that doesn't fit.
+    """
+    refuse_deleted_chain(found, user, PAGE_CHAIN)
+    row = upsert_annotations(pir_page_id, body.model_dump())
+    if row is None:
+        raise HTTPException(status_code=400, detail=PAGE_DELETED)
+    return PirAnnotationResponse(status="success", message="Annotations saved", data=PirAnnotationOut.model_validate(row))
 
 
 # ---------------------------------------------------------------------------------------------------------------------

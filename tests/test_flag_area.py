@@ -21,6 +21,8 @@ from api.services.flag_area import compute_area, polygon_area
     ("arc", {"r": 2, "theta": math.pi}, "6.28"),                       # 4 / 2 x (pi - 0) = 2 pi: a half disc
     ("arc", {"r": 10, "theta": math.pi / 2}, "28.54"),                 # 100 / 2 x (pi/2 - 1) = 28.5398...
     ("arc", {"r": 1, "theta": 2 * math.pi}, "3.14"),                   # the whole disc, pi
+    ("circle", {"r": 1}, "3.14"),                                      # pi (a feature's shape)
+    ("circle", {"r": 2.5}, "19.63"),                                   # 6.25 pi = 19.634...
 ])
 def test_each_shape_comes_to_its_hand_worked_area(shape, dimensions, area):
     assert compute_area(shape, dimensions) == Decimal(area)

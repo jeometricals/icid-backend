@@ -2,41 +2,61 @@ from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
-from psycopg.types.json import Jsonb
-
 from api.db.runner import run_query
+from api.queries._shared import PAY_ITEM_OF_PROJECT, placeholders, write_values
 
-# A flag as every function here returns it: its own columns, its PIR's property and project, what counts as its
-# quantity, and whether its page, PIR and property are deleted (what the routes check before a write). Read from a
-# row source named f (the table, or a CTE of rows just written).
-_FLAG_COLUMNS = """
+# A flag's net area: its shape's area less its non-assessable areas and the features subtracted from it, never below 0
+_NET = "GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0)"
+# A flag as every function here returns it: its own columns, its PIR's property and project, its non-assessable areas
+# and subtracted features, what counts as its quantity, and whether its page, PIR and property are deleted (what the
+# routes check before a write). Read from a row source named f (the table, or a CTE of rows just written).
+_FLAG_COLUMNS = (
+    """
             f.id, f.pir_id, f.pir_page_id, pir.property_id, p.project_id, f.display_order, f.added_in_field, f.shape, f.dimensions,
             f.sketch_x, f.sketch_y, f.rotation, f.surveyed_mark, f.surveyed_is_assessable,
-            f.surveyed_non_assessable_reason, f.surveyed_thickness, f.is_constructed, f.pay_item_id,
+            f.surveyed_non_assessable_reason, f.surveyed_thickness, f.is_constructed, f.pay_item_id, f.defect_codes,
             f.computed_quantity, f.reported_quantity,
-            COALESCE(f.reported_quantity, f.computed_quantity) AS quantity,
+            naa.area_count AS non_assessable_areas_count, naa.quantity AS non_assessable_quantity,
+            sub.quantity AS subtracted_quantity, """
+    + _NET
+    + """ AS net_quantity,
+            COALESCE(f.reported_quantity, """
+    + _NET
+    + """) AS quantity,
             (f.reported_quantity IS NOT NULL) AS is_overridden,
             f.quantity_delta_reason, f.created_at, f.updated_at, f.created_by, f.deleted_at, f.deleted_by,
             pg.deleted_at AS page_deleted_at, pir.deleted_at AS pir_deleted_at, p.deleted_at AS property_deleted_at"""
+)
+# A flag's areas are its live ones, and, once it is deleted, those deleted with it (at the same moment); the features
+# subtracted from it are the live ones
 _FROM = """
         JOIN icid.pirs pir ON pir.id = f.pir_id
         JOIN icid.properties p ON p.id = pir.property_id
-        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id"""
+        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id
+        CROSS JOIN LATERAL (
+            SELECT count(*) AS area_count, COALESCE(sum(na.computed_quantity), 0) AS quantity
+            FROM icid.non_assessable_areas na
+            WHERE na.flag_id = f.id AND (na.deleted_at IS NULL OR na.deleted_at = f.deleted_at)
+        ) naa
+        CROSS JOIN LATERAL (
+            SELECT COALESCE(sum(COALESCE(ft.reported_quantity, ft.computed_quantity)), 0) AS quantity
+            FROM icid.features ft
+            WHERE ft.flag_id = f.id AND ft.area_impact = 'subtract' AND ft.deleted_at IS NULL
+        ) sub"""
 # The columns a write sets from the request, in the order their values are passed, each with its type (so a NULL
 # parameter is typed, not text)
 _WRITABLE_TYPES = {
     "display_order": "int", "added_in_field": "boolean", "shape": "text", "dimensions": "jsonb", "sketch_x": "real",
     "sketch_y": "real", "rotation": "real", "surveyed_mark": "text", "surveyed_is_assessable": "boolean",
     "surveyed_non_assessable_reason": "text", "surveyed_thickness": "text", "pay_item_id": "uuid",
-    "reported_quantity": "numeric", "quantity_delta_reason": "text",
+    "reported_quantity": "numeric", "quantity_delta_reason": "text", "defect_codes": "text[]",
 }
+# What the PIR import writes, as this module does
+WRITABLE_TYPES = _WRITABLE_TYPES
 _WRITABLE = tuple(_WRITABLE_TYPES)
-_PLACEHOLDERS = [f"%s::{_WRITABLE_TYPES[column]}" for column in _WRITABLE]
+_PLACEHOLDERS = placeholders(_WRITABLE_TYPES)
 # The pay item, if any, must be one of the PIR's project's: p is the PIR's property
-_PAY_ITEM_OF_PROJECT = """(%s::uuid IS NULL OR EXISTS (
-              SELECT 1 FROM icid.contract_items ci
-              WHERE ci.contract_item_id = %s::uuid AND ci.project_id = p.project_id
-          ))"""
+_PAY_ITEM_OF_PROJECT = PAY_ITEM_OF_PROJECT
 
 
 def _values(data: dict[str, Any]) -> list[Any]:
@@ -45,7 +65,7 @@ def _values(data: dict[str, Any]) -> list[Any]:
     Takes the values keyed by column (every writable column present).
     Returns the list of parameters.
     """
-    return [Jsonb(data[column]) if column == "dimensions" else data.get(column) for column in _WRITABLE]
+    return write_values(_WRITABLE_TYPES, data)
 
 
 def list_flags(pir_id: UUID, include_deleted: bool = False) -> Optional[list[dict[str, Any]]]:
@@ -173,7 +193,7 @@ def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal) -> 
 
 def soft_delete_flag(flag_id: UUID, deleted_by_uuid: UUID) -> Optional[dict[str, Any]]:
     """
-    Mark a flag deleted, with when and by whom.
+    Mark a flag deleted, with when and by whom, and its live non-assessable areas with it (the same moment, so an un-delete brings back those).
     Takes the flag's id and the uuid of the user deleting it.
     Returns the updated flag dict, or None if no flag matches or it is already deleted.
     """
@@ -184,38 +204,54 @@ def soft_delete_flag(flag_id: UUID, deleted_by_uuid: UUID) -> Optional[dict[str,
             SET deleted_at = now(), deleted_by = %s, updated_at = now()
             WHERE id = %s AND deleted_at IS NULL
             RETURNING *
+        ),
+        areas AS (
+            UPDATE icid.non_assessable_areas
+            SET deleted_at = now(), deleted_by = %s, updated_at = now()
+            WHERE flag_id IN (SELECT id FROM f) AND deleted_at IS NULL
+            RETURNING non_assessable_area_id
         )
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
         + _FROM
-        + ";"
+        + "\n        CROSS JOIN (SELECT count(*) FROM areas) AS areas_retired;"
     )
-    rows = run_query(sql, (deleted_by_uuid, flag_id))
+    rows = run_query(sql, (deleted_by_uuid, flag_id, deleted_by_uuid))
     return rows[0] if rows else None
 
 
 def undelete_flag(flag_id: UUID) -> Optional[dict[str, Any]]:
     """
-    Bring a deleted flag back: clear deleted_at and deleted_by. Only a flag on a page that is still live comes back.
+    Bring a deleted flag back: clear deleted_at and deleted_by, on it and on the non-assessable areas deleted with it. Only a flag on a page that is still live comes back.
     Takes the flag's id.
-    Returns the updated flag dict, or None if no flag matches, it isn't deleted, it has no page or its page was replaced.
+    Returns the updated flag dict as the statement wrote it (its areas not yet counted: read it again for them), or None if no flag matches, it isn't deleted, it has no page or its page was replaced.
     """
     sql = (
         """
-        WITH f AS (
+        WITH before AS (
+            SELECT id, deleted_at FROM icid.flags WHERE id = %s
+        ),
+        f AS (
             UPDATE icid.flags flag
             SET deleted_at = NULL, deleted_by = NULL, updated_at = now()
             FROM icid.pir_pages page
             WHERE flag.id = %s AND flag.deleted_at IS NOT NULL
               AND page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL
             RETURNING flag.*
+        ),
+        areas AS (
+            UPDATE icid.non_assessable_areas na
+            SET deleted_at = NULL, deleted_by = NULL, updated_at = now()
+            FROM before
+            WHERE before.id IN (SELECT id FROM f) AND na.flag_id = before.id AND na.deleted_at = before.deleted_at
+            RETURNING na.non_assessable_area_id
         )
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
         + _FROM
-        + ";"
+        + "\n        CROSS JOIN (SELECT count(*) FROM areas) AS areas_restored;"
     )
-    rows = run_query(sql, (flag_id,))
+    rows = run_query(sql, (flag_id, flag_id))
     return rows[0] if rows else None

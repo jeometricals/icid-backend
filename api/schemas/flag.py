@@ -12,8 +12,22 @@ FlagShape = Literal["rectangle", "trapezoid", "triangle", "polygon", "arc"]
 FlagMark = Literal["number_only", "cross", "cross_with_number", "tick", "none"]
 FlagNonAssessableReason = Literal[
     "tree_damage", "city_tree", "transition", "no_driveway", "hydrant", "fronting_city", "utility", "settlement", "other",
+    "tree", "driveway", "grass", "dirt", "existing_sidewalk", "asphalt", "tree_pit", "landmark", "vault", "subway",
+    "scaffolding", "other_perm_obstruction", "other_temp_obstruction",
 ]
 FlagThickness = Literal["4in", "7in", "7in_as_4in"]
+# The DOT defect codes, in the order a flag stores them
+DEFECT_CODES = ("1", "2", "3", "4", "5", "6A", "6B", "6C")
+DefectCode = Literal["1", "2", "3", "4", "5", "6A", "6B", "6C"]
+
+
+def ordered_defect_codes(codes: list[str]) -> list[str]:
+    """
+    Put a flag's defect codes in the DOT's order, each once.
+    Takes the codes as sent (already checked against DefectCode).
+    Returns them deduplicated, in DEFECT_CODES order.
+    """
+    return [code for code in DEFECT_CODES if code in codes]
 
 # A length in feet: a finite number above zero
 Length = Field(gt=0, allow_inf_nan=False)
@@ -80,7 +94,13 @@ class ArcDimensions(_Dimensions):
     theta: float = Field(gt=0, le=2 * math.pi, allow_inf_nan=False)
 
 
-# The dimensions each shape takes
+class CircleDimensions(_Dimensions):
+    """A circle: its radius. Only a feature takes it."""
+
+    r: float = Length
+
+
+# The dimensions each shape takes (a flag's and a non-assessable area's)
 DIMENSIONS_BY_SHAPE: dict[str, type[_Dimensions]] = {
     "rectangle": RectangleDimensions,
     "trapezoid": TrapezoidDimensions,
@@ -88,6 +108,17 @@ DIMENSIONS_BY_SHAPE: dict[str, type[_Dimensions]] = {
     "polygon": PolygonDimensions,
     "arc": ArcDimensions,
 }
+# A feature's shapes: a flag's, and a circle
+FEATURE_DIMENSIONS_BY_SHAPE: dict[str, type[_Dimensions]] = {**DIMENSIONS_BY_SHAPE, "circle": CircleDimensions}
+
+
+def checked_dimensions(shape: str, dimensions: dict[str, Any], by_shape: dict[str, type[_Dimensions]]) -> dict[str, Any]:
+    """
+    Check a shape's dimensions against what it takes.
+    Takes the shape, its dimensions as sent and the table of dimensions by shape.
+    Returns the dimensions as parsed; raises ValueError (a ValidationError) when they don't fit.
+    """
+    return by_shape[shape].model_validate(dimensions).model_dump()
 
 
 class FlagCreate(BaseModel):
@@ -112,15 +143,17 @@ class FlagCreate(BaseModel):
     pay_item_id: Optional[UUID] = None
     reported_quantity: Optional[Decimal] = Field(default=None, gt=0, allow_inf_nan=False)
     quantity_delta_reason: Optional[str] = None
+    defect_codes: list[DefectCode] = []
 
     @model_validator(mode="after")
     def _check(self) -> "FlagCreate":
         """
-        Check the dimensions against the shape (keeping them as parsed) and the survey's rules.
+        Check the dimensions against the shape (keeping them as parsed) and the survey's rules, and put the defect codes in order.
         Takes the parsed flag.
         Returns it; raises ValueError naming the first rule broken.
         """
-        self.dimensions = DIMENSIONS_BY_SHAPE[self.shape].model_validate(self.dimensions).model_dump()
+        self.dimensions = checked_dimensions(self.shape, self.dimensions, DIMENSIONS_BY_SHAPE)
+        self.defect_codes = ordered_defect_codes(self.defect_codes)
         if self.surveyed_is_assessable and self.surveyed_non_assessable_reason is not None:
             raise ValueError("an assessable flag has no surveyed_non_assessable_reason")
         if not self.surveyed_is_assessable and self.surveyed_non_assessable_reason is None:
@@ -153,13 +186,15 @@ class FlagUpdate(BaseModel):
     pay_item_id: Optional[UUID] = None
     reported_quantity: Optional[Decimal] = None
     quantity_delta_reason: Optional[str] = None
+    defect_codes: Optional[list[DefectCode]] = None
 
 
 class FlagOut(BaseModel):
     """
     A flag: a row of icid.flags, with its PIR's property and project. pir_page_id is the page it is drawn on (None
-    only for a deleted flag from before pages), sketch_x / sketch_y / rotation its place there. quantity is what
-    counts (the override, or else the computed area) and is_overridden says which.
+    only for a deleted flag from before pages), sketch_x / sketch_y / rotation its place there. computed_quantity is
+    its shape's area; net_quantity that area less its non-assessable areas and the features subtracted from it (never
+    below 0); quantity is what counts (the override, or else the net area) and is_overridden says which.
     """
 
     id: UUID
@@ -185,6 +220,11 @@ class FlagOut(BaseModel):
     quantity: float
     is_overridden: bool
     quantity_delta_reason: Optional[str] = None
+    defect_codes: list[str] = []
+    non_assessable_areas_count: int = 0
+    non_assessable_quantity: float = 0
+    subtracted_quantity: float = 0
+    net_quantity: Optional[float] = None
     created_at: datetime
     updated_at: datetime
     created_by: UUID

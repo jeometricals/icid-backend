@@ -2,10 +2,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from fastapi.exceptions import RequestValidationError
-from pydantic import ValidationError
 
-from api.queries.contract_items import get_project_pay_item
 from api.queries.flags import (
     create_flag,
     get_flag,
@@ -28,12 +25,16 @@ from api.services.auth import (
 )
 from api.services.flag_area import compute_area
 from api.v1._shared import (
+    PAGE_CHAIN,
     PAGE_DELETED,
-    PIR_DELETED,
-    PROPERTY_DELETED,
+    PAGE_PARENTS,
+    changes_sent,
+    check_pay_item,
     refuse_deleted_chain,
     refuse_deleted_for_member,
     refuse_deleted_pir_for_member,
+    require_dimensions_with_shape,
+    validated,
 )
 
 # A second router under /v1/pirs (a PIR's flags across its pages), one under /v1/pir-pages (a page's flags), and
@@ -46,12 +47,8 @@ router = APIRouter(prefix="/v1/flags", tags=["Flags"], dependencies=[Depends(cur
 CLEARABLE = {
     "sketch_x", "sketch_y", "surveyed_non_assessable_reason", "pay_item_id", "reported_quantity", "quantity_delta_reason",
 }
-PAY_ITEM_ELSEWHERE = "Pay item belongs to a different project"
-# A page, and a flag, are the admin's once something above them is soft-deleted
-PAGE_CHAIN = [("deleted_at", PAGE_DELETED), ("pir_deleted_at", PIR_DELETED), ("property_deleted_at", PROPERTY_DELETED)]
-FLAG_PARENTS = [
-    ("page_deleted_at", PAGE_DELETED), ("pir_deleted_at", PIR_DELETED), ("property_deleted_at", PROPERTY_DELETED),
-]
+# A flag is the admin's once its page, PIR or property is soft-deleted
+FLAG_PARENTS = PAGE_PARENTS
 
 
 def _flag_writer_on_pir(found: dict = Depends(pir_member), user: UserOut = Depends(no_demo_flag_writes)) -> dict:
@@ -79,30 +76,6 @@ def _writable_flag(found: dict = Depends(flag_member), user: UserOut = Depends(n
     Returns the flag dict; raises 403 for a demo user.
     """
     return found
-
-
-def _validated(record: dict[str, Any]) -> FlagCreate:
-    """
-    Check a flag's whole record, as a PATCH leaves it, by the rules a new flag is checked by.
-    Takes the merged record keyed by field.
-    Returns the parsed FlagCreate; raises a 422 shaped as FastAPI's own when a rule is broken.
-    """
-    try:
-        return FlagCreate.model_validate(record)
-    except ValidationError as exc:
-        raise RequestValidationError(
-            [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
-        ) from exc
-
-
-def _check_pay_item(project_id: str, pay_item_id: Optional[UUID]) -> None:
-    """
-    Refuse a pay item that isn't one of the project's.
-    Takes the project id and the pay item's id (None for none).
-    Returns nothing; raises 400 when the project has no such pay item.
-    """
-    if pay_item_id is not None and get_project_pay_item(project_id, pay_item_id) is None:
-        raise HTTPException(status_code=400, detail=PAY_ITEM_ELSEWHERE)
 
 
 def _response(row: dict[str, Any], message: str) -> FlagResponse:
@@ -143,12 +116,12 @@ def _create_on_page(page: dict[str, Any], body: FlagCreate, user: UserOut) -> Fl
     Takes the page dict, the checked flag and the user.
     Returns the FlagResponse; raises 400 for a pay item of another project or a page replaced meanwhile, and 500 if the statement fails otherwise.
     """
-    _check_pay_item(page["project_id"], body.pay_item_id)
+    check_pay_item(page["project_id"], body.pay_item_id)
     row = create_flag(page["pir_page_id"], user.uuid, body.model_dump(), compute_area(body.shape, body.dimensions))
 
     if row is None:
         # The page was replaced, or the pay item deleted or moved, between the checks and the statement
-        _check_pay_item(page["project_id"], body.pay_item_id)
+        check_pay_item(page["project_id"], body.pay_item_id)
         raise HTTPException(status_code=400, detail=PAGE_DELETED)
 
     return _response(row, "Flag created")
@@ -231,31 +204,20 @@ def update_flag_record(
     refuse_deleted_for_member(found, user, "Flag is deleted")
     refuse_deleted_chain(found, user, FLAG_PARENTS)
 
-    changes = {
-        field: value for field, value in body.model_dump(exclude_unset=True).items()
-        if value is not None or field in CLEARABLE
-    }
-
-    if not changes:
-        raise HTTPException(status_code=400, detail="Send at least one field to change")
-
-    if changes.get("shape", found["shape"]) != found["shape"] and "dimensions" not in changes:
-        raise RequestValidationError([{
-            "type": "missing", "loc": ("body", "dimensions"), "msg": "dimensions are required when the shape changes",
-            "input": None,
-        }])
+    changes = changes_sent(body, CLEARABLE)
+    require_dimensions_with_shape(changes, found["shape"])
 
     if "reported_quantity" in changes and changes["reported_quantity"] is None:
         changes["quantity_delta_reason"] = None  # back to the computed quantity: no override left to explain
 
-    merged = _validated({**{field: found[field] for field in FlagCreate.model_fields}, **changes})
-    _check_pay_item(found["project_id"], merged.pay_item_id)
+    merged = validated(FlagCreate, {**{field: found[field] for field in FlagCreate.model_fields}, **changes})
+    check_pay_item(found["project_id"], merged.pay_item_id)
 
     row = update_flag(flag_id, merged.model_dump(), compute_area(merged.shape, merged.dimensions))
 
     if row is None:
         # The pay item was deleted or moved between the check and the statement
-        _check_pay_item(found["project_id"], merged.pay_item_id)
+        check_pay_item(found["project_id"], merged.pay_item_id)
         raise HTTPException(status_code=500, detail="Failed to update flag")
 
     return _response(row, "Flag updated")
@@ -297,7 +259,7 @@ def delete_flag(flag_id: UUID, admin: UserOut = Depends(current_admin)) -> FlagR
 @router.post("/{flag_id}/admin/undelete", response_model=FlagResponse, dependencies=[Depends(current_admin)])
 def undelete_flag_record(flag_id: UUID) -> FlagResponse:
     """
-    Bring a soft-deleted flag back, onto its page, which must still be live. Admins only.
+    Bring a soft-deleted flag back, onto its page, which must still be live, with the non-assessable areas deleted with it. Admins only.
     Takes the flag's id as a path parameter.
     Returns a FlagResponse with the restored flag; raises 400 for a flag with no page (one from before pages) or whose page was replaced, 403 for a user who isn't an admin and 404 for an unknown flag or one that isn't deleted.
     """
@@ -319,4 +281,5 @@ def undelete_flag_record(flag_id: UUID) -> FlagResponse:
             raise HTTPException(status_code=400, detail="Its page was replaced")
         raise HTTPException(status_code=404, detail="Flag is not deleted")
 
-    return _response(row, "Flag restored")
+    # Read again: the statement's own read sees the flag's areas as they were before it restored them
+    return _response(_load_flag(flag_id), "Flag restored")

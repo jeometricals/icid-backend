@@ -1,16 +1,21 @@
 """
 What more than one router needs: reading the date and discipline filters, reading a text field off a request body,
 checking a new password, shaping the rows of an IDR list, keeping soft-deleted rows (and their children) for
-admins, and the gate on a PIR's writes.
+admins, the gate on a PIR's writes, and what the writes of a PIR's drawings share (the pay-item check, merging
+and checking a PATCH).
 Not a router itself.
 """
 
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
+from uuid import UUID
 
 from fastapi import Depends, HTTPException
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ValidationError
 
 from api.schemas.auth import UserOut
+from api.queries.contract_items import get_project_pay_item
 from api.schemas.idr import IdrListItem
 from api.queries.properties import get_property
 from api.services.auth import MAX_PASSWORD_BYTES, no_demo_pir_writes, pir_member
@@ -79,6 +84,68 @@ def refuse_deleted_for_member(row: dict[str, Any], user: UserOut, detail: str) -
 PIR_DELETED = "PIR is deleted"
 PROPERTY_DELETED = "Property is deleted"
 PAGE_DELETED = "Page is deleted"
+
+
+# A page is the admin's once it, its PIR or its property is soft-deleted (read off the page itself)
+PAGE_CHAIN = [("deleted_at", PAGE_DELETED), ("pir_deleted_at", PIR_DELETED), ("property_deleted_at", PROPERTY_DELETED)]
+# A row drawn on a page is the admin's once its page, PIR or property is (read off the row)
+PAGE_PARENTS = [
+    ("page_deleted_at", PAGE_DELETED), ("pir_deleted_at", PIR_DELETED), ("property_deleted_at", PROPERTY_DELETED),
+]
+PAY_ITEM_ELSEWHERE = "Pay item belongs to a different project"
+Checked = TypeVar("Checked", bound=BaseModel)
+
+
+def check_pay_item(project_id: str, pay_item_id: Optional[UUID]) -> None:
+    """
+    Refuse a pay item that isn't one of the project's.
+    Takes the project id and the pay item's id (None for none).
+    Returns nothing; raises 400 when the project has no such pay item.
+    """
+    if pay_item_id is not None and get_project_pay_item(project_id, pay_item_id) is None:
+        raise HTTPException(status_code=400, detail=PAY_ITEM_ELSEWHERE)
+
+
+def validated(model: type[Checked], record: dict[str, Any]) -> Checked:
+    """
+    Check a row's whole record, as a PATCH leaves it, by the rules a new row is checked by.
+    Takes the model a new row is checked as and the merged record keyed by field.
+    Returns the parsed model; raises a 422 shaped as FastAPI's own when a rule is broken.
+    """
+    try:
+        return model.model_validate(record)
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
+        ) from exc
+
+
+def changes_sent(body: BaseModel, clearable: set[str]) -> dict[str, Any]:
+    """
+    Read what a PATCH changes: the fields sent, a null counting as not sent except on the fields it clears.
+    Takes the parsed body and the fields a null clears.
+    Returns the changes keyed by field; raises 400 when there are none.
+    """
+    changes = {
+        field: value for field, value in body.model_dump(exclude_unset=True).items()
+        if value is not None or field in clearable
+    }
+    if not changes:
+        raise HTTPException(status_code=400, detail="Send at least one field to change")
+    return changes
+
+
+def require_dimensions_with_shape(changes: dict[str, Any], stored_shape: Optional[str]) -> None:
+    """
+    Refuse a PATCH that changes a shape without sending its dimensions.
+    Takes the changes and the shape the row has now.
+    Returns nothing; raises a 422 shaped as FastAPI's own.
+    """
+    if changes.get("shape", stored_shape) != stored_shape and "dimensions" not in changes:
+        raise RequestValidationError([{
+            "type": "missing", "loc": ("body", "dimensions"), "msg": "dimensions are required when the shape changes",
+            "input": None,
+        }])
 
 
 def refuse_deleted_chain(row: dict[str, Any], user: UserOut, checks: list[tuple[str, str]]) -> None:

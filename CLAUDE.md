@@ -17,14 +17,14 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`). Each exports a `router` (`properties.py` and `task_orders.py` also a `project_router`, for their routes under `/v1/projects`; `pirs.py` a `property_router`, for its routes under `/v1/properties`; `pir_pages.py` and `flags.py` a `pir_router`, for their routes under `/v1/pirs`, and `flags.py` a `page_router` too, under `/v1/pir-pages`). `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows). |
-| `api/queries/` | SQL functions, one module per table area. The only place SQL is written. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `pir_import.py`). Each exports a `router` (`properties.py` and `task_orders.py` also a `project_router`, for their routes under `/v1/projects`; `pirs.py` a `property_router`, for its routes under `/v1/properties`; `pir_pages.py`, `flags.py`, `features.py` and `segments.py` a `pir_router`, for their routes under `/v1/pirs`, and `flags.py`, `features.py` and `segments.py` a `page_router` too, under `/v1/pir-pages`; `non_assessable_areas.py` a `flag_router`, under `/v1/flags`; `pir_import.py`'s `router` is under `/v1/pirs`). `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
+| `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `budget_rollup.py` (budget against actual by contract value: a project's summed quantities at their contract items' unit prices, per pay item, per budget code and for the project), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `idr_purge.py` (deleting a soft-deleted IDR for good: its row, then its files in the three buckets), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `pir_image.py` (a PIR's scan as pages: the signed upload, checking the file by its first bytes, rendering every page of a PDF (or the one image) to PNG within the caps, storing the pages and replacing the PIR's pages with them, and signing a page's URL), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `pay_items.py` (what a project's pay item may hold: the rules for each field, shared by the admin's form and the CSV import), `pay_item_units.py` (the units a pay item can be bid in and the short form each is stored in), `flag_area.py` (a flag's area from its shape and dimensions, in square feet), `pay_item_import.py` (a pay-item CSV: reading the file, checking every row, sorting the rows into new items, overwrites and errors), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. `auto_general.py` (the auto-General's aggregation), `budget_rollup.py` (budget against actual by contract value: a project's summed quantities at their contract items' unit prices, per pay item, per budget code and for the project), `attachments.py` (attachment uploads and downloads), `auth.py` (sign-in: the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, the `current_user` / `current_admin` dependencies, and the demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `idr_purge.py` (deleting a soft-deleted IDR for good: its row, then its files in the three buckets), `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field in a report, running the edit, keeping an auto-General in step), `pir_image.py` (a PIR's scan as pages: the signed upload, checking the file by its first bytes, rendering every page of a PDF (or the one image) to PNG within the caps, storing the pages and replacing the PIR's pages with them, and signing a page's URL), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit), `pay_items.py` (what a project's pay item may hold: the rules for each field, shared by the admin's form and the CSV import), `pay_item_units.py` (the units a pay item can be bid in and the short form each is stored in), `flag_area.py` (an area from its shape and dimensions, in square feet: a flag's, a non-assessable area's or a feature's; a circle for features), `pir_import.py` (a Smart PIR import: checking each item of the file, dropping the bad ones with their reasons, and readying the rest for the one statement), `pay_item_import.py` (a pay-item CSV: reading the file, checking every row, sorting the rows into new items, overwrites and errors), `disciplines.py` (which disciplines each report type covers, and the reverse: read by the quantities reader and the archive filter), `quantities.py` (an IDR's pay items as rows of `icid.quantities`: `extract_rows` reads them off its reports, `quantity_rows_for_idr` readies them for the approving statement, `write_quantities` replaces an approved IDR's rows for the backfill), and the IDR export: `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps the inspector's signature on an IDR's pages from submission on and the Resident Engineer's on an approved one, stores the file and signs its URL), `export_common.py` (shared layouts and stampers: headers, continuation header, pay items, work force, equipment, safety, the text cascade, the two signatures, and how a redline is drawn), `export_redlines.py` (reviewer redlines: reads the IDR's edits as each field's chain and each pay item's rows), `export_general.py` (the General onto Gen Fr / Gen Bk / Report Cont), `export_swcb.py` (SWCB onto Conc Fr / Conc Bk), `export_ac.py` (AC onto AC Fr / AC Bk), `export_conc_mix.py` (CONC_MIX addendums onto Conc Mix sheets), `export_conc_cyl.py` (CONC_CYL addendums onto Conc Cyl sheets), `export_attachments.py` (report attachments onto pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration — env loading: `DATABASE_URL` and `JWT_SECRET_KEY` (both required at startup), the other JWT settings, `CRON_SECRET` (what the scheduler sends; optional), and the Supabase Storage settings (attachments and `idr-exports` buckets, signed-URL lifetimes, the signatures bucket: `SIGNATURE_BUCKET_NAME`, `SIGNATURE_URL_EXPIRY_SECONDS`, and the PIR images bucket: `PIR_IMAGE_BUCKET_NAME`, `PIR_IMAGE_URL_EXPIRY_SECONDS`, `PIR_IMAGE_MAX_BYTES`, `PIR_IMAGE_RENDER_DPI`, `PIR_UPLOAD_MAX_PAGES`, `PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE`). No business logic. |
-| `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. |
+| `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
 | `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. |
@@ -49,10 +49,11 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `PATCH /v1/admin/users/{user_id}` — admin only: body `{first_name?, last_name?, email?, is_admin?, is_demo?}`; changes what is sent and returns the user under `data` (`role` is `admin` or null). Names and email are trimmed. 400 when nothing is sent (a null counts as not sent), a name is blank or over 100 characters, the email is blank or malformed, an admin sends `is_admin: false` for themselves (`You cannot revoke your own admin role.`), or `is_demo: true` is sent for a real user (`Cannot change a real user to a demo user.`); 404 for an unknown user; 409 `{detail, existing_user_uuid}` when another user has the email, whatever its capitals
 - `POST /v1/admin/users/{user_id}/delete` — admin only: soft-deletes the user (`deleted_at`, `deleted_by`) and returns them under `data`; they can no longer sign in or use a token. Nothing else of theirs changes. 400 `You cannot delete your own account.`, 404 for an unknown user or `User is already deleted`
 - `POST /v1/admin/users/{user_id}/undelete` — admin only: restores a soft-deleted user and returns them under `data`. 404 for an unknown user or `User is not deleted`, 409 `{detail, existing_user_uuid}` when another user now has their email
-- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs, flags, pir_pages}}` when anything still names them
+- `DELETE /v1/admin/users/{user_id}/permanent` — admin only: deletes a soft-deleted user for good, 204. 404 for an unknown user or `User must be soft-deleted first`; 409 `{detail, references: {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs, flags, pir_pages, non_assessable_areas, features, segments}}` when anything still names them
 - `POST /v1/admin/users/{user_id}/password` — admin only: body `{new_password}`; replaces the user's password and returns the user under `data`. Any user, the admin's own row included. 400 for a password under 6 characters or over 72 bytes, 404 for an unknown user
-- `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`)
+- `GET /v1/admin/projects` — admin only: every project, whoever is assigned to it, by project id, under `data`; each as `GET /v1/projects/{project_id}` returns one (`project_id`, `project_name`, `project_description`, `registration_code`, `borough`, `status`, `cost_per_sf_4in`, `cost_per_sf_7in`)
 - `POST /v1/admin/projects` — admin only: body `{project_id, project_name, project_description, borough, registration_code?}`; creates the project and returns it under `data`, 201. 400 for a blank or over-long value, or a `project_id` with anything but letters, digits, hyphens and underscores; 409 `{detail, existing_project_id}` when the id is taken
+- `PATCH /v1/admin/projects/{project_id}/assessment-rates` — admin only: body `{cost_per_sf_4in?, cost_per_sf_7in?}`, the DOT assessment rates per square foot (a rate left out keeps its value, a null clears it); returns the project under `data`. 400 when nothing is sent or a rate is negative, a million or more, or past 4 decimal places; 422 for one that isn't a number; 404 for an unknown project
 - `GET /v1/admin/projects/{project_id}/pay-items` — admin only: every pay item of the project, by budget code then ref: `{status, message, data: [{pay_item_uuid, pay_item_ref, description, unit, quantity, unit_price, budget_code, spec_section}]}`. 404 for an unknown project, as on the four below
 - `POST /v1/admin/projects/{project_id}/pay-items` — admin only: body `{pay_item_ref, description, unit, quantity, unit_price, budget_code, spec_section?}`; creates the pay item and returns it under `data`, 201. 400 for a blank or over-long value, an unknown unit, or a negative or over-precise amount; 409 `{detail, existing_pay_item_uuid}` when the project has that ref under that budget code
 - `PATCH /v1/admin/projects/{project_id}/pay-items/{pay_item_uuid}` — admin only: any of the seven fields; returns the item under `data`. 400 when nothing is sent (a null counts as not sent, except `spec_section`, which it clears) or a value doesn't fit, 404 for an item the project doesn't have, 409 as on create
@@ -93,8 +94,8 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `POST /v1/pirs/{pir_id}/image/upload-request` — project members (any role) and admins: body `{mime, filename?, size_bytes?}` (`application/pdf`, `image/png` or `image/jpeg`; R1d's `{content_type}` still works); returns `{upload_url, staging_path, expires_at}` under `data` (and R1d's `upload_path` and `expires_in`, deprecated), a signed URL to PUT the file to at `staging/{pir_id}/{uuid}.{ext}` (see "PIR pages"). 400 `Unsupported file type` or `mime is required`; 413 `File too large` for a `size_bytes` over the limit; 502 when Storage can't sign. Every PIR page write gives 403 to a user who isn't on the project and to a demo user (`Demo mode: PIRs are read-only`), and, for a user who isn't an admin, 400 `PIR is deleted` or `Property is deleted` (and, on a page route, `Page is deleted`)
 - `POST /v1/pirs/{pir_id}/image/complete` — same access: body `{staging_path, scale_px_per_ft?}` (R1d's `{upload_path, scale}` still works); renders every page of a PDF (or the one PNG or JPEG) to PNG, stores them, and replaces the PIR's pages with them, its live flags on the old pages soft-deleted in the same statement. Returns the PIR with `pages` (each with a signed `image_url`) under `data`, and page 1's `signed_url` and `expires_at` (deprecated). 400 for a missing path, a scale that isn't above 0, a path that isn't one of the PIR's uploads or has no file, a file that isn't a PDF, PNG or JPEG by its bytes, one that can't be read, or one over a cap (`The PDF has 16 pages; a PIR can have at most 15 (PIR_UPLOAD_MAX_PAGES)`, `Page 2 at 150 DPI is 39.1 megapixels; a page can be at most 25 (PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE)`); 413 `File too large`; 502 when Storage fails
 - `GET /v1/pirs/{pir_id}/pages` — for a user on its project, or an admin: its live pages in order, each `{pir_page_id, pir_id, page_number, image_url, image_url_expires_at, image_mime, width_px, height_px, scale_px_per_ft, rotation_deg, created_at, updated_at, deleted_at, deleted_by}`, under `data`
-- `DELETE /v1/pirs/{pir_id}/pages` — same access as upload: soft-deletes the PIR's live pages and their live flags in one statement (the files are kept), 204; a PIR without pages is a 204 that changes nothing
-- `PATCH /v1/pir-pages/{pir_page_id}/scale` — project members and admins: body `{scale_px_per_ft}`; sets that page's scale only and returns the page under `data`. 400 for a scale that isn't above 0; 404 `Page not found`
+- `DELETE /v1/pirs/{pir_id}/pages` — same access as upload: soft-deletes the PIR's live pages, their live flags (and those flags' non-assessable areas), features and segments in one statement (the files are kept), 204; a PIR without pages is a 204 that changes nothing
+- `PATCH /v1/pir-pages/{pir_page_id}/scale` — project members and admins: body `{scale_px_per_ft}`; sets that page's scale only, works out its live segments' lengths again in the same statement, and returns the page under `data`. 400 for a scale that isn't above 0; 404 `Page not found`
 - `PATCH /v1/pir-pages/{pir_page_id}/rotation` — same access: body `{rotation_deg}` (0, 90, 180 or 270; anything else 422); returns the page under `data`
 - `GET /v1/pirs/{pir_id}/image`, `PATCH /v1/pirs/{pir_id}/image` (`{scale}`) and `DELETE /v1/pirs/{pir_id}/image` — **DEPRECATED (R1e, removed in R1f)**: R1d's single-image routes, now page 1's link and scale, page 1's scale, and DELETE `.../pages`. 404 `No image for this PIR` when the PIR has no pages
 - `GET /v1/pirs/{pir_id}/flags?include_deleted=` — the PIR's flags across its live pages, by `display_order` then creation, under `data` (see "Flags"); an admin who sends `include_deleted=true` gets every flag it has had (ignored for anyone else). For a user on its project, or an admin: 403 otherwise, 404 for an unknown PIR
@@ -105,7 +106,19 @@ Every route below needs a bearer token (401 without a valid one); see "Sign-in" 
 - `PATCH /v1/flags/{flag_id}` — project members and admins: any of the create body's fields, merged over the stored flag and checked whole; the area is computed again. Returns the flag under `data`. 400 when nothing is sent, for a pay item of another project, or, for a user who isn't an admin, a soft-deleted flag (`Flag is deleted`), page, PIR or property; 422 as on create, and for a new `shape` without its `dimensions`; 403 and 404 as on read, and 403 for a demo user
 - `DELETE /v1/flags/{flag_id}` — project members and admins: soft-deletes the flag (`deleted_at`, `deleted_by`; an admin can bring it back), 204; again is a 204 that changes nothing. 400 for a user who isn't an admin under a soft-deleted page, PIR or property; 403 for a demo user or a user who isn't on its project; 404 for an unknown flag
 - `POST /v1/flags/{flag_id}/admin/soft-delete` — admin only: as DELETE, returning the flag under `data`. Deleting one already deleted is a 200 that changes nothing. 404 for an unknown flag
-- `POST /v1/flags/{flag_id}/admin/undelete` — admin only: clears both and returns the flag under `data`, onto its page. 404 for an unknown flag or `Flag is not deleted`; 400 `This flag has no page; draw it again` (a flag from before pages) or `Its page was replaced`
+- `POST /v1/flags/{flag_id}/admin/undelete` — admin only: clears both, and brings back the non-assessable areas deleted with the flag, and returns the flag under `data`, onto its page. 404 for an unknown flag or `Flag is not deleted`; 400 `This flag has no page; draw it again` (a flag from before pages) or `Its page was replaced`
+- `GET /v1/flags/{flag_id}/non-assessable-areas` — the flag's live non-assessable areas, by `display_order`, under `data` (see "Non-assessable areas, features and segments"). For a user on its project, or an admin: 403 otherwise, 404 for an unknown flag
+- `POST /v1/flags/{flag_id}/non-assessable-areas` — project members and admins: body `{display_order, shape, dimensions, sketch_x, sketch_y, rotation?, reason}`; creates the area, `created_by` the signed-in user, its `computed_quantity` the area of its shape, and returns it under `data`, 201. 400 `Flag is deleted` or `Page is deleted` (for everyone), or, for a user who isn't an admin, a soft-deleted PIR or property; 403 for a user who isn't on its project or a demo user (`Demo mode: flags are read-only`); 404 for an unknown flag; 409 when a live area of the flag has the `display_order`; 422 for dimensions that don't fit the shape
+- `GET /v1/non-assessable-areas/{non_assessable_area_id}` — one area, soft-deleted or not, under `data`; `PATCH` it (any of the create body's fields, merged and checked whole, the area computed again; a null counts as not sent; 409 as on create) and `DELETE` it (a soft delete, 204; again is a 204 that changes nothing). Same access as on create; a user who isn't an admin gets 400 under anything soft-deleted, the area included (`Non-assessable area is deleted`)
+- `GET /v1/pir-pages/{pir_page_id}/features` and `GET /v1/pirs/{pir_id}/features` — the page's live features, or the PIR's on its live pages (by page), in the order they were drawn, under `data`. For a user on the project, or an admin
+- `POST /v1/pir-pages/{pir_page_id}/features` — project members and admins: body `{feature_type, area_impact?, sketch_x, sketch_y, rotation?, shape?, dimensions?, label?, pay_item_id?, flag_id?, reported_quantity?}`; creates the feature, `created_by` the signed-in user, its `computed_quantity` the area of its shape when it has one, 201. 400 for a replaced page, a pay item of another project, a `flag_id` that isn't a live flag on the page (`Flag is not a live flag on this page`), or, for a user who isn't an admin, a soft-deleted PIR or property; 403 for a user who isn't on its project or a demo user (`Demo mode: PIRs are read-only`); 422 for a broken rule
+- `GET /v1/features/{feature_id}`, `PATCH` (merged and checked whole; a null clears `shape`, `dimensions`, `label`, `pay_item_id`, `flag_id` or `reported_quantity`) and `DELETE` (soft, 204, idempotent) — as for areas; `Feature is deleted`
+- `GET /v1/pir-pages/{pir_page_id}/segments` and `GET /v1/pirs/{pir_id}/segments` — as for features
+- `POST /v1/pir-pages/{pir_page_id}/segments` — project members and admins: body `{segment_type, points: [{x, y}, ...] (two or more), pay_item_id?, note?}`; creates the segment, its `length_ft` worked out from the points and the page's scale (null while the page has none), 201. The refusals of a feature's create, but for the flag
+- `GET /v1/segments/{segment_id}`, `PATCH` (merged and checked whole, the length worked out again; a null clears `pay_item_id` or `note`) and `DELETE` (soft, 204, idempotent) — as for features; `Segment is deleted`
+- `GET /v1/pir-pages/{pir_page_id}/annotations` — the page's title block under `data`, or `data: null` when it has none. For a user on its project, or an admin
+- `PUT /v1/pir-pages/{pir_page_id}/annotations` — project members and admins: the whole title block (a field left out is cleared); returns it under `data`. 400 `Page is deleted` for a replaced page (for everyone), or, for a user who isn't an admin, a soft-deleted PIR or property; 403 as for the page's scale; 422 for a value that doesn't fit
+- `POST /v1/pirs/{pir_id}/import` — project members and admins: a Smart PIR import file (see "Smart PIR import"); adds its flags (with their non-assessable areas), features, segments, title blocks and page scales and rotations to the PIR's live pages, dropping each item that fails its check. Returns `{inserted, dropped, dropped_items, pages_updated}` under `data`. 400 `The file's pir_id is not this PIR`, or, for a user who isn't an admin, a soft-deleted PIR or property; 403 for a user who isn't on its project or a demo user (`Demo mode: PIRs are read-only`); 404 for an unknown PIR; 422 for a file that isn't a Smart PIR import
 - `POST /v1/idrs/` — create a draft IDR for the signed-in user, its reporter (409 with `existing_idr_id` if one exists for that reporter, project and date)
 - `GET /v1/idrs/?project_id=&status=&reporter_uuid=&idr_number=&work_date=&from=&to=&discipline=` — list IDRs (the archive) with `report_count`, `has_general`, `disciplines` and the names of the inspector and reviewers (all filters optional; `discipline` repeats). Deleted IDRs and other people's drafts are left out; an admin can add `include_deleted=true` and `include_all_drafts=true` (400 for anyone else who sends either as true). 400 for a bad date, `work_date` with `from` or `to`, `from` after `to`, or an unknown discipline
 - `GET /v1/idrs/{idr_id}` — IDR plus all its reports, in page order, and `field_edits`: every edit reviewers made on it, oldest first, each with `editor_name` and `editor_initials`
@@ -192,14 +205,16 @@ Any change must follow these.
     anyone else. Submitting and the review routes are the exception: they check project roles, below. So is
     the quantities route, which takes `project_member`: the caller must be assigned to the project, in any role,
     or be an admin (403 `Project access required`; 404 for a project that doesn't exist). The
-    admin-only routes are `/v1/admin/cleanup-demos`, the seven under `/v1/admin/users`, the two under `/v1/admin/projects`, the seven under
+    admin-only routes are `/v1/admin/cleanup-demos`, the seven under `/v1/admin/users`, the three under `/v1/admin/projects`, the seven under
     `/v1/admin/projects/{project_id}/pay-items`, the two under
     `/v1/projects/{project_id}/roles`, `/admin/soft-delete` and `/admin/undelete` under
     `/v1/properties/{property_id}`, `/v1/task-orders/{task_order_id}`, `/v1/pirs/{pir_id}` and `/v1/flags/{flag_id}`, and
     `/v1/idrs/{idr_id}/admin/unlock`, `/admin/delete`, `/admin/undelete` and `/admin/permanent`. The property,
-    task-order, PIR, page and flag reads take `project_member`, or, by id, `property_member`, `task_order_member`,
-    `pir_member`, `pir_page_member` and `flag_member` (all through `_readable_on_project`; a page and a flag reach
-    their project through their PIR).
+    task-order, PIR, page, flag, area, feature and segment reads take `project_member`, or, by id,
+    `property_member`, `task_order_member`, `pir_member`, `pir_page_member`, `flag_member`,
+    `non_assessable_area_member`, `feature_member` and `segment_member` (all through `_readable_on_project`; a page
+    and a flag reach their project through their PIR, an area through its flag, a feature and a segment through
+    their page).
   - **Project members write properties, task orders and PIRs** (S1, S2). Creating and editing each, and
     bundling and unbundling, take a user on the project in any role, or an admin; deleting and restoring stay
     admin only. Each write route checks membership first (404 / 403), then refuses a demo user with 403
@@ -259,8 +274,10 @@ Any change must follow these.
       they reported, reviewed at either stage or deleted; project roles; audit rows; field edits; attachments
       they uploaded; properties and task orders they created or deleted; properties they bundled into task
       orders; PIRs they digitized, signed as built or deleted; flags they created or deleted; PIR pages they
-      replaced or deleted. Any of those is a 409 with the counts under `references`. Those are all the foreign
-      keys to `users.uuid` (the `deleted_by` of a property, a task order, a PIR, a flag or a PIR page and a PIR's
+      replaced or deleted; non-assessable areas, features and segments they created or deleted. Any of those is a
+      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (26 in `schema.sql`,
+      `users.deleted_by` the one not counted; the `deleted_by` of a property, a task order, a PIR, a flag, a PIR
+      page, an area, a feature or a segment and a PIR's
       `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
       cascades, and the DELETE itself is refused by them if a row appears at the last moment
       (also 409). So a user who ever did anything stays soft-deleted for good, which is the usual case; a
@@ -940,11 +957,15 @@ Any change must follow these.
   - **The body** (`FlagCreate`): `display_order` (an integer ≥ 0; not unique, the list sorts by it then by
     creation), `shape`, `dimensions`, `sketch_x` / `sketch_y` (optional), `rotation` (default 0),
     `surveyed_mark`, `surveyed_is_assessable`, `surveyed_non_assessable_reason`, `surveyed_thickness`,
-    `added_in_field` (default false), `pay_item_id`, `reported_quantity` and `quantity_delta_reason` (optional).
+    `added_in_field` (default false), `pay_item_id`, `reported_quantity` and `quantity_delta_reason` (optional),
+    and `defect_codes` (default `[]`).
     The values each enum takes: shape `rectangle` `trapezoid` `triangle` `polygon` `arc`; mark `number_only`
-    `cross` `cross_with_number` `tick` `none`; reason `tree_damage` `city_tree` `transition` `no_driveway`
-    `hydrant` `fronting_city` `utility` `settlement` `other`; thickness `4in` `7in` `7in_as_4in` (the table's
-    CHECKs hold the same). `is_constructed` is not the API's to write: a later IDR-claim slice sets it.
+    `cross` `cross_with_number` `tick` `none`; reason R1b's `tree_damage` `city_tree` `transition` `no_driveway`
+    `hydrant` `fronting_city` `utility` `settlement` `other` and the R1e.1 survey's `tree` `driveway` `grass`
+    `dirt` `existing_sidewalk` `asphalt` `tree_pit` `landmark` `vault` `subway` `scaffolding`
+    `other_perm_obstruction` `other_temp_obstruction` (migration 034 widened the CHECK; every old value stays);
+    thickness `4in` `7in` `7in_as_4in`; defect codes `1` `2` `3` `4` `5` `6A` `6B` `6C`, stored in that order,
+    each once (the table's CHECKs hold the same). `is_constructed` is not the API's to write: a later IDR-claim slice sets it.
   - **Dimensions, by shape** (feet; finite numbers, lengths above 0, no other keys): rectangle `{L, W}`;
     trapezoid `{a, b, w}` (the parallel sides and the width between them); triangle `{a, b}` (a right
     triangle's legs); polygon `{vertices: [{x, y}, ...]}` (three or more, in order, enclosing some area: a
@@ -957,10 +978,14 @@ Any change must follow these.
   - **Rules** (422, from `FlagCreate`): an assessable flag has no `surveyed_non_assessable_reason`, one that
     isn't has one; `surveyed_mark = 'none'` if and only if `added_in_field` (a flag added on site carries no PIR
     mark); `reported_quantity`, when set, is above 0.
-  - **Overrides.** `reported_quantity` NULL means there is none: the computed area stands. Every response
-    carries `quantity` (`COALESCE(reported_quantity, computed_quantity)`, worked out in the statement) and
-    `is_overridden`. A PATCH with `reported_quantity: null` reverts to the computed area and clears
-    `quantity_delta_reason`.
+  - **Net area.** `computed_quantity` is the shape's own area. Every response also carries
+    `non_assessable_areas_count`, `non_assessable_quantity` (the sum of its areas'), `subtracted_quantity` (the sum
+    of its live `subtract` features', each its override or else its area) and `net_quantity`: the area less those
+    two, never below 0, worked out in the statement (two `LATERAL` subqueries), not stored. A flag's areas are its
+    live ones, and, once the flag is deleted, the ones deleted with it.
+  - **Overrides.** `reported_quantity` NULL means there is none: the net area stands. Every response
+    carries `quantity` (`COALESCE(reported_quantity, net_quantity)`) and `is_overridden`. A PATCH with
+    `reported_quantity: null` reverts to the net area and clears `quantity_delta_reason`.
   - **PATCH merges, then checks the whole.** The body is laid over the stored flag and the result is checked
     as `FlagCreate` checks a new one (a 422 in FastAPI's own shape), so a change that breaks a rule only
     together with the stored values is caught. A new `shape` needs its `dimensions` in the same PATCH. A null
@@ -990,6 +1015,10 @@ Any change must follow these.
   - **Deleting is a soft delete, for anyone on the project** (`DELETE /v1/flags/{id}`; the admin route does the
     same). Flags are never hard-deleted. **Un-delete is an admin's, and only onto a live page:** a flag with no
     page (the 3 R1b form flags migration 033 retired) or whose page was replaced is a 400.
+  - **A flag's non-assessable areas go with it.** Its soft delete soft-deletes its live areas in the same
+    statement, at the same moment (`now()`); its un-delete brings back the areas whose `deleted_at` is the flag's,
+    so one deleted on its own before stays deleted. The route reads the restored flag again, since the statement's
+    own read sees the areas as they were before it.
   - `pir_id` has no cascade: a flag is a record of its own. `created_by` is `NO ACTION`, so
     `count_user_references` counts flags created or deleted.
   - **Migration 032 must be in the database before this code runs**: the routes and the user-reference count
@@ -1010,8 +1039,10 @@ Any change must follow these.
     (15) and `PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE` (25) per page at that resolution, a 400 naming the cap that
     tripped. The pages go to a **new folder per upload**, `pirs/{pir_id}/{upload uuid}/page-{n}.png`; a scale sent
     with the upload is set on every page.
-  - **Replacing is one statement** (`replace_pages`): the PIR's live flags on its live pages are soft-deleted
-    (`deleted_at`, `deleted_by`), those pages are marked replaced the same way, and the new pages are inserted,
+  - **Replacing is one statement** (`replace_pages`): the PIR's live flags on its live pages, those flags' live
+    non-assessable areas, and the pages' live features and segments are soft-deleted (`deleted_at`, `deleted_by`;
+    `_RETIRE_DRAWINGS` in `api/queries/pir_pages.py`), those pages are marked replaced the same way (their title
+    blocks stay with them), and the new pages are inserted,
     numbered 1..N. The INSERT first reads the count of replaced pages, so the old pages are out of the partial
     unique index on `(pir_id, page_number)` before the new ones go in. **Pages are never hard-deleted**, so the
     flags' foreign key (no action) never blocks a re-upload. **The old pages' files are kept**: a flag's history
@@ -1020,6 +1051,7 @@ Any change must follow these.
     are unchanged.
   - `DELETE /v1/pirs/{id}/pages` does the same without inserting. **Per page:** scale (pixels per foot,
     recalibrating; above 0) and rotation (a quarter turn) are set one page at a time, a replaced page not at all.
+    Setting the scale works out the length of every live segment on the page again, in the same statement.
   - **Responses carry a signed URL per page** (`image_url`, `image_url_expires_at`, good for
     `PIR_IMAGE_URL_EXPIRY_SECONDS`); the stored value is the path.
   - **Who:** reading takes `pir_member` or `pir_page_member`; writes take `writable_pir` (in `api/v1/_shared.py`,
@@ -1031,6 +1063,64 @@ Any change must follow these.
     card working until the R1e frontend ships.
   - **Migration 033 must be in the database before this code runs**, and the code before it fails once it is
     (it reads `pirs.source_image_url`): deploy right after running it.
+- **Non-assessable areas, features and segments** (migration 034): what else is drawn on a PIR's page
+  (`api/v1/non_assessable_areas.py`, `features.py`, `segments.py`; their query and schema modules of the same names).
+  - **Non-assessable areas** are the parts of a flag that are not assessed (`reason`: `driveway` `grass` `dirt`
+    `existing_sidewalk` `asphalt` `tree_pit` `landmark` `other`). Shape, dimensions and placement as a flag's (the
+    same shapes and `DIMENSIONS_BY_SHAPE`, native page pixels); `display_order` ≥ 1 and unique per flag among live
+    areas (`nas_flag_order_live_uq`: create is `ON CONFLICT DO NOTHING`, and edit checks with `NOT EXISTS`, each a
+    409). Nobody adds one to a deleted flag or a flag on a replaced page. Their area is taken off the flag's (see
+    "Flags", net area).
+  - **Features** are point obstructions and sized features (`feature_type`: `manhole` `grate` `utility_cover`
+    `hydrant` `fire_alarm` `tree_pit` `meter` `sign_or_meter` `mail_box` `telephone` `cellar_door` `pole`
+    `detectable_warning` `other`). `area_impact` is `marker_only` (default), `subtract` or `sits_on_top`; the last
+    two need a shape, and `subtract` names the flag its area comes off (`flag_id`, a live flag on the same page:
+    the route checks, the statement matches only then, and the table's CHECK requires the id). A shape and its
+    dimensions come together; a feature takes a flag's shapes and `circle` (`{r}`, area `π r²`, `compute_area`).
+    `label` is trimmed, at most 200.
+  - **Segments** are curb runs (`segment_type`: `curb_concrete` `curb_concrete_depressed` `curb_steel_faced`
+    `curb_steel_faced_corner` `curb_granite` `other`): `points`, two or more `{x, y}` in page pixels, and
+    `note` (2000). **`length_ft` is the server's:** the sum of the runs between consecutive points over the page's
+    scale, to 2 decimal places, worked out in SQL (`segment_length_sql` in `api/queries/segments.py`, the one
+    formula) when a segment is written, when its page's scale is set, and by the import; NULL while the page has no
+    scale.
+  - **Who:** reads take the project's members or an admin; writes the same, not a demo user (areas
+    `no_demo_flag_writes`, features and segments `no_demo_pir_writes`). Under anything soft-deleted a user who
+    isn't an admin gets 400 (`refuse_deleted_chain` with `PAGE_PARENTS`, and an area's `flag_deleted_at` first).
+    `pay_item_id` is one of the project's (400, `check_pay_item` in `api/v1/_shared.py`), as on a flag.
+  - **Deleting is a soft delete**, for anyone on the project; there is no un-delete route for any of the three
+    (areas come back with their flag). `created_by` and `deleted_by` name users, so `count_user_references`
+    counts them. All three foreign keys up (to `flags` or `pir_pages`) have no action: neither is ever
+    hard-deleted.
+  - **Migration 034 must be in the database before this code runs**: every flag read names the new tables.
+- **PIR annotations.** `icid.pir_annotations` (migration 034): a page's title block, one row per page, keyed by
+  `pir_page_id` (`api/queries/pir_annotations.py`, `api/schemas/pir_annotation.py`, the routes in
+  `api/v1/pir_pages.py`). `PUT` sets it whole (an upsert that matches only a live page); text is trimmed, blank is
+  NULL, `boro` is one of the five boroughs spelled out, the widths are ≥ 0 and come back as JSON numbers. It has no
+  `deleted_at`: a replaced page keeps its title block, and its replacement starts without one.
+- **Assessment rates.** `projects.cost_per_sf_4in` and `cost_per_sf_7in` (migration 034, NUMERIC(10,4), ≥ 0): the
+  DOT's rates per square foot, set by an admin (`PATCH /v1/admin/projects/{id}/assessment-rates`, checked by the
+  route: 400s, not 422s, but for text that isn't a number) and returned wherever a project's detail is
+  (`ProjectDetail`). Nothing computes with them yet.
+- **Smart PIR import** (`POST /v1/pirs/{pir_id}/import`; `api/v1/pir_import.py`, `api/services/pir_import.py`,
+  `api/queries/pir_import.py`, `api/schemas/pir_import.py`): a sketch tool's file of what it drew on a PIR.
+  - **The file:** `{schema_version: "1.0", pir_id, annotations?, pages: [{page_number, scale_px_per_ft?,
+    rotation_deg?, annotations?, flags, features, segments}]}`. `pir_id` must be the path's (400). A flag is a flag's
+    body plus `non_assessable_areas`; a feature names its flag by `flag_index` (its place in the page's `flags`
+    list, 0 first), never by `flag_id`. The file's own `annotations` go to page 1, unless page 1 brings its own.
+    `tests/fixtures/smart_pir_sample.json` is a valid one.
+  - **Additive, item by item.** Each flag, area, feature, segment and title block is checked on its own, as its
+    route checks it (and a pay item must be the project's); one that fails is **dropped** and listed in
+    `dropped_items` with its kind, page, place and reason, and the rest go in. A page number the PIR has no live page
+    for, or one listed twice, drops everything in that entry. An area whose flag is dropped goes with it; a feature
+    whose `flag_index` names a dropped flag is dropped. Nothing already on the pages changes, but a page's title block
+    is replaced and its scale and rotation set (re-working out its existing segments' lengths).
+  - **One statement** (`import_pir_drawings`): data-modifying CTEs over one JSON parameter per table, as
+    `bulk_upsert_pay_items` does, so what passed lands together or not at all. Flags get their ids in Python so
+    their areas and features can name them; an area joins the CTE of new flags, a feature's flag must be in it, and
+    only live pages of the PIR take anything. A row the statement can't write (its page replaced meanwhile) is
+    counted in `dropped`, without an item.
+  - **Who:** `writable_pir` (members and admins, not demo users) and `refuse_deleted_pir_for_member`.
 - **The archive.** `GET /v1/idrs/` is the IDR list the archive page reads (`list_project_idrs` in
   `api/v1/idrs.py`, `list_idrs` in `api/queries/idrs.py`). It is not paged: every match comes back, most
   recently edited first.

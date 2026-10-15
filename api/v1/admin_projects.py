@@ -1,13 +1,16 @@
 import re
+from decimal import Decimal
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from api.queries.projects import create_project, list_projects_for_admin
+from api.queries.projects import create_project, list_projects_for_admin, update_assessment_rates
 from api.schemas.project import (
     AdminProjectCreate,
     AdminProjectListResponse,
     AdminProjectResponse,
+    AssessmentRatesUpdate,
     ProjectConflict,
     ProjectDetail,
 )
@@ -23,6 +26,9 @@ MAX_PROJECT_NAME_LENGTH = 100
 MAX_DESCRIPTION_LENGTH = 200
 MAX_BOROUGH_LENGTH = 50
 MAX_REGISTRATION_CODE_LENGTH = 50
+# An assessment rate fits NUMERIC(10,4): below a million, to at most 4 decimal places
+MAX_RATE = Decimal("1000000")
+RATE_DECIMAL_PLACES = 4
 # A project id is part of page URLs and Storage paths
 _PROJECT_ID = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -66,5 +72,42 @@ def create_project_record(body: AdminProjectCreate) -> AdminProjectResponse | JS
     if row is None:
         conflict = ProjectConflict(detail="A project with this project_id already exists", existing_project_id=project_id)
         return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
+
+    return AdminProjectResponse(data=ProjectDetail.model_validate(row))
+
+
+def _checked_rate(value: Optional[Decimal], field: str) -> Optional[Decimal]:
+    """
+    Check an assessment rate.
+    Takes the rate (None clears it) and its field's name, for the message.
+    Returns it; raises 400 for a negative rate, one of a million or more, or one past 4 decimal places.
+    """
+    if value is None:
+        return None
+    if not value.is_finite() or value < 0:
+        raise HTTPException(status_code=400, detail=f"{field} cannot be negative")
+    if value >= MAX_RATE:
+        raise HTTPException(status_code=400, detail=f"{field} must be less than {MAX_RATE}")
+    if -value.normalize().as_tuple().exponent > RATE_DECIMAL_PLACES:
+        raise HTTPException(status_code=400, detail=f"{field} can have at most {RATE_DECIMAL_PLACES} decimal places")
+    return value
+
+
+@router.patch("/{project_id}/assessment-rates", response_model=AdminProjectResponse)
+def set_assessment_rates(project_id: str, body: AssessmentRatesUpdate) -> AdminProjectResponse:
+    """
+    Set a project's DOT assessment rates, per square foot of 4" and 7" sidewalk. Admins only. A rate left out keeps its value; a null clears it.
+    Takes the project id as a path parameter and either rate (or both) in the body.
+    Returns an AdminProjectResponse with the project as it now is; raises 400 when nothing is sent or a rate doesn't fit, 403 for a user who isn't an admin, 404 for an unknown project and 422 for a rate that isn't a number.
+    """
+    rates = {field: _checked_rate(value, field) for field, value in body.model_dump(exclude_unset=True).items()}
+
+    if not rates:
+        raise HTTPException(status_code=400, detail="Send cost_per_sf_4in and/or cost_per_sf_7in")
+
+    row = update_assessment_rates(project_id, rates)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Project not found")
 
     return AdminProjectResponse(data=ProjectDetail.model_validate(row))

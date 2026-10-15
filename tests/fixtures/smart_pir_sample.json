@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "pir_id": "00000000-0000-4000-8000-0000000000a1",
+  "pages": [
+    {
+      "page_number": 1,
+      "scale_px_per_ft": 15,
+      "rotation_deg": 90,
+      "annotations": {
+        "contract_no": "SE-384",
+        "violation_no": "V12345",
+        "boro": "Queens",
+        "property_address": "12-34 56th Ave",
+        "block": "1234",
+        "lot": "56",
+        "cross_street_left": "55th St",
+        "cross_street_right": "57th St",
+        "frontage_street": "56th Ave",
+        "tax_map_width_ft": 25,
+        "cc_curb_to_curb_ft": 34.5,
+        "property_status": "some_defects_corrected",
+        "violation_not_removed_due_to": ["tree"]
+      },
+      "flags": [
+        {
+          "display_order": 1, "shape": "rectangle", "dimensions": {"L": 5, "W": 4},
+          "sketch_x": 100, "sketch_y": 120, "rotation": 0,
+          "surveyed_mark": "cross", "surveyed_is_assessable": true, "surveyed_thickness": "4in",
+          "defect_codes": ["1", "6A"],
+          "non_assessable_areas": [
+            {"display_order": 1, "shape": "rectangle", "dimensions": {"L": 1, "W": 2},
+             "sketch_x": 98, "sketch_y": 118, "reason": "driveway"},
+            {"display_order": 2, "shape": "triangle", "dimensions": {"a": 2, "b": 1},
+             "sketch_x": 102, "sketch_y": 122, "reason": "grass"}
+          ]
+        },
+        {
+          "display_order": 2, "shape": "polygon",
+          "dimensions": {"vertices": [{"x": 0, "y": 0}, {"x": 4, "y": 0}, {"x": 4, "y": 3}, {"x": 0, "y": 3}]},
+          "sketch_x": 200, "sketch_y": 120,
+          "surveyed_mark": "cross_with_number", "surveyed_is_assessable": true, "surveyed_thickness": "7in",
+          "defect_codes": ["2"]
+        },
+        {
+          "display_order": 3, "shape": "arc", "dimensions": {"r": 2, "theta": 3.141592653589793},
+          "sketch_x": 300, "sketch_y": 120,
+          "surveyed_mark": "number_only", "surveyed_is_assessable": false,
+          "surveyed_non_assessable_reason": "scaffolding", "surveyed_thickness": "4in"
+        },
+        {
+          "display_order": 4, "shape": "trapezoid", "dimensions": {"a": 3, "b": 5, "w": 4},
+          "sketch_x": 400, "sketch_y": 120,
+          "surveyed_mark": "none", "added_in_field": true, "surveyed_is_assessable": true,
+          "surveyed_thickness": "7in_as_4in"
+        },
+        {
+          "display_order": 5, "shape": "triangle", "dimensions": {"a": 3, "b": 4},
+          "sketch_x": 500, "sketch_y": 120,
+          "surveyed_mark": "tick", "surveyed_is_assessable": true, "surveyed_thickness": "4in",
+          "defect_codes": ["3", "5"]
+        }
+      ],
+      "features": [
+        {"feature_type": "tree_pit", "area_impact": "subtract", "shape": "circle", "dimensions": {"r": 1},
+         "sketch_x": 101, "sketch_y": 121, "flag_index": 0},
+        {"feature_type": "hydrant", "sketch_x": 50, "sketch_y": 60, "label": "H1"},
+        {"feature_type": "cellar_door", "area_impact": "sits_on_top", "shape": "rectangle",
+         "dimensions": {"L": 3, "W": 2}, "sketch_x": 210, "sketch_y": 125}
+      ],
+      "segments": [
+        {"segment_type": "curb_concrete", "points": [{"x": 0, "y": 0}, {"x": 150, "y": 0}]}
+      ]
+    },
+    {
+      "page_number": 2,
+      "segments": [
+        {"segment_type": "curb_granite", "points": [{"x": 0, "y": 0}, {"x": 30, "y": 40}], "note": "corner"}
+      ]
+    }
+  ]
+}

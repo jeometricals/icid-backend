@@ -1,6 +1,7 @@
 """
-A flag's area from its shape and dimensions, in square feet: what the API stores as computed_quantity.
-Dimensions are feet, checked per shape by api/schemas/flag.py before they get here.
+An area from its shape and dimensions, in square feet: what the API stores as the computed_quantity of a flag, a
+non-assessable area or a sized feature. Dimensions are feet, checked per shape by api/schemas/flag.py before they get
+here.
 """
 
 import math
@@ -33,8 +34,8 @@ def polygon_area(vertices: list[dict[str, Any]]) -> Decimal:
 
 def compute_area(shape: str, dimensions: dict[str, Any]) -> Decimal:
     """
-    Compute a flag's area: rectangle L x W; trapezoid (a + b) / 2 x w; right triangle a x b / 2; polygon by the
-    shoelace formula; arc the circular segment r^2 / 2 x (theta - sin theta).
+    Compute a shape's area: rectangle L x W; trapezoid (a + b) / 2 x w; right triangle a x b / 2; polygon by the
+    shoelace formula; arc the circular segment r^2 / 2 x (theta - sin theta); circle pi r^2 (features only).
     Takes the shape and its dimensions (already checked).
     Returns the area in square feet, rounded to 2 decimal places, halves up; raises ValueError for an unknown shape.
     """
@@ -49,6 +50,9 @@ def compute_area(shape: str, dimensions: dict[str, Any]) -> Decimal:
     elif shape == "arc":
         r, theta = float(dimensions["r"]), float(dimensions["theta"])
         area = Decimal(repr(r * r / 2 * (theta - math.sin(theta))))
+    elif shape == "circle":
+        r = float(dimensions["r"])
+        area = Decimal(repr(math.pi * r * r))
     else:
         raise ValueError(f"Unknown shape: {shape}")
     return area.quantize(_CENTS, rounding=ROUND_HALF_UP)

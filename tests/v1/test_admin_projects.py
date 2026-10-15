@@ -1,13 +1,14 @@
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
 
-from api.queries.projects import create_project, list_projects_for_admin
+from api.queries.projects import create_project, list_projects_for_admin, update_assessment_rates
 from api.services import auth
 from tests.conftest import ADMIN_USER_ROW, signed_in
 
 # ---------------------------------------------------------------------------
-# GET and POST /v1/admin/projects
+# GET and POST /v1/admin/projects, and PATCH .../{project_id}/assessment-rates
 # Mock rows are dicts, as run_query returns them: a project's own columns.
 # ---------------------------------------------------------------------------
 
@@ -18,12 +19,14 @@ CRON = {"Authorization": f"Bearer {CRON_SECRET}"}
 
 HWS_ROW = {"project_id": "HWS0023", "project_name": "S/W Queens 2025",
            "project_description": "Installation of Curb, Sidewalk and Ped-Ramp Various locations Queens",
-           "registration_code": "2024123457", "borough": "Queens", "status": "Construction; Active"}
+           "registration_code": "2024123457", "borough": "Queens", "status": "Construction; Active",
+           "cost_per_sf_4in": 12.5, "cost_per_sf_7in": 18.75}
 DEMO_ROW = {"project_id": "DEMO01", "project_name": "Test Project", "project_description": None,
-            "registration_code": None, "borough": None, "status": None}
+            "registration_code": None, "borough": None, "status": None, "cost_per_sf_4in": None,
+            "cost_per_sf_7in": None}
 NEW_ROW = {"project_id": "HWK2026", "project_name": "S/W Brooklyn 2026",
            "project_description": "Installation of Sidewalk in Brooklyn", "registration_code": "2026000001",
-           "borough": "Brooklyn", "status": None}
+           "borough": "Brooklyn", "status": None, "cost_per_sf_4in": None, "cost_per_sf_7in": None}
 FULL_BODY = {"project_id": "HWK2026", "project_name": "S/W Brooklyn 2026",
              "project_description": "Installation of Sidewalk in Brooklyn", "borough": "Brooklyn",
              "registration_code": "2026000001"}
@@ -185,3 +188,71 @@ class TestAdminProjectQueries:
             assert create_project("HWK2026", "S/W Brooklyn 2026", "Sidewalk", "Brooklyn", None) == NEW_ROW
         with patch(QUERY, return_value=[]):
             assert create_project("HWK2026", "S/W Brooklyn 2026", "Sidewalk", "Brooklyn", None) is None
+
+
+RATES_URL = f"{URL}/HWS0023/assessment-rates"
+
+
+class TestAssessmentRates:
+    def test_the_list_carries_each_projects_rates(self, admin_client):
+        with patch(QUERY, return_value=[HWS_ROW]):
+            data = admin_client.get(URL).json()["data"]
+        assert data[0]["cost_per_sf_4in"] == 12.5 and data[0]["cost_per_sf_7in"] == 18.75
+
+    def test_the_statements_read_the_rates(self, admin_client):
+        with patch(QUERY, return_value=[]) as run:
+            admin_client.get(URL)
+        assert "cost_per_sf_4in" in run.call_args.args[0] and "cost_per_sf_7in" in run.call_args.args[0]
+
+    def test_an_admin_sets_both_rates(self, admin_client):
+        with patch(QUERY, return_value=[HWS_ROW]) as run:
+            response = admin_client.patch(RATES_URL, json={"cost_per_sf_4in": 12.5, "cost_per_sf_7in": "18.75"})
+        assert response.status_code == 200 and response.json() == {"data": HWS_ROW}
+        assert run.call_args.args[1] == (True, Decimal("12.5"), True, Decimal("18.75"), "HWS0023")
+
+    def test_a_rate_left_out_keeps_its_value_and_a_null_clears_one(self, admin_client):
+        with patch(QUERY, return_value=[HWS_ROW]) as run:
+            assert admin_client.patch(RATES_URL, json={"cost_per_sf_7in": None}).status_code == 200
+        assert run.call_args.args[1] == (False, None, True, None, "HWS0023")
+        sql = " ".join(run.call_args.args[0].split())
+        assert "cost_per_sf_4in = CASE WHEN %s THEN %s::numeric ELSE cost_per_sf_4in END" in sql
+        assert "UPDATE icid.projects" in sql and "WHERE project_id = %s" in sql
+
+    def test_zero_and_four_decimal_places_are_taken(self, admin_client):
+        with patch(QUERY, return_value=[HWS_ROW]):
+            response = admin_client.patch(RATES_URL, json={"cost_per_sf_4in": 0, "cost_per_sf_7in": "999999.9999"})
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize("body,detail", [
+        ({}, "Send cost_per_sf_4in and/or cost_per_sf_7in"),
+        ({"cost_per_sf_4in": -1}, "cost_per_sf_4in cannot be negative"),
+        ({"cost_per_sf_7in": 1000000}, "cost_per_sf_7in must be less than 1000000"),
+        ({"cost_per_sf_4in": "1.23456"}, "cost_per_sf_4in can have at most 4 decimal places"),
+    ])
+    def test_a_rate_that_doesnt_fit_is_400_and_nothing_is_written(self, admin_client, body, detail):
+        with patch(QUERY) as run:
+            response = admin_client.patch(RATES_URL, json=body)
+        assert response.status_code == 400 and response.json() == {"detail": detail}
+        run.assert_not_called()
+
+    def test_a_rate_that_isnt_a_number_is_422(self, admin_client):
+        with patch(QUERY) as run:
+            assert admin_client.patch(RATES_URL, json={"cost_per_sf_4in": "cheap"}).status_code == 422
+        run.assert_not_called()
+
+    def test_an_unknown_project_is_404(self, admin_client):
+        with patch(QUERY, return_value=[]):
+            response = admin_client.patch(f"{URL}/NOPE/assessment-rates", json={"cost_per_sf_4in": 1})
+        assert response.status_code == 404 and response.json() == {"detail": "Project not found"}
+
+    def test_a_user_who_isnt_an_admin_is_forbidden(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(QUERY) as run:
+            response = inspector.patch(RATES_URL, json={"cost_per_sf_4in": 1})
+        assert (response.status_code, response.json()) == FORBIDDEN
+        run.assert_not_called()
+
+    def test_the_query_returns_the_row_or_none(self):
+        with patch(QUERY, return_value=[HWS_ROW]):
+            assert update_assessment_rates("HWS0023", {"cost_per_sf_4in": Decimal("1")}) == HWS_ROW
+        with patch(QUERY, return_value=[]):
+            assert update_assessment_rates("NOPE", {"cost_per_sf_4in": Decimal("1")}) is None

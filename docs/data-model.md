@@ -36,13 +36,20 @@ projects ──< task_orders ──< task_order_properties >── properties
 properties ──< pirs                            property_id, no cascade; one live PIR per property
 pirs ──< pir_pages ──< flags                   pir_id ON DELETE CASCADE; flags.pir_page_id no action (live flags only)
 pirs ──< flags ··· contract_items              pir_id, no cascade; pay_item_id optional, ON DELETE SET NULL
+flags ──< non_assessable_areas                 flag_id, no action (soft-deleted with their flag)
+pir_pages ──< features ··· flags               pir_page_id, no action; flag_id optional (a 'subtract' feature's flag)
+pir_pages ──< segments                         pir_page_id, no action
+pir_pages ──1 pir_annotations                  pir_page_id is the primary key, no action
+features, segments ··· contract_items          pay_item_id optional, ON DELETE SET NULL
 
 users is also referenced by (none cascades):
     idrs.stage1_reviewer_uuid, idrs.re_reviewer_uuid, idrs.deleted_by
     idr_audit.actor_uuid, idr_field_edits.editor_uuid, report_attachments.uploaded_by, properties.created_by,
-    task_orders.created_by, task_order_properties.added_by, pirs.digitized_by, flags.created_by
+    task_orders.created_by, task_order_properties.added_by, pirs.digitized_by, flags.created_by,
+    non_assessable_areas.created_by, features.created_by, segments.created_by
     users.deleted_by, properties.deleted_by, task_orders.deleted_by, pirs.deleted_by,
-    pirs.as_built_signed_by, flags.deleted_by, pir_pages.deleted_by (ON DELETE SET NULL)
+    pirs.as_built_signed_by, flags.deleted_by, pir_pages.deleted_by, non_assessable_areas.deleted_by,
+    features.deleted_by, segments.deleted_by (ON DELETE SET NULL)
 ```
 
 `──<` reads "has many". Deleting an IDR's row takes everything drawn under it; nothing cascades from a user, a
@@ -66,7 +73,12 @@ client or a project except a project's `contract_items`. `quantities.reporter_uu
   several. See [task_orders](#task_orders).
 - A **PIR** is a property's digitized DOT survey sheet; a property has at most one that isn't deleted. See
   [pirs](#pirs). Its scan is a set of **pages** ([pir_pages](#pir_pages)), and its **flags** are the marked
-  pieces of sidewalk drawn on them, each with a shape and the area it comes to. See [flags](#flags).
+  pieces of sidewalk drawn on them, each with a shape and the area it comes to. See [flags](#flags). A flag's
+  **non-assessable areas** are the parts of it not assessed; a page's **features** (obstructions, some taken off a
+  flag's area) and **segments** (curb runs) are drawn on it too, and its **annotations** are its title block. See
+  [non_assessable_areas](#non_assessable_areas), [features](#features), [segments](#segments) and
+  [pir_annotations](#pir_annotations). A sketch tool's file of all of these comes in through one import
+  (`POST /v1/pirs/{id}/import`).
 - An IDR is **soft-deleted** by an admin (`status = 'deleted'`, `deleted_at`, `deleted_by`): the row and
   everything under it stay, and it can be brought back. Only a soft-deleted IDR can then be deleted for good,
   which removes the row and, by the cascades above, everything under it. See [idrs](#idrs).
@@ -122,10 +134,10 @@ admin role and demo flag (`/v1/admin/users`); a password is changed by its user 
   same email.
 - `DELETE .../permanent` deletes the row of a user who is soft-deleted, and only when no row names them: every
   foreign key to `users.uuid` (see the diagram) is `NO ACTION` and refuses the delete, except
-  the `deleted_by` of users, properties, task orders, PIRs, flags and PIR pages and `pirs.as_built_signed_by`, which (but
-  for `users.deleted_by`) are counted all the same. So only a user who never reported, reviewed, edited,
-  uploaded, held a role, created or deleted a property, a task order or a flag, bundled a property, or
-  digitized, signed or deleted a PIR, can go;
+  the `deleted_by` of users, properties, task orders, PIRs, flags, PIR pages, non-assessable areas, features and
+  segments and `pirs.as_built_signed_by`, which (but for `users.deleted_by`) are counted all the same. So only a user
+  who never reported, reviewed, edited, uploaded, held a role, created or deleted a property, a task order, a flag, a
+  non-assessable area, a feature or a segment, bundled a property, or digitized, signed or deleted a PIR, can go;
   anyone with history stays soft-deleted. The user's signature file is then removed from Storage, best-effort.
 
 A demo user is made by `POST /v1/auth/demo` (`demo-<uuid>@icid.local`, first name `Demo`, client `C00001`, no
@@ -146,6 +158,7 @@ set in SQL.
 | `registration_code` | TEXT | Shown as "Reg. No" |
 | `borough` | TEXT | |
 | `status` | TEXT | Free text, e.g. `active` |
+| `cost_per_sf_4in`, `cost_per_sf_7in` | NUMERIC(10,4) | The DOT assessment rates per square foot of 4" and 7" sidewalk; ≥ 0 (`chk_projects_assessment_rates`); NULL until an admin sets them (`PATCH /v1/admin/projects/{id}/assessment-rates`). Migration 034 |
 
 There is no contractor column. The frontend's old mock data had one, but it was never in the
 database, and R5 removed it from the General page.
@@ -454,8 +467,10 @@ the old one is then refused (409). No PIR can be created on a soft-deleted prope
 ### pir_pages
 
 One page of a PIR's scan, rendered to PNG in the `pir-images` bucket. Added by migration 033, replacing R1d's
-`pirs.source_image_url` / `source_image_scale` (dropped). Uploading a scan replaces the PIR's live pages: they, and
-their live flags, are soft-deleted in the same statement, and the new pages are inserted; their files are kept.
+`pirs.source_image_url` / `source_image_scale` (dropped). Uploading a scan replaces the PIR's live pages: they, their
+live flags (and those flags' non-assessable areas), features and segments are soft-deleted in the same statement, and
+the new pages are inserted; their files, and their title blocks, are kept with them. Setting a page's scale works out
+the length of every live segment on it again, in the same statement.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -489,16 +504,93 @@ Demo users only read.
 | `rotation` | REAL NOT NULL | Degrees on its page, default 0 |
 | `surveyed_mark` | TEXT NOT NULL | `number_only`, `cross`, `cross_with_number`, `tick` or `none`; CHECK `chk_flags_surveyed_mark` |
 | `surveyed_is_assessable` | BOOLEAN NOT NULL | |
-| `surveyed_non_assessable_reason` | TEXT | Required when not assessable, empty when assessable (the API checks the pairing); CHECK `chk_flags_non_assessable_reason` on the nine values |
+| `surveyed_non_assessable_reason` | TEXT | Required when not assessable, empty when assessable (the API checks the pairing); CHECK `chk_flags_non_assessable_reason` on 22 values: R1b's nine (`tree_damage`, `city_tree`, `transition`, `no_driveway`, `hydrant`, `fronting_city`, `utility`, `settlement`, `other`) and the R1e.1 survey's (`tree`, `driveway`, `grass`, `dirt`, `existing_sidewalk`, `asphalt`, `tree_pit`, `landmark`, `vault`, `subway`, `scaffolding`, `other_perm_obstruction`, `other_temp_obstruction`; widened by migration 034) |
 | `surveyed_thickness` | TEXT NOT NULL | `4in`, `7in` or `7in_as_4in`; CHECK `chk_flags_thickness` |
 | `is_constructed` | BOOLEAN NOT NULL | Default false; set by a later IDR-claim slice, not the API |
 | `pay_item_id` | UUID | FK → `contract_items.contract_item_id`, **ON DELETE SET NULL**; a contract item of the PIR's project (the API checks); `idx_flags_pay_item` (live, mapped flags) |
-| `computed_quantity` | NUMERIC NOT NULL | The shape's area in square feet, 2 decimal places, computed by the API |
-| `reported_quantity` | NUMERIC | An override, above 0 (`chk_flags_reported_quantity`); NULL means the computed quantity stands |
+| `computed_quantity` | NUMERIC NOT NULL | The shape's area in square feet, 2 decimal places, computed by the API. Its **net** area (in responses, not stored) is this less its non-assessable areas and the live `subtract` features naming it, never below 0 |
+| `reported_quantity` | NUMERIC | An override, above 0 (`chk_flags_reported_quantity`); NULL means the net area stands |
+| `defect_codes` | TEXT[] NOT NULL | The DOT defect codes marked on it, a subset of `1` `2` `3` `4` `5` `6A` `6B` `6C` (`chk_flags_defect_codes`), stored in that order, each once; default `{}`. Migration 034 |
 | `quantity_delta_reason` | TEXT | Why the override differs |
 | `created_by` | UUID NOT NULL | The signed-in user who added it: any project member or admin; FK → `users.uuid` |
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
+
+### non_assessable_areas
+
+The parts of a flag that are not assessed (a driveway, grass, ...), one row each. Added by migration 034. Each is
+drawn on its flag's page, and its area is taken off the flag's: a flag's net area is its own less its areas' and its
+`subtract` features'. Anyone on the project, and any admin, adds, edits and deletes them
+(`/v1/flags/{id}/non-assessable-areas`, `/v1/non-assessable-areas/{id}`); demo users only read.
+
+**They go with their flag.** Soft-deleting a flag soft-deletes its live areas in the same statement, at the same
+moment; un-deleting the flag brings back exactly those (the ones with its `deleted_at`), not one deleted on its own
+before. Replacing or deleting a PIR's pages does the same for the flags on them.
+
+| Column | Type | Notes |
+|---|---|---|
+| `non_assessable_area_id` | UUID PK | `gen_random_uuid()` |
+| `flag_id` | UUID NOT NULL | FK → `flags.id`, no action (flags are never hard-deleted); `nas_flag_idx` |
+| `display_order` | INT NOT NULL | ≥ 1; unique per flag among live areas (`nas_flag_order_live_uq`, `WHERE deleted_at IS NULL`) |
+| `shape`, `dimensions` | TEXT, JSONB NOT NULL | A flag's shapes (`chk_nas_shape`), dimensions checked per shape by the API |
+| `sketch_x`, `sketch_y`, `rotation` | REAL NOT NULL | Its place on the flag's page, as a flag's (native page pixels; rotation default 0, unbounded) |
+| `reason` | TEXT NOT NULL | `driveway`, `grass`, `dirt`, `existing_sidewalk`, `asphalt`, `tree_pit`, `landmark` or `other` (`chk_nas_reason`) |
+| `computed_quantity` | NUMERIC NOT NULL | Its area in square feet, computed by the API |
+| `created_by` | UUID NOT NULL | FK → `users.uuid` |
+| `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete; `deleted_by` FK → `users.uuid`, **ON DELETE SET NULL** |
+
+### features
+
+Point obstructions and sized features drawn on a page (a manhole, a tree pit, a hydrant, ...), one row each. Added
+by migration 034. Project members and admins write them (`/v1/pir-pages/{id}/features`, `/v1/features/{id}`); demo
+users only read. There is no un-delete.
+
+| Column | Type | Notes |
+|---|---|---|
+| `feature_id` | UUID PK | `gen_random_uuid()` |
+| `pir_page_id` | UUID NOT NULL | FK → `pir_pages`, no action; `features_page_idx`, `features_live_idx` |
+| `flag_id` | UUID | FK → `flags.id`: the flag a `subtract` feature comes off, required then (`chk_features_subtract_flag`); a live flag on the same page (the API checks); `features_flag_live_idx` |
+| `feature_type` | TEXT NOT NULL | `manhole`, `grate`, `utility_cover`, `hydrant`, `fire_alarm`, `tree_pit`, `meter`, `sign_or_meter`, `mail_box`, `telephone`, `cellar_door`, `pole`, `detectable_warning` or `other` |
+| `area_impact` | TEXT NOT NULL | `marker_only` (default), `subtract` or `sits_on_top`; the last two need a shape (`chk_features_sized_impact`) |
+| `sketch_x`, `sketch_y`, `rotation` | REAL NOT NULL | Its place on the page |
+| `shape`, `dimensions` | TEXT, JSONB | Set together or not at all (`chk_features_shape_dimensions`); a flag's shapes and `circle` (`{r}`, area πr²) |
+| `label` | TEXT | Trimmed, at most 200 characters |
+| `pay_item_id` | UUID | FK → `contract_items`, **ON DELETE SET NULL**; one of the project's |
+| `computed_quantity` | NUMERIC | Its area in square feet when it has a shape |
+| `reported_quantity` | NUMERIC | An override, above 0; what a `subtract` feature takes off is this or else its area |
+| `created_by`, `deleted_at`, `deleted_by` | | As on `non_assessable_areas` |
+
+### segments
+
+Curb runs drawn on a page, one row each. Added by migration 034. Same access as features.
+
+| Column | Type | Notes |
+|---|---|---|
+| `segment_id` | UUID PK | `gen_random_uuid()` |
+| `pir_page_id` | UUID NOT NULL | FK → `pir_pages`, no action; `segments_page_idx`, `segments_live_idx` |
+| `segment_type` | TEXT NOT NULL | `curb_concrete`, `curb_concrete_depressed`, `curb_steel_faced`, `curb_steel_faced_corner`, `curb_granite` or `other` |
+| `points` | JSONB NOT NULL | `[{x, y}, ...]` in native page pixels, two or more (the API checks; the database only that it is an array) |
+| `length_ft` | NUMERIC | The sum of the runs between consecutive points over the page's scale, 2 decimal places, worked out in SQL whenever the segment is written or its page's scale is set; NULL while the page has no scale |
+| `pay_item_id` | UUID | FK → `contract_items`, **ON DELETE SET NULL**; one of the project's |
+| `note` | TEXT | At most 2000 characters |
+| `created_by`, `deleted_at`, `deleted_by` | | As on `non_assessable_areas` |
+
+### pir_annotations
+
+A page's title block, one row per page. Added by migration 034. Set whole with `PUT /v1/pir-pages/{id}/annotations`
+(a field left out is cleared); project members and admins, not demo users. It has no `deleted_at`: a replaced page
+keeps its title block, and the new page starts without one.
+
+| Column | Type | Notes |
+|---|---|---|
+| `pir_page_id` | UUID PK | FK → `pir_pages`, no action |
+| `contract_no`, `violation_no`, `property_address`, `block`, `lot`, `cross_street_left`, `cross_street_right`, `frontage_street` | TEXT | Trimmed, blank is NULL, at most 200 characters (the API) |
+| `boro` | TEXT | One of the five boroughs, spelled out (`chk_pir_annotations_boro`) |
+| `tax_map_width_ft`, `cc_curb_to_curb_ft` | NUMERIC(10,2) | ≥ 0 |
+| `property_status` | TEXT | `all_defects_corrected`, `some_defects_corrected` or `no_work_done` |
+| `corner_property_status` | TEXT | `ped_ramp_installed`, `no_ped_ramp_exists` or `existing_ped_ramp` |
+| `violation_not_removed_due_to` | TEXT[] NOT NULL | Free text, default `{}` |
+| `created_at`, `updated_at` | TIMESTAMPTZ NOT NULL | |
 
 ### report_attachments
 
@@ -743,6 +835,7 @@ content as TEXT, linked to a report and a form template).
 | 031b | `031b_pir_images_bucket.sql` | R1d | Created the private Storage bucket `pir-images` (10 MB per file; PNG, JPEG and PDF). No `icid` table changes. |
 | 032 | `032_flags.sql` | R1b | Created `flags` (FK to `pirs` with no cascade; FK to `contract_items` ON DELETE SET NULL; FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`; CHECKs on `display_order`, `shape`, `surveyed_mark`, `surveyed_non_assessable_reason`, `surveyed_thickness` and `reported_quantity`) with the partial indexes `idx_flags_pir` and `idx_flags_pay_item`. No existing table or row changed. |
 | 033 | `033_pir_pages_and_flag_coords.sql` | R1e | Created `pir_pages` (FK to `pirs` ON DELETE CASCADE, FK to `users` for `deleted_by` ON DELETE SET NULL, CHECKs on `page_number`, `width_px`, `height_px`, `scale_px_per_ft` and `rotation_deg`) with the partial unique index `pir_pages_pir_page_num_live_uq` and `pir_pages_pir_idx`. Dropped `pirs.source_image_url` and `source_image_scale` (no PIR had an image). Soft-deleted the 3 flags made through R1b's form, then added `flags.pir_page_id` (FK to `pir_pages`, no action), CHECK `chk_flags_live_on_a_page` and `flags_pir_page_idx`. |
+| 034 | `034_smart_pir_data_model.sql` | Smart PIR | Added `flags.defect_codes` (TEXT[] NOT NULL DEFAULT `{}`, CHECK `chk_flags_defect_codes`) and widened `chk_flags_non_assessable_reason` to R1b's nine values plus the R1e.1 survey's (22). Created `non_assessable_areas` (FK to `flags`, no action; partial unique index `nas_flag_order_live_uq`), `features` (FKs to `pir_pages` and `flags`, no action; to `contract_items` ON DELETE SET NULL), `segments` (FK to `pir_pages`, no action; to `contract_items` ON DELETE SET NULL) and `pir_annotations` (keyed by `pir_page_id`, no action), the first three with `created_by` and, ON DELETE SET NULL, `deleted_by` FKs to `users` (20 → 26 FKs to `users`). Added `projects.cost_per_sf_4in` and `cost_per_sf_7in` (NUMERIC(10,4), ≥ 0). No existing row changed; the thickness CHECK already held `7in_as_4in`. |
 
 Where each current column came from:
 
@@ -762,6 +855,7 @@ Where each current column came from:
 | `pirs` | all | 031 |
 | `flags` | all but `pir_page_id` | 032 |
 | `pir_pages`; `flags.pir_page_id` | all | 033 |
+| `non_assessable_areas`, `features`, `segments`, `pir_annotations`; `flags.defect_codes`, `chk_flags_defect_codes`, the wider `chk_flags_non_assessable_reason`; `projects.cost_per_sf_4in`, `cost_per_sf_7in`, `chk_projects_assessment_rates` | all | 034 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

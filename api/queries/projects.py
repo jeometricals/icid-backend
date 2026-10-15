@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
@@ -134,7 +135,9 @@ _PROJECT_COLUMNS = """
             project_description,
             registration_code,
             borough,
-            status"""
+            status,
+            cost_per_sf_4in,
+            cost_per_sf_7in"""
 
 
 def get_project_by_id(project_id: str) -> Optional[dict[str, Any]]:
@@ -176,4 +179,30 @@ def create_project(
         + ";"
     )
     rows = run_query(sql, (project_id, project_name, project_description, borough, registration_code))
+    return rows[0] if rows else None
+
+
+def update_assessment_rates(project_id: str, rates: dict[str, Optional[Decimal]]) -> Optional[dict[str, Any]]:
+    """
+    Set a project's DOT assessment rates; a rate left out keeps its value, and one given as None is cleared.
+    Takes the project id and the rates being set, keyed cost_per_sf_4in and/or cost_per_sf_7in.
+    Returns the project dict (as get_project_by_id returns it), or None if no project matches.
+    """
+    sql = (
+        """
+        UPDATE icid.projects
+        SET cost_per_sf_4in = CASE WHEN %s THEN %s::numeric ELSE cost_per_sf_4in END,
+            cost_per_sf_7in = CASE WHEN %s THEN %s::numeric ELSE cost_per_sf_7in END,
+            updated_at = now()
+        WHERE project_id = %s
+        RETURNING"""
+        + _PROJECT_COLUMNS
+        + ";"
+    )
+    params = (
+        "cost_per_sf_4in" in rates, rates.get("cost_per_sf_4in"),
+        "cost_per_sf_7in" in rates, rates.get("cost_per_sf_7in"),
+        project_id,
+    )
+    rows = run_query(sql, params)
     return rows[0] if rows else None

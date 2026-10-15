@@ -336,7 +336,7 @@ def count_user_references(uuid: UUID) -> Optional[dict[str, int]]:
     """
     Count the rows that name a user, each of which stops the user's row being deleted for good.
     Takes the user's uuid.
-    Returns {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs, flags, pir_pages}: the IDRs they reported, reviewed or deleted, their project roles, the audit rows and field edits they made, the attachments they uploaded, the properties and task orders they created or deleted, the properties they bundled into task orders, the PIRs they digitized, signed as built or deleted, the flags they created or deleted and the PIR pages they replaced or deleted; or None on failure.
+    Returns {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs, flags, pir_pages, non_assessable_areas, features, segments}: the IDRs they reported, reviewed or deleted, their project roles, the audit rows and field edits they made, the attachments they uploaded, the properties and task orders they created or deleted, the properties they bundled into task orders, the PIRs they digitized, signed as built or deleted, the flags they created or deleted, the PIR pages they replaced or deleted, and the non-assessable areas, features and segments they created or deleted; or None on failure.
     """
     sql = """
         SELECT
@@ -352,9 +352,13 @@ def count_user_references(uuid: UUID) -> Optional[dict[str, int]]:
             (SELECT count(*) FROM icid.pirs pir
              WHERE %s IN (pir.digitized_by, pir.as_built_signed_by, pir.deleted_by)) AS pirs,
             (SELECT count(*) FROM icid.flags f WHERE %s IN (f.created_by, f.deleted_by)) AS flags,
-            (SELECT count(*) FROM icid.pir_pages pg WHERE pg.deleted_by = %s) AS pir_pages;
+            (SELECT count(*) FROM icid.pir_pages pg WHERE pg.deleted_by = %s) AS pir_pages,
+            (SELECT count(*) FROM icid.non_assessable_areas na
+             WHERE %s IN (na.created_by, na.deleted_by)) AS non_assessable_areas,
+            (SELECT count(*) FROM icid.features ft WHERE %s IN (ft.created_by, ft.deleted_by)) AS features,
+            (SELECT count(*) FROM icid.segments s WHERE %s IN (s.created_by, s.deleted_by)) AS segments;
     """
-    rows = run_query(sql, (uuid,) * 11)
+    rows = run_query(sql, (uuid,) * 14)
     return rows[0] if rows else None
 
 

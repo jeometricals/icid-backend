@@ -67,7 +67,12 @@ CREATE TABLE icid.projects (
     borough             TEXT,
     status              TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- The DOT assessment rates per square foot of 4" and 7" sidewalk (migrations/034)
+    cost_per_sf_4in     NUMERIC(10,4),
+    cost_per_sf_7in     NUMERIC(10,4),
+    CONSTRAINT chk_projects_assessment_rates CHECK ((cost_per_sf_4in IS NULL OR cost_per_sf_4in >= 0)
+                                                    AND (cost_per_sf_7in IS NULL OR cost_per_sf_7in >= 0))
 );
 
 CREATE INDEX idx_projects_project_id ON icid.projects(project_id);
@@ -374,7 +379,9 @@ CREATE INDEX pir_pages_pir_idx ON icid.pir_pages (pir_id);
 -- dimensions are checked per shape by the API; computed_quantity is the shape's area (sq ft), reported_quantity an
 -- override (NULL: none). pay_item_id is SET NULL on delete: pay items are hard-deleted by the admin routes.
 -- pir_page_id (migrations/033) is the page it is drawn on, sketch_x / sketch_y / rotation its place there; a live flag
--- has one (chk_flags_live_on_a_page), and the foreign key has no action: flags are never hard-deleted
+-- has one (chk_flags_live_on_a_page), and the foreign key has no action: flags are never hard-deleted.
+-- defect_codes (migrations/034) are the DOT defect codes marked on it; the non-assessable reasons are R1b's and the
+-- R1e.1 survey's
 ------------------------------------------------------------
 CREATE TABLE icid.flags (
     id                              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -401,21 +408,153 @@ CREATE TABLE icid.flags (
     created_by                      UUID NOT NULL REFERENCES icid.users(uuid),
     deleted_at                      TIMESTAMPTZ,
     deleted_by                      UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    defect_codes                    TEXT[] NOT NULL DEFAULT '{}',
     CONSTRAINT chk_flags_display_order CHECK (display_order >= 0),
     CONSTRAINT chk_flags_shape CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
     CONSTRAINT chk_flags_surveyed_mark
         CHECK (surveyed_mark IN ('number_only', 'cross', 'cross_with_number', 'tick', 'none')),
     CONSTRAINT chk_flags_non_assessable_reason CHECK (surveyed_non_assessable_reason IS NULL OR
         surveyed_non_assessable_reason IN ('tree_damage', 'city_tree', 'transition', 'no_driveway', 'hydrant',
-                                           'fronting_city', 'utility', 'settlement', 'other')),
+                                           'fronting_city', 'utility', 'settlement', 'other',
+                                           'tree', 'driveway', 'grass', 'dirt', 'existing_sidewalk', 'asphalt',
+                                           'tree_pit', 'landmark', 'vault', 'subway', 'scaffolding',
+                                           'other_perm_obstruction', 'other_temp_obstruction')),
     CONSTRAINT chk_flags_thickness CHECK (surveyed_thickness IN ('4in', '7in', '7in_as_4in')),
     CONSTRAINT chk_flags_reported_quantity CHECK (reported_quantity IS NULL OR reported_quantity > 0),
-    CONSTRAINT chk_flags_live_on_a_page CHECK (pir_page_id IS NOT NULL OR deleted_at IS NOT NULL)
+    CONSTRAINT chk_flags_live_on_a_page CHECK (pir_page_id IS NOT NULL OR deleted_at IS NOT NULL),
+    CONSTRAINT chk_flags_defect_codes
+        CHECK (defect_codes <@ ARRAY['1', '2', '3', '4', '5', '6A', '6B', '6C']::TEXT[])
 );
 
 CREATE INDEX idx_flags_pir ON icid.flags (pir_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_flags_pay_item ON icid.flags (pay_item_id) WHERE deleted_at IS NULL AND pay_item_id IS NOT NULL;
 CREATE INDEX flags_pir_page_idx ON icid.flags (pir_page_id);
+
+------------------------------------------------------------
+-- NON-ASSESSABLE AREA (a part of a flag that is not assessed: a driveway, grass, ...; soft-deleted; migrations/034)
+-- computed_quantity is its shape's area (sq ft), taken off the flag's. Deleted with its flag (at the same moment) and
+-- restored with it. The foreign key has no action: flags are never hard-deleted
+------------------------------------------------------------
+CREATE TABLE icid.non_assessable_areas (
+    non_assessable_area_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    flag_id                 UUID NOT NULL REFERENCES icid.flags(id),
+    display_order           INT NOT NULL,
+    shape                   TEXT NOT NULL,
+    dimensions              JSONB NOT NULL,
+    sketch_x                REAL NOT NULL,
+    sketch_y                REAL NOT NULL,
+    rotation                REAL NOT NULL DEFAULT 0,
+    reason                  TEXT NOT NULL,
+    computed_quantity       NUMERIC NOT NULL,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by              UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at              TIMESTAMPTZ,
+    deleted_by              UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    CONSTRAINT chk_nas_display_order CHECK (display_order >= 1),
+    CONSTRAINT chk_nas_shape CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
+    CONSTRAINT chk_nas_reason CHECK (reason IN ('driveway', 'grass', 'dirt', 'existing_sidewalk', 'asphalt',
+                                                'tree_pit', 'landmark', 'other'))
+);
+CREATE INDEX nas_flag_idx ON icid.non_assessable_areas (flag_id);
+CREATE UNIQUE INDEX nas_flag_order_live_uq ON icid.non_assessable_areas (flag_id, display_order)
+    WHERE deleted_at IS NULL;
+
+------------------------------------------------------------
+-- FEATURE (a point obstruction or sized feature drawn on a page; soft-deleted; migrations/034)
+-- A 'subtract' feature names the flag its area comes off (flag_id); computed_quantity is its shape's area (sq ft)
+------------------------------------------------------------
+CREATE TABLE icid.features (
+    feature_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pir_page_id        UUID NOT NULL REFERENCES icid.pir_pages(pir_page_id),
+    flag_id            UUID REFERENCES icid.flags(id),
+    feature_type       TEXT NOT NULL,
+    area_impact        TEXT NOT NULL DEFAULT 'marker_only',
+    sketch_x           REAL NOT NULL,
+    sketch_y           REAL NOT NULL,
+    rotation           REAL NOT NULL DEFAULT 0,
+    shape              TEXT,
+    dimensions         JSONB,
+    label              TEXT,
+    pay_item_id        UUID REFERENCES icid.contract_items(contract_item_id) ON DELETE SET NULL,
+    computed_quantity  NUMERIC,
+    reported_quantity  NUMERIC,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by         UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at         TIMESTAMPTZ,
+    deleted_by         UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    CONSTRAINT chk_features_type CHECK (feature_type IN (
+        'manhole', 'grate', 'utility_cover', 'hydrant', 'fire_alarm', 'tree_pit', 'meter', 'sign_or_meter',
+        'mail_box', 'telephone', 'cellar_door', 'pole', 'detectable_warning', 'other')),
+    CONSTRAINT chk_features_area_impact CHECK (area_impact IN ('marker_only', 'subtract', 'sits_on_top')),
+    CONSTRAINT chk_features_shape
+        CHECK (shape IS NULL OR shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc', 'circle')),
+    CONSTRAINT chk_features_shape_dimensions CHECK ((shape IS NULL) = (dimensions IS NULL)),
+    CONSTRAINT chk_features_sized_impact CHECK (area_impact = 'marker_only' OR shape IS NOT NULL),
+    CONSTRAINT chk_features_subtract_flag CHECK (area_impact <> 'subtract' OR flag_id IS NOT NULL),
+    CONSTRAINT chk_features_reported_quantity CHECK (reported_quantity IS NULL OR reported_quantity > 0)
+);
+CREATE INDEX features_page_idx ON icid.features (pir_page_id);
+CREATE INDEX features_live_idx ON icid.features (pir_page_id) WHERE deleted_at IS NULL;
+CREATE INDEX features_flag_live_idx ON icid.features (flag_id) WHERE deleted_at IS NULL AND flag_id IS NOT NULL;
+
+------------------------------------------------------------
+-- SEGMENT (a curb run drawn on a page; soft-deleted; migrations/034)
+-- length_ft is worked out from points and the page's scale whenever either is written; NULL without a scale
+------------------------------------------------------------
+CREATE TABLE icid.segments (
+    segment_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pir_page_id   UUID NOT NULL REFERENCES icid.pir_pages(pir_page_id),
+    segment_type  TEXT NOT NULL,
+    points        JSONB NOT NULL,
+    length_ft     NUMERIC,
+    pay_item_id   UUID REFERENCES icid.contract_items(contract_item_id) ON DELETE SET NULL,
+    note          TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by    UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at    TIMESTAMPTZ,
+    deleted_by    UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    CONSTRAINT chk_segments_type CHECK (segment_type IN (
+        'curb_concrete', 'curb_concrete_depressed', 'curb_steel_faced', 'curb_steel_faced_corner', 'curb_granite',
+        'other')),
+    CONSTRAINT chk_segments_points CHECK (jsonb_typeof(points) = 'array'),
+    CONSTRAINT chk_segments_length CHECK (length_ft IS NULL OR length_ft >= 0)
+);
+CREATE INDEX segments_page_idx ON icid.segments (pir_page_id);
+CREATE INDEX segments_live_idx ON icid.segments (pir_page_id) WHERE deleted_at IS NULL;
+
+------------------------------------------------------------
+-- PIR ANNOTATIONS (a page's title block, one row per page; migrations/034). No deleted_at: it stays with its page
+------------------------------------------------------------
+CREATE TABLE icid.pir_annotations (
+    pir_page_id                  UUID PRIMARY KEY REFERENCES icid.pir_pages(pir_page_id),
+    contract_no                  TEXT,
+    violation_no                 TEXT,
+    boro                         TEXT,
+    property_address             TEXT,
+    block                        TEXT,
+    lot                          TEXT,
+    cross_street_left            TEXT,
+    cross_street_right           TEXT,
+    frontage_street              TEXT,
+    tax_map_width_ft             NUMERIC(10,2),
+    cc_curb_to_curb_ft           NUMERIC(10,2),
+    property_status              TEXT,
+    corner_property_status       TEXT,
+    violation_not_removed_due_to TEXT[] NOT NULL DEFAULT '{}',
+    created_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_pir_annotations_boro
+        CHECK (boro IS NULL OR boro IN ('Manhattan', 'Bronx', 'Brooklyn', 'Queens', 'Staten Island')),
+    CONSTRAINT chk_pir_annotations_property_status CHECK (property_status IS NULL OR
+        property_status IN ('all_defects_corrected', 'some_defects_corrected', 'no_work_done')),
+    CONSTRAINT chk_pir_annotations_corner_status CHECK (corner_property_status IS NULL OR
+        corner_property_status IN ('ped_ramp_installed', 'no_ped_ramp_exists', 'existing_ped_ramp')),
+    CONSTRAINT chk_pir_annotations_widths CHECK ((tax_map_width_ft IS NULL OR tax_map_width_ft >= 0)
+                                                 AND (cc_curb_to_curb_ft IS NULL OR cc_curb_to_curb_ft >= 0))
+);
 
 ------------------------------------------------------------
 -- REPORT ATTACHMENT (file metadata; bytes live in Supabase Storage)

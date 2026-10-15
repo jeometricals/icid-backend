@@ -54,7 +54,9 @@ FLAG_ROW = {"id": FLAG_ID, "pir_id": PIR_ID, "pir_page_id": PAGE_ID, "property_i
             "added_in_field": False, "shape": "rectangle", "dimensions": {"L": 5.0, "W": 4.0}, "sketch_x": None,
             "sketch_y": None, "rotation": 0.0, "surveyed_mark": "cross", "surveyed_is_assessable": True,
             "surveyed_non_assessable_reason": None, "surveyed_thickness": "4in", "is_constructed": False,
-            "pay_item_id": None, "computed_quantity": Decimal("20.00"), "reported_quantity": None,
+            "pay_item_id": None, "defect_codes": [], "computed_quantity": Decimal("20.00"), "reported_quantity": None,
+            "non_assessable_areas_count": 0, "non_assessable_quantity": Decimal("0"), "subtracted_quantity": Decimal("0"),
+            "net_quantity": Decimal("20.00"),
             "quantity": Decimal("20.00"), "is_overridden": False, "quantity_delta_reason": None,
             "created_at": CREATED, "updated_at": CREATED, "created_by": ADMIN_ID, "deleted_at": None,
             "deleted_by": None, "page_deleted_at": None, "pir_deleted_at": None, "property_deleted_at": None}
@@ -136,7 +138,7 @@ class TestCreateFlag:
         assert "WHERE page.pir_page_id = %s AND page.deleted_at IS NULL" in one_line
         assert run.call_args.args[1][CREATOR + 1] == PAGE_ID
         assert "ci.contract_item_id = %s::uuid AND ci.project_id = p.project_id" in one_line
-        assert "COALESCE(f.reported_quantity, f.computed_quantity) AS quantity" in one_line
+        assert "COALESCE(f.reported_quantity, GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0)) AS quantity" in one_line
         assert "%s::real" in one_line and "%s::jsonb" in one_line  # a NULL parameter is typed, not text
 
     @pytest.mark.parametrize("dimensions,shape", [
@@ -426,7 +428,7 @@ class TestSoftDeleteAndUndeleteFlag:
             deleted = admin_client.post(f"{URL}/admin/soft-delete")
         assert deleted.status_code == 200 and deleted.json()["message"] == "Flag deleted"
         assert deleted.json()["data"]["deleted_by"] == str(ADMIN_ID)
-        with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW]]):
+        with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW], [FLAG_ROW]]):
             restored = admin_client.post(f"{URL}/admin/undelete")
         assert restored.status_code == 200 and restored.json()["message"] == "Flag restored"
         assert restored.json()["data"]["deleted_at"] is None
@@ -438,7 +440,7 @@ class TestSoftDeleteAndUndeleteFlag:
         delete_sql, undelete_sql = (call.args[0] for call in run.call_args_list)
         assert "SET deleted_at = now(), deleted_by = %s" in delete_sql and "deleted_at IS NULL" in delete_sql
         assert "SET deleted_at = NULL, deleted_by = NULL" in undelete_sql
-        assert run.call_args_list[0].args[1] == (ADMIN_ID, FLAG_ID)
+        assert run.call_args_list[0].args[1] == (ADMIN_ID, FLAG_ID, ADMIN_ID)
 
     def test_deleting_it_again_changes_nothing(self, admin_client):
         with patch(FLAGS, return_value=[DELETED_ROW]) as run:
@@ -526,7 +528,7 @@ class TestMemberDelete:
         assert response.status_code == 204 and response.content == b""
         sql, params = run.call_args.args
         assert "SET deleted_at = now(), deleted_by = %s" in sql and "DELETE" not in sql
-        assert params == (MEMBER_ID, FLAG_ID)
+        assert params == (MEMBER_ID, FLAG_ID, MEMBER_ID)
 
     def test_deleting_it_again_changes_nothing(self, admin_client):
         with patch(FLAGS, return_value=[DELETED_ROW]) as run:
@@ -567,6 +569,89 @@ class TestUndeleteNeedsALivePage:
         assert run.call_count == 1
 
     def test_the_statement_brings_it_back_only_onto_a_live_page(self, admin_client):
-        with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW]]) as run:
+        with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW], [FLAG_ROW]]) as run:
             assert admin_client.post(f"{URL}/admin/undelete").status_code == 200
-        assert "page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL" in " ".join(run.call_args.args[0].split())
+        assert "page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL" in " ".join(run.call_args_list[1].args[0].split())
+
+
+class TestDefectCodesAndReasons:
+    def test_defect_codes_are_stored_in_order_each_once(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "defect_codes": ["6C", "1", "6C", "3"]})
+        assert response.status_code == 201
+        assert written(run)["defect_codes"] == ["1", "3", "6C"]
+        assert "%s::text[]" in run.call_args.args[0]
+
+    def test_a_flag_without_defect_codes_has_none(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            admin_client.post(FLAGS_URL, json=BODY)
+        assert written(run)["defect_codes"] == []
+
+    @pytest.mark.parametrize("codes", [["7"], ["6a"], ["6D"], "1"])
+    def test_a_code_outside_the_dots_is_422(self, admin_client, codes):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "defect_codes": codes})
+        assert response.status_code == 422
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("reason", ["tree_damage", "settlement", "tree", "driveway", "existing_sidewalk",
+                                        "scaffolding", "other_perm_obstruction", "other_temp_obstruction"])
+    def test_the_old_and_new_non_assessable_reasons_are_taken(self, admin_client, reason):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "surveyed_is_assessable": False,
+                                                          "surveyed_non_assessable_reason": reason})
+        assert response.status_code == 201 and written(run)["surveyed_non_assessable_reason"] == reason
+
+    def test_a_patch_replaces_the_codes_and_a_null_keeps_them(self, admin_client):
+        stored = {**FLAG_ROW, "defect_codes": ["2"]}
+        with patch(FLAGS, side_effect=[[stored], [stored]]) as run:
+            assert admin_client.patch(URL, json={"defect_codes": ["5", "4"]}).status_code == 200
+        assert written(run)["defect_codes"] == ["4", "5"]
+        with patch(FLAGS, side_effect=[[stored], [stored]]) as run:
+            assert admin_client.patch(URL, json={"defect_codes": None, "display_order": 2}).status_code == 200
+        assert written(run)["defect_codes"] == ["2"]
+
+
+class TestNetQuantity:
+    def test_a_flag_carries_its_areas_and_subtracted_features(self, admin_client):
+        row = {**FLAG_ROW, "non_assessable_areas_count": 2, "non_assessable_quantity": Decimal("5.00"),
+               "subtracted_quantity": Decimal("3.14"), "net_quantity": Decimal("11.86"), "quantity": Decimal("11.86")}
+        with patch(FLAGS, return_value=[row]):
+            data = admin_client.get(URL).json()["data"]
+        assert data["computed_quantity"] == 20.0 and data["net_quantity"] == 11.86 and data["quantity"] == 11.86
+        assert data["non_assessable_areas_count"] == 2 and data["subtracted_quantity"] == 3.14
+
+    def test_the_read_works_the_net_out_in_sql(self):
+        with patch(FLAGS, return_value=[]) as run:
+            list_flags(PIR_ID)
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0) AS net_quantity" in one_line
+        # an area counts while live, and once its flag is deleted, if it went with the flag
+        assert "na.flag_id = f.id AND (na.deleted_at IS NULL OR na.deleted_at = f.deleted_at)" in one_line
+        assert "ft.flag_id = f.id AND ft.area_impact = 'subtract' AND ft.deleted_at IS NULL" in one_line
+        assert "COALESCE(ft.reported_quantity, ft.computed_quantity)" in one_line
+
+
+class TestAreasGoWithTheirFlag:
+    def test_deleting_a_flag_deletes_its_live_areas_in_the_same_statement(self):
+        with patch(FLAGS, return_value=[]) as run:
+            soft_delete_flag(FLAG_ID, ADMIN_ID)
+        one_line = " ".join(run.call_args.args[0].split())
+        assert ("UPDATE icid.non_assessable_areas SET deleted_at = now(), deleted_by = %s, updated_at = now() "
+                "WHERE flag_id IN (SELECT id FROM f) AND deleted_at IS NULL") in one_line
+        assert "CROSS JOIN (SELECT count(*) FROM areas) AS areas_retired" in one_line
+
+    def test_undeleting_brings_back_only_the_areas_deleted_with_it(self):
+        with patch(FLAGS, return_value=[]) as run:
+            undelete_flag(FLAG_ID)
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "WITH before AS ( SELECT id, deleted_at FROM icid.flags WHERE id = %s )" in one_line
+        assert "na.flag_id = before.id AND na.deleted_at = before.deleted_at" in one_line
+        assert "WHERE before.id IN (SELECT id FROM f)" in one_line
+        assert run.call_args.args[1] == (FLAG_ID, FLAG_ID)
+
+    def test_the_restored_flag_is_read_again_for_its_areas(self, admin_client):
+        restored = {**FLAG_ROW, "non_assessable_areas_count": 1}
+        with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW], [restored]]) as run:
+            response = admin_client.post(f"{URL}/admin/undelete")
+        assert response.json()["data"]["non_assessable_areas_count"] == 1 and run.call_count == 3

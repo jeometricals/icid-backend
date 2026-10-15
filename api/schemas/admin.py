@@ -81,6 +81,9 @@ class UserReferences(BaseModel):
     pirs: int
     flags: int
     pir_pages: int
+    non_assessable_areas: int
+    features: int
+    segments: int
 
 
 class UserHasHistory(BaseModel):

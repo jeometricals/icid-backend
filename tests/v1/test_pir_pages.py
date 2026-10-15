@@ -121,7 +121,7 @@ class FakePages:
             for row in retired:
                 row["deleted_at"], row["deleted_by"] = DELETED, params[0]
             if "INSERT INTO icid.pir_pages" in sql:
-                return self._insert(params[4].obj)
+                return self._insert(params[-1].obj)
             return [{"pir_page_id": row["pir_page_id"], "image_path": row["image_path"]} for row in retired]
         if sql.lstrip().startswith("WITH pg AS"):  # a page update
             page_id = params[-1]
@@ -293,7 +293,15 @@ class TestComplete:
         assert "UPDATE icid.flags SET deleted_at = now(), deleted_by = %s" in one_line
         assert "WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL" in one_line
         assert "CROSS JOIN (SELECT count(*) FROM old_pages) AS replaced" in one_line  # old out of the index first
-        assert replace_params[0] == ADMIN_ID and replace_params[2] == ADMIN_ID
+        assert replace_params[0] == ADMIN_ID and replace_params[2:6] == (ADMIN_ID,) * 4
+        # the flags' non-assessable areas, and the pages' features and segments, go in the same statement
+        assert "UPDATE icid.non_assessable_areas SET deleted_at = now(), deleted_by = %s, updated_at = now()" in one_line
+        assert "WHERE flag_id IN (SELECT id FROM old_flags) AND deleted_at IS NULL" in one_line
+        for table in ("features", "segments"):
+            assert (f"UPDATE icid.{table} SET deleted_at = now(), deleted_by = %s, updated_at = now() "
+                    "WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL") in one_line
+        for retired in ("flags", "areas", "features", "segments"):
+            assert f"FROM old_{retired}) AS {retired}_retired" in one_line
 
     @pytest.mark.parametrize("upload,status,detail", [
         (b"just text", 400, "Unsupported file type"),
@@ -390,7 +398,9 @@ class TestPages:
             response = client.delete(f"{PIR_URL}/pages")
         assert response.status_code == 204 and pages.live() == [] and storage.removed == []
         sql, params = pages.calls[-1]
-        assert "UPDATE icid.flags" in sql and "INSERT" not in sql and params == (MEMBER_ID, PIR_ID, MEMBER_ID)
+        assert "UPDATE icid.flags" in sql and "INSERT" not in sql and params == (MEMBER_ID, PIR_ID, *(MEMBER_ID,) * 4)
+        for table in ("non_assessable_areas", "features", "segments"):
+            assert f"UPDATE icid.{table}" in sql
 
     @pytest.mark.parametrize("parent,detail", [
         ("deleted_at", "Page is deleted"), ("pir_deleted_at", "PIR is deleted"), ("property_deleted_at", "Property is deleted"),
