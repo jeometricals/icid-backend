@@ -28,6 +28,7 @@ from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
 from api.services import export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_swcb
 from api.services.auto_general import build_auto_general_data
+from api.services.idr_flags import IdrFlagError, export_lines
 from api.services import export_general
 from api.services.export_common import (
     REPORT_CONT, REPORT_CONT_RE_SIGNATURE, REPORT_CONT_SIGNATURE, SignatureImage, SignatureLayout, allocate_copies,
@@ -111,6 +112,25 @@ def _general_for_export(idr_id: UUID) -> tuple[dict[str, Any], Optional[int], Op
         raise ExportDataError("Failed to load IDR reports")
     contributing = [report for report in reports if report["report_type"] not in ADDENDUM_TYPES]
     return build_auto_general_data(contributing), None, None
+
+
+def _with_flag_lines(general_data: dict[str, Any], idr: dict[str, Any]) -> dict[str, Any]:
+    """
+    Add an IDR's flag rollup to the General's pay items, after its own, under a "PIR Flags" heading row (see
+    idr_flags.export_lines): live before approval, as frozen at approval after. They carry no id, so no redline
+    touches them.
+    Takes the General's report_data and the IDR row.
+    Returns the report_data with the lines added (unchanged when there are none); raises ExportDataError when the
+    IDR's flags can't be read.
+    """
+    try:
+        lines = export_lines(idr)
+    except IdrFlagError as exc:
+        raise ExportDataError(str(exc)) from exc
+    if not lines:
+        return general_data
+    own = general_data.get("payItems")
+    return {**general_data, "payItems": (own if isinstance(own, list) else []) + lines}
 
 
 def _load_reports(idr_id: UUID) -> list[dict[str, Any]]:
@@ -381,6 +401,7 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     a signature line, and an approved IDR's carry the Resident Engineer's beside it (the inspector's dated with the work date, the RE's with the approval date).
     What reviewers edited prints with its redlines, at any status: the replaced value struck, the reviewer's in blue
     with their initials (see export_redlines); a revised pay item takes a row per revision, which can add pages.
+    The IDR's flag rollup prints with the General's pay items, under a "PIR Flags" heading row.
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -394,6 +415,7 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     project = {**project, "contractor": get_project_contractor_name(idr["project_id"])}
     inspector = _inspector_name(get_user_by_id(idr["reporter_uuid"]))
     general_data, page_number, general_edited_as = _general_for_export(idr_id)
+    general_data = _with_flag_lines(general_data, idr)
     reports = _load_reports(idr_id)
     swcbs, conc_mixes, acs = _swcb_reports(reports), _conc_mix_reports(reports), _ac_reports(reports)
     conc_cyls = _conc_cyl_reports(reports)

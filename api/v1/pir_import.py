@@ -7,6 +7,7 @@ from api.queries.pir_pages import list_pages_for_pir
 from api.schemas.auth import UserOut
 from api.schemas.pir_import import PirImportResponse, SmartPirImport
 from api.services.auth import current_user
+from api.services.pay_item_units import flag_unit
 from api.services.pir_import import run_import
 from api.v1._shared import refuse_deleted_pir_for_member, writable_pir
 
@@ -35,6 +36,7 @@ def import_pir(
     result = run_import(
         pir_id, user.uuid, body, {page["page_number"]: page["pir_page_id"] for page in pages},
         {item["pay_item_uuid"] for item in pay_items},
+        {item["pay_item_uuid"] for item in pay_items if flag_unit(item["unit"]) is not None},
     )
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to import the PIR")

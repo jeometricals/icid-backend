@@ -229,3 +229,22 @@ class TestRunImport:
     def test_a_failed_statement_is_none(self):
         with patch(WRITE, return_value=None):
             assert run_import(PIR_ID, USER_ID, SmartPirImport.model_validate(sample()), PAGE_IDS, set()) is None
+
+
+class TestFlagUnits:
+    """R1f: a flag's pay item must be in a unit an IDR's rollup can measure a flag in."""
+
+    def test_a_flag_whose_pay_item_a_flag_cant_be_measured_in_is_dropped(self):
+        from api.services.pir_import import FLAG_UNIT_REFUSED
+        raw = sample()
+        page_one(raw)["flags"][1]["pay_item_id"] = str(PAY_ITEM)
+        result = prepare_import(SmartPirImport.model_validate(raw), PAGE_IDS, {PAY_ITEM}, set())
+        assert [(kind, index, reason) for kind, _, index, reason in reasons(result) if kind == "flag"] == [
+            ("flag", 1, FLAG_UNIT_REFUSED)]
+        assert FLAG_UNIT_REFUSED == "a flag can't be measured in its pay item's unit (only SF, SY, CY, EA)"
+
+    def test_a_flag_whose_pay_item_a_flag_measures_is_kept(self):
+        raw = sample()
+        page_one(raw)["flags"][1]["pay_item_id"] = str(PAY_ITEM)
+        result = prepare_import(SmartPirImport.model_validate(raw), PAGE_IDS, {PAY_ITEM}, {PAY_ITEM})
+        assert result.dropped == [] and result.flags[1]["pay_item_id"] == PAY_ITEM

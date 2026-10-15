@@ -165,6 +165,8 @@ CREATE TABLE icid.idrs (
     returned_from          TEXT,
     deleted_at             TIMESTAMPTZ,
     deleted_by             UUID REFERENCES icid.users(uuid),
+    -- Its default flag scope (migrations/037): the live flags on this task order's properties; none without one
+    task_order_id          UUID REFERENCES icid.task_orders(id),
     CONSTRAINT chk_idrs_status CHECK (status IN ('draft', 'submitted', 'stage1_review', 'stage2_review', 'approved', 'returned', 'deleted')),
     CONSTRAINT chk_idrs_returned_from CHECK (returned_from IN ('stage1', 'stage2'))
 );
@@ -177,6 +179,7 @@ CREATE UNIQUE INDEX uq_idrs_project_reporter_date
 CREATE INDEX idx_idrs_project_status ON icid.idrs(project_id, status) WHERE deleted_at IS NULL;
 CREATE INDEX idx_idrs_status ON icid.idrs(status) WHERE deleted_at IS NULL;
 CREATE INDEX idx_idrs_reporter ON icid.idrs(reporter_uuid);
+CREATE INDEX idx_idrs_task_order ON icid.idrs (task_order_id) WHERE task_order_id IS NOT NULL;
 -- An IDR number is used once per project among IDRs that aren't deleted; a soft delete frees it
 CREATE UNIQUE INDEX uq_idrs_project_number
     ON icid.idrs(project_id, idr_number)
@@ -265,7 +268,9 @@ CREATE TABLE icid.quantities (
     description    TEXT,
     amount         NUMERIC NOT NULL,
     unit           TEXT,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- manual: a report's pay item; from_flags: the IDR's attributed flags rolled up per pay item (migrations/037)
+    source         TEXT NOT NULL DEFAULT 'manual' CONSTRAINT chk_quantities_source CHECK (source IN ('manual', 'from_flags'))
 );
 
 CREATE INDEX idx_quantities_project_date ON icid.quantities(project_id, report_date);
@@ -441,6 +446,10 @@ CREATE TABLE icid.flags (
     deleted_at                      TIMESTAMPTZ,
     deleted_by                      UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
     defect_codes                    TEXT[] NOT NULL DEFAULT '{}',
+    -- The approved IDR that built it, and that IDR's work date (migrations/037); no action: a claim is released
+    -- (unlock, admin delete) before its IDR can be purged
+    claimed_by_idr_id               UUID REFERENCES icid.idrs(idr_id),
+    constructed_on                  DATE,
     CONSTRAINT chk_flags_display_order CHECK (display_order >= 0),
     CONSTRAINT chk_flags_shape CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
     CONSTRAINT chk_flags_surveyed_mark
@@ -455,12 +464,32 @@ CREATE TABLE icid.flags (
     CONSTRAINT chk_flags_reported_quantity CHECK (reported_quantity IS NULL OR reported_quantity > 0),
     CONSTRAINT chk_flags_live_on_a_page CHECK (pir_page_id IS NOT NULL OR deleted_at IS NOT NULL),
     CONSTRAINT chk_flags_defect_codes
-        CHECK (defect_codes <@ ARRAY['1', '2', '3', '4', '5', '6A', '6B', '6C']::TEXT[])
+        CHECK (defect_codes <@ ARRAY['1', '2', '3', '4', '5', '6A', '6B', '6C']::TEXT[]),
+    CONSTRAINT chk_flags_claim_consistent CHECK (
+        (claimed_by_idr_id IS NULL AND is_constructed = false AND constructed_on IS NULL)
+        OR (claimed_by_idr_id IS NOT NULL AND is_constructed = true AND constructed_on IS NOT NULL))
 );
 
 CREATE INDEX idx_flags_pir ON icid.flags (pir_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_flags_pay_item ON icid.flags (pay_item_id) WHERE deleted_at IS NULL AND pay_item_id IS NOT NULL;
 CREATE INDEX flags_pir_page_idx ON icid.flags (pir_page_id);
+CREATE INDEX idx_flags_claimed_by_idr ON icid.flags (claimed_by_idr_id) WHERE claimed_by_idr_id IS NOT NULL;
+CREATE INDEX idx_flags_scope_rollup ON icid.flags (pay_item_id, claimed_by_idr_id) WHERE deleted_at IS NULL;
+
+------------------------------------------------------------
+-- IDR FLAG ATTRIBUTION (an override of an IDR's default flag attribution; migrations/037)
+-- exclude drops a flag the default holds, include adds one it doesn't
+------------------------------------------------------------
+CREATE TABLE icid.idr_flag_attributions (
+    idr_id   UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    flag_id  UUID NOT NULL REFERENCES icid.flags(id) ON DELETE CASCADE,
+    action   TEXT NOT NULL CHECK (action IN ('exclude', 'include')),
+    set_by   UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    set_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (idr_id, flag_id)
+);
+
+CREATE INDEX idx_idr_flag_attributions_flag ON icid.idr_flag_attributions (flag_id);
 
 ------------------------------------------------------------
 -- NON-ASSESSABLE AREA (a part of a flag that is not assessed: a driveway, grass, ...; soft-deleted; migrations/034)

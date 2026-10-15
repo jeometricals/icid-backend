@@ -499,6 +499,17 @@ class TestAddPayItem:
         assert params[4:] == [UUID(SWCB_ID), UUID(SWCB_ID), f"payItems[{item['id']}]", "pay_item_add", None,
                               ("json", item), OLIVE["uuid"], "stage1", "pay_item_add"]
 
+    def test_a_pay_item_the_idrs_flags_fill_is_400_and_nothing_is_added(self):
+        filled = {"flag_id": UUID("f0000000-0000-4000-8000-00000000000a"), "state": "attributed",
+                  "pay_item_id": UUID("d0000000-0000-4000-8000-00000000000a"), "pay_item_ref": "4.05 A",
+                  "budget_code": "12345"}
+        with signed_in(OLIVE) as client, backend() as seen,                 patch("api.queries.idr_flags.run_query", return_value=[filled]):
+            response = client.post(ADD_URL, json=NEW_ITEM)
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Pay item 4.05 A (12345) comes from this IDR's PIR flags; "
+                                             "remove it from the report, or exclude its flags from the IDR"}
+        assert seen["writes"] == []
+
     def test_two_added_items_get_different_ids(self):
         with signed_in(OLIVE) as client, backend() as seen:
             client.post(ADD_URL, json=NEW_ITEM)

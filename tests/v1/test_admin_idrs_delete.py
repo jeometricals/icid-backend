@@ -159,7 +159,7 @@ class TestUndelete:
             admin_client.post(UNDELETE)
         sql, params = writes(seen)[0]
         one_line = flat(sql)
-        assert "approved AS ( SELECT idr_id FROM moved WHERE status = 'approved' )" in one_line
+        assert "approved AS ( SELECT * FROM moved WHERE status = 'approved' )" in one_line
         assert "DELETE FROM icid.quantities WHERE idr_id IN (SELECT idr_id FROM approved)" in one_line
         assert "INSERT INTO icid.quantities (" in sql and "CROSS JOIN approved i" in sql
         rows = params[4].obj
@@ -230,6 +230,56 @@ class TestUndelete:
         with backend() as seen:
             assert client.post(UNDELETE, headers=CRON).status_code == 401
         assert seen["statements"] == []
+
+
+CLAIMER_ID = UUID("2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e")
+TAKEN_FLAG = UUID("f0000000-0000-4000-8000-00000000000a")
+
+
+def released(status_before="approved", taken=()) -> list:
+    """
+    The record released_claims reads off the IDR's admin_delete audit row, as its statement returns it.
+    Takes the status the IDR had and the flags another IDR has claimed since (dicts as the statement builds them).
+    Returns the one-row result.
+    """
+    return [{"status_before": status_before, "released": [TAKEN_FLAG], "taken": list(taken)}]
+
+
+class TestUndeleteClaimsFlagsBack:
+    def test_a_flag_another_idr_claimed_since_is_409_naming_it_and_nothing_is_written(self, admin_client):
+        taken = [{"flag_id": str(TAKEN_FLAG), "claimed_by_idr_id": str(CLAIMER_ID), "claimed_by_idr_number": "007"}]
+        with patch("api.queries.idr_flags.run_query", return_value=released(taken=taken)) as flags,                 backend() as seen:
+            response = admin_client.post(UNDELETE)
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": "1 flag this IDR claimed is now claimed by IDR 007; unlock that IDR first",
+            "existing_idr_id": str(CLAIMER_ID)}
+        assert writes(seen) == []
+        sql, params = flags.call_args.args
+        assert "a.action = 'admin_delete'" in sql and params == (UUID(IDR_ID), UUID(IDR_ID))
+
+    def test_a_taken_flag_doesnt_block_an_idr_that_wasnt_approved(self, admin_client):
+        taken = [{"flag_id": str(TAKEN_FLAG), "claimed_by_idr_id": str(CLAIMER_ID), "claimed_by_idr_number": None}]
+        with patch("api.queries.idr_flags.run_query", return_value=released("draft", taken)),                 backend(restored=[{**RESTORED, "status": "draft"}]):
+            assert admin_client.post(UNDELETE).status_code == 200
+
+    def test_it_claims_back_what_its_delete_released_in_the_same_statement(self, admin_client):
+        with patch("api.queries.idr_flags.run_query", return_value=released()),                 backend(restored=[{**RESTORED, "flags_claimed": 1}]) as seen:
+            response = admin_client.post(UNDELETE)
+        assert response.status_code == 200 and response.json()["flags_claimed"] == 1
+        one_line = flat(writes(seen)[0][0])
+        assert "before.note AS note_before" in one_line
+        assert ("claimed_flags AS ( UPDATE icid.flags f SET claimed_by_idr_id = i.idr_id, is_constructed = true, "
+                "constructed_on = i.report_date FROM approved i WHERE f.id IN (SELECT jsonb_array_elements_text("
+                "COALESCE((SELECT note_before FROM target), '{}')::jsonb -> 'released_flag_ids')::uuid) "
+                "AND f.claimed_by_idr_id IS NULL") in one_line
+        assert "flag_quantities AS ( INSERT INTO icid.quantities" in one_line and "FROM approved i JOIN icid.flags f" in one_line
+        assert "(SELECT count(*) FROM claimed_flags) AS flags_claimed" in one_line
+
+    def test_a_record_that_cant_be_read_is_500(self, admin_client):
+        with patch("api.queries.idr_flags.run_query", return_value=None), backend() as seen:
+            response = admin_client.post(UNDELETE)
+        assert response.status_code == 500 and writes(seen) == []
 
 
 class TestPermanentDelete:

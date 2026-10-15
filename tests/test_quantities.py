@@ -216,8 +216,9 @@ class TestReplaceQuantities:
             assert replace_quantities(IDR_ID, [row(), row("AC", None, "3", None)]) == 2
         assert query.call_count == 1
         sql = flat(query.call_args.args[0])
+        # Only the reports' rows: the backfill leaves an IDR's from_flags rows alone (R1f)
         assert sql.startswith("WITH given AS ( SELECT %s::uuid AS idr_id ), deleted_quantities AS ( DELETE FROM "
-                              "icid.quantities WHERE idr_id IN (SELECT idr_id FROM given) ), "
+                              "icid.quantities WHERE idr_id IN (SELECT idr_id FROM given) AND source = 'manual' ), "
                               "inserted_quantities AS ( INSERT INTO icid.quantities (")
         assert sql.endswith("RETURNING quantity_id ) SELECT COUNT(*) AS inserted FROM inserted_quantities;")
         assert "FROM jsonb_to_recordset(%s) AS q(" in sql
@@ -289,7 +290,10 @@ class TestMigration025:
         return flat(re.search(r"CREATE TABLE icid\.quantities \(.*?\n\);", text, re.DOTALL).group(0))
 
     def test_schema_sql_has_the_table_the_migration_creates(self):
-        assert self.table(self.schema) == self.table(self.migration)
+        # Migration 037 added the source column since: without it, the two match
+        schema = re.sub(r",\s*--[^\n]*\n\s*source\s+TEXT[^\n]*", "", self.schema)
+        assert self.table(schema) == self.table(self.migration)
+        assert "source TEXT NOT NULL DEFAULT 'manual'" in self.table(self.schema).replace("source         ", "source ")
 
     def test_the_table_is_in_the_icid_schema_with_its_keys(self):
         table = self.table(self.migration)
@@ -311,3 +315,53 @@ class TestMigration025:
         for column in ("project_id", "idr_id", "report_date", "reporter_uuid", "report_type", "pay_item_ref",
                        "budget_code", "description", "amount", "unit"):
             assert f" {column} " in table, column
+
+
+# ---------------------------------------------------------------------------
+# R1f: the rows an IDR's flags give (source from_flags)
+# ---------------------------------------------------------------------------
+
+class TestFlagQuantities:
+    def test_the_insert_sums_the_claimed_flags_per_pay_item_in_its_unit(self):
+        from api.queries.quantities import insert_flag_quantities_cte
+        sql = flat(insert_flag_quantities_cte("moved"))
+        assert sql.startswith("flag_quantities AS ( INSERT INTO icid.quantities ( project_id, idr_id, report_date, "
+                              "reporter_uuid, report_type, pay_item_ref, budget_code, description, amount, unit, "
+                              "source )")
+        assert "'PIR_FLAGS', ci.item_no, ci.budget_code, ci.description, round(sum(" in sql
+        assert "'from_flags' FROM moved i JOIN icid.flags f ON f.id IN (SELECT id FROM claimed_flags)" in sql
+        assert "JOIN icid.contract_items ci ON ci.contract_item_id = f.pay_item_id" in sql
+        assert "END) IS NOT NULL GROUP BY i.project_id, i.idr_id, i.report_date, i.reporter_uuid, ci.contract_item_id" in sql
+        assert sql.endswith("RETURNING quantity_id )")
+
+    def test_it_can_read_another_ctes_claims(self):
+        from api.queries.quantities import insert_flag_quantities_cte
+        assert "FROM approved i JOIN icid.flags f ON f.id IN (SELECT id FROM reclaimed)" in flat(
+            insert_flag_quantities_cte("approved", "reclaimed"))
+
+    def test_the_backfill_deletes_only_the_reports_rows(self):
+        from api.queries.quantities import delete_quantities_cte
+        assert flat(delete_quantities_cte("given", manual_only=True)).endswith(
+            "WHERE idr_id IN (SELECT idr_id FROM given) AND source = 'manual' )")
+        assert "source" not in delete_quantities_cte("moved")  # unlock, delete and approval take every row
+
+    def test_an_approved_idrs_frozen_rollup_is_read_from_its_from_flags_rows(self):
+        from api.queries.quantities import list_flag_quantities
+        rows = [{"pay_item_ref": "4.13 AAS", "budget_code": "B", "description": "Walk", "unit": "SF", "amount": 90}]
+        with patch("api.queries.quantities.run_query", return_value=rows) as query:
+            assert list_flag_quantities(IDR_ID) == rows
+        sql, params = query.call_args.args
+        assert "FROM icid.quantities WHERE idr_id = %s AND source = 'from_flags'" in flat(sql)
+        assert params == (IDR_ID,)
+
+
+class TestFlagAmount:
+    def test_a_flag_is_measured_in_its_pay_items_unit(self):
+        from api.queries.flags import FLAG_AMOUNT, FLAG_QUANTITY, FLAG_UNIT
+        sql = flat(FLAG_AMOUNT)
+        assert f"WHEN 'SF' THEN {FLAG_QUANTITY}" in sql
+        assert f"WHEN 'SY' THEN {FLAG_QUANTITY} / 9" in sql
+        assert f"WHEN 'CY' THEN {FLAG_QUANTITY} * (CASE f.surveyed_thickness WHEN '7in' THEN 7 ELSE 4 END) / 324" in sql
+        assert "WHEN 'EA' THEN 1" in sql and "ELSE" not in sql.split("END)")[-2].split("WHEN 'EA' THEN 1")[-1]
+        assert "WHEN 'EACH' THEN 'EA'" in FLAG_UNIT and "regexp_replace(ci.unit, '[^A-Za-z]', '', 'g')" in FLAG_UNIT
+        assert FLAG_QUANTITY == "COALESCE(f.reported_quantity, GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0))"

@@ -655,3 +655,55 @@ class TestAreasGoWithTheirFlag:
         with patch(FLAGS, side_effect=[[DELETED_ROW], [FLAG_ROW], [restored]]) as run:
             response = admin_client.post(f"{URL}/admin/undelete")
         assert response.json()["data"]["non_assessable_areas_count"] == 1 and run.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# R1f: a flag's pay item must be in a unit an IDR's rollup can measure it in, and a flag shows who claimed it
+# ---------------------------------------------------------------------------
+
+LF_REFUSED = "A flag can't be measured in LF: give it a pay item in SF, SY, CY, EA"
+
+
+class TestFlagPayItemUnits:
+    def test_a_pay_item_in_lf_is_422_on_create_and_nothing_is_written(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[{**PAY_ITEM_ROW, "unit": "LF"}]), \
+                patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "pay_item_id": str(PAY_ITEM_ID)})
+        assert response.status_code == 422 and response.json() == {"detail": LF_REFUSED}
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("unit", ["SF", "S.F.", "SY", "CY", "C.Y.", "EA", "Each"])
+    def test_a_unit_a_flag_measures_is_taken(self, admin_client, unit):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[{**PAY_ITEM_ROW, "unit": unit}]), \
+                patch(FLAGS, return_value=[{**FLAG_ROW, "pay_item_id": PAY_ITEM_ID}]):
+            response = admin_client.post(FLAGS_URL, json={**BODY, "pay_item_id": str(PAY_ITEM_ID)})
+        assert response.status_code == 201
+
+    def test_a_new_pay_item_in_lf_is_422_on_patch(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]) as run, patch(CONTRACT, return_value=[{**PAY_ITEM_ROW, "unit": "LF"}]):
+            response = admin_client.patch(URL, json={"pay_item_id": str(PAY_ITEM_ID)})
+        assert response.status_code == 422 and response.json() == {"detail": LF_REFUSED}
+        assert run.call_count == 1  # the read, nothing written
+
+    def test_a_flag_keeping_its_pay_item_isnt_refused_for_its_unit(self, admin_client):
+        mapped = {**FLAG_ROW, "pay_item_id": PAY_ITEM_ID}
+        with patch(FLAGS, side_effect=[[mapped], [mapped]]), \
+                patch(CONTRACT, return_value=[{**PAY_ITEM_ROW, "unit": "LF"}]):
+            response = admin_client.patch(URL, json={"display_order": 2})
+        assert response.status_code == 200
+
+    def test_a_flag_shows_the_idr_that_claimed_it(self, admin_client):
+        idr_id = UUID("9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e")
+        claimed = {**FLAG_ROW, "is_constructed": True, "claimed_by_idr_id": idr_id, "claimed_by_idr_number": "042",
+                   "constructed_on": date(2026, 10, 1)}
+        with patch(FLAGS, return_value=[claimed]):
+            data = admin_client.get(URL).json()["data"]
+        assert (data["is_constructed"], data["claimed_by_idr_id"], data["claimed_by_idr_number"],
+                data["constructed_on"]) == (True, str(idr_id), "042", "2026-10-01")
+
+    def test_an_unclaimed_flag_shows_none(self, admin_client):
+        with patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            data = admin_client.get(URL).json()["data"]
+        assert (data["claimed_by_idr_id"], data["claimed_by_idr_number"], data["constructed_on"]) == (None, None, None)
+        sql = " ".join(run.call_args.args[0].split())
+        assert "f.claimed_by_idr_id, f.constructed_on" in sql and "AS claimed_by_idr_number" in sql

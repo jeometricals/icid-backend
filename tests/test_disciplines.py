@@ -37,3 +37,16 @@ class TestDisciplines:
     def test_every_mapped_type_is_a_report_type(self):
         assert set(REPORT_TYPE_TO_DISCIPLINES) <= {report_type.value for report_type in ReportType}
         assert all(disciplines for disciplines in REPORT_TYPE_TO_DISCIPLINES.values())
+
+
+class TestPirFlagsRows:
+    """R1f: the quantity rows an IDR's flags give (report type PIR_FLAGS) are sidewalk work."""
+
+    def test_a_pir_flags_row_is_sidewalk(self):
+        assert disciplines_for_report_type("PIR_FLAGS") == ("Sidewalk",)
+
+    def test_sidewalk_takes_pir_flags_rows_for_quantities_only(self):
+        assert report_types_for_discipline("Sidewalk", quantities=True) == ("SWCB", "PIR_FLAGS")
+        assert report_types_for_discipline("Sidewalk") == ("SWCB",)  # an IDR's reports: never PIR_FLAGS
+        assert report_types_for_discipline("Curb", quantities=True) == ("SWCB",)
+        assert "PIR_FLAGS" not in REPORT_TYPE_TO_DISCIPLINES

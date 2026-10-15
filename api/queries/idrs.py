@@ -6,8 +6,14 @@ from psycopg.errors import UniqueViolation
 
 from api.db.runner import run_query
 from api.queries.idr_audit import AUDIT_CTE
+from api.queries.idr_flags import claim_flags_cte, reclaim_ids_sql, release_flags_cte, released_note
 from api.queries.idr_reports import REPORT_DATA_WITH_IDS
-from api.queries.quantities import delete_quantities_cte, quantity_rows_json, replace_quantities_ctes
+from api.queries.quantities import (
+    delete_quantities_cte,
+    insert_flag_quantities_cte,
+    quantity_rows_json,
+    replace_quantities_ctes,
+)
 
 IDR_COLUMNS = """
     idr_id,
@@ -41,7 +47,8 @@ IDR_COLUMNS = """
     return_reason,
     returned_from,
     deleted_at,
-    deleted_by
+    deleted_by,
+    task_order_id
 """
 
 # What the IDR lists add to each row (FROM icid.idrs i): its report count, whether it holds a General, the types of
@@ -92,20 +99,20 @@ class IdrSlotTakenError(Exception):
 
 
 def create_idr(
-    project_id: str, reporter_uuid: UUID, report_date: date
+    project_id: str, reporter_uuid: UUID, report_date: date, task_order_id: Optional[UUID] = None
 ) -> Optional[list[dict[str, Any]]]:
     """
     Insert a new draft IDR unless one already exists for this project, reporter and date.
-    Takes the project id, the reporter's user uuid and the report date.
+    Takes the project id, the reporter's user uuid, the report date and its task order (None for none; checked by the route to be a live one of the project).
     Returns a one-row list with the new IDR, an empty list if that day's IDR already exists, or None on failure.
     """
     sql = f"""
-        INSERT INTO icid.idrs (project_id, reporter_uuid, report_date)
-        VALUES (%s, %s, %s)
+        INSERT INTO icid.idrs (project_id, reporter_uuid, report_date, task_order_id)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT DO NOTHING
         RETURNING {IDR_COLUMNS};
     """
-    return run_query(sql, (project_id, reporter_uuid, report_date))
+    return run_query(sql, (project_id, reporter_uuid, report_date, task_order_id))
 
 
 def get_idr_by_id(idr_id: UUID) -> Optional[dict[str, Any]]:
@@ -180,17 +187,21 @@ HEADER_COLUMNS = (
 )
 
 
+# What a draft's header form sets besides the header fields: its task order (a reviewer can't edit it)
+DRAFT_COLUMNS = HEADER_COLUMNS + ("task_order_id",)
+
+
 def update_idr_header(idr_id: UUID, fields: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
     """
-    Set the given header columns on a draft IDR and stamp updated_at; columns not in fields are untouched.
-    Takes the IDR uuid and a dict of header column -> value (None clears); keys must be in HEADER_COLUMNS.
+    Set the given header columns (and the task order) on a draft IDR and stamp updated_at; columns not in fields are untouched.
+    Takes the IDR uuid and a dict of column -> value (None clears); keys must be in DRAFT_COLUMNS.
     Returns a one-row list with the updated IDR, an empty list if the IDR is not a draft, or None on failure.
     """
-    unknown = set(fields) - set(HEADER_COLUMNS)
+    unknown = set(fields) - set(DRAFT_COLUMNS)
     if unknown:
         raise ValueError(f"Not header columns: {sorted(unknown)}")
 
-    columns = [column for column in HEADER_COLUMNS if column in fields]
+    columns = [column for column in DRAFT_COLUMNS if column in fields]
     assignments = [f"{column} = %s" for column in columns] + ["updated_at = now()"]
 
     sql = f"""
@@ -387,11 +398,12 @@ def _move_idr(
     note: Optional[str] = None,
     also: str = "",
     also_values: tuple = (),
+    also_columns: str = "",
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Move an IDR from one review status to another in one statement: lock it, set the status, updated_at and the given columns, and log the move in icid.idr_audit. What else must change with the move (its quantity rows) rides along as more CTEs.
-    Takes the IDR uuid, the acting user's uuid, the action to log, the status it must be in (one, a list of them, or None for any) and the one it moves to, the extra SET assignments (written here, never from a request) with their values, an optional reviewer column that must hold the actor, an optional note for the log, and further CTEs to run in the statement (written here too; they read the moved CTE, so they do nothing when the IDR doesn't move) with their values. A deleted IDR is never moved.
-    Returns a one-row list with the moved IDR, an empty list if it wasn't in that status (or the actor isn't that reviewer), or None on failure.
+    Move an IDR from one review status to another in one statement: lock it, set the status, updated_at and the given columns, and log the move in icid.idr_audit. What else must change with the move (its quantity rows, its flags' claims) rides along as more CTEs.
+    Takes the IDR uuid, the acting user's uuid, the action to log, the status it must be in (one, a list of them, or None for any) and the one it moves to, the extra SET assignments (written here, never from a request) with their values, an optional reviewer column that must hold the actor, an optional note for the log, further CTEs to run in the statement (written here too; they read the moved CTE, so they do nothing when the IDR doesn't move) with their values, and further columns for the result (written here too, read off those CTEs).
+    Returns a one-row list with the moved IDR (and the further columns), an empty list if it wasn't in that status (or the actor isn't that reviewer), or None on failure.
     """
     reviewer = f"AND {reviewer_column} = %s" if reviewer_column else ""
     if from_status is None:
@@ -415,7 +427,7 @@ def _move_idr(
             RETURNING i.*
         ),
         {AUDIT_CTE.rstrip()}{"," + also if also else ""}
-        SELECT {IDR_COLUMNS}
+        SELECT {IDR_COLUMNS}{"," + also_columns if also_columns else ""}
         FROM moved;
     """
     locked_by = (actor_uuid,) if reviewer_column else ()
@@ -476,18 +488,21 @@ def accept_stage2(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any
 
 
 def approve_stage2(
-    idr_id: UUID, actor_uuid: UUID, signature_path: str, as_reviewer: bool, quantity_rows: list[dict[str, Any]]
+    idr_id: UUID, actor_uuid: UUID, signature_path: str, as_reviewer: bool, quantity_rows: list[dict[str, Any]],
+    flag_ids: Optional[list[UUID]] = None,
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, clear any return, and write its pay-item quantities to icid.quantities in place of any it had. The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place. All of it is one statement: an IDR that isn't approved gets no quantities, and a quantity that can't be written stops the approval.
-    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, whether they must already be the IDR's RE reviewer (False for an admin), and the IDR's quantity rows (empty when it has no pay items).
-    Returns a one-row list with the IDR, an empty list if it isn't in Stage 2 review under that reviewer, or None on failure.
+    Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, clear any return, claim its attributed flags (constructed on its report date; one another IDR claimed meanwhile is left out), and write its quantities to icid.quantities in place of any it had: its reports' pay items (manual) and the claimed flags summed per pay item (from_flags). The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place. All of it is one statement: an IDR that isn't approved claims nothing and gets no quantities, and a quantity that can't be written stops the approval.
+    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, whether they must already be the IDR's RE reviewer (False for an admin), the IDR's quantity rows from its reports (empty when it has no pay items), and the uuids of its attributed flags (none when None).
+    Returns a one-row list with the IDR and flags_claimed (how many of the flags it claimed), an empty list if it isn't in Stage 2 review under that reviewer, or None on failure.
     """
     assignments = ("re_reviewer_uuid = %s, re_signature_path = %s, re_signed_at = now(), "
                    "return_reason = NULL, returned_from = NULL")
+    also = f"{replace_quantities_ctes('moved')},{claim_flags_cte('moved')},{insert_flag_quantities_cte('moved')}"
     return _move_idr(idr_id, actor_uuid, "approve_stage2", "stage2_review", "approved", assignments,
                      (actor_uuid, signature_path), reviewer_column="re_reviewer_uuid" if as_reviewer else None,
-                     also=replace_quantities_ctes("moved"), also_values=(quantity_rows_json(quantity_rows),))
+                     also=also, also_values=(quantity_rows_json(quantity_rows), list(flag_ids or [])),
+                     also_columns="(SELECT count(*) FROM claimed_flags) AS flags_claimed")
 
 
 def return_idr(
@@ -517,39 +532,44 @@ UNLOCKABLE_STATUSES = ["approved", "stage2_review"]
 
 def admin_unlock_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again. Its number, the inspector's signature and stage1_accepted_at stay. Its quantity rows are deleted in the same statement: it is no longer approved, and approving it again writes them afresh.
+    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again. Its number, the inspector's signature and stage1_accepted_at stay. Its quantity rows are deleted and its flags' claims released in the same statement: it is no longer approved, and approving it again claims and writes them afresh. Its attribution overrides stay.
     Takes the IDR uuid and the admin's uuid.
-    Returns a one-row list with the IDR, an empty list if it isn't in one of UNLOCKABLE_STATUSES (or is deleted), or None on failure.
+    Returns a one-row list with the IDR and flags_released, an empty list if it isn't in one of UNLOCKABLE_STATUSES (or is deleted), or None on failure.
     """
     assignments = "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL"
     return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments,
-                     also=delete_quantities_cte("moved"))
+                     also=f"{delete_quantities_cte('moved')},{release_flags_cte('moved')}",
+                     also_columns="(SELECT count(*) FROM released_flags) AS flags_released")
 
 
-def admin_delete_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
+def admin_delete_idr(
+    idr_id: UUID, actor_uuid: UUID, claimed: Optional[list[UUID]] = None
+) -> Optional[list[dict[str, Any]]]:
     """
-    Soft-delete an IDR, whatever its status: mark it deleted with when and by whom. The row and everything under it are kept, but for its quantity rows, which are deleted in the same statement; its day and its IDR number become free again.
-    Takes the IDR uuid and the admin's uuid.
-    Returns a one-row list with the IDR, an empty list if it was already deleted, or None on failure.
+    Soft-delete an IDR, whatever its status: mark it deleted with when and by whom. The row and everything under it are kept, but for its quantity rows, which are deleted in the same statement, and its flags' claims, which are released; its day and its IDR number become free again. The flags it had claimed are recorded in the audit row's note, for an un-delete to claim them again.
+    Takes the IDR uuid, the admin's uuid and the flags it has claimed (read just before; none when None).
+    Returns a one-row list with the IDR and flags_released, an empty list if it was already deleted, or None on failure.
     """
     return _move_idr(idr_id, actor_uuid, "admin_delete", None, "deleted", "deleted_at = now(), deleted_by = %s",
-                     (actor_uuid,), also=delete_quantities_cte("moved"))
+                     (actor_uuid,), note=released_note(claimed or []),
+                     also=f"{delete_quantities_cte('moved')},{release_flags_cte('moved')}",
+                     also_columns="(SELECT count(*) FROM released_flags) AS flags_released")
 
 
 def undelete_idr(
     idr_id: UUID, actor_uuid: UUID, quantity_rows: list[dict[str, Any]]
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Bring a soft-deleted IDR back in one statement: give it the status it had when it was deleted, clear deleted_at and deleted_by, and log it in icid.idr_audit as admin_undelete. The status is read off the IDR's latest admin_delete row in icid.idr_audit, which the delete wrote; an IDR with no such row comes back as a draft. One that comes back approved gets its quantity rows written in the same statement, as an approval writes them.
+    Bring a soft-deleted IDR back in one statement: give it the status it had when it was deleted, clear deleted_at and deleted_by, and log it in icid.idr_audit as admin_undelete. The status is read off the IDR's latest admin_delete row in icid.idr_audit, which the delete wrote; an IDR with no such row comes back as a draft. One that comes back approved gets its quantity rows written in the same statement, as an approval writes them, and claims again the flags its delete released (as that row's note lists them; one another IDR claimed meanwhile is left out: the route refuses first).
     Takes the IDR uuid, the admin's uuid and the IDR's quantity rows as its reports give them now (used only when it comes back approved).
-    Returns a one-row list with the IDR and status_on_record (False when it came back as a draft for want of a record), an empty list if it isn't deleted, or None on failure; raises IdrSlotTakenError when another IDR holds its day or its number.
+    Returns a one-row list with the IDR, status_on_record (False when it came back as a draft for want of a record) and flags_claimed, an empty list if it isn't deleted, or None on failure; raises IdrSlotTakenError when another IDR holds its day or its number.
     """
     sql = f"""
         WITH target AS (
-            SELECT i.idr_id, i.status AS from_status, before.status AS status_before
+            SELECT i.idr_id, i.status AS from_status, before.status AS status_before, before.note AS note_before
             FROM icid.idrs i
             LEFT JOIN LATERAL (
-                SELECT a.from_status AS status
+                SELECT a.from_status AS status, a.note
                 FROM icid.idr_audit a
                 WHERE a.idr_id = i.idr_id AND a.action = 'admin_delete' AND a.from_status <> 'deleted'
                 ORDER BY a.created_at DESC
@@ -567,10 +587,12 @@ def undelete_idr(
         ),
         {AUDIT_CTE.rstrip()},
         approved AS (
-            SELECT idr_id FROM moved WHERE status = 'approved'
-        ),{replace_quantities_ctes("approved")}
+            SELECT * FROM moved WHERE status = 'approved'
+        ),{replace_quantities_ctes("approved")},{claim_flags_cte("approved", reclaim_ids_sql("target"))},{
+            insert_flag_quantities_cte("approved")}
         SELECT {IDR_COLUMNS},
-            (SELECT status_before IS NOT NULL FROM target) AS status_on_record
+            (SELECT status_before IS NOT NULL FROM target) AS status_on_record,
+            (SELECT count(*) FROM claimed_flags) AS flags_claimed
         FROM moved;
     """
     try:

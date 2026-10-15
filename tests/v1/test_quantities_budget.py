@@ -245,7 +245,7 @@ class TestRollupRangeAndCumulative:
     def test_cumulative_keeps_the_other_filters(self):
         _, statements, _ = get({"from": "2026-10-01", "cumulative": "true", "budget_code": "HW-CONS",
                                 "discipline": "Sidewalk"})
-        assert statements[1][1] == (PROJECT_ID, ["HW-CONS"], ["SWCB"])
+        assert statements[1][1] == (PROJECT_ID, ["HW-CONS"], ["SWCB", "PIR_FLAGS"])  # Sidewalk takes flag rows (R1f)
 
     def test_cumulative_still_refuses_a_bad_date(self):
         response, statements, _ = get({"from": "notadate", "cumulative": "true"})

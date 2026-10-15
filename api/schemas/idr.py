@@ -17,6 +17,8 @@ IdrStatus = Literal["draft", "submitted", "stage1_review", "stage2_review", "app
 class IdrCreate(BaseModel):
     project_id: str
     report_date: date
+    # Its default flag scope: a live task order of the project (none when left out)
+    task_order_id: Optional[UUID] = None
 
 
 class Idr(BaseModel):
@@ -52,12 +54,22 @@ class Idr(BaseModel):
     returned_from: Optional[str] = None
     deleted_at: Optional[datetime] = None
     deleted_by: Optional[UUID] = None
+    task_order_id: Optional[UUID] = None
 
 
 class IdrResponse(BaseModel):
+    """
+    One IDR. A move that claims or releases flags also says how many: flags_claimed (approval, or an un-delete back to
+    approved), flags_dropped (attributed flags another IDR claimed first, left out of the approval) and
+    flags_released (unlock, admin delete).
+    """
+
     status: str
     message: str
     data: Idr
+    flags_claimed: Optional[int] = None
+    flags_dropped: Optional[int] = None
+    flags_released: Optional[int] = None
 
 
 class IdrListItem(Idr):
@@ -79,7 +91,7 @@ class IdrListResponse(BaseModel):
 class IdrHeaderUpdate(BaseModel):
     """
     Partial IDR header update: omitted fields are left alone, null clears a field.
-    Only the eight header fields are accepted; any other key is a 422 naming it.
+    Only the eight header fields and the task order are accepted; any other key is a 422 naming it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -92,12 +104,13 @@ class IdrHeaderUpdate(BaseModel):
     temp_high: Optional[float] = None
     weather_am: Optional[str] = None
     weather_pm: Optional[str] = None
+    task_order_id: Optional[UUID] = None
 
     @model_validator(mode="before")
     @classmethod
     def reject_non_header_fields(cls, data: Any) -> Any:
         """
-        Reject any key that is not one of the eight header fields, naming the offenders.
+        Reject any key that is not one of the eight header fields or the task order, naming the offenders.
         Takes the raw request body.
         Returns it unchanged, or raises a validation error (surfaced as 422).
         """

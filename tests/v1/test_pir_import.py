@@ -190,3 +190,16 @@ class TestRefusals:
                 patch(CONTRACT, return_value=PAY_ITEM_ROWS), patch(IMPORT, return_value=[]):
             response = admin_client.post(URL, json=body())
         assert response.status_code == 500 and response.json() == {"detail": "Failed to import the PIR"}
+
+
+class TestFlagMeasurablePayItems:
+    """R1f: the route hands the service the project's pay items a flag can be measured in, apart from the rest."""
+
+    def test_only_pay_items_in_a_flags_units_are_passed_for_flags(self, admin_client):
+        lf_item = UUID("7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4f")
+        rows = PAY_ITEM_ROWS + [{**PAY_ITEM_ROWS[0], "pay_item_uuid": lf_item, "unit": "LF"}]
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PAGES, return_value=PAGE_ROWS), \
+                patch(CONTRACT, return_value=rows), patch("api.v1.pir_import.run_import", return_value=None) as run:
+            admin_client.post(URL, json=body())
+        args = run.call_args.args
+        assert args[4] == {PAY_ITEM_ID, lf_item} and args[5] == {PAY_ITEM_ID}

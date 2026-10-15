@@ -4,8 +4,11 @@ SQL for icid.quantities, the pay-item quantities of approved IDRs.
 list_quantities reads a project's rows for the quantities endpoint.
 
 An IDR's rows change with the IDR, never on their own: there are no multi-statement transactions, so the delete and
-the insert ride along in the statement that approves, unlocks or deletes it, as data-modifying CTEs. The two CTEs here
-are the one source of both; replace_quantities runs them on their own, for an IDR that is already approved.
+the inserts ride along in the statement that approves, unlocks or deletes it, as data-modifying CTEs. The CTEs here
+are the one source of them; replace_quantities runs them on their own, for an IDR that is already approved.
+
+A row's source is 'manual' (a pay item of one of the IDR's reports, handed over as JSON) or 'from_flags' (the flags
+the IDR claimed at approval, summed per pay item in the statement itself; migration 037).
 """
 
 from datetime import date
@@ -15,6 +18,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from api.db.runner import run_query
+from api.queries.flags import FLAG_AMOUNT, FLAG_UNIT, QUANTITY_LATERALS
 
 # What one quantity row carries besides its IDR, as the statement reads it out of the JSON it is handed
 QUANTITY_FIELDS = """
@@ -30,16 +34,17 @@ QUANTITY_FIELDS = """
 """
 
 
-def delete_quantities_cte(idrs: str) -> str:
+def delete_quantities_cte(idrs: str, manual_only: bool = False) -> str:
     """
-    Write the CTE that deletes every quantity row of the IDR a statement is working on.
-    Takes the name of a CTE defined earlier in that statement (written here, never from a request) whose idr_id column holds the IDR: "moved" in a statement that moves an IDR, so nothing is deleted unless the IDR did move.
+    Write the CTE that deletes the quantity rows of the IDR a statement is working on: every one, or only its reports' (manual) ones.
+    Takes the name of a CTE defined earlier in that statement (written here, never from a request) whose idr_id column holds the IDR: "moved" in a statement that moves an IDR, so nothing is deleted unless the IDR did move; and whether to leave its from_flags rows alone.
     Returns the CTE, to append to the statement's WITH list; it takes no parameters.
     """
+    manual = " AND source = 'manual'" if manual_only else ""
     return f"""
         deleted_quantities AS (
             DELETE FROM icid.quantities
-            WHERE idr_id IN (SELECT idr_id FROM {idrs})
+            WHERE idr_id IN (SELECT idr_id FROM {idrs}){manual}
         )"""
 
 
@@ -63,13 +68,36 @@ def insert_quantities_cte(idrs: str) -> str:
         )"""
 
 
-def replace_quantities_ctes(idrs: str) -> str:
+def replace_quantities_ctes(idrs: str, manual_only: bool = False) -> str:
     """
-    Write the two CTEs that replace an IDR's quantity rows: every row it has goes, and the rows handed over come in.
-    Takes the name of a CTE defined earlier in the statement (see delete_quantities_cte).
+    Write the two CTEs that replace an IDR's quantity rows: every row it has (or only its manual ones) goes, and the rows handed over come in.
+    Takes the name of a CTE defined earlier in the statement (see delete_quantities_cte) and whether to leave its from_flags rows alone.
     Returns the CTEs, comma-separated, to append to the statement's WITH list; they take one parameter, the rows.
     """
-    return f"{delete_quantities_cte(idrs)},{insert_quantities_cte(idrs)}"
+    return f"{delete_quantities_cte(idrs, manual_only)},{insert_quantities_cte(idrs)}"
+
+
+def insert_flag_quantities_cte(idrs: str, claimed: str = "claimed_flags") -> str:
+    """
+    Write the CTE that inserts an IDR's from_flags quantity rows: the flags it just claimed, summed per pay item in each pay item's unit (FLAG_AMOUNT) and rounded to 2 decimal places, as report type PIR_FLAGS. A flag without a pay item, or one whose unit a flag can't measure, adds nothing.
+    Takes the names of two CTEs defined earlier in the statement (written here, never from a request): the one holding the IDR (idr_id, project_id, report_date, reporter_uuid) and the one listing the flags it claimed (id).
+    Returns the CTE (flag_quantities), to append to the statement's WITH list; no parameters.
+    """
+    return f"""
+        flag_quantities AS (
+            INSERT INTO icid.quantities (
+                project_id, idr_id, report_date, reporter_uuid, report_type, pay_item_ref, budget_code, description,
+                amount, unit, source
+            )
+            SELECT i.project_id, i.idr_id, i.report_date, i.reporter_uuid, 'PIR_FLAGS', ci.item_no, ci.budget_code,
+                   ci.description, round(sum({FLAG_AMOUNT}), 2), {FLAG_UNIT}, 'from_flags'
+            FROM {idrs} i
+            JOIN icid.flags f ON f.id IN (SELECT id FROM {claimed})
+            JOIN icid.contract_items ci ON ci.contract_item_id = f.pay_item_id{QUANTITY_LATERALS}
+            WHERE {FLAG_AMOUNT} IS NOT NULL
+            GROUP BY i.project_id, i.idr_id, i.report_date, i.reporter_uuid, ci.contract_item_id
+            RETURNING quantity_id
+        )"""
 
 
 def quantity_rows_json(rows: list[dict[str, Any]]) -> Jsonb:
@@ -97,19 +125,34 @@ def quantity_rows_json(rows: list[dict[str, Any]]) -> Jsonb:
 
 def replace_quantities(idr_id: UUID, rows: list[dict[str, Any]]) -> Optional[int]:
     """
-    Replace an IDR's quantity rows with a new set, in one statement: the rows it has are deleted and the given ones inserted. Nothing about the IDR is checked: it is for an IDR already approved (the backfill).
+    Replace an IDR's manual quantity rows with a new set, in one statement: the rows its reports gave are deleted and the given ones inserted; its from_flags rows are left alone. Nothing about the IDR is checked: it is for an IDR already approved (the backfill).
     Takes the IDR uuid and the new rows (see quantity_rows_json); an empty list leaves the IDR with none.
     Returns how many rows were inserted, or None on failure.
     """
     sql = f"""
         WITH given AS (
             SELECT %s::uuid AS idr_id
-        ),{replace_quantities_ctes("given")}
+        ),{replace_quantities_ctes("given", manual_only=True)}
         SELECT COUNT(*) AS inserted
         FROM inserted_quantities;
     """
     result = run_query(sql, (idr_id, quantity_rows_json(rows)))
     return result[0]["inserted"] if result else None
+
+
+def list_flag_quantities(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch the pay-item rollup an approved IDR wrote from its flags: its from_flags quantity rows, as frozen at approval.
+    Takes the IDR's uuid.
+    Returns the rows (pay_item_ref, budget_code, description, unit, amount) by item number then budget code; empty for an IDR without any; None on failure.
+    """
+    sql = """
+        SELECT pay_item_ref, budget_code, description, unit, amount
+        FROM icid.quantities
+        WHERE idr_id = %s AND source = 'from_flags'
+        ORDER BY pay_item_ref NULLS LAST, budget_code;
+    """
+    return run_query(sql, (idr_id,))
 
 
 def list_quantities(

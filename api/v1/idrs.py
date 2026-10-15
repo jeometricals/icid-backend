@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 
-from api.v1._shared import day, day_range, idr_list_items, report_types_for
+from api.v1._shared import day, day_range, idr_list_items, refuse_flag_filled_pay_items, report_types_for
 
 from api.queries.idr_reports import (
     create_idr_report,
@@ -26,6 +26,7 @@ from api.queries.idrs import (
     update_idr_header,
 )
 from api.queries.projects import get_project_by_id, is_user_on_project
+from api.queries.task_orders import get_task_order
 from api.services.attachments import delete_all_storage_files_for_report
 from api.services.auth import current_user, demo_idr_fence, require_full_user, require_project_role
 from api.services.auto_general import regenerate_auto_general
@@ -58,6 +59,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/idrs", tags=["IDRs"], dependencies=[Depends(current_user), Depends(demo_idr_fence)])
 
 
+def _check_task_order(project_id: str, task_order_id: Optional[UUID]) -> None:
+    """
+    Refuse a task order an IDR can't take: one that isn't a live task order of the IDR's project.
+    Takes the IDR's project id and the task order's id (None for none, which is always fine).
+    Returns nothing; raises 400 for an unknown task order, another project's or a deleted one.
+    """
+    if task_order_id is None:
+        return
+    task_order = get_task_order(task_order_id, include_properties=False)
+    if task_order is None or task_order["project_id"] != project_id:
+        raise HTTPException(status_code=400, detail="Task order is not one of this project's")
+    if task_order["deleted_at"] is not None:
+        raise HTTPException(status_code=400, detail="Task order is deleted")
+
+
 @router.post(
     "/",
     response_model=IdrResponse,
@@ -66,9 +82,9 @@ router = APIRouter(prefix="/v1/idrs", tags=["IDRs"], dependencies=[Depends(curre
 )
 def create_draft_idr(body: IdrCreate, user: UserOut = Depends(current_user)) -> Union[IdrResponse, JSONResponse]:
     """
-    Create a new draft IDR for the signed-in user (its reporter) on a project for the given date.
-    Takes an IdrCreate body with the project id and report date, and the signed-in user.
-    Returns an IdrResponse, raising 404 for an unknown project, 403 for an unassigned reporter, and 409 (with existing_idr_id) if that day's IDR exists.
+    Create a new draft IDR for the signed-in user (its reporter) on a project for the given date, with an optional task order (its default flag scope).
+    Takes an IdrCreate body with the project id, report date and task order, and the signed-in user.
+    Returns an IdrResponse, raising 404 for an unknown project, 403 for an unassigned reporter, 400 for a task order that isn't a live one of the project, and 409 (with existing_idr_id) if that day's IDR exists.
     """
     if get_project_by_id(body.project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -76,7 +92,9 @@ def create_draft_idr(body: IdrCreate, user: UserOut = Depends(current_user)) -> 
     if not is_user_on_project(user.uuid, body.project_id):
         raise HTTPException(status_code=403, detail="Reporter is not assigned to this project")
 
-    rows = create_idr(body.project_id, user.uuid, body.report_date)
+    _check_task_order(body.project_id, body.task_order_id)
+
+    rows = create_idr(body.project_id, user.uuid, body.report_date, body.task_order_id)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to create IDR")
@@ -195,9 +213,9 @@ def save_report(
     idr_id: UUID, report_id: UUID, body: Annotated[ReportData, Body()]
 ) -> IdrReportResponse:
     """
-    Replace a report's data with the body as-is, bumping updated_at on the report and its IDR.
+    Replace a report's data with the body as-is, bumping updated_at on the report and its IDR. Its pay items can't include one the IDR's flags already fill.
     Takes the IDR and report uuids as path parameters and any JSON object as the body.
-    Returns an IdrReportResponse; raises 404 (no IDR), 409 (IDR not draft) and 404 (report not in this IDR).
+    Returns an IdrReportResponse; raises 404 (no IDR), 409 (IDR not draft), 400 (a pay item the IDR's flags fill) and 404 (report not in this IDR).
     """
     idr = get_idr_by_id(idr_id)
 
@@ -206,6 +224,8 @@ def save_report(
 
     if idr["status"] != "draft":
         raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
+
+    refuse_flag_filled_pay_items(idr, body.get("payItems"))
 
     rows = save_report_data(idr_id, report_id, body)
 
@@ -228,9 +248,9 @@ def save_report(
 @router.put("/{idr_id}/header", response_model=IdrResponse)
 def save_header(idr_id: UUID, body: IdrHeaderUpdate) -> IdrResponse:
     """
-    Update any subset of a draft IDR's header fields (null clears one) and bump its updated_at.
+    Update any subset of a draft IDR's header fields and its task order (null clears one) and bump its updated_at.
     Takes the IDR uuid as a path parameter and an IdrHeaderUpdate body.
-    Returns an IdrResponse; raises 404 (no IDR), 409 (not draft) and 400 (temp_low above temp_high after the update).
+    Returns an IdrResponse; raises 404 (no IDR), 409 (not draft) and 400 (temp_low above temp_high after the update, or a task order that isn't a live one of its project).
     """
     idr = get_idr_by_id(idr_id)
 
@@ -247,6 +267,8 @@ def save_header(idr_id: UUID, body: IdrHeaderUpdate) -> IdrResponse:
 
     if temp_low is not None and temp_high is not None and temp_low > temp_high:
         raise HTTPException(status_code=400, detail="temp_low cannot be greater than temp_high")
+
+    _check_task_order(idr["project_id"], fields.get("task_order_id"))
 
     rows = update_idr_header(idr_id, fields)
 

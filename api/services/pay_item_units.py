@@ -6,6 +6,7 @@ the short form is what icid.contract_items holds, so one unit is always spelled 
 """
 
 import re
+from typing import Optional
 
 # Every accepted spelling, without its periods and spaces and in capitals, and the form it is stored in
 UNIT_FORMS = {
@@ -36,3 +37,21 @@ def normalize_unit(raw: str) -> str:
     if unit is None:
         raise UnknownUnit(f"unknown unit: '{raw.strip()}'")
     return unit
+
+
+# The units a flag's quantity can be given in: its area (SF, SY), its volume at its thickness (CY), or the flag itself
+# (EA); the flags' FLAG_AMOUNT computes each
+FLAG_UNITS = ("SF", "SY", "CY", "EA")
+
+
+def flag_unit(raw: Optional[str]) -> Optional[str]:
+    """
+    Tell whether a flag can be measured in a pay item's unit.
+    Takes the pay item's unit as stored (short form, or a seeded row's long one, e.g. "S.F." or "Each").
+    Returns the unit's short form when it is one of FLAG_UNITS, else None.
+    """
+    try:
+        unit = normalize_unit(raw or "")
+    except UnknownUnit:
+        return None
+    return unit if unit in FLAG_UNITS else None

@@ -2,7 +2,7 @@
 What more than one router needs: reading the date and discipline filters, reading a text field off a request body,
 checking a new password, shaping the rows of an IDR list, keeping soft-deleted rows (and their children) for
 admins, the gate on a PIR's writes, and what the writes of a PIR's drawings share (the pay-item check, merging
-and checking a PATCH).
+and checking a PATCH), and refusing pay items entered by hand that an IDR's flags fill.
 Not a router itself.
 """
 
@@ -20,6 +20,7 @@ from api.schemas.idr import IdrListItem
 from api.queries.properties import get_property
 from api.services.auth import MAX_PASSWORD_BYTES, no_demo_pir_writes, pir_member
 from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
+from api.services.idr_flags import IdrFlagError, manual_entry_conflicts
 
 # The shortest password sign-in takes
 MIN_PASSWORD_LENGTH = 6
@@ -53,17 +54,17 @@ def day_range(date_from: Optional[str], date_to: Optional[str]) -> tuple[Optiona
     return first, last
 
 
-def report_types_for(disciplines: Optional[list[str]]) -> Optional[list[str]]:
+def report_types_for(disciplines: Optional[list[str]], quantities: bool = False) -> Optional[list[str]]:
     """
     Resolve a discipline filter to the report types that cover any of the disciplines.
-    Takes the disciplines sent (None when the filter wasn't).
+    Takes the disciplines sent (None when the filter wasn't) and whether the types are a quantity row's (PIR_FLAGS counts as Sidewalk).
     Returns the report types, each once, or None without a filter; raises 400 for a discipline nothing covers.
     """
     if not disciplines:
         return None
     report_types: list[str] = []
     for discipline in disciplines:
-        covered = report_types_for_discipline(discipline)
+        covered = report_types_for_discipline(discipline, quantities)
         if not covered:
             raise HTTPException(status_code=400, detail=f"Unknown discipline: {discipline}")
         report_types += [report_type for report_type in covered if report_type not in report_types]
@@ -218,3 +219,17 @@ def idr_list_items(rows: list[dict[str, Any]]) -> list[IdrListItem]:
         IdrListItem(**{**row, "disciplines": disciplines_for_report_types(row["report_types"])})
         for row in rows
     ]
+
+
+def refuse_flag_filled_pay_items(idr: dict[str, Any], pay_items: Any) -> None:
+    """
+    Refuse pay items entered by hand that the IDR's flags already fill (a contract item attributed by flag).
+    Takes the IDR dict and the report's payItems as sent.
+    Returns nothing; raises 400 naming the first such item, or 500 when the IDR's flags can't be read.
+    """
+    try:
+        conflicts = manual_entry_conflicts(idr, pay_items)
+    except IdrFlagError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if conflicts:
+        raise HTTPException(status_code=400, detail=conflicts[0])

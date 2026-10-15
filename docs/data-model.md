@@ -223,6 +223,7 @@ One row per inspector, per project, per day. Holds the shared header; the report
 | `return_reason` | TEXT | The latest return comment |
 | `returned_from` | TEXT | `stage1` or `stage2`; CHECK `chk_idrs_returned_from` |
 | `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete: when and by whom (FK → `users.uuid`). The row is kept |
+| `task_order_id` | UUID | Its default flag scope (migration 037): FK → `task_orders.id`, no action; a live task order of its project (the API). NULL: it covers no flag but those included |
 
 The review columns (from `idr_number` down) came with migration 017.
 
@@ -266,7 +267,7 @@ that also writes a row to `idr_audit`.
 ### idr_audit
 
 One row per thing done to an IDR from submission on. Written by the statement that changes the IDR. Un-delete
-reads it, for the status an IDR had when it was deleted; nothing else does.
+reads it, for the status an IDR had when it was deleted and the flags its delete released; nothing else does.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -275,10 +276,17 @@ reads it, for the status an IDR had when it was deleted; nothing else does.
 | `actor_uuid` | UUID NOT NULL | FK → `users.uuid`. Who did it |
 | `action` | TEXT NOT NULL | `submit`, `accept_stage1`, `approve_stage1`, `accept_stage2`, `approve_stage2`, `return_to_inspector`, `return_to_oe`, `admin_unlock`, `admin_delete`, `admin_undelete`, and for reviewer edits `field_edit`, `pay_item_revise`, `pay_item_add`, `pay_item_approve`, `truck_add`. No CHECK |
 | `from_status`, `to_status` | TEXT | The IDR's status before and after; nullable for actions that aren't a status change. An `admin_delete` row's `from_status` is the only record of what a deleted IDR was |
-| `note` | TEXT | The return comment; for a reviewer edit, `{"edit_id", "field_path"}` as JSON text |
+| `note` | TEXT | The return comment; for a reviewer edit, `{"edit_id", "field_path"}` as JSON text; for an `admin_delete` (since migration 037), `{"released_flag_ids": [...]}`, the flags whose claims the delete released |
 | `created_at` | TIMESTAMPTZ NOT NULL | Default `now()` |
 
 Index: `idx_idr_audit_idr_created (idr_id, created_at DESC)`.
+
+**Where un-delete gets its re-claim list.** An admin delete releases every flag the IDR claimed (R1f) and records
+their ids in its `admin_delete` row's `note`. Un-delete reads the latest such row: its `from_status` is the status
+the IDR comes back with, and, when that is `approved`, the note's `released_flag_ids` are the flags it claims back
+in the same statement (with their `from_flags` quantity rows). If another IDR has claimed any of them since, the
+un-delete is refused (409, naming that IDR) and nothing changes. A delete from before 037, or of an IDR that held no
+claims, records an empty list.
 
 ### idr_field_edits
 
@@ -376,6 +384,7 @@ them back for an IDR that comes back approved. So it only ever holds IDRs that a
 | `amount` | NUMERIC NOT NULL | `payItems[].payQuantity`, parsed. An item whose quantity is blank or isn't a number gets no row. |
 | `unit` | TEXT | `payItems[].unit` in its short form: `LF`, `SF`, `CY`, `SY`, `TN`, `EA`, `LS`; an unknown unit as written |
 | `created_at` | TIMESTAMPTZ NOT NULL | `now()` |
+| `source` | TEXT NOT NULL | `manual` (a report's pay item; every row before migration 037) or `from_flags` (the flags the IDR claimed at approval, one row per pay item, `report_type` `PIR_FLAGS`); CHECK `chk_quantities_source` |
 
 - Indexes: `idx_quantities_project_date (project_id, report_date)`, `idx_quantities_project_item (project_id,
   pay_item_ref)`, `idx_quantities_project_budget (project_id, budget_code)`, `idx_quantities_idr (idr_id)`.
@@ -526,7 +535,7 @@ Demo users only read.
 | `surveyed_is_assessable` | BOOLEAN NOT NULL | |
 | `surveyed_non_assessable_reason` | TEXT | Required when not assessable, empty when assessable (the API checks the pairing); CHECK `chk_flags_non_assessable_reason` on 22 values: R1b's nine (`tree_damage`, `city_tree`, `transition`, `no_driveway`, `hydrant`, `fronting_city`, `utility`, `settlement`, `other`) and the R1e.1 survey's (`tree`, `driveway`, `grass`, `dirt`, `existing_sidewalk`, `asphalt`, `tree_pit`, `landmark`, `vault`, `subway`, `scaffolding`, `other_perm_obstruction`, `other_temp_obstruction`; widened by migration 034) |
 | `surveyed_thickness` | TEXT NOT NULL | `4in`, `7in` or `7in_as_4in`; CHECK `chk_flags_thickness` |
-| `is_constructed` | BOOLEAN NOT NULL | Default false; set by a later IDR-claim slice, not the API |
+| `is_constructed` | BOOLEAN NOT NULL | Default false; true exactly while an approved IDR claims it (`chk_flags_claim_consistent`, migration 037). Set by approval, never by a flag route |
 | `pay_item_id` | UUID | FK → `contract_items.contract_item_id`, **ON DELETE SET NULL**; a contract item of the PIR's project (the API checks); `idx_flags_pay_item` (live, mapped flags) |
 | `computed_quantity` | NUMERIC NOT NULL | The shape's area in square feet, 2 decimal places, computed by the API. Its **net** area (in responses, not stored) is this less its non-assessable areas and the live `subtract` features naming it, never below 0 |
 | `reported_quantity` | NUMERIC | An override, above 0 (`chk_flags_reported_quantity`); NULL means the net area stands |
@@ -535,6 +544,23 @@ Demo users only read.
 | `created_by` | UUID NOT NULL | The signed-in user who added it: any project member or admin; FK → `users.uuid` |
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
+| `claimed_by_idr_id` | UUID | The approved IDR that claimed it (migration 037): FK → `idrs.idr_id`, no action (an unlock or a delete releases it first). At most one IDR claims a flag; a soft-deleted flag keeps its claim |
+| `constructed_on` | DATE | The claiming IDR's `report_date`; NULL while unclaimed |
+
+### idr_flag_attributions
+
+An override of which flags an IDR covers (migration 037, R1f). By default an IDR covers the live flags on its task
+order's properties; an `exclude` row leaves one of those out, an `include` row brings in another flag of its project.
+Set by the IDR's inspector on a draft, its stage's reviewer in review, or an admin
+(`/v1/idrs/{id}/attributed-flags/{flag_id}/exclude` and `/include`). Kept through returns, unlocks and deletes.
+
+| Column | Type | Notes |
+|---|---|---|
+| `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, **ON DELETE CASCADE**; PK with `flag_id` |
+| `flag_id` | UUID NOT NULL | FK → `flags.id`, **ON DELETE CASCADE**; `idx_idr_flag_attributions_flag` |
+| `action` | TEXT NOT NULL | `exclude` or `include` (CHECK) |
+| `set_by` | UUID | Who set it; FK → `users.uuid`, **ON DELETE SET NULL** (counted by `count_user_references` anyway) |
+| `set_at` | TIMESTAMPTZ NOT NULL | `now()` |
 
 ### non_assessable_areas
 
@@ -856,6 +882,7 @@ content as TEXT, linked to a report and a form template).
 | 032 | `032_flags.sql` | R1b | Created `flags` (FK to `pirs` with no cascade; FK to `contract_items` ON DELETE SET NULL; FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`; CHECKs on `display_order`, `shape`, `surveyed_mark`, `surveyed_non_assessable_reason`, `surveyed_thickness` and `reported_quantity`) with the partial indexes `idx_flags_pir` and `idx_flags_pay_item`. No existing table or row changed. |
 | 033 | `033_pir_pages_and_flag_coords.sql` | R1e | Created `pir_pages` (FK to `pirs` ON DELETE CASCADE, FK to `users` for `deleted_by` ON DELETE SET NULL, CHECKs on `page_number`, `width_px`, `height_px`, `scale_px_per_ft` and `rotation_deg`) with the partial unique index `pir_pages_pir_page_num_live_uq` and `pir_pages_pir_idx`. Dropped `pirs.source_image_url` and `source_image_scale` (no PIR had an image). Soft-deleted the 3 flags made through R1b's form, then added `flags.pir_page_id` (FK to `pir_pages`, no action), CHECK `chk_flags_live_on_a_page` and `flags_pir_page_idx`. |
 | 035 | `035_property_subtyping.sql` | Property kinds | Created the enum types `property_kind`, `boro`, `quadrant`, `facing_street` and `ramp_type`. Added `properties.kind` (NOT NULL DEFAULT `sidewalk`), `boro` (backfilled from each BBL's first digit, then NOT NULL), `violation_no`, `intersection_street_1`, `intersection_street_2`, `quadrant`, `facing_street` and `ramp_type`; dropped NOT NULL on `bbl`, `address` and `property_type`; added CHECK `properties_kind_fields_consistent`. The 4 existing rows became sidewalks (3 Brooklyn, 1 Queens). |
+| 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |
 | 036 | `036_split_bbl_into_block_lot.sql` | R1e.3 | Added `properties.block` and `lot` (TEXT, CHECKs `chk_properties_block_format` and `chk_properties_lot_format`), backfilled from each sidewalk's BBL without leading zeros; replaced `properties_kind_fields_consistent` (block and lot where it had bbl); dropped `uq_properties_project_bbl` and the `bbl` column; created `uq_properties_project_sidewalk_bbl` on `(project_id, boro, block, lot)` `WHERE kind = 'sidewalk' AND deleted_at IS NULL`. The 6 rows: 5 sidewalks backfilled, 1 ped ramp untouched. |
 | 034 | `034_smart_pir_data_model.sql` | Smart PIR | Added `flags.defect_codes` (TEXT[] NOT NULL DEFAULT `{}`, CHECK `chk_flags_defect_codes`) and widened `chk_flags_non_assessable_reason` to R1b's nine values plus the R1e.1 survey's (22). Created `non_assessable_areas` (FK to `flags`, no action; partial unique index `nas_flag_order_live_uq`), `features` (FKs to `pir_pages` and `flags`, no action; to `contract_items` ON DELETE SET NULL), `segments` (FK to `pir_pages`, no action; to `contract_items` ON DELETE SET NULL) and `pir_annotations` (keyed by `pir_page_id`, no action), the first three with `created_by` and, ON DELETE SET NULL, `deleted_by` FKs to `users` (20 → 26 FKs to `users`). Added `projects.cost_per_sf_4in` and `cost_per_sf_7in` (NUMERIC(10,4), ≥ 0). No existing row changed; the thickness CHECK already held `7in_as_4in`. |
 
@@ -875,6 +902,7 @@ Where each current column came from:
 | `properties` | all | 029 |
 | `properties` | `kind`, `boro`, `violation_no`, `intersection_street_1`, `intersection_street_2`, `quadrant`, `facing_street`, `ramp_type`, `properties_kind_fields_consistent`; `bbl`, `address` and `property_type` nullable | 035 |
 | `properties` | `block`, `lot`, `chk_properties_block_format`, `chk_properties_lot_format`, `uq_properties_project_sidewalk_bbl`, the `properties_kind_fields_consistent` of today; `bbl` and `uq_properties_project_bbl` dropped | 036 |
+| `idr_flag_attributions`; `idrs.task_order_id`, `idx_idrs_task_order`; `flags.claimed_by_idr_id`, `constructed_on`, `chk_flags_claim_consistent`, `idx_flags_claimed_by_idr`, `idx_flags_scope_rollup`; `quantities.source`, `chk_quantities_source` | all | 037 |
 | `task_orders`, `task_order_properties` | all | 030 |
 | `pirs` | all | 031 |
 | `flags` | all but `pir_page_id` | 032 |

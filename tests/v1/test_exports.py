@@ -5711,3 +5711,45 @@ class TestConcCylRedlines:
 
     def test_the_lab_columns_stay_blank_under_redlines(self, cyl_redlined):
         assert all(cyl_redlined[f"{column}{row}"].value is None for column in CYL_LAB_COLUMNS for row in range(27, 45))
+
+
+# ---------------------------------------------------------------------------
+# R1f: an IDR's flag rollup prints with the General's pay items, under a "PIR Flags" heading
+# ---------------------------------------------------------------------------
+
+class TestFlagLinesOnTheGeneral:
+    IDR = {"idr_id": UUID("9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e"), "status": "draft"}
+    FLAG = {"flag_id": UUID("f0000000-0000-4000-8000-00000000000a"), "state": "attributed",
+            "pay_item_id": UUID("d0000000-0000-4000-8000-00000000000a"), "pay_item_ref": "4.13 AAS",
+            "budget_code": "HW0001Q-CONS", "pay_item_description": "4\" CONCRETE SIDEWALK", "unit": "SF",
+            "amount": Decimal("25.004")}
+
+    def test_the_rollup_follows_the_generals_own_items_under_its_heading(self):
+        from api.services.export import _with_flag_lines
+        own = [{"itemNo": "4.02", "payQuantity": "12"}]
+        with patch("api.queries.idr_flags.run_query", return_value=[self.FLAG, {**self.FLAG, "amount": Decimal("5")}]):
+            data = _with_flag_lines({"payItems": own, "description": "x"}, self.IDR)
+        assert data["description"] == "x"
+        assert data["payItems"] == own + [
+            {"description": "PIR Flags"},
+            {"itemNo": "4.13 AAS", "budgetCode": "HW0001Q-CONS", "payQuantity": "30.00", "unit": "SF",
+             "description": "4\" CONCRETE SIDEWALK"}]
+
+    def test_an_idr_without_flag_lines_is_unchanged(self):
+        from api.services.export import _with_flag_lines
+        general = {"payItems": [{"itemNo": "4.02"}]}
+        assert _with_flag_lines(general, self.IDR) is general  # the default patch: no flags
+
+    def test_an_approved_idr_prints_its_frozen_rollup(self):
+        from api.services.export import _with_flag_lines
+        frozen = [{"pay_item_ref": "4.13 AAS", "budget_code": "B", "description": "Walk", "unit": "SF",
+                   "amount": Decimal("90.00")}]
+        with patch("api.services.idr_flags.list_flag_quantities", return_value=frozen) as quantities:
+            data = _with_flag_lines({}, {**self.IDR, "status": "approved"})
+        assert data["payItems"][1]["payQuantity"] == "90.00"
+        quantities.assert_called_once_with(self.IDR["idr_id"])
+
+    def test_flags_that_cant_be_read_fail_the_export(self):
+        from api.services.export import ExportDataError, _with_flag_lines
+        with patch("api.queries.idr_flags.run_query", return_value=None), pytest.raises(ExportDataError):
+            _with_flag_lines({}, self.IDR)

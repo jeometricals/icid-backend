@@ -9,6 +9,7 @@ from api.schemas.auth import UserOut
 from api.schemas.field_edit import FieldEditRequest, PayItemAdd, PayItemRevision, TruckAdd
 from api.schemas.idr import IdrWithReports, IdrWithReportsResponse
 from api.services.auth import current_user, demo_idr_fence, stage_reviewer
+from api.v1._shared import refuse_flag_filled_pay_items
 from api.services.field_edits import (
     FieldEditError,
     add_pay_item,
@@ -65,8 +66,9 @@ def add_idr_pay_item(idr_id: UUID, body: PayItemAdd, user: UserOut = Depends(sta
     """
     Add a pay item to one report of an IDR in review, on the reviewer's behalf: it joins the end of that report's pay items and is logged as added by them. (An inspector adds pay items to a draft through the report form.)
     Takes the IDR uuid as a path parameter, a PayItemAdd body (report_id, item_no, budget_code, quantity, unit, description) and the stage's reviewer (or an admin).
-    Returns an IdrWithReportsResponse with the IDR, its reports and every edit; raises 400 (not in review, a report without pay items, an auto-generated General, a blank quantity, neither an item number nor a description), 403 (not the stage's reviewer), 404 (no IDR, or the report isn't in it) and 409 (the IDR changed meanwhile).
+    Returns an IdrWithReportsResponse with the IDR, its reports and every edit; raises 400 (not in review, a report without pay items, an auto-generated General, a blank quantity, neither an item number nor a description, a pay item the IDR's flags fill), 403 (not the stage's reviewer), 404 (no IDR, or the report isn't in it) and 409 (the IDR changed meanwhile).
     """
+    refuse_flag_filled_pay_items(get_idr_by_id(idr_id), [{"itemNo": body.item_no, "budgetCode": body.budget_code}])
     return _edited(idr_id, lambda: add_pay_item(editable_idr(idr_id), body.report_id, body.item_no, body.budget_code,
                                                 body.quantity, body.unit, body.description, user),
                    "Pay item added")

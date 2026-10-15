@@ -139,7 +139,7 @@ class TestCreateIdr:
         sql, params = mocks["idrs"].call_args.args
         assert "INSERT INTO icid.idrs" in sql
         assert "ON CONFLICT DO NOTHING" in sql  # no target: the per-day index is partial since migration 017
-        assert params == ("HWS0023", ADMIN_USER_ROW["uuid"], REPORT_DATE)
+        assert params == ("HWS0023", ADMIN_USER_ROW["uuid"], REPORT_DATE, None)  # no task order
 
     def test_existing_idr_for_day_returns_409_with_its_id(self, admin_client):
         with patched(idrs=COLLISION, projects=ASSIGNED):
@@ -2211,3 +2211,93 @@ class TestSubmitSignature:
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]):
             draft = admin_client.get(f"/v1/idrs/{IDR_ID}").json()["data"]
         assert (draft["inspector_signature_path"], draft["inspector_signed_at"]) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# R1f: an IDR's task order (its default flag scope), and pay items its flags fill
+# ---------------------------------------------------------------------------
+
+TASK_ORDER_ID = UUID("5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b")
+TASK_ORDERS = "api.queries.task_orders.run_query"
+TASK_ORDER_ROW = {"id": TASK_ORDER_ID, "project_id": "HWS0023", "task_order_number": "TO-001", "issued_date": None,
+                  "estimate_notes": None, "created_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+                  "updated_at": datetime(2026, 9, 1, tzinfo=timezone.utc), "created_by": ADMIN_USER_ROW["uuid"],
+                  "deleted_at": None, "deleted_by": None}
+FLAG_FILLED = {"flag_id": UUID("f0000000-0000-4000-8000-00000000000a"), "state": "attributed",
+               "pay_item_id": UUID("d0000000-0000-4000-8000-00000000000a"), "pay_item_ref": "4.13 AAS",
+               "budget_code": "HW0001Q-CONS"}
+
+
+class TestIdrTaskOrder:
+    url = "/v1/idrs/"
+
+    def test_a_task_order_of_the_project_is_set_on_create(self, admin_client):
+        with patched(idrs=[{**MOCK_IDR_ROW, "task_order_id": TASK_ORDER_ID}], projects=ASSIGNED) as mocks, \
+                patch(TASK_ORDERS, return_value=[TASK_ORDER_ROW]):
+            response = admin_client.post(self.url, json={**CREATE_BODY, "task_order_id": str(TASK_ORDER_ID)})
+        assert response.status_code == 201 and response.json()["data"]["task_order_id"] == str(TASK_ORDER_ID)
+        sql, params = mocks["idrs"].call_args.args
+        assert "INSERT INTO icid.idrs (project_id, reporter_uuid, report_date, task_order_id)" in sql
+        assert params == ("HWS0023", ADMIN_USER_ROW["uuid"], REPORT_DATE, TASK_ORDER_ID)
+
+    @pytest.mark.parametrize("found,detail", [
+        ([], "Task order is not one of this project's"),
+        ([{**TASK_ORDER_ROW, "project_id": "HWK2026"}], "Task order is not one of this project's"),
+        ([{**TASK_ORDER_ROW, "deleted_at": datetime(2026, 9, 2, tzinfo=timezone.utc)}], "Task order is deleted"),
+    ])
+    def test_a_task_order_it_cant_take_is_400_on_create(self, admin_client, found, detail):
+        with patched(idrs=[MOCK_IDR_ROW], projects=ASSIGNED) as mocks, patch(TASK_ORDERS, return_value=found):
+            response = admin_client.post(self.url, json={**CREATE_BODY, "task_order_id": str(TASK_ORDER_ID)})
+        assert response.status_code == 400 and response.json() == {"detail": detail}
+        mocks["idrs"].assert_not_called()
+
+    def test_the_header_sets_the_task_order(self, admin_client):
+        with patched(idrs=header_calls()) as mocks, patch(TASK_ORDERS, return_value=[TASK_ORDER_ROW]):
+            response = admin_client.put(f"/v1/idrs/{IDR_ID}/header", json={"task_order_id": str(TASK_ORDER_ID)})
+        assert response.status_code == 200
+        sql, params = mocks["idrs"].call_args.args
+        assert "task_order_id = %s" in sql and params == (TASK_ORDER_ID, UUID(IDR_ID))
+
+    def test_a_null_clears_it_without_a_lookup(self, admin_client):
+        with patched(idrs=header_calls()) as mocks, patch(TASK_ORDERS) as task_orders:
+            assert admin_client.put(f"/v1/idrs/{IDR_ID}/header", json={"task_order_id": None}).status_code == 200
+        task_orders.assert_not_called()
+        assert mocks["idrs"].call_args.args[1] == (None, UUID(IDR_ID))
+
+    def test_a_bad_task_order_is_400_on_the_header_and_nothing_is_written(self, admin_client):
+        with patched(idrs=header_calls()) as mocks, patch(TASK_ORDERS, return_value=[]):
+            response = admin_client.put(f"/v1/idrs/{IDR_ID}/header", json={"task_order_id": str(TASK_ORDER_ID)})
+        assert response.status_code == 400 and response.json() == {"detail": "Task order is not one of this project's"}
+        assert mocks["idrs"].call_count == 1  # the read only
+
+
+class TestFlagFilledPayItems:
+    url = f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}"
+
+    def test_a_pay_item_the_idrs_flags_fill_cant_be_entered_by_hand(self, admin_client):
+        body = {"payItems": [{"id": "x", "itemNo": " 4.13 AAS ", "budgetCode": "HW0001Q-CONS", "payQuantity": "5"}]}
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks, \
+                patch("api.queries.idr_flags.run_query", return_value=[FLAG_FILLED]):
+            response = admin_client.put(self.url, json=body)
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Pay item 4.13 AAS (HW0001Q-CONS) comes from this IDR's PIR flags; "
+                                             "remove it from the report, or exclude its flags from the IDR"}
+        mocks["idr_reports"].assert_not_called()
+
+    def test_other_pay_items_save(self, admin_client):
+        body = {"payItems": [{"id": "x", "itemNo": "4.13 AAS", "budgetCode": "OTHER", "payQuantity": "5"}]}
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]), \
+                patch("api.queries.idr_flags.run_query", return_value=[FLAG_FILLED]):
+            assert admin_client.put(self.url, json=body).status_code == 200
+
+    def test_an_excluded_flags_pay_item_can_be_entered(self, admin_client):
+        body = {"payItems": [{"id": "x", "itemNo": "4.13 AAS", "budgetCode": "HW0001Q-CONS", "payQuantity": "5"}]}
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]), \
+                patch("api.queries.idr_flags.run_query", return_value=[{**FLAG_FILLED, "state": "excluded"}]):
+            assert admin_client.put(self.url, json=body).status_code == 200
+
+    def test_a_report_without_pay_items_reads_no_flags(self, admin_client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]), \
+                patch("api.queries.idr_flags.run_query") as flags:
+            assert admin_client.put(self.url, json={"description": "No items"}).status_code == 200
+        flags.assert_not_called()

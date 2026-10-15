@@ -1,5 +1,5 @@
 import math
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, Optional
 from uuid import UUID
@@ -194,7 +194,9 @@ class FlagOut(BaseModel):
     A flag: a row of icid.flags, with its PIR's property and project. pir_page_id is the page it is drawn on (None
     only for a deleted flag from before pages), sketch_x / sketch_y / rotation its place there. computed_quantity is
     its shape's area; net_quantity that area less its non-assessable areas and the features subtracted from it (never
-    below 0); quantity is what counts (the override, or else the net area) and is_overridden says which.
+    below 0); quantity is what counts (the override, or else the net area) and is_overridden says which. Once an
+    approved IDR claims it (migration 037), claimed_by_idr_id names that IDR (claimed_by_idr_number its number),
+    is_constructed is true and constructed_on is the IDR's report date.
     """
 
     id: UUID
@@ -230,6 +232,9 @@ class FlagOut(BaseModel):
     created_by: UUID
     deleted_at: Optional[datetime] = None
     deleted_by: Optional[UUID] = None
+    claimed_by_idr_id: Optional[UUID] = None
+    claimed_by_idr_number: Optional[str] = None
+    constructed_on: Optional[date] = None
 
 
 class FlagResponse(BaseModel):

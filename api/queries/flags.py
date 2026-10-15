@@ -7,6 +7,34 @@ from api.queries._shared import PAY_ITEM_OF_PROJECT, placeholders, write_values
 
 # A flag's net area: its shape's area less its non-assessable areas and the features subtracted from it, never below 0
 _NET = "GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0)"
+# What counts as a flag's quantity, in square feet: its override, or else its net area. Needs QUANTITY_LATERALS.
+FLAG_QUANTITY = f"COALESCE(f.reported_quantity, {_NET})"
+# A flag's areas are its live ones, and, once it is deleted, those deleted with it (at the same moment); the features
+# subtracted from it are the live ones. Read for a row source named f.
+QUANTITY_LATERALS = """
+        CROSS JOIN LATERAL (
+            SELECT count(*) AS area_count, COALESCE(sum(na.computed_quantity), 0) AS quantity
+            FROM icid.non_assessable_areas na
+            WHERE na.flag_id = f.id AND (na.deleted_at IS NULL OR na.deleted_at = f.deleted_at)
+        ) naa
+        CROSS JOIN LATERAL (
+            SELECT COALESCE(sum(COALESCE(ft.reported_quantity, ft.computed_quantity)), 0) AS quantity
+            FROM icid.features ft
+            WHERE ft.flag_id = f.id AND ft.area_impact = 'subtract' AND ft.deleted_at IS NULL
+        ) sub"""
+# A flag's pay item's unit (ci, its contract item) in short form, as the units a flag measures are spelled: SF, SY,
+# CY, EA
+_UNIT_LETTERS = "upper(regexp_replace(ci.unit, '[^A-Za-z]', '', 'g'))"
+FLAG_UNIT = f"(CASE {_UNIT_LETTERS} WHEN 'EACH' THEN 'EA' ELSE {_UNIT_LETTERS} END)"
+# A flag's quantity in its pay item's unit: its square feet (SF), those over 9 (SY), its volume at its thickness, 4 in
+# (4in, 7in_as_4in) or 7 in (7in), in cubic yards (CY), or 1 (EA); NULL for any other unit. Needs QUANTITY_LATERALS
+# and ci.
+FLAG_AMOUNT = f"""(CASE {FLAG_UNIT}
+                WHEN 'SF' THEN {FLAG_QUANTITY}
+                WHEN 'SY' THEN {FLAG_QUANTITY} / 9
+                WHEN 'CY' THEN {FLAG_QUANTITY} * (CASE f.surveyed_thickness WHEN '7in' THEN 7 ELSE 4 END) / 324
+                WHEN 'EA' THEN 1
+            END)"""
 # A flag as every function here returns it: its own columns, its PIR's property and project, its non-assessable areas
 # and subtracted features, what counts as its quantity, and whether its page, PIR and property are deleted (what the
 # routes check before a write). Read from a row source named f (the table, or a CTE of rows just written).
@@ -25,24 +53,16 @@ _FLAG_COLUMNS = (
     + """) AS quantity,
             (f.reported_quantity IS NOT NULL) AS is_overridden,
             f.quantity_delta_reason, f.created_at, f.updated_at, f.created_by, f.deleted_at, f.deleted_by,
+            f.claimed_by_idr_id, f.constructed_on,
+            (SELECT claimer.idr_number FROM icid.idrs claimer WHERE claimer.idr_id = f.claimed_by_idr_id)
+                AS claimed_by_idr_number,
             pg.deleted_at AS page_deleted_at, pir.deleted_at AS pir_deleted_at, p.deleted_at AS property_deleted_at"""
 )
-# A flag's areas are its live ones, and, once it is deleted, those deleted with it (at the same moment); the features
-# subtracted from it are the live ones
+# A flag's PIR, property and page, and its areas and subtracted features (QUANTITY_LATERALS)
 _FROM = """
         JOIN icid.pirs pir ON pir.id = f.pir_id
         JOIN icid.properties p ON p.id = pir.property_id
-        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id
-        CROSS JOIN LATERAL (
-            SELECT count(*) AS area_count, COALESCE(sum(na.computed_quantity), 0) AS quantity
-            FROM icid.non_assessable_areas na
-            WHERE na.flag_id = f.id AND (na.deleted_at IS NULL OR na.deleted_at = f.deleted_at)
-        ) naa
-        CROSS JOIN LATERAL (
-            SELECT COALESCE(sum(COALESCE(ft.reported_quantity, ft.computed_quantity)), 0) AS quantity
-            FROM icid.features ft
-            WHERE ft.flag_id = f.id AND ft.area_impact = 'subtract' AND ft.deleted_at IS NULL
-        ) sub"""
+        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id""" + QUANTITY_LATERALS
 # The columns a write sets from the request, in the order their values are passed, each with its type (so a NULL
 # parameter is typed, not text)
 _WRITABLE_TYPES = {

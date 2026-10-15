@@ -15,6 +15,27 @@ from api.schemas.auth import UserOut  # noqa: E402
 from api.services.auth import auth_provider  # noqa: E402
 
 
+def _no_idr_flags(sql: str, params: object = None) -> list:
+    """
+    Stand in for the IDR-flag statements (api.queries.idr_flags) in tests that don't patch them: no IDR covers any flag, and a deleted IDR's record of released claims is empty.
+    Takes the statement and its parameters.
+    Returns the rows: one empty record for released_claims, none otherwise.
+    """
+    if "released_flag_ids" in sql:
+        return [{"status_before": None, "released": [], "taken": []}]
+    return []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_idr_flags():
+    """
+    Patch the IDR-flag statements for the whole session (R1f; module-scoped fixtures that build an export run too), so the IDR routes that now read an IDR's flags (approve, delete, un-delete, report saves, the export) see none unless a test patches api.queries.idr_flags.run_query itself; an approved IDR's frozen flag rollup (api.services.idr_flags.list_flag_quantities) is empty too.
+    Yields the mock of the statements.
+    """
+    with patch("api.queries.idr_flags.run_query", side_effect=_no_idr_flags) as run,             patch("api.services.idr_flags.list_flag_quantities", return_value=[]):
+        yield run
+
+
 @pytest.fixture(scope="session")
 def client():
     """

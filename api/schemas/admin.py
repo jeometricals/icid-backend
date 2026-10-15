@@ -84,6 +84,7 @@ class UserReferences(BaseModel):
     non_assessable_areas: int
     features: int
     segments: int
+    idr_flag_attributions: int
 
 
 class UserHasHistory(BaseModel):

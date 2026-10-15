@@ -122,6 +122,10 @@ class TestListQuantities:
             ("SWCB", ["Sidewalk", "Curb"]), ("SWCB", ["Sidewalk", "Curb"]), ("AC", ["AC Pavement"]),
             ("GEN", ["General"]), ("SWCB", ["Sidewalk", "Curb"])]
 
+    def test_a_row_an_idrs_flags_gave_is_sidewalk(self):
+        rows = get(rows=[quantity(6, "PIR_FLAGS", amount="90", unit="SF")])[0].json()["data"]["rows"]
+        assert [(row["report_type"], row["disciplines"]) for row in rows] == [("PIR_FLAGS", ["Sidewalk"])]
+
     def test_totals_are_summed_per_unit_over_the_rows_returned(self):
         assert get()[0].json()["data"]["totals_by_unit"] == {"EA": 36.0, "LF": 320.5, "SF": 1250.0, "TN": 48.5}
 
@@ -185,11 +189,12 @@ class TestQuantityFilters:
     def test_a_discipline_resolves_to_its_report_types(self):
         response, sql, params = get({"discipline": "Sidewalk"})
         assert response.status_code == 200
-        assert "AND q.report_type = ANY(%s)" in sql and params == (PROJECT_ID, ["SWCB"], MAX_ROWS + 1)
+        # PIR_FLAGS: the rows an IDR's flags give are sidewalk work (R1f)
+        assert "AND q.report_type = ANY(%s)" in sql and params == (PROJECT_ID, ["SWCB", "PIR_FLAGS"], MAX_ROWS + 1)
 
     def test_several_disciplines_match_any_of_their_report_types_each_once(self):
         _, _, params = get([("discipline", "Sidewalk"), ("discipline", "AC Pavement"), ("discipline", "Curb")])
-        assert params == (PROJECT_ID, ["SWCB", "AC"], MAX_ROWS + 1)
+        assert params == (PROJECT_ID, ["SWCB", "PIR_FLAGS", "AC"], MAX_ROWS + 1)
 
     def test_a_discipline_with_no_pay_items_is_a_valid_filter(self):
         response, _, params = get({"discipline": "Concrete (testing)"}, rows=[])
@@ -206,7 +211,7 @@ class TestQuantityFilters:
         assert ("WHERE q.project_id = %s AND i.deleted_at IS NULL AND q.report_date >= %s AND q.report_date <= %s "
                 "AND q.pay_item_ref = ANY(%s) AND q.budget_code = ANY(%s) AND q.report_type = ANY(%s) "
                 "AND q.reporter_uuid = %s ORDER BY") in sql
-        assert params == (PROJECT_ID, date(2026, 10, 1), date(2026, 10, 31), ["4.13 AAS"], ["XYZ"], ["SWCB"],
+        assert params == (PROJECT_ID, date(2026, 10, 1), date(2026, 10, 31), ["4.13 AAS"], ["XYZ"], ["SWCB", "PIR_FLAGS"],
                           INSPECTOR["uuid"], MAX_ROWS + 1)
 
     def test_a_filters_value_is_never_written_into_the_statement(self):

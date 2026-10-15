@@ -44,7 +44,7 @@ def list_project_quantities(
         "date_to": None if cumulative else last,
         "pay_items": pay_item,
         "budget_codes": budget_code,
-        "report_types": report_types_for(discipline),
+        "report_types": report_types_for(discipline, quantities=True),
         "reporter_uuid": inspector_uuid,
     }
 

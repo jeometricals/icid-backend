@@ -23,11 +23,14 @@ from api.services.auth import (
     pir_member,
     pir_page_member,
 )
+from api.queries.contract_items import get_project_pay_item
 from api.services.flag_area import compute_area
+from api.services.pay_item_units import FLAG_UNITS, flag_unit
 from api.v1._shared import (
     PAGE_CHAIN,
     PAGE_DELETED,
     PAGE_PARENTS,
+    PAY_ITEM_ELSEWHERE,
     changes_sent,
     check_pay_item,
     refuse_deleted_chain,
@@ -110,13 +113,31 @@ def _load_flag(flag_id: UUID) -> dict[str, Any]:
     return found
 
 
+def _check_flag_pay_item(project_id: str, pay_item_id: Optional[UUID], new: bool = True) -> None:
+    """
+    Refuse a pay item a flag can't take: one that isn't the project's, or, when it is newly given, one in a unit a flag can't be measured in (see FLAG_UNITS: an IDR's rollup counts a flag in its pay item's unit).
+    Takes the project id, the pay item's id (None for none) and whether the flag is newly given it (a flag keeping its pay item keeps it whatever its unit).
+    Returns nothing; raises 400 for another project's pay item and 422 for a unit a flag can't be measured in.
+    """
+    if pay_item_id is None:
+        return
+    pay_item = get_project_pay_item(project_id, pay_item_id)
+    if pay_item is None:
+        raise HTTPException(status_code=400, detail=PAY_ITEM_ELSEWHERE)
+    if new and flag_unit(pay_item["unit"]) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"A flag can't be measured in {pay_item['unit']}: give it a pay item in {', '.join(FLAG_UNITS)}",
+        )
+
+
 def _create_on_page(page: dict[str, Any], body: FlagCreate, user: UserOut) -> FlagResponse:
     """
     Add a flag to a live page, created by the user, its area computed from its shape.
     Takes the page dict, the checked flag and the user.
-    Returns the FlagResponse; raises 400 for a pay item of another project or a page replaced meanwhile, and 500 if the statement fails otherwise.
+    Returns the FlagResponse; raises 400 for a pay item of another project or a page replaced meanwhile, 422 for a pay item in a unit a flag can't be measured in, and 500 if the statement fails otherwise.
     """
-    check_pay_item(page["project_id"], body.pay_item_id)
+    _check_flag_pay_item(page["project_id"], body.pay_item_id)
     row = create_flag(page["pir_page_id"], user.uuid, body.model_dump(), compute_area(body.shape, body.dimensions))
 
     if row is None:
@@ -211,7 +232,7 @@ def update_flag_record(
         changes["quantity_delta_reason"] = None  # back to the computed quantity: no override left to explain
 
     merged = validated(FlagCreate, {**{field: found[field] for field in FlagCreate.model_fields}, **changes})
-    check_pay_item(found["project_id"], merged.pay_item_id)
+    _check_flag_pay_item(found["project_id"], merged.pay_item_id, new=merged.pay_item_id != found["pay_item_id"])
 
     row = update_flag(flag_id, merged.model_dump(), compute_area(merged.shape, merged.dimensions))
 

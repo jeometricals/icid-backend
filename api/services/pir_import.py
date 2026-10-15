@@ -24,8 +24,10 @@ from api.schemas.pir_import import (
 )
 from api.schemas.segment import SegmentCreate
 from api.services.flag_area import compute_area
+from api.services.pay_item_units import FLAG_UNITS
 
 PAY_ITEM_ELSEWHERE = "pay item is not one of the project's"
+FLAG_UNIT_REFUSED = f"a flag can't be measured in its pay item's unit (only {', '.join(FLAG_UNITS)})"
 KINDS = {"flag": "flags", "non_assessable_area": "non_assessable_areas", "feature": "features",
          "segment": "segments", "annotations": "annotations"}
 
@@ -80,13 +82,15 @@ def _checked(model: type[BaseModel], raw: Any) -> tuple[Optional[BaseModel], Opt
 class _Importer:
     """Turns a file into a PreparedImport, item by item."""
 
-    def __init__(self, page_ids: dict[int, UUID], pay_item_ids: set[UUID]) -> None:
+    def __init__(self, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
+                 flag_pay_item_ids: Optional[set[UUID]] = None) -> None:
         """
         Start with nothing prepared.
-        Takes the PIR's live pages' ids by page number and the ids of its project's pay items.
+        Takes the PIR's live pages' ids by page number, the ids of its project's pay items, and those of them in a unit a flag can be measured in (all of them when None).
         Returns nothing.
         """
         self.page_ids, self.pay_item_ids = page_ids, pay_item_ids
+        self.flag_pay_item_ids = pay_item_ids if flag_pay_item_ids is None else flag_pay_item_ids
         self.out = PreparedImport()
 
     def drop(self, kind: str, page_number: Optional[int], index: Optional[int], reason: str,
@@ -146,6 +150,9 @@ class _Importer:
                 continue
             if not self.pay_item_ok(flag.pay_item_id):
                 self.drop("flag", entry.page_number, index, PAY_ITEM_ELSEWHERE)
+                continue
+            if flag.pay_item_id is not None and flag.pay_item_id not in self.flag_pay_item_ids:
+                self.drop("flag", entry.page_number, index, FLAG_UNIT_REFUSED)
                 continue
             flag_id = uuid4()
             kept[index] = flag_id
@@ -245,13 +252,14 @@ class _Importer:
             self.annotations(entry.annotations, page_id, entry.page_number)
 
 
-def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID]) -> PreparedImport:
+def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
+                   flag_pay_item_ids: Optional[set[UUID]] = None) -> PreparedImport:
     """
     Check a Smart PIR import item by item and turn what passes into the rows the import statement writes. The file's own annotations go to page 1, unless page 1's entry brings its own.
-    Takes the parsed file, the PIR's live pages' ids by page number and the ids of its project's pay items.
+    Takes the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items and those of them a flag can be measured in (all of them when None).
     Returns the PreparedImport: the rows, and every item dropped with why.
     """
-    importer = _Importer(page_ids, pay_item_ids)
+    importer = _Importer(page_ids, pay_item_ids, flag_pay_item_ids)
     seen: set[int] = set()
     for entry in body.pages:
         importer.page(entry, seen)
@@ -269,14 +277,15 @@ def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids
 
 
 def run_import(
-    pir_id: UUID, created_by: UUID, body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID]
+    pir_id: UUID, created_by: UUID, body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
+    flag_pay_item_ids: Optional[set[UUID]] = None,
 ) -> Optional[PirImportResult]:
     """
     Import a Smart PIR file: check it, then write what passed in one statement. An item the statement couldn't write (its page replaced or its pay item deleted meanwhile) is counted as dropped.
-    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number and the ids of its project's pay items.
+    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items and those of them a flag can be measured in (all of them when None).
     Returns the PirImportResult, or None if the statement failed.
     """
-    prepared = prepare_import(body, page_ids, pay_item_ids)
+    prepared = prepare_import(body, page_ids, pay_item_ids, flag_pay_item_ids)
     wanted = prepared.counts()
 
     if not (prepared.pages or prepared.flags or prepared.features or prepared.segments or prepared.annotations):

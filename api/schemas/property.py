@@ -140,12 +140,21 @@ class PropertyOut(BaseModel):
         Takes the property.
         Returns the label.
         """
-        if self.kind == "sidewalk":
-            return self.address or ""
-        facing = self.intersection_street_1 if self.facing_street == "street_1" else self.intersection_street_2
-        return (
-            f"{self.intersection_street_1} & {self.intersection_street_2} — {self.quadrant} Quadrant (Facing {facing})"
-        )
+        return display_address_of(self.kind, self.address, self.intersection_street_1, self.intersection_street_2,
+                                  self.quadrant, self.facing_street)
+
+
+def display_address_of(kind: str, address: Optional[str], street_1: Optional[str], street_2: Optional[str],
+                       quadrant: Optional[str], facing_street: Optional[str]) -> str:
+    """
+    Label a property: a sidewalk by its address; a ped ramp by its intersection, quadrant and the street it faces.
+    Takes its kind, address, two intersection streets, quadrant and facing_street ('street_1' or 'street_2').
+    Returns the label ("" for a sidewalk without an address).
+    """
+    if kind == "sidewalk":
+        return address or ""
+    facing = street_1 if facing_street == "street_1" else street_2
+    return f"{street_1} & {street_2} — {quadrant} Quadrant (Facing {facing})"
 
 
 class PropertyStatus(BaseModel):
