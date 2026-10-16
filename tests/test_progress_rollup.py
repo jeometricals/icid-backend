@@ -92,10 +92,24 @@ class TestStates:
         rows = [row(MAIN_ST, CONCRETE, "unclaimed", 1, "1.2345679")]
         assert line(compute_progress(PAY_ITEMS, rows), CONCRETE)["unclaimed"]["quantity"] == 1.2345679
 
-    def test_a_pay_item_nothing_is_on_is_listed_at_zero(self):
-        sign = line(compute_progress(PAY_ITEMS, WALKTHROUGH), SIGN)
+    def test_only_pay_items_a_flag_is_on_are_listed(self):
+        result = compute_progress(PAY_ITEMS, WALKTHROUGH)
+        assert [item["item_no"] for item in result["pay_items"]] == ["4.13 AAS", "73.21AC"]
+
+    def test_a_pay_item_with_only_unclaimed_flags_is_listed(self):
+        result = compute_progress(PAY_ITEMS, [row(MAIN_ST, SIGN, "unclaimed", 2, "2")])
+        assert [item["item_no"] for item in result["pay_items"]] == ["9.01"]
+
+    def test_include_empty_lists_every_pay_item_at_zero_in_the_catalogs_order(self):
+        result = compute_progress(PAY_ITEMS, WALKTHROUGH, include_empty=True)
+        assert [item["item_no"] for item in result["pay_items"]] == ["4.13 AAS", "73.21AC", "9.01"]
+        sign = line(result, SIGN)
         assert sign["live_total"] == {"quantity": 0.0, "flag_count": 0, "value": 0.0}
         assert sign["approved_pct"] is None
+
+    def test_include_empty_leaves_the_overall_as_it_is(self):
+        assert (compute_progress(PAY_ITEMS, WALKTHROUGH, include_empty=True)["overall"]
+                == compute_progress(PAY_ITEMS, WALKTHROUGH)["overall"])
 
     def test_unmapped_flags_are_counted_and_in_no_column(self):
         rows = WALKTHROUGH + [row(MAIN_ST, None, "unmapped", 2, "0"), row(OAK_ST, None, "unmapped", 1, "0")]
@@ -123,7 +137,7 @@ class TestOverall:
         assert overall == {"approved_value": 0.0, "live_total_value": 0.0, "approved_pct": None}
 
     def test_a_project_with_no_pay_items_a_flag_can_fill(self):
-        result = compute_progress([], [row(MAIN_ST, None, "unmapped", 1, "0")])
+        result = compute_progress([], [row(MAIN_ST, None, "unmapped", 1, "0")], include_empty=True)
         assert result["pay_items"] == []
         assert result["unmapped_flag_count"] == 1
 
@@ -135,13 +149,23 @@ class TestTaskOrder:
         assert [entry["display_address"] for entry in result["properties"]] == ["12 Elm St", "350 Main St", "7 Oak St"]
         main = result["properties"][1]
         assert line(main, SIDEWALK)["approved"]["quantity"] == 383.44
-        assert line(main, CONCRETE)["live_total"]["flag_count"] == 0
+        assert [item["item_no"] for item in main["pay_items"]] == ["4.13 AAS"]
         assert result["properties"][2]["overall"]["approved_pct"] == 0.0
+
+    def test_include_empty_lists_every_pay_item_for_each_property(self):
+        result = compute_progress(PAY_ITEMS, WALKTHROUGH, [bundled(MAIN_ST), bundled(OAK_ST)], include_empty=True)
+        assert [len(entry["pay_items"]) for entry in result["properties"]] == [3, 3]
+        assert line(result["properties"][0], CONCRETE)["live_total"]["flag_count"] == 0
+
+    def test_a_property_with_no_flags_lists_no_pay_items(self):
+        result = compute_progress(PAY_ITEMS, WALKTHROUGH, [bundled(OAK_ST)])
+        assert result["properties"][0]["pay_items"] == []
 
     def test_the_properties_add_up_to_the_task_order(self):
         rows = WALKTHROUGH + [row(OAK_ST, SIDEWALK, "unclaimed", 4, "40")]
         result = compute_progress(PAY_ITEMS, rows, [bundled(MAIN_ST), bundled(ELM_ST), bundled(OAK_ST)])
-        total = sum(line(entry, SIDEWALK)["live_total"]["quantity"] for entry in result["properties"])
+        total = sum(item["live_total"]["quantity"] for entry in result["properties"] for item in entry["pay_items"]
+                    if item["pay_item_id"] == SIDEWALK)
         assert total == line(result, SIDEWALK)["live_total"]["quantity"]
 
     def test_sites_started_counts_properties_with_an_approved_flag(self):

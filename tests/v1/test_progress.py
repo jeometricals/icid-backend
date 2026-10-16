@@ -177,7 +177,16 @@ class TestProjectRollup:
                 patch(PROGRESS, return_value=[]):
             data = admin_client.get(URL).json()["data"]
         assert data["overall"] == {"approved_value": 0.0, "live_total_value": 0.0, "approved_pct": None}
-        assert len(data["pay_items"]) == 2
+        assert data["pay_items"] == []
+
+    def test_include_empty_lists_every_pay_item_a_flag_can_fill(self, admin_client):
+        rows = WALKTHROUGH[:1]
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS),                 patch(PROGRESS, return_value=rows):
+            narrow = admin_client.get(URL).json()["data"]
+            full = admin_client.get(URL, params={"include_empty": "true"}).json()["data"]
+        assert [item["item_no"] for item in narrow["pay_items"]] == ["4.13 AAS"]
+        assert [item["item_no"] for item in full["pay_items"]] == ["4.13 AAS", "73.21AC"]
+        assert line(full, "73.21AC")["live_total"] == {"quantity": 0.0, "flag_count": 0, "value": 0.0}
 
     def test_a_task_order_filter_reads_its_bundled_properties(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
@@ -282,7 +291,13 @@ class TestTaskOrderRollup:
         main = data["properties"][0]
         assert line(main, "4.13 AAS")["approved"] == line(data, "4.13 AAS")["approved"]
         assert data["properties"][2]["overall"]["approved_pct"] is None
+        assert data["properties"][2]["pay_items"] == []
         assert run.call_args.args[1] == (PROJECT_ID, PROJECT_ID, [MAIN_ST, ELM_ST, OAK_ST], [MAIN_ST, ELM_ST, OAK_ST])
+
+    def test_include_empty_lists_every_pay_item_for_each_property(self, admin_client):
+        with patch(TASKS, return_value=[TASK_ORDER_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS),                 patch(PROGRESS, return_value=WALKTHROUGH):
+            data = admin_client.get(TO_URL, params={"include_empty": "true"}).json()["data"]
+        assert [len(entry["pay_items"]) for entry in data["properties"]] == [2, 2, 2]
 
     def test_a_deleted_task_order_uses_its_bundle_as_it_stands(self, admin_client):
         with patch(TASKS, return_value=[{**TASK_ORDER_ROW, "deleted_at": CREATED}]), \

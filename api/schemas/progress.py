@@ -17,9 +17,9 @@ class ProgressBucket(BaseModel):
 
 class ProgressPayItem(BaseModel):
     """
-    A pay item a flag can fill, and its flags split by state: approved (claimed by an approved IDR), in flight
-    (attributed to an open IDR), unclaimed, and the three together (live_total). approved_pct is approved over the
-    total, to 1 decimal place; None when the total is 0.
+    A pay item a flag can fill (listed when a flag in scope is on it, or for include_empty), and its flags split by
+    state: approved (claimed by an approved IDR), in flight (attributed to an open IDR), unclaimed, and the three
+    together (live_total). approved_pct is approved over the total, to 1 decimal place; None when the total is 0.
     """
 
     pay_item_id: UUID

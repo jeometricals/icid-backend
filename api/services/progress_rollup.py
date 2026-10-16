@@ -1,6 +1,7 @@
 """
 Progress from flags (R1g): how much of each pay item a flag can fill is approved, in flight or unclaimed, by value at
-its unit price, for a project, a task order or a property.
+its unit price, for a project, a task order or a property. A pay item is listed when a flag in scope is on it, or,
+when asked for, whether or not.
 
 compute_progress works on rows already read (list_flag_pay_items and list_flag_progress) and reads nothing itself.
 Quantities are handed out unrounded; values are rounded to cents and percentages to 1 decimal place, once, where a
@@ -36,10 +37,10 @@ def _bucket(quantity: Decimal, flag_count: int, unit_price: Decimal) -> dict[str
     return {"quantity": float(quantity), "flag_count": flag_count, "value": money(quantity * unit_price)}
 
 
-def _rollup(pay_items: list[dict[str, Any]], rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def _rollup(pay_items: list[dict[str, Any]], rows: Iterable[dict[str, Any]], include_empty: bool) -> dict[str, Any]:
     """
-    Roll one scope's flag rows up per pay item and overall. Every pay item is listed, with nothing in it or not.
-    Takes the pay items (list_flag_pay_items' rows) and the scope's rows (list_flag_progress's).
+    Roll one scope's flag rows up per pay item and overall. A pay item no flag of the scope is on is listed only when asked for.
+    Takes the pay items (list_flag_pay_items' rows), the scope's rows (list_flag_progress's) and whether to list every pay item.
     Returns {pay_items, unmapped_flag_count, overall}.
     """
     sums = {item["pay_item_id"]: {state: [Decimal(0), 0] for state in STATES} for item in pay_items}
@@ -60,6 +61,8 @@ def _rollup(pay_items: list[dict[str, Any]], rows: Iterable[dict[str, Any]]) -> 
         count = sum(states[state][1] for state in STATES)
         approved_value += states["approved"][0] * price
         live_value += quantity * price
+        if not (count or include_empty):
+            continue
         lines.append({
             "pay_item_id": item["pay_item_id"], "item_no": item["item_no"], "budget_code": item["budget_code"],
             "description": item["description"], "unit": item["unit"], "unit_price": float(price),
@@ -93,14 +96,15 @@ def _unmapped_by_property(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def compute_progress(
-    pay_items: list[dict[str, Any]], rows: list[dict[str, Any]], properties: Optional[list[dict[str, Any]]] = None
+    pay_items: list[dict[str, Any]], rows: list[dict[str, Any]], properties: Optional[list[dict[str, Any]]] = None,
+    include_empty: bool = False,
 ) -> dict[str, Any]:
     """
-    Roll a scope's flags up per pay item and overall, and, for a task order, per property.
-    Takes the pay items a flag can fill (list_flag_pay_items), the scope's flag rows (list_flag_progress) and, for a task order, its live bundled properties (each with id, kind and address fields), in the order to list them.
+    Roll a scope's flags up per pay item and overall, and, for a task order, per property; each rollup lists the pay items its own flags are on, or every one when asked for.
+    Takes the pay items a flag can fill (list_flag_pay_items), the scope's flag rows (list_flag_progress), for a task order its live bundled properties (each with id, kind and address fields) in the order to list them, and whether to list every pay item.
     Returns {pay_items, unmapped_flag_count, unmapped_by_property, overall}, and with properties also {properties, site_count, sites_started}.
     """
-    result = {**_rollup(pay_items, rows), "unmapped_by_property": _unmapped_by_property(rows)}
+    result = {**_rollup(pay_items, rows, include_empty), "unmapped_by_property": _unmapped_by_property(rows)}
     if properties is None:
         return result
 
@@ -108,7 +112,7 @@ def compute_progress(
     for prop in properties:
         property_id = UUID(str(prop["id"]))
         own = [row for row in rows if row["property_id"] == property_id]
-        drilled.append({"property_id": property_id, "display_address": _address(prop), **_rollup(pay_items, own)})
+        drilled.append({"property_id": property_id, "display_address": _address(prop), **_rollup(pay_items, own, include_empty)})
     started = {row["property_id"] for row in rows if row["state"] == "approved" and row["flag_count"]}
     return {
         **result,

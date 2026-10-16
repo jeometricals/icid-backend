@@ -72,11 +72,12 @@ def _read(project_id: str, property_ids: Optional[list[UUID]]) -> tuple[list[dic
     "/{project_id}/progress-rollup", response_model=ProgressRollupResponse, dependencies=[Depends(project_member)]
 )
 def get_project_progress(
-    project_id: str, task_order_id: Optional[UUID] = None, property_id: Optional[UUID] = None
+    project_id: str, task_order_id: Optional[UUID] = None, property_id: Optional[UUID] = None,
+    include_empty: bool = False,
 ) -> ProgressRollupResponse:
     """
     Roll a project's flags up: per pay item a flag can fill, what is approved, in flight and unclaimed, by value, with the unmapped flags per property and the approved share overall.
-    Takes the project id and, as query parameters, task_order_id and property_id (both optional, narrowing to a live task order's properties and to one live property).
+    Takes the project id and, as query parameters, task_order_id and property_id (both optional, narrowing to a live task order's properties and to one live property) and include_empty (true: list every pay item a flag can fill, not only those flags in scope are on).
     Returns a ProgressRollupResponse; raises 404 (no project, or a filter that isn't a live one of it), 403 (not on the project, and not an admin) and 500.
     """
     ids = _filter_ids(project_id, task_order_id, property_id)
@@ -85,15 +86,17 @@ def get_project_progress(
     return ProgressRollupResponse(
         status="success",
         message=f"Progress for project {project_id}",
-        data=ProgressRollup(scope=scope, **compute_progress(pay_items, rows)),
+        data=ProgressRollup(scope=scope, **compute_progress(pay_items, rows, include_empty=include_empty)),
     )
 
 
 @router.get("/{task_order_id}/progress-rollup", response_model=TaskOrderProgressRollupResponse)
-def get_task_order_progress(found: dict = Depends(task_order_member)) -> TaskOrderProgressRollupResponse:
+def get_task_order_progress(
+    include_empty: bool = False, found: dict = Depends(task_order_member)
+) -> TaskOrderProgressRollupResponse:
     """
     Roll a task order's flags up as a project's are, over its live bundled properties (a deleted task order's bundle as it stands), with each property's own rollup and how many have started.
-    Takes the task order (task_order_member: one the user may read).
+    Takes include_empty as a query parameter (true: list every pay item a flag can fill, in each rollup) and the task order (task_order_member: one the user may read).
     Returns a TaskOrderProgressRollupResponse; raises 404 (no task order), 403 (not on its project, and not an admin) and 500.
     """
     pay_items, rows = _read(found["project_id"], _bundled_ids(found))
@@ -101,5 +104,5 @@ def get_task_order_progress(found: dict = Depends(task_order_member)) -> TaskOrd
     return TaskOrderProgressRollupResponse(
         status="success",
         message=f"Progress for task order {found['task_order_number']}",
-        data=TaskOrderProgressRollup(scope=scope, **compute_progress(pay_items, rows, found["properties"])),
+        data=TaskOrderProgressRollup(scope=scope, **compute_progress(pay_items, rows, found["properties"], include_empty)),
     )
