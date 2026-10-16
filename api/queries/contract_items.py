@@ -5,6 +5,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from api.db.runner import run_query
+from api.queries.flags import FLAG_UNIT
 
 # A contract item as the pay-item picker reads it: the row's own item number, description and section,
 # and its unit as pay_unit.
@@ -74,6 +75,22 @@ def list_project_pay_items(project_id: str) -> Optional[list[dict[str, Any]]]:
     """
     sql = _PAY_ITEM_SELECT + "        WHERE ci.project_id = %s\n        ORDER BY ci.budget_code, ci.item_no;"
     return run_query(sql, (project_id,))
+
+
+def list_flag_pay_items(project_id: str, units: tuple[str, ...]) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch the pay items of a project a flag can fill: those whose unit, in a flag's short form (FLAG_UNIT), is one of the given ones.
+    Takes the project id and the units (FLAG_UNITS).
+    Returns dicts (pay_item_id, item_no, budget_code, description, unit in short form, unit_price) by budget code then item number (empty when none), or None on failure.
+    """
+    sql = f"""
+        SELECT ci.contract_item_id AS pay_item_id, ci.item_no, ci.budget_code, ci.description,
+               {FLAG_UNIT} AS unit, ci.bid_unit_price AS unit_price
+        FROM icid.contract_items ci
+        WHERE ci.project_id = %s AND {FLAG_UNIT} = ANY(%s)
+        ORDER BY ci.budget_code, ci.item_no;
+    """
+    return run_query(sql, (project_id, list(units)))
 
 
 def list_project_contract_totals(project_id: str) -> Optional[list[dict[str, Any]]]:

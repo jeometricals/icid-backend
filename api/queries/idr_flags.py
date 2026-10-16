@@ -58,6 +58,17 @@ _CLAIMED = "f.claimed_by_idr_id = i.idr_id"
 _ORDER = """
         ORDER BY COALESCE(p.address, p.intersection_street_1 || ' & ' || p.intersection_street_2), p.quadrant,
                  pg.page_number, f.display_order, f.created_at"""
+# A flag drawn now, for a statement elsewhere reading f, pg, pir and p as this module does
+LIVE_FLAG = _LIVE
+# The flags of a project an open IDR (a draft, or one submitted or in review) has attributed to it and none has
+# claimed, each once: in its scope and not excluded. A subquery, its one parameter the project id (the progress
+# rollup's in flight).
+IN_FLIGHT_FLAG_IDS = (
+    "\n        SELECT DISTINCT f.id" + _FROM
+    + "\n        WHERE i.project_id = %s AND i.deleted_at IS NULL"
+    + " AND i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
+    + f"\n          AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND f.claimed_by_idr_id IS NULL"
+)
 
 
 def list_idr_flags(idr_id: UUID, claimed_only: bool) -> Optional[list[dict[str, Any]]]:
