@@ -32,6 +32,7 @@ def include_routers(app: FastAPI):
     from api.v1.users import router as users_router
     from api.v1.projects import router as projects_router
     from api.v1.quantities import router as quantities_router
+    from api.v1.assessment_summary import project_router as assessment_summary_router
     from api.v1.properties import project_router as project_properties_router
     from api.v1.properties import router as properties_router
     from api.v1.task_orders import project_router as project_task_orders_router
@@ -73,6 +74,7 @@ def include_routers(app: FastAPI):
     app.include_router(users_router)
     app.include_router(projects_router)
     app.include_router(quantities_router)
+    app.include_router(assessment_summary_router)
     app.include_router(project_properties_router)
     app.include_router(properties_router)
     app.include_router(project_task_orders_router)
