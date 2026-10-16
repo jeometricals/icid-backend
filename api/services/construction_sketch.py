@@ -6,6 +6,10 @@ shape's outline in feet, centred on its bounding box, scaled by its page's px/ft
 clockwise) and moved to (sketch_x, sketch_y) in the page's native pixels. The page's own rotation is then applied,
 as the workspace shows the page. The whole is fitted to the sketch pane; a sketch that would print too small to read,
 or spreads over more than one page, is for R1h.1's multi-sheet support.
+
+Numbering (R1h.3), as DOT's sheets number them: every flag 1..n, top to bottom then left to right as the sheet shows
+it; and A1..An for what isn't assessed, ordered the same way: a flag surveyed non-assessable (which also keeps its
+number) and a non-assessable area on an assessable flag. The sketch and the calculations panel both read them.
 """
 
 import math
@@ -109,11 +113,72 @@ def placed_outline(item: dict[str, Any], scale: float) -> list[Point]:
 
 @dataclass
 class SketchItem:
-    """Something to draw, its points already on the sheet's page in feet, the page turned as the workspace shows it."""
+    """Something to draw, its points already on the sheet's page in feet, the page turned as the workspace shows it; an area knows its flag."""
 
     kind: str  # flag, area, feature, segment
     points: list[Point]
     source: dict[str, Any]
+    parent: Optional[dict[str, Any]] = None
+
+
+def material(item: SketchItem) -> Optional[str]:
+    """
+    What a flag or an area is made of, as the sketch fills and labels it.
+    Takes the item.
+    Returns '4in' (4", stippled), '7in' (7" or 7" assessed as 4", diagonal lines) or 'non_assessable' (a flag surveyed non-assessable, or an area); None for a feature or a segment.
+    """
+    if item.kind == "area":
+        return "non_assessable"
+    if item.kind != "flag":
+        return None
+    if not item.source["surveyed_is_assessable"]:
+        return "non_assessable"
+    return "4in" if item.source["surveyed_thickness"] == "4in" else "7in"
+
+
+def reading_order(boxes: dict[Any, tuple[float, float, float, float]]) -> list[Any]:
+    """
+    Put shapes in reading order, as a viewer scans a sheet: in rows, top to bottom, then left to right along each row. A row starts at its topmost shape not yet placed and takes every shape whose middle lies within that shape's height, so hand-drawn rows that aren't quite level read as rows.
+    Takes each shape's bounding box (min x, min y, max x, max y; feet, y down), keyed.
+    Returns the keys in order.
+    """
+    middles = {key: ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2) for key, box in boxes.items()}
+    left = sorted(boxes, key=lambda key: (middles[key][1], middles[key][0]))
+    ordered: list[Any] = []
+    while left:
+        first = boxes[left[0]]
+        row = [key for key in left if first[1] - 1e-9 <= middles[key][1] <= first[3] + 1e-9]
+        if left[0] not in row:
+            row.insert(0, left[0])
+        ordered += sorted(row, key=lambda key: (middles[key][0], middles[key][1]))
+        left = [key for key in left if key not in row]
+    return ordered
+
+
+def number_items(flags: list[dict[str, Any]], items: list[SketchItem]) -> dict[str, str]:
+    """
+    Number a report's flags and what isn't assessed, as the sketch and the calculations panel show them: flags 1..n and non-assessable flags and areas A1..An, each in reading order (reading_order); flags and areas not drawn come after, in drawing order. An area on a flag surveyed non-assessable gets no A-number: the whole flag is already one.
+    Takes the flags (list_report_flags) and the sketch's items (sketch_items).
+    Returns the labels keyed 'flag:<id>' (its number), 'a:flag:<id>' and 'a:area:<id>' (A-numbers).
+    """
+    boxes = {(item.kind, str(item.source["id"])): bounds_of(item.points)
+             for item in items if item.kind in ("flag", "area")}
+
+    def in_order(keys: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        drawn = reading_order({key: boxes[key] for key in keys if key in boxes})
+        return drawn + [key for key in keys if key not in boxes]
+
+    labels = {f"flag:{key[1]}": str(number)
+              for number, key in enumerate(in_order([("flag", str(flag["id"])) for flag in flags]), start=1)}
+    not_assessed = []
+    for flag in flags:
+        if not flag["surveyed_is_assessable"]:
+            not_assessed.append(("flag", str(flag["id"])))
+        else:
+            not_assessed += [("area", str(area["id"])) for area in flag["areas"]]
+    for number, (kind, key) in enumerate(in_order(not_assessed), start=1):
+        labels[f"a:{kind}:{key}"] = f"A{number}"
+    return labels
 
 
 @dataclass
@@ -161,7 +226,7 @@ def sketch_items(flags: list[dict[str, Any]], drawings: dict[str, Any]) -> list[
         for area in flag["areas"]:
             area_outline = placed_outline(area, scale)
             if area_outline:
-                items.append(SketchItem("area", in_feet(area_outline), area))
+                items.append(SketchItem("area", in_feet(area_outline), area, flag))
     if not items:
         raise SketchError(NOT_DRAWN_MESSAGE)
     for feature in drawings["features"]:
@@ -178,14 +243,15 @@ def sketch_items(flags: list[dict[str, Any]], drawings: dict[str, Any]) -> list[
     return items
 
 
-def fit_to_pane(items: list[SketchItem], pane: tuple[float, float, float, float]) -> Fit:
+def fit_to_pane(items: list[SketchItem], pane: tuple[float, float, float, float], min_width_ft: float = 0.0) -> Fit:
     """
     Fit a sketch to the pane, keeping its proportions, with PADDING round it. Raises SketchError when a foot would print smaller than MIN_POINTS_PER_FOOT.
-    Takes the items (sketch_items) and the pane (x, bottom y, width, height, in points).
+    Takes the items (sketch_items), the pane (x, bottom y, width, height, in points) and the least width the drawing must make room for, in feet (a dimension drawn at scale beside it: the tax map's, the curb-to-curb).
     Returns the Fit, the drawing centred in the pane.
     """
     min_x, min_y, max_x, max_y = bounds_of(point for item in items for point in item.points)
-    width_ft, height_ft = max(max_x - min_x, 1.0), max(max_y - min_y, 1.0)
+    width_ft, height_ft = max(max_x - min_x, 1.0, min_width_ft), max(max_y - min_y, 1.0)
+    min_x = (min_x + max_x) / 2 - width_ft / 2
     padded_w, padded_h = width_ft * (1 + 2 * PADDING), height_ft * (1 + 2 * PADDING)
     points_per_foot = min(pane[2] / padded_w, pane[3] / padded_h)
     if points_per_foot < MIN_POINTS_PER_FOOT:

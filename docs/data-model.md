@@ -632,9 +632,9 @@ keeps its title block, and the new page starts without one.
 | Column | Type | Notes |
 |---|---|---|
 | `pir_page_id` | UUID PK | FK → `pir_pages`, no action |
-| `contract_no`, `violation_no`, `property_address`, `block`, `lot`, `cross_street_left`, `cross_street_right`, `frontage_street` | TEXT | Trimmed, blank is NULL, at most 200 characters (the API) |
+| `contract_no`, `violation_no`, `property_address`, `block`, `lot`, `cross_street_left`, `cross_street_right`, `frontage_street` | TEXT | Trimmed, blank is NULL, at most 200 characters (the API; the title-block editor's route takes a street at most 60). The Construction Report prints the cross streets up the sketch's sides and the frontage under it (R1h.3) |
 | `boro` | TEXT | One of the five boroughs, spelled out (`chk_pir_annotations_boro`) |
-| `tax_map_width_ft`, `cc_curb_to_curb_ft` | NUMERIC(10,2) | ≥ 0 |
+| `tax_map_width_ft`, `cc_curb_to_curb_ft` | NUMERIC(10,2) | ≥ 0. The Construction Report draws them at scale: TAX MAP between the PLs along the top, CC= along the bottom (R1h.3) |
 | `property_status` | TEXT | `all_defects_corrected`, `some_defects_corrected` or `no_work_done` |
 | `corner_property_status` | TEXT | `ped_ramp_installed`, `no_ped_ramp_exists` or `existing_ped_ramp` |
 | `violation_not_removed_due_to` | TEXT[] NOT NULL | Free text, default `{}`. The Construction Report ticks its nine boxes for the codes `work_already_done`, `distinctive_material`, `landmark`, `subway`, `tree`, `vault`, `scaffolding`, `other_perm_obstruction` and `other_temp_obstruction`, and drops any other text |

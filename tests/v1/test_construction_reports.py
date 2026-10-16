@@ -2,7 +2,7 @@ import io
 import zipfile
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import pypdfium2 as pdfium
@@ -234,9 +234,57 @@ class TestPropertyReport:
     @pytest.mark.parametrize("bearing, expected", [("N", 0), ("NE", 45)])
     def test_the_north_arrow_is_not_turned_by_the_pages_rotation(self, admin_client, storage, bearing, expected):
         rotated = [{**flag, "rotation_deg": 90} for flag in FLAGS]
-        with patch(PROPS, return_value=[PROPERTY_ROW]),                 patch(REPORT, side_effect=report_query(header={**HEADER, "north_bearing": bearing}, flags=rotated)),                 patch("api.services.construction_report.draw_report", wraps=construction_report.draw_report) as draw:
+        with patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(REPORT, side_effect=report_query(header={**HEADER, "north_bearing": bearing}, flags=rotated)), \
+                patch("api.services.construction_report.draw_report", wraps=construction_report.draw_report) as draw:
             assert admin_client.get(URL).status_code == 200
         assert draw.call_args.args[5] == expected
+
+    def test_the_calculations_panel_lists_each_piece_and_agrees_with_box_2(self, admin_client, storage):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
+            text = pdf_text(admin_client.get(URL).content)
+        assert "Calculations" in text and 'Total 4" Sidewalk Sq.Ft Non-Assessable' in text
+        # Flag 1 is the non-assessable 4" one (A1, whole); flag 2 the assessable 4"
+        assert "1 5.00 x 5.00 90.25" in text and "A1 5.00 x 5.00 90.25" in text
+        # Box 2's 4" figures as the subtraction: 250.94 - 137.75 = 113.19 (an adjustment covers the override)
+        assert "250.94 - 137.75 113.19" in text and "Adjustment to box 2 +47.50" in text
+        assert "171.81 - 77.67 94.14" in text
+
+    def test_the_perimeter_prints_the_property_line_the_tax_map_and_the_curb_to_curb(self, admin_client, storage):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
+            text = pdf_text(admin_client.get(URL).content)
+        assert text.count("PL") >= 2 and "TAX MAP 40.00'" in text and "CC= 34.25'" in text
+        assert "139 AVENUE" in text and "138 AVENUE" in text and "227 STREET" in text
+
+    def test_without_the_widths_only_the_property_line_prints(self, admin_client, storage):
+        header = {**HEADER, "tb_tax_map_width_ft": None, "tb_cc_curb_to_curb_ft": None}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(header=header)):
+            text = pdf_text(admin_client.get(URL).content)
+        assert "PL" in text and "TAX MAP" not in text and "CC=" not in text
+
+    def test_each_material_is_filled_its_own_way(self, admin_client, storage):
+        fills = {"4in": MagicMock(), "7in": MagicMock(), "non_assessable": MagicMock()}
+        with patch.dict(construction_report._FILLS, fills), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(REPORT, side_effect=report_query()):
+            assert admin_client.get(URL).status_code == 200
+        # One non-assessable 4", one assessable 4", three 7"
+        assert (fills["non_assessable"].call_count, fills["4in"].call_count, fills["7in"].call_count) == (1, 1, 3)
+
+    def test_large_pieces_are_labelled_by_material_and_reason(self, admin_client, storage):
+        big = [{**flag_row(1, "4in", "500", "500"), "dimensions": {"L": 25, "W": 20}},
+               {**flag_row(2, "7in", "500", "500", x=30), "dimensions": {"L": 25, "W": 20},
+                "areas": [{"id": "a0000000-0000-4000-8000-000000000001", "display_order": 1, "reason": "grass",
+                           "shape": "rectangle", "dimensions": {"L": 10, "W": 8}, "sketch_x": 200 + 30 * 24,
+                           "sketch_y": 200.0, "rotation": 0, "computed_quantity": 80}]}]
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=big)):
+            text = pdf_text(admin_client.get(URL).content)
+        assert '4" Conc.' in text and "Grass" in text and "A1" in text
+
+    def test_too_many_pieces_for_the_calculations_panel_is_422(self, admin_client, storage):
+        flags = [{**flag_row(1, "4in", "25", "25", x=(n % 8) * 0.2), "id": UUID(int=n + 1)} for n in range(45)]
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
+            response = admin_client.get(URL)
+        assert response.status_code == 422 and "calculations panel" in response.json()["detail"]
 
     def test_a_page_without_a_scale_is_422(self, admin_client, storage):
         flags = [{**flag, "scale_px_per_ft": None} for flag in FLAGS]

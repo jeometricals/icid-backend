@@ -998,8 +998,9 @@ Any change must follow these.
   NULL, `boro` is one of the five boroughs spelled out, the widths are ≥ 0 and come back as JSON numbers. It has no
   `deleted_at`: a replaced page keeps its title block, and its replacement starts without one.
 - **The title-block editor's route** (R1h.2; `PATCH /v1/pirs/{pir_id}/title-block`, `api/v1/pir_title_block.py`,
-  `api/queries/pir_title_block.py`): the five fields the Construction Report prints, page 1's `contract_no` and three
-  dates and the PIR's `north_bearing`, written in one statement (two data-modifying CTEs) so a save is never half
+  `api/queries/pir_title_block.py`): the fields the Construction Report prints, page 1's `contract_no`, three dates,
+  streets (`cross_street_left`, `cross_street_right`, `frontage_street`; R1h.3, at most 60) and widths
+  (`tax_map_width_ft`, `cc_curb_to_curb_ft`, NUMERIC(10,2)) and the PIR's `north_bearing`, written in one statement (two data-modifying CTEs) so a save is never half
   applied. Only fields sent are written, and only where they differ (`IS DISTINCT FROM`), so a save that changes
   nothing writes nothing, `updated_at` included; a page without a title block gets one only when a value is sent. The
   route reads the body itself, so a bad value is a 400 naming the field. Writers as for the PIR (`writable_pir`).
@@ -1088,9 +1089,25 @@ Any change must follow these.
     Non-Assessable = the rest, never below 0. Rows by `surveyed_thickness`; cost = assessable × `cost_per_sf_4in` (4"
     and 7" assessed as 4") or `cost_per_sf_7in`; no rate, no cost. Kept as `Decimal`, rounded for display.
   - **Sketch** (`construction_sketch.py`): outlines exactly as the frontend's `lib/flagGeometry.js`, the page's
-    rotation applied, fitted to the pane with 10% padding. 422 when the flags are on more than one page or would print
-    below `MIN_POINTS_PER_FOOT` (4) (`MULTI_SHEET_MESSAGE`, R1h.1's), or the page has no scale. North arrow from
-    `pirs.north_bearing`, read on the upright page (not turned again by its rotation); none when unset.
+    rotation applied, fitted with 10% padding to the left two thirds of the band (R1h.3), room left round it. 422 when
+    the flags are on more than one page or would print below `MIN_POINTS_PER_FOOT` (4) (`MULTI_SHEET_MESSAGE`, R1h.1's),
+    or the page has no scale. North arrow from `pirs.north_bearing`, read on the upright page (not turned again by its
+    rotation); none when unset.
+  - **DOT parity (R1h.3).** Numbers (`number_items`): every flag 1..n and A1..An for a flag surveyed non-assessable
+    (which keeps its number too) and an area on an assessable flag, both in reading order (`reading_order`: rows top
+    to bottom, a row taking the shapes whose middle lies within its topmost shape's height, then left to right).
+    Fills by `material`: 4" stippled, 7" and 7" as 4" in diagonal lines, a non-assessable flag or area tinted blue
+    and cross-hatched (a non-assessable flag crossed through too). Labels (`4" Conc.`, `7" Conc.`, the reason in words,
+    `Non-Ass.` for none or other) only where they fit and clear every number and earlier label, areas' first. The
+    perimeter from page 1's title block, no migration (041 was skipped): PL along the top, `TAX MAP` at scale between
+    the PLs when `tax_map_width_ft` is set, `CC=` at scale along the bottom from `cc_curb_to_curb_ft`, the frontage
+    street under it and the cross streets up the sides; the fit makes room for either width.
+  - **Calculations panel** (the band's right third; `calc_groups` in `construction_measure.py`, `calc_lines` in
+    `construction_report.py`): per thickness with flags, each flag's Length × Width = Sub-Total from its stored
+    dimensions (`shape_terms`: a trapezoid `0.5(a+b)` × w, a triangle `0.5(a)` × b, a polygon or an arc the Sub-Total
+    alone), the non-assessable pieces, then Total − Non-Assessable = Assessable. Its totals are box 2's; when the pieces
+    don't add up to it (an override, a subtracted feature, an area larger than its flag) an `Adjustment to box 2` row
+    carries the difference. More lines than fit at 6 pt is a 422 (`CALC_TOO_LONG_MESSAGE`).
   - **Certification:** the IDR's own inspector signature copy (`inspector_signature_path`, fetched through
     `fetch_signature_file` in `api/services/signatures.py`, as the IDR export does; best-effort, blank when it can't
     be), its reporter as Inspected By, `idr_number`, and their initials with the day the IDR was approved. The PIR's

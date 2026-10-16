@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
@@ -27,7 +28,10 @@ PIR_ROW = {"id": PIR_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023", "s
            "deleted_at": None, "deleted_by": None}
 PROPERTY_ROW = {"id": PROPERTY_ID, "project_id": "HWS0023", "deleted_at": None}
 EMPTY = {"pir_id": PIR_ID, "pir_page_id": PAGE_ID, "north_bearing": None, "contract_no": "HWS2014Q",
-         "date_notice_issued": None, "date_excavated": None, "date_constructed": None}
+         "date_notice_issued": None, "date_excavated": None, "date_constructed": None, "cross_street_left": None,
+         "cross_street_right": None, "frontage_street": None, "tax_map_width_ft": None, "cc_curb_to_curb_ft": None}
+STREETS = {"cross_street_left": None, "cross_street_right": None, "frontage_street": None, "tax_map_width_ft": None,
+           "cc_curb_to_curb_ft": None}
 SET = {**EMPTY, "contract_no": "HWS0023", "date_notice_issued": date(2026, 9, 15), "date_excavated": date(2026, 10, 1),
        "date_constructed": date(2026, 10, 5), "north_bearing": "NE"}
 MEMBER_ROW = {**ADMIN_USER_ROW, "uuid": UUID("b0000000-0000-4000-8000-000000000002"), "role": None}
@@ -78,7 +82,7 @@ class TestFields:
         assert response.status_code == 200 and response.json()["message"] == "Title block saved"
         assert response.json()["data"] == {"pir_id": str(PIR_ID), "contract_no": "HWS0023",
                                            "date_notice_issued": "2026-09-15", "date_excavated": "2026-10-01",
-                                           "date_constructed": "2026-10-05", "north_bearing": "NE"}
+                                           "date_constructed": "2026-10-05", "north_bearing": "NE", **STREETS}
         sql, params = write_call(run)
         assert "UPDATE icid.pirs pir SET north_bearing = %s::icid.compass_point" in sql
         assert "INSERT INTO icid.pir_annotations AS a (pir_page_id, contract_no, date_notice_issued, date_excavated, date_constructed)" in sql
@@ -116,7 +120,8 @@ class TestFields:
         assert "date_excavated" not in sql and "date_notice_issued" not in sql and "north_bearing" not in sql
 
     @pytest.mark.parametrize("field", ["contract_no", "date_notice_issued", "date_excavated", "date_constructed",
-                                       "north_bearing"])
+                                       "north_bearing", "cross_street_left", "cross_street_right", "frontage_street",
+                                       "tax_map_width_ft", "cc_curb_to_curb_ft"])
     def test_a_null_clears_a_field(self, admin_client, field):
         p1, p2, p3 = patch_all()
         with p1, p2, p3 as run:
@@ -144,6 +149,70 @@ class TestFields:
             response = admin_client.patch(URL, json={"north_bearing": "NE", "contract_no": "HWS0023"})
         assert response.status_code == 200 and response.json()["message"] == "Nothing changed"
         assert "pir.north_bearing IS DISTINCT FROM %s::icid.compass_point" in write_call(run)[0]
+
+
+class TestStreetsAndWidths:
+    def test_the_streets_and_widths_are_written_and_come_back(self, admin_client):
+        after = {**EMPTY, "cross_street_left": "139 AVENUE", "cross_street_right": "138 AVENUE",
+                 "frontage_street": "227 STREET", "tax_map_width_ft": Decimal("40.00"),
+                 "cc_curb_to_curb_ft": Decimal("34.25")}
+        p1, p2, p3 = patch_all(title=block(after=after))
+        with p1, p2, p3 as run:
+            response = admin_client.patch(URL, json={"cross_street_left": " 139 AVENUE ", "cross_street_right": "138 AVENUE",
+                                                     "frontage_street": "227 STREET", "tax_map_width_ft": 40,
+                                                     "cc_curb_to_curb_ft": "34.25"})
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert (data["cross_street_left"], data["frontage_street"]) == ("139 AVENUE", "227 STREET")
+        assert (data["tax_map_width_ft"], data["cc_curb_to_curb_ft"]) == (40.0, 34.25)
+        sql, params = write_call(run)
+        assert ("(pir_page_id, cross_street_left, cross_street_right, frontage_street, tax_map_width_ft, "
+                "cc_curb_to_curb_ft)") in sql
+        assert "%s::numeric" in sql
+        assert params[:5] == ("139 AVENUE", "138 AVENUE", "227 STREET", Decimal("40"), Decimal("34.25"))
+
+    def test_a_blank_street_clears_it(self, admin_client):
+        p1, p2, p3 = patch_all()
+        with p1, p2, p3 as run:
+            assert admin_client.patch(URL, json={"frontage_street": "  "}).status_code == 200
+        assert write_call(run)[1][0] is None
+
+    def test_a_street_over_60_characters_is_400(self, admin_client):
+        p1, p2, p3 = patch_all()
+        with p1, p2, p3 as run:
+            response = admin_client.patch(URL, json={"cross_street_right": "x" * 61})
+        assert response.status_code == 400
+        assert response.json() == {"detail": "cross_street_right cannot be longer than 60 characters"}
+        run.assert_not_called()
+
+    def test_60_characters_are_fine(self, admin_client):
+        p1, p2, p3 = patch_all()
+        with p1, p2, p3:
+            assert admin_client.patch(URL, json={"cross_street_left": "x" * 60}).status_code == 200
+
+    def test_a_street_that_isnt_text_is_400(self, admin_client):
+        p1, p2, p3 = patch_all()
+        with p1, p2, p3:
+            response = admin_client.patch(URL, json={"frontage_street": 227})
+        assert response.status_code == 400 and response.json() == {"detail": "frontage_street must be text"}
+
+    @pytest.mark.parametrize("value", [-1, "-0.01", 40.005, "forty", True, [40], "NaN", "Infinity", 100000000])
+    def test_a_width_that_doesnt_fit_is_400_naming_it(self, admin_client, value):
+        p1, p2, p3 = patch_all()
+        with p1, p2, p3 as run:
+            response = admin_client.patch(URL, json={"tax_map_width_ft": value})
+        assert response.status_code == 400
+        assert response.json() == {"detail": "tax_map_width_ft must be a number of feet, at least 0, "
+                                             "with at most 2 decimal places"}
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("value, stored", [(0, Decimal("0")), (34.25, Decimal("34.25")), ("40.00", Decimal("40.00")),
+                                               (" 12.5 ", Decimal("12.5"))])
+    def test_a_width_is_taken_as_a_number_or_number_text(self, admin_client, value, stored):
+        p1, p2, p3 = patch_all()
+        with p1, p2, p3 as run:
+            assert admin_client.patch(URL, json={"cc_curb_to_curb_ft": value}).status_code == 200
+        assert write_call(run)[1][0] == stored
 
 
 class TestRefusals:

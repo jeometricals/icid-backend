@@ -4,7 +4,8 @@ from uuid import UUID
 
 import pytest
 
-from api.services.construction_measure import compute_measure, flag_areas
+from api.services.construction_measure import calc_groups, compute_measure, flag_areas, shape_terms
+from api.services.construction_report import calc_lines, label_fits, material_label, reason_text
 from api.services.construction_sketch import (
     MIN_POINTS_PER_FOOT,
     MULTI_SHEET_MESSAGE,
@@ -12,8 +13,11 @@ from api.services.construction_sketch import (
     SketchError,
     SketchItem,
     fit_to_pane,
+    material,
     north_degrees,
+    number_items,
     placed_outline,
+    reading_order,
     shape_outline,
     sketch_items,
 )
@@ -186,6 +190,14 @@ class TestFit:
             fit_to_pane(items, self.PANE)
         assert str(raised.value) == MULTI_SHEET_MESSAGE
 
+    def test_a_dimension_wider_than_the_drawing_gets_room(self):
+        items = [SketchItem("flag", [(0, 0), (10, 0), (10, 5), (0, 5)], {})]
+        narrow, wide = fit_to_pane(items, self.PANE), fit_to_pane(items, self.PANE, min_width_ft=40)
+        assert wide.points_per_foot < narrow.points_per_foot
+        # The drawing stays centred in the pane
+        middle = (wide.place((0, 0))[0] + wide.place((10, 0))[0]) / 2
+        assert middle == pytest.approx(self.PANE[0] + self.PANE[2] / 2)
+
     def test_y_runs_up_on_the_sheet(self):
         items = [SketchItem("flag", [(0, 0), (10, 0), (10, 10), (0, 10)], {})]
         fit = fit_to_pane(items, self.PANE)
@@ -200,3 +212,140 @@ class TestNorth:
 
     def test_no_bearing_no_arrow(self):
         assert north_degrees(None) is None
+
+
+# ---------------------------------------------------------------------------
+# R1h.3: numbering, materials and the calculations panel
+# ---------------------------------------------------------------------------
+
+def piece(n: int, thickness: str = "4in", assessable: bool = True, x: float = 0, y: float = 0, L: float = 5,
+          W: float = 5, quantity=None, areas=(), shape: str = "rectangle", dimensions=None) -> dict:
+    """
+    Build a flag with what the numbering and the calculations read: an id, its place (feet, y down; drawn at 1 px/ft), shape, thickness and areas.
+    Takes its index, thickness, whether surveyed assessable, its top-left corner, its size, its quantity (default: its area), its areas, and a shape and dimensions other than an L x W rectangle.
+    Returns the dict.
+    """
+    gross = Decimal(str(L * W)) if dimensions is None else Decimal("73.67")
+    return {"id": UUID(f"f0000000-0000-4000-8000-0000000000{n:02d}"), "surveyed_thickness": thickness,
+            "surveyed_is_assessable": assessable, "surveyed_non_assessable_reason": None if assessable else "tree",
+            "shape": shape, "dimensions": dimensions or {"L": L, "W": W}, "sketch_x": x + L / 2,
+            "sketch_y": y + W / 2, "rotation": 0, "pir_page_id": PAGE, "scale_px_per_ft": 1, "rotation_deg": 0,
+            "computed_quantity": gross, "quantity": gross if quantity is None else Decimal(quantity),
+            "areas": list(areas)}
+
+
+def area(n: int, x: float = 0, y: float = 0, L: float = 2, W: float = 2, reason: str = "grass") -> dict:
+    """
+    Build a non-assessable area as list_report_flags nests it.
+    Takes its index, top-left corner, size and reason.
+    Returns the dict.
+    """
+    return {"id": f"a0000000-0000-4000-8000-0000000000{n:02d}", "display_order": n, "reason": reason,
+            "shape": "rectangle", "dimensions": {"L": L, "W": W}, "sketch_x": x + L / 2, "sketch_y": y + W / 2,
+            "rotation": 0, "computed_quantity": L * W}
+
+
+class TestReadingOrder:
+    def test_rows_that_arent_level_read_as_rows_left_to_right(self):
+        # Two hand-drawn rows: the top row's shapes sit a little higher or lower than each other
+        boxes = {"a": (10, 0.5, 15, 5.5), "b": (0, 0, 5, 5), "c": (20, -0.4, 25, 4.6), "d": (0, 5.2, 5, 10),
+                 "e": (10, 5.0, 15, 9.8)}
+        assert reading_order(boxes) == ["b", "a", "c", "d", "e"]
+
+    def test_one_shape_below_another_comes_after_it(self):
+        assert reading_order({"low": (0, 10, 5, 15), "high": (8, 0, 13, 5)}) == ["high", "low"]
+
+
+class TestNumbering:
+    def test_flags_are_numbered_and_what_isnt_assessed_gets_A_numbers(self):
+        flags = [piece(1, x=20), piece(2, x=0, assessable=False), piece(3, x=10, areas=[area(1, x=11, y=1)]),
+                 piece(4, x=0, y=10)]
+        labels = number_items(flags, sketch_items(flags, NO_DRAWINGS))
+        ids = [str(flag["id"]) for flag in flags]
+        assert [labels[f"flag:{i}"] for i in ids] == ["3", "1", "2", "4"]
+        # The non-assessable flag (left) reads before the area (middle)
+        assert labels[f"a:flag:{ids[1]}"] == "A1"
+        assert labels[f"a:area:{flags[2]['areas'][0]['id']}"] == "A2"
+        assert f"a:flag:{ids[0]}" not in labels
+
+    def test_an_area_on_a_non_assessable_flag_gets_no_A_number(self):
+        flags = [piece(1, assessable=False, areas=[area(1, x=1, y=1)])]
+        labels = number_items(flags, sketch_items(flags, NO_DRAWINGS))
+        assert labels == {f"flag:{flags[0]['id']}": "1", f"a:flag:{flags[0]['id']}": "A1"}
+
+    def test_a_flag_not_drawn_comes_last(self):
+        flags = [{**piece(1), "sketch_x": None}, piece(2, x=50)]
+        labels = number_items(flags, sketch_items(flags, NO_DRAWINGS))
+        assert labels[f"flag:{flags[0]['id']}"] == "2" and labels[f"flag:{flags[1]['id']}"] == "1"
+
+
+class TestMaterials:
+    @pytest.mark.parametrize("thickness, assessable, expected, label", [
+        ("4in", True, "4in", '4" Conc.'), ("7in", True, "7in", '7" Conc.'), ("7in_as_4in", True, "7in", '7" Conc.'),
+        ("4in", False, "non_assessable", "Tree"), ("7in", False, "non_assessable", "Tree"),
+    ])
+    def test_a_flag_is_filled_and_labelled_by_what_it_is(self, thickness, assessable, expected, label):
+        item = SketchItem("flag", [], piece(1, thickness=thickness, assessable=assessable))
+        assert material(item) == expected and material_label(item) == label
+
+    @pytest.mark.parametrize("reason, label", [("grass", "Grass"), ("dirt", "Dirt"), ("driveway", "Driveway"),
+                                               ("tree_pit", "Tree Pit"), ("other", "Non-Ass."), (None, "Non-Ass."),
+                                               ("other_perm_obstruction", "Non-Ass.")])
+    def test_an_area_is_non_assessable_and_labelled_by_its_reason(self, reason, label):
+        item = SketchItem("area", [], area(1, reason=reason))
+        assert material(item) == "non_assessable" and material_label(item) == label and reason_text(reason) == label
+
+    def test_a_label_prints_only_where_it_fits(self):
+        assert label_fits('4" Conc.', [(0, 0), (80, 0), (80, 30), (0, 30)])
+        assert not label_fits('4" Conc.', [(0, 0), (20, 0), (20, 30), (0, 30)])  # too narrow
+        assert not label_fits('4" Conc.', [(0, 0), (80, 0), (80, 12), (0, 12)])  # too short
+        assert not label_fits("", [(0, 0), (80, 0), (80, 30), (0, 30)])
+
+
+class TestCalculations:
+    @pytest.mark.parametrize("shape, dimensions, expected", [
+        ("rectangle", {"L": 33.83, "W": 4.75}, ("33.83", "4.75")),
+        ("rectangle", {"L": 19, "W": 4.75}, ("19.00", "4.75")),
+        ("trapezoid", {"a": 16.25, "b": 17.16, "w": 4.41}, ("0.5(16.25+17.16)", "4.41")),
+        ("triangle", {"a": 3, "b": 4}, ("0.5(3.00)", "4.00")),
+        ("polygon", {"vertices": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 0, "y": 1}]}, ("", "")),
+        ("arc", {"r": 2, "theta": 1}, ("", "")),
+        ("rectangle", None, ("", "")),
+    ])
+    def test_length_and_width_come_from_the_stored_dimensions(self, shape, dimensions, expected):
+        assert shape_terms(shape, dimensions) == expected
+
+    def test_each_thickness_lists_its_flags_its_pieces_and_the_measures_figures(self):
+        flags = [piece(1, x=0, L=10, W=5, areas=[area(1, x=1, y=1, L=2, W=2)], quantity="46"),
+                 piece(2, x=12, assessable=False), piece(3, "7in", x=20, L=4, W=5)]
+        labels = number_items(flags, sketch_items(flags, NO_DRAWINGS))
+        measure = compute_measure(flags, RATES)
+        groups = calc_groups(flags, measure, labels)
+        assert [group.label for group in groups] == ['4" Sidewalk Sq.Ft', '7" Sidewalk Sq.Ft']  # 7" as 4" has none
+        four = groups[0]
+        assert [(row.label, row.length, row.width, row.sub_total) for row in four.rows] == [
+            ("1", "10.00", "5.00", Decimal("50")), ("2", "5.00", "5.00", Decimal("25"))]
+        assert [(row.label, row.sub_total) for row in four.non_assessable_rows] == [("A1", Decimal("4")),
+                                                                                   ("A2", Decimal("25"))]
+        assert (four.total, four.non_assessable, four.assessable, four.adjustment) == (
+            Decimal("75"), Decimal("29"), Decimal("46"), Decimal("0"))
+        assert groups[1].non_assessable_rows == [] and groups[1].assessable == Decimal("20")
+
+    def test_an_override_shows_as_an_adjustment_so_the_panel_agrees_with_box_2(self):
+        flags = [piece(1, L=10, W=5, quantity="40")]  # 50 SF, nothing marked, 40 assessed
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        assert groups[0].non_assessable_rows == [] and groups[0].adjustment == Decimal("10")
+        assert groups[0].non_assessable == Decimal("10")
+
+    def test_an_area_larger_than_its_flag_is_capped_by_an_adjustment(self):
+        flags = [piece(1, "7in", L=5, W=5, quantity="0", areas=[area(1, L=10, W=3)])]  # 30 SF of area on 25 SF
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        assert groups[0].adjustment == Decimal("-5") and groups[0].non_assessable == Decimal("25")
+
+    def test_the_panel_lines_subtract_only_when_something_isnt_assessed(self):
+        flags = [piece(1, L=10, W=5, areas=[area(1, x=1, y=1)], quantity="46"), piece(2, "7in", x=20)]
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        kinds = [line[0] for line in calc_lines(groups)]
+        assert kinds == ["title", "heads", "row", "total", "title", "heads", "row", "total", "title", "subtraction",
+                         "title", "heads", "row", "total", "title", "total"]
+        assert calc_lines(groups)[9] == ("subtraction", Decimal("50"), Decimal("4"), Decimal("46"))

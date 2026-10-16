@@ -6,6 +6,13 @@ What prints: the property and page 1's title block (box 1, the header line, boxe
 (box 2, construction_measure.py), the sketch of the flags the IDR claimed with their non-assessable areas and the
 features and segments around them (construction_sketch.py), the KEY, and the certification: the IDR inspector's
 signature copy, dated the day the IDR was approved. A value ICID doesn't hold prints blank.
+
+The sketch (R1h.3) takes the left two thirds of its band, as on DOT's sheets: each flag and area filled by what it is
+(4" stippled, 7" in diagonal lines, what isn't assessed tinted blue and cross-hatched, a flag surveyed non-assessable
+crossed through), numbered (1..n, A1..An) and labelled when the label fits; the property line along the top (PL, and
+TAX MAP at scale when the title block has its width), the curb-to-curb at scale along the bottom (CC), the frontage
+street under it and the cross streets at the sides. The right third is the calculations panel
+(construction_measure.calc_groups), whose totals are box 2's.
 """
 
 import io
@@ -31,7 +38,7 @@ from api.queries.construction_report import (
     list_report_flags,
 )
 from api.schemas.property import display_address_of
-from api.services.construction_measure import Measure, compute_measure
+from api.services.construction_measure import CalcGroup, CalcRow, Measure, calc_groups, compute_measure
 from api.services.construction_sketch import (
     MULTI_SHEET_MESSAGE,
     Fit,
@@ -39,7 +46,9 @@ from api.services.construction_sketch import (
     SketchItem,
     bounds_of,
     fit_to_pane,
+    material,
     north_degrees,
+    number_items,
     sketch_items,
 )
 from api.services.export_common import signed_date
@@ -50,9 +59,22 @@ logger = logging.getLogger(__name__)
 
 PAGE_WIDTH, PAGE_HEIGHT = landscape(letter)  # 792 x 612 points
 LEFT, RIGHT = 36.0, PAGE_WIDTH - 36.0
-FONT, BOLD, ITALIC = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
-# The sketch pane: x, bottom y, width, height
-PANE = (LEFT, 98.0, RIGHT - LEFT, 288.0)
+FONT, BOLD, ITALIC, BOLD_ITALIC = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"
+# The band between box 3 and the KEY: x, bottom y, width, height. The sketch takes its left SKETCH_WIDTH points
+BAND = (LEFT, 98.0, RIGHT - LEFT, 288.0)
+SKETCH_WIDTH = 480.0
+# Where the drawing is fitted: the sketch's part of the band less the room round it for the streets, PL, TAX MAP and CC
+PANE = (LEFT + 26.0, BAND[1] + 34.0, SKETCH_WIDTH - 52.0, BAND[3] - 76.0)
+# The calculations panel: the band's right third
+CALC_PANE = (LEFT + SKETCH_WIDTH + 4.0, BAND[1] + 4.0, RIGHT - LEFT - SKETCH_WIDTH - 10.0, BAND[3] - 8.0)
+# Its title's height, and the least height a line of its tables may have
+CALC_TITLE_HEIGHT = 16.0
+MIN_CALC_LINE = 6.0
+CALC_TOO_LONG_MESSAGE = ("This property has too many pieces for one sheet's calculations panel. "
+                         "Multi-sheet support ships in R1h.1.")
+# A label printed inside a shape, and a number's circle
+LABEL_PT = 6.5
+MARK_RADIUS = 4.5
 CENT = Decimal("0.01")
 
 # Box 4's nine reasons, in the form's order: (the code a title block stores, the label); any other reason is dropped
@@ -140,11 +162,17 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
         raise SketchError(MULTI_SHEET_MESSAGE)
     drawings = _read(list_page_drawings(pages)) if pages else {"features": [], "segments": []}
     items = sketch_items(flags, drawings)
-    fit = fit_to_pane(items, PANE)
+    fit = fit_to_pane(items, PANE, max(_width_ft(header.get("tb_tax_map_width_ft")),
+                                       _width_ft(header.get("tb_cc_curb_to_curb_ft"))))
+    labels = number_items(flags, items)
     measure = compute_measure(flags, {"cost_per_sf_4in": header["cost_per_sf_4in"],
                                       "cost_per_sf_7in": header["cost_per_sf_7in"]})
+    groups = calc_groups(flags, measure, labels)
+    if len(calc_lines(groups)) * MIN_CALC_LINE > CALC_PANE[3] - CALC_TITLE_HEIGHT:
+        raise SketchError(CALC_TOO_LONG_MESSAGE)
     signature = _signature(header["inspector_signature_path"], idr_id)
-    content = draw_report(header, measure, items, fit, signature, north_degrees(header["north_bearing"]))
+    content = draw_report(header, measure, items, fit, signature, north_degrees(header["north_bearing"]), labels,
+                          groups)
     address = _address(header)
     return ReportFile(f"{file_stem(address)}_construction_report.pdf", content)
 
@@ -249,23 +277,81 @@ def feet(value: float) -> str:
     return f"{round(float(value), 2):g}'"
 
 
-def dimension_label(shape: Optional[str], dimensions: Optional[dict[str, Any]]) -> str:
+def _width_ft(value: Optional[Decimal]) -> float:
     """
-    The size printed inside a flag or an area on the sketch.
-    Takes the shape and its dimensions.
-    Returns "5' x 5'" for a rectangle, "a'/b' x w'" for a trapezoid, "a' x b'" for a triangle, "r'" for an arc, "" otherwise.
+    A title block's width in feet, for fitting the sketch.
+    Takes the width (None when not set).
+    Returns it, 0 when not set.
     """
-    if not dimensions:
+    return float(value) if value else 0.0
+
+
+def width_text(value: Decimal) -> str:
+    """
+    A dimension as the sketch prints it, as DOT's sheets do: two decimal places and a foot mark.
+    Takes the width in feet.
+    Returns e.g. "40.00'".
+    """
+    return f"{Decimal(value).quantize(CENT, rounding=ROUND_HALF_UP):,.2f}'"
+
+
+def reason_text(reason: Optional[str]) -> str:
+    """
+    What a non-assessable piece is, as its label inside the sketch says it: the reason in words ("Grass", "Tree Pit"), or "Non-Ass." for none or an "other" one.
+    Takes the reason code.
+    Returns the label.
+    """
+    if not reason or reason.startswith("other"):
+        return "Non-Ass."
+    return reason.replace("_", " ").title()
+
+
+def material_label(item: SketchItem) -> str:
+    """
+    The label printed inside a flag or an area: 4" Conc. or 7" Conc. for an assessable flag, the reason for a flag surveyed non-assessable or an area.
+    Takes the item.
+    Returns the label; "" for a feature or a segment.
+    """
+    if item.kind == "area":
+        return reason_text(item.source.get("reason"))
+    if item.kind != "flag":
         return ""
-    if shape == "rectangle":
-        return f"{feet(dimensions['L'])} x {feet(dimensions['W'])}"
-    if shape == "trapezoid":
-        return f"{feet(dimensions['a'])}/{feet(dimensions['b'])} x {feet(dimensions['w'])}"
-    if shape == "triangle":
-        return f"{feet(dimensions['a'])} x {feet(dimensions['b'])}"
-    if shape == "arc":
-        return f"r {feet(dimensions['r'])}"
-    return ""
+    if not item.source["surveyed_is_assessable"]:
+        return reason_text(item.source.get("surveyed_non_assessable_reason"))
+    return '4" Conc.' if item.source["surveyed_thickness"] == "4in" else '7" Conc.'
+
+
+def calc_amount(value: Decimal) -> str:
+    """
+    A square-foot figure in the calculations panel: two decimal places, thousands separated, 0.00 for none.
+    Takes the amount.
+    Returns the text.
+    """
+    return f"{value.quantize(CENT, rounding=ROUND_HALF_UP):,.2f}"
+
+
+def calc_lines(groups: list[CalcGroup]) -> list[tuple[Any, ...]]:
+    """
+    The calculations panel line by line: per thickness, its title, the column heads, a row per flag and the total; the non-assessable title, heads, pieces, any adjustment and total (when it has any); and the assessable line (Total - Non-Assessable, or the total alone).
+    Takes the groups (calc_groups).
+    Returns the lines, each a tuple naming its kind first: title, heads, row, total, adjustment, subtraction.
+    """
+    lines: list[tuple[Any, ...]] = []
+    for group in groups:
+        lines += [("title", f"Total {group.label}"), ("heads",)]
+        lines += [("row", row) for row in group.rows]
+        lines.append(("total", group.total))
+        has_non = bool(group.non_assessable_rows) or group.adjustment != 0
+        if has_non:
+            lines += [("title", f"Total {group.label} Non-Assessable"), ("heads",)]
+            lines += [("row", row) for row in group.non_assessable_rows]
+            if group.adjustment != 0:
+                lines.append(("adjustment", group.adjustment))
+            lines.append(("total", group.non_assessable))
+        lines.append(("title", f"Total {group.label} Assessable"))
+        lines.append(("subtraction", group.total, group.non_assessable, group.assessable) if has_non
+                     else ("total", group.assessable))
+    return lines
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -478,19 +564,52 @@ def _stipple(c: Canvas, min_x: float, min_y: float, max_x: float, max_y: float) 
     c.drawPath(dots, stroke=0, fill=1)
 
 
-def _hatch(c: Canvas, min_x: float, min_y: float, max_x: float, max_y: float) -> None:
+def _lines_45(c: Canvas, min_x: float, min_y: float, max_x: float, max_y: float, step: float,
+              rising: bool = True) -> None:
     """
-    A non-assessable area's fill: yellow stripes.
-    Takes the canvas and the box to cover.
+    Draw parallel lines at 45 degrees across a box, in the stroke already set.
+    Takes the canvas, the box, the spacing between lines and which way they run (up to the right, or down).
     Returns nothing.
     """
-    c.setStrokeColorRGB(0.85, 0.65, 0.0)
-    c.setLineWidth(0.9)
     span = max_y - min_y
     x = min_x - span
     while x <= max_x:
-        c.line(x, min_y, x + span, max_y)
-        x += 3.0
+        if rising:
+            c.line(x, min_y, x + span, max_y)
+        else:
+            c.line(x, max_y, x + span, min_y)
+        x += step
+
+
+def _diagonal(c: Canvas, min_x: float, min_y: float, max_x: float, max_y: float) -> None:
+    """
+    The 7" fill: diagonal lines at 45 degrees.
+    Takes the canvas and the box to cover.
+    Returns nothing.
+    """
+    c.setStrokeColorRGB(0.35, 0.35, 0.35)
+    c.setLineWidth(0.4)
+    _lines_45(c, min_x, min_y, max_x, max_y, 4.0)
+
+
+def _cross_hatch(c: Canvas, min_x: float, min_y: float, max_x: float, max_y: float) -> None:
+    """
+    What isn't assessed: a light-blue tint (25%) under a cross-hatch.
+    Takes the canvas and the box to cover.
+    Returns nothing.
+    """
+    c.setFillColorRGB(0.29, 0.53, 0.86)
+    c.setFillAlpha(0.25)
+    c.rect(min_x, min_y, max_x - min_x, max_y - min_y, stroke=0, fill=1)
+    c.setFillAlpha(1)
+    c.setStrokeColorRGB(0.29, 0.45, 0.70)
+    c.setLineWidth(0.3)
+    _lines_45(c, min_x, min_y, max_x, max_y, 5.0)
+    _lines_45(c, min_x, min_y, max_x, max_y, 5.0, rising=False)
+
+
+# Each material's fill
+_FILLS = {"4in": _stipple, "7in": _diagonal, "non_assessable": _cross_hatch}
 
 
 def _centre(points: list[tuple[float, float]]) -> tuple[float, float]:
@@ -563,53 +682,129 @@ def draw_north(c: Canvas, x: float, y: float, degrees: float, size: float = 14.0
     c.restoreState()
 
 
-def _draw_flag(c: Canvas, item: SketchItem, points: list[tuple[float, float]]) -> None:
+def _draw_piece(c: Canvas, item: SketchItem, points: list[tuple[float, float]]) -> None:
     """
-    Draw a flag: its outline filled by its thickness (stipple for 4" and 7" assessed as 4", white for 7"), an X over a flag surveyed non-assessable, and its size inside it.
+    Draw a flag or a non-assessable area: white, filled by its material (_FILLS), outlined (an area more finely), and a flag surveyed non-assessable crossed through, as the KEY's Non-Assessable Flag.
     Takes the canvas, the item and its points on the sheet.
     Returns nothing.
     """
-    flag = item.source
     path = _path(c, points)
     c.setFillColorRGB(1, 1, 1)
     c.drawPath(path, stroke=0, fill=1)
-    if flag["surveyed_thickness"] in ("4in", "7in_as_4in"):
-        _fill_pattern(c, path, points, _stipple)
+    _fill_pattern(c, path, points, _FILLS[material(item)])
     c.setStrokeColorRGB(0, 0, 0)
-    c.setLineWidth(0.8)
+    c.setLineWidth(0.8 if item.kind == "flag" else 0.5)
     c.drawPath(_path(c, points), stroke=1, fill=0)
-    min_x, min_y, max_x, max_y = bounds_of(points)
-    if not flag["surveyed_is_assessable"]:
+    if item.kind == "flag" and not item.source["surveyed_is_assessable"]:
+        min_x, min_y, max_x, max_y = bounds_of(points)
         c.setLineWidth(0.5)
         c.line(min_x, min_y, max_x, max_y)
         c.line(min_x, max_y, max_x, min_y)
-    label = dimension_label(flag["shape"], flag["dimensions"])
-    if label:
-        x, y = _centre(points)
+
+
+def _mark(c: Canvas, x: float, y: float, text: str, filled: bool) -> None:
+    """
+    Draw a piece's number in a circle: black on white for a flag's, white on blue for an A-number, as DOT's sheets do.
+    Takes the canvas, the circle's centre, the number and whether it is an A-number.
+    Returns nothing.
+    """
+    c.setLineWidth(0.5)
+    c.setStrokeColorRGB(0, 0, 0)
+    if filled:
+        c.setFillColorRGB(0.20, 0.42, 0.78)
+    else:
+        c.setFillColorRGB(1, 1, 1)
+    c.circle(x, y, MARK_RADIUS, stroke=1, fill=1)
+    if filled:
+        c.setFillColorRGB(1, 1, 1)
+    else:
         c.setFillColorRGB(0, 0, 0)
-        _text(c, x, y - 2, label, 6, BOLD, max_x - min_x - 2, "centre")
+    _text(c, x, y - 1.9, text, 5.5 if len(text) < 3 else 4.5, BOLD, MARK_RADIUS * 2 - 1, "centre")
+    c.setFillColorRGB(0, 0, 0)
+
+
+def label_fits(text: str, points: list[tuple[float, float]]) -> bool:
+    """
+    Whether a label can be printed inside a shape: its footprint at least the label's width (and a margin) across and 20 points tall.
+    Takes the label and the shape's points on the sheet.
+    Returns True when it fits.
+    """
+    min_x, min_y, max_x, max_y = bounds_of(points)
+    return bool(text) and stringWidth(text, BOLD, LABEL_PT) + 8 <= max_x - min_x and max_y - min_y >= 20
+
+
+Box = tuple[float, float, float, float]
+
+
+def _overlaps(box: Box, others: list[Box]) -> bool:
+    """
+    Whether a box overlaps any of some others.
+    Takes the box and the others, each (min x, min y, max x, max y).
+    Returns True when it does.
+    """
+    return any(box[0] < other[2] and other[0] < box[2] and box[1] < other[3] and other[1] < box[3]
+               for other in others)
+
+
+def piece_marks(item: SketchItem, points: list[tuple[float, float]],
+                labels: dict[str, str]) -> list[tuple[float, float, str, bool]]:
+    """
+    Where a flag's or an area's numbers go: a flag's number at its top-left corner and, when surveyed non-assessable, its A-number beside it; an area's A-number at its bottom-right corner; a shape too small for corner marks has them at its middle.
+    Takes the item, its points on the sheet and the labels (number_items).
+    Returns each mark as (x, y, text, whether an A-number).
+    """
+    min_x, min_y, max_x, max_y = bounds_of(points)
+    x, y = _centre(points)
+    roomy = max_x - min_x >= 4 * MARK_RADIUS + 6 and max_y - min_y >= 2 * MARK_RADIUS + 4
+    key = str(item.source.get("id"))
+    marks = []
+    if item.kind == "flag":
+        corner = (min_x + MARK_RADIUS + 2, max_y - MARK_RADIUS - 2) if roomy else (x, y)
+        if labels.get(f"flag:{key}"):
+            marks.append((corner[0], corner[1], labels[f"flag:{key}"], False))
+        if labels.get(f"a:flag:{key}"):
+            marks.append((corner[0] + 2 * MARK_RADIUS + 2, corner[1], labels[f"a:flag:{key}"], True))
+    elif item.kind == "area" and labels.get(f"a:area:{key}"):
+        corner = (max_x - MARK_RADIUS - 2, min_y + MARK_RADIUS + 2) if roomy else (x, y)
+        marks.append((corner[0], corner[1], labels[f"a:area:{key}"], True))
+    return marks
+
+
+def _draw_labels(c: Canvas, pieces: list[tuple[SketchItem, list[tuple[float, float]]]], labels: dict[str, str]) -> None:
+    """
+    Print the pieces' labels and numbers over the drawing: every number (piece_marks) on top, and each material label (on white, as DOT's sheets box it) at its piece's middle when it fits there and clears every number and the labels printed before it, areas' first (an area usually sits at its flag's middle).
+    Takes the canvas, the flags and areas with their points on the sheet, and the labels (number_items).
+    Returns nothing.
+    """
+    marks = [mark for item, points in pieces for mark in piece_marks(item, points, labels)]
+    taken: list[Box] = [(x - MARK_RADIUS, y - MARK_RADIUS, x + MARK_RADIUS, y + MARK_RADIUS) for x, y, _, _ in marks]
+    for item, points in sorted(pieces, key=lambda piece: piece[0].kind != "area"):
+        text = material_label(item)
+        if not label_fits(text, points):
+            continue
+        x, y = _centre(points)
+        width = stringWidth(text, BOLD, LABEL_PT) + 4
+        box = (x - width / 2, y - 4, x + width / 2, y + 4.5)
+        if _overlaps(box, taken):
+            continue
+        taken.append(box)
+        c.setFillColorRGB(1, 1, 1)
+        c.rect(box[0], box[1], width, 8.5, stroke=0, fill=1)
+        c.setFillColorRGB(0, 0, 0)
+        _text(c, x, y - 2.2, text, LABEL_PT, BOLD, align="centre")
+    for x, y, text, filled in marks:
+        _mark(c, x, y, text, filled)
 
 
 def _draw_item(c: Canvas, item: SketchItem, fit: Fit) -> None:
     """
-    Draw one sketch item on the sheet: a flag, a non-assessable area (yellow stripes, its size), a feature (its outline when it has a size, cut out of its flag when it subtracts, then its glyph) or a segment (solid and thick for a curb, dashed otherwise).
+    Draw one sketch item on the sheet: a flag or a non-assessable area (_draw_piece), a feature (its outline when it has a size, cut out of its flag when it subtracts, then its glyph) or a segment (solid and thick for a curb, dashed otherwise).
     Takes the canvas, the item and the sketch's Fit.
     Returns nothing.
     """
     points = [fit.place(point) for point in item.points]
-    if item.kind == "flag":
-        _draw_flag(c, item, points)
-    elif item.kind == "area":
-        path = _path(c, points)
-        _fill_pattern(c, path, points, _hatch)
-        c.setStrokeColorRGB(0, 0, 0)
-        c.setLineWidth(0.5)
-        c.drawPath(_path(c, points), stroke=1, fill=0)
-        label = dimension_label(item.source.get("shape"), item.source.get("dimensions"))
-        if label:
-            min_x, _, max_x, _ = bounds_of(points)
-            x, y = _centre(points)
-            _text(c, x, y - 2, label, 5, width=max_x - min_x - 2, align="centre")
+    if item.kind in ("flag", "area"):
+        _draw_piece(c, item, points)
     elif item.kind == "feature":
         feature = item.source
         if feature.get("shape"):
@@ -629,36 +824,184 @@ def _draw_item(c: Canvas, item: SketchItem, fit: Fit) -> None:
         c.setDash([], 0)
 
 
-def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, north: Optional[float]) -> None:
+def _arrowhead(c: Canvas, x: float, y: float, pointing_left: bool) -> None:
     """
-    Draw the sketch pane: segments under flags, flags under their areas, features on top; the streets round it in italics; the north arrow when the bearing is known.
-    Takes the canvas, the header row, the items, their Fit and the north arrow's direction (None: no arrow).
+    Draw a dimension line's arrowhead, its tip at the given point.
+    Takes the canvas, the tip and which way it points.
     Returns nothing.
     """
-    x, y, w, h = fit.pane
+    back = 4.0 if pointing_left else -4.0
+    c.drawPath(_path(c, [(x, y), (x + back, y + 1.5), (x + back, y - 1.5)]), stroke=0, fill=1)
+
+
+def _dimension(c: Canvas, left: float, right: float, y: float, text: str) -> None:
+    """
+    Draw a dimension: a line with an arrowhead at each end and its text centred just above it.
+    Takes the canvas, the line's two ends and height on the sheet, and the text.
+    Returns nothing.
+    """
     c.setStrokeColorRGB(0, 0, 0)
-    c.setLineWidth(0.8)
-    c.rect(x, y, w, h)
+    c.setFillColorRGB(0, 0, 0)
+    c.setLineWidth(0.5)
+    c.line(left, y, right, y)
+    for x in (left, right):
+        c.line(x, y - 3, x, y + 3)
+    _arrowhead(c, left, y, True)
+    _arrowhead(c, right, y, False)
+    _text(c, (left + right) / 2, y + 2, text, 6.5, align="centre")
+
+
+def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit) -> None:
+    """
+    Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at each end, the tax map's width at scale between them when known, else the drawing's ends), the curb-to-curb at scale along the bottom (CC), the frontage street under it and the cross streets up the sides.
+    Takes the canvas, the header row (tb_ streets and widths), the items and their Fit.
+    Returns nothing.
+    """
+    min_x, min_y, max_x, max_y = bounds_of(fit.place(point) for item in items if item.kind in ("flag", "area")
+                                           for point in item.points)
+    middle = (min_x + max_x) / 2
+    tax_map, curb = header.get("tb_tax_map_width_ft"), header.get("tb_cc_curb_to_curb_ft")
+    line_y = max_y + 16
+    if tax_map:
+        half = float(tax_map) * fit.points_per_foot / 2
+        ends = (middle - half, middle + half)
+        _dimension(c, ends[0], ends[1], line_y, f"TAX MAP {width_text(tax_map)}")
+    else:
+        ends = (min_x, max_x)
+    c.setLineWidth(0.4)
+    for x in ends:
+        c.line(x, max_y + 2, x, line_y + 6)
+        _text(c, x, line_y + 9, "PL", 6.5, BOLD, align="centre")
+    if curb:
+        half = float(curb) * fit.points_per_foot / 2
+        _dimension(c, middle - half, middle + half, min_y - 12, f"CC= {width_text(curb)}")
+    band_x, band_y, _, band_h = BAND
+    if header.get("tb_frontage_street"):
+        _text(c, middle, band_y + 6, header["tb_frontage_street"], 8.5, BOLD_ITALIC,
+              SKETCH_WIDTH - 60, "centre")
+    for street, side, angle in ((header.get("tb_cross_street_left"), band_x + 13, 90),
+                                (header.get("tb_cross_street_right"), band_x + SKETCH_WIDTH - 13, 270)):
+        if street:
+            c.saveState()
+            c.translate(side, band_y + band_h / 2)
+            c.rotate(angle)
+            _text(c, 0, -3, street, 8.5, BOLD_ITALIC, band_h - 70, "centre")
+            c.restoreState()
+
+
+def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, north: Optional[float],
+            labels: dict[str, str]) -> None:
+    """
+    Draw the sketch, in the band's left part: segments under flags, flags under their areas, features on top, then the pieces' labels and numbers over all; its perimeter (_perimeter); the north arrow when the bearing is known.
+    Takes the canvas, the header row, the items, their Fit, the north arrow's direction (None: no arrow) and the labels (number_items).
+    Returns nothing.
+    """
+    x, y, _, h = BAND
     c.saveState()
-    c.clipPath(_path(c, [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]), stroke=0, fill=0)
+    c.clipPath(_path(c, [(x, y), (x + SKETCH_WIDTH, y), (x + SKETCH_WIDTH, y + h), (x, y + h)]), stroke=0, fill=0)
     for kind in ("segment", "flag", "area", "feature"):
         for item in items:
             if item.kind == kind:
                 _draw_item(c, item, fit)
+    _draw_labels(c, [(item, [fit.place(point) for point in item.points]) for item in items
+                     if item.kind in ("flag", "area")], labels)
+    _perimeter(c, header, items, fit)
     c.restoreState()
-    c.setFillColorRGB(0, 0, 0)
-    if header.get("tb_frontage_street"):
-        _text(c, x + w / 2, y + 5, header["tb_frontage_street"], 8, ITALIC, w - 40, "centre")
-    for street, side, angle in ((header.get("tb_cross_street_left"), x + 10, 90),
-                                (header.get("tb_cross_street_right"), x + w - 10, 270)):
-        if street:
-            c.saveState()
-            c.translate(side, y + h / 2)
-            c.rotate(angle)
-            _text(c, 0, -3, street, 8, ITALIC, h - 40, "centre")
-            c.restoreState()
     if north is not None:
-        draw_north(c, x + w - 22, y + h - 24, north)
+        draw_north(c, x + SKETCH_WIDTH - 40, y + h - 22, north)
+
+
+# The calculations tables' columns, as shares of the panel's width: Area, Length, x, Width, Sub-Total
+_CALC_COLUMNS = (0.12, 0.33, 0.05, 0.20, 0.30)
+
+
+def _calc_cells(x: float, w: float) -> list[tuple[float, float]]:
+    """
+    The calculations tables' cells across the panel.
+    Takes the panel's left edge and width.
+    Returns each column's (left, width).
+    """
+    cells, left = [], x
+    for share in _CALC_COLUMNS:
+        cells.append((left, w * share))
+        left += w * share
+    return cells
+
+
+def _calc_line(c: Canvas, line: tuple[Any, ...], x: float, y: float, w: float, h: float) -> None:
+    """
+    Draw one line of the calculations panel, ruled as a table: a grey title bar, the column heads, a piece (label, Length x Width, Sub-Total), a total, an adjustment, or the assessable subtraction.
+    Takes the canvas, the line (calc_lines), the line's box (x, bottom y, width, height).
+    Returns nothing.
+    """
+    size = min(6.5, h * 0.68)
+    base = y + (h - size * 0.72) / 2
+    cells = _calc_cells(x, w)
+    kind = line[0]
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(0.3)
+    if kind == "title":
+        c.setFillColorRGB(0.82, 0.82, 0.82)
+        c.rect(x, y, w, h, stroke=1, fill=1)
+        c.setFillColorRGB(0, 0, 0)
+        _text(c, x + w / 2, base, line[1], size, BOLD, w - 4, "centre")
+        return
+    c.rect(x, y, w, h, stroke=1, fill=0)
+
+    def cell(index: int, text: str, font: str = FONT, align: str = "centre", span: int = 1) -> None:
+        left = cells[index][0]
+        width = sum(cells[i][1] for i in range(index, index + span))
+        anchor = {"centre": left + width / 2, "right": left + width - 2, "left": left + 2}[align]
+        _text(c, anchor, base, text, size, font, width - 3, align)
+
+    def rules(*indices: int) -> None:
+        for index in indices:
+            c.line(cells[index][0], y, cells[index][0], y + h)
+
+    if kind == "heads":
+        rules(1, 2, 3, 4)
+        for index, text in ((0, "Area"), (1, "Length"), (3, "Width"), (4, "Sub-Total")):
+            cell(index, text, BOLD)
+    elif kind == "row":
+        row: CalcRow = line[1]
+        rules(1, 2, 3, 4)
+        cell(0, row.label)
+        cell(1, row.length)
+        if row.length and row.width:
+            cell(2, "x")
+        cell(3, row.width)
+        cell(4, calc_amount(row.sub_total), align="right")
+    elif kind == "total":
+        rules(4)
+        cell(0, "Total", BOLD, span=4)
+        cell(4, calc_amount(line[1]), BOLD, "right")
+    elif kind == "adjustment":
+        rules(4)
+        cell(0, "Adjustment to box 2", ITALIC, span=4)
+        cell(4, ("+" if line[1] > 0 else "-") + calc_amount(abs(line[1])), ITALIC, "right")
+    elif kind == "subtraction":
+        rules(1, 2, 3, 4)
+        cell(1, calc_amount(line[1]), align="right")
+        cell(2, "-")
+        cell(3, calc_amount(line[2]), align="right")
+        cell(4, calc_amount(line[3]), BOLD, "right")
+
+
+def _calculations(c: Canvas, groups: list[CalcGroup]) -> None:
+    """
+    Draw the calculations panel in the band's right third: its title, then each thickness's tables line by line, the lines as tall as the panel allows (at most 10 points, at least MIN_CALC_LINE, which _render checks).
+    Takes the canvas and the groups (calc_groups).
+    Returns nothing.
+    """
+    x, y, w, h = CALC_PANE
+    _text(c, x + w / 2, y + h - 11, "Calculations", 9, BOLD_ITALIC, align="centre")
+    lines = calc_lines(groups)
+    if not lines:
+        return
+    line_h = min(10.0, (h - CALC_TITLE_HEIGHT) / len(lines))
+    top = y + h - CALC_TITLE_HEIGHT
+    for index, line in enumerate(lines):
+        _calc_line(c, line, x, top - (index + 1) * line_h, w, line_h)
 
 
 _KEY = (("utility_cover", "Utility Cover"), ("hydrant", "Hydrant"), ("sign_or_meter", "Sign or Meter"),
@@ -710,10 +1053,11 @@ def _certification(c: Canvas, header: dict[str, Any], signature: Optional[ImageR
 
 
 def draw_report(header: dict[str, Any], measure: Measure, items: list[SketchItem], fit: Fit,
-                signature: Optional[ImageReader], north: Optional[float]) -> bytes:
+                signature: Optional[ImageReader], north: Optional[float], labels: dict[str, str],
+                groups: list[CalcGroup]) -> bytes:
     """
     Draw a Construction Report on one letter-landscape page.
-    Takes the header row (get_report_header), the Measure, the sketch items and their Fit, the signature image (or None) and the north arrow's direction (or None).
+    Takes the header row (get_report_header), the Measure, the sketch items and their Fit, the signature image (or None), the north arrow's direction (or None), the pieces' labels (number_items) and the calculations (calc_groups).
     Returns the PDF's bytes.
     """
     buffer = io.BytesIO()
@@ -724,7 +1068,11 @@ def draw_report(header: dict[str, Any], measure: Measure, items: list[SketchItem
     _property_box(c, header)
     _measure_box(c, measure)
     _status_boxes(c, header)
-    _sketch(c, header, items, fit, north)
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(0.8)
+    c.rect(*BAND)
+    _sketch(c, header, items, fit, north, labels)
+    _calculations(c, groups)
     _key(c)
     _certification(c, header, signature)
     c.showPage()

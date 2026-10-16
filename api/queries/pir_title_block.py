@@ -1,6 +1,6 @@
 """
 SQL for a PIR's title block as the Construction Report prints it (R1h.2): the PIR's north bearing, and page 1's
-contract number and three dates.
+contract number, three dates, the streets round the sketch and its two widths.
 
 A save writes only the fields sent, and only where they change: the PIR's row and page 1's title block in one
 statement (data-modifying CTEs), so it is never half-applied, and a save that changes nothing writes nothing.
@@ -13,18 +13,20 @@ from api.db.runner import run_query
 
 # The title block's fields on page 1's pir_annotations row, and their types
 BLOCK_FIELDS = {"contract_no": "text", "date_notice_issued": "date", "date_excavated": "date",
-                "date_constructed": "date"}
+                "date_constructed": "date", "cross_street_left": "text", "cross_street_right": "text",
+                "frontage_street": "text", "tax_map_width_ft": "numeric", "cc_curb_to_curb_ft": "numeric"}
 
 
 def get_title_block(pir_id: UUID) -> Optional[dict[str, Any]]:
     """
-    Fetch a PIR's title block: its north bearing, its live page 1 and that page's contract number and dates.
+    Fetch a PIR's title block: its north bearing, its live page 1 and that page's contract number, dates, streets and widths.
     Takes the PIR's id.
-    Returns {pir_id, pir_page_id (None without a live page 1), north_bearing, contract_no, date_notice_issued, date_excavated, date_constructed}, the page's fields None when it has no title block; None for an unknown PIR.
+    Returns {pir_id, pir_page_id (None without a live page 1), north_bearing, contract_no, date_notice_issued, date_excavated, date_constructed, cross_street_left, cross_street_right, frontage_street, tax_map_width_ft, cc_curb_to_curb_ft}, the page's fields None when it has no title block; None for an unknown PIR.
     """
     sql = """
         SELECT pir.id AS pir_id, pg.pir_page_id, pir.north_bearing::text AS north_bearing,
-               a.contract_no, a.date_notice_issued, a.date_excavated, a.date_constructed
+               a.contract_no, a.date_notice_issued, a.date_excavated, a.date_constructed,
+               a.cross_street_left, a.cross_street_right, a.frontage_street, a.tax_map_width_ft, a.cc_curb_to_curb_ft
         FROM icid.pirs pir
         LEFT JOIN icid.pir_pages pg ON pg.pir_id = pir.id AND pg.page_number = 1 AND pg.deleted_at IS NULL
         LEFT JOIN icid.pir_annotations a ON a.pir_page_id = pg.pir_page_id

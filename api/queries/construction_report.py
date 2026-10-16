@@ -78,18 +78,19 @@ def get_report_header(property_id: UUID, idr_id: UUID) -> Optional[dict[str, Any
 
 def list_report_flags(property_id: UUID, idr_id: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch the flags an IDR claimed on a property, as the report draws and measures them: shape and place, their page's scale and rotation, thickness, whether surveyed assessable, gross area (computed_quantity) and quantity (FLAG_QUANTITY: the override, or else the net area), and their non-assessable areas (live, or deleted with the flag).
+    Fetch the flags an IDR claimed on a property, as the report draws and measures them: shape and place, their page's scale and rotation, thickness, whether surveyed assessable (and why not), gross area (computed_quantity) and quantity (FLAG_QUANTITY: the override, or else the net area), and their non-assessable areas (live, or deleted with the flag).
     Takes the property's id and the IDR's.
-    Returns the flag dicts (areas a list of {display_order, shape, dimensions, sketch_x, sketch_y, rotation, computed_quantity}) by drawing order; [] when the IDR claimed none there; None on failure.
+    Returns the flag dicts (areas a list of {id, display_order, reason, shape, dimensions, sketch_x, sketch_y, rotation, computed_quantity}) by drawing order; [] when the IDR claimed none there; None on failure.
     """
     sql = f"""
         SELECT
             f.id, f.pir_page_id, pg.page_number, pg.scale_px_per_ft, pg.rotation_deg, f.display_order, f.shape,
             f.dimensions, f.sketch_x, f.sketch_y, f.rotation, f.surveyed_thickness, f.surveyed_is_assessable,
+            f.surveyed_non_assessable_reason,
             f.computed_quantity, {FLAG_QUANTITY} AS quantity,
             COALESCE((
                 SELECT jsonb_agg(jsonb_build_object(
-                    'display_order', na.display_order, 'shape', na.shape, 'dimensions', na.dimensions,
+                    'id', na.non_assessable_area_id, 'display_order', na.display_order, 'reason', na.reason, 'shape', na.shape, 'dimensions', na.dimensions,
                     'sketch_x', na.sketch_x, 'sketch_y', na.sketch_y, 'rotation', na.rotation,
                     'computed_quantity', na.computed_quantity) ORDER BY na.display_order)
                 FROM icid.non_assessable_areas na
