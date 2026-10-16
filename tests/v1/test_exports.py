@@ -15,7 +15,7 @@ import pytest
 
 from api.queries.projects import get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
-from api.services import export, export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_swcb
+from api.services import export, export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_swcb, signatures
 from api.services.export import generate_idr_export
 from api.services.export_common import (
     fill_lines, fit_pay_description, paragraphs, pay_item_rows, pay_item_slices, pay_unit_abbreviation,
@@ -159,7 +159,7 @@ def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers 
         patch.object(export, "list_reports_for_idr", return_value=reports or []) as lr,
         patch.object(export, "list_uploaded_attachments_for_reports", return_value=attachments or []) as la,
         patch.object(export_attachments, "download_file", side_effect=download) as df,
-        patch.object(export, "download_file", side_effect=download_signature) as ds,
+        patch.object(signatures, "download_file", side_effect=download_signature) as ds,
         patch.object(export, "field_edits_for", return_value=edits or []),
     ):
         yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm, "reports": lr,

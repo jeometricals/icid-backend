@@ -1,8 +1,12 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+# Which way North is on a PIR's sketch (icid.compass_point)
+CompassPoint = Literal["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
 
 class PirCreate(BaseModel):
@@ -13,10 +17,11 @@ class PirCreate(BaseModel):
 
 
 class PirUpdate(BaseModel):
-    """What an admin is changing on a PIR. Any field may be left out; a null counts as left out."""
+    """What is changing on a PIR. Any field may be left out; a null counts as left out, but for north_bearing, which it clears."""
 
     inspector_initials: Optional[str] = None
     inspector_sign_date: Optional[date] = None
+    north_bearing: Optional[CompassPoint] = None
 
 
 class PirOut(BaseModel):
@@ -36,6 +41,7 @@ class PirOut(BaseModel):
     digitized_at: datetime
     as_built_signed_by: Optional[UUID] = None
     as_built_signed_at: Optional[datetime] = None
+    north_bearing: Optional[CompassPoint] = None
     created_at: datetime
     updated_at: datetime
     deleted_at: Optional[datetime] = None

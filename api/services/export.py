@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-from api.core.config import EXPORT_BUCKET_NAME, EXPORT_URL_EXPIRY_SECONDS, SIGNATURE_BUCKET_NAME
+from api.core.config import EXPORT_BUCKET_NAME, EXPORT_URL_EXPIRY_SECONDS
 from api.queries.idr_reports import get_general_report, list_non_general_main_reports, list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
@@ -39,7 +39,8 @@ from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, stamp_ge
 from api.services.export_redlines import Redlines
 from api.services.field_edits import field_edits_for
 from api.services.xlsx_template import WorkbookTemplate
-from api.storage.client import create_signed_url, download_file, upload_file
+from api.services.signatures import fetch_signature_file
+from api.storage.client import create_signed_url, upload_file
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +357,7 @@ def _fetch_signature(path: str, idr_id: UUID) -> Optional[SignatureImage]:
     blank signature line).
     """
     try:
-        return prepare_signature(download_file(path, SIGNATURE_BUCKET_NAME))
+        return prepare_signature(fetch_signature_file(path))
     except Exception as exc:  # noqa: BLE001 - a missing signature mustn't stop the export
         logger.error("Signature %s unavailable for the export of IDR %s: %s", path, idr_id, exc)
         return None

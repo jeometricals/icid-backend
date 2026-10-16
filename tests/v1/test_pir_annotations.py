@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
@@ -100,23 +100,54 @@ class TestPutAnnotations:
         assert values["violation_not_removed_due_to"] == ["tree", "scaffold"]
         assert values["pir_page_id"] == PAGE_ID
 
-    def test_every_field_is_written_and_one_left_out_is_cleared(self, admin_client):
+    def test_a_field_left_out_keeps_its_value(self, admin_client):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(ANNOTATIONS, return_value=[ANNOTATION_ROW]) as run:
             assert admin_client.put(URL, json={"boro": "Bronx"}).status_code == 200
+        sql = " ".join(run.call_args.args[0].split())
+        assert "DO UPDATE SET boro = EXCLUDED.boro, updated_at = now()" in sql
+        assert "contract_no = EXCLUDED" not in sql and "date_constructed = EXCLUDED" not in sql
         values = written(run)
         assert len(run.call_args.args[1]) == len(ANNOTATION_TYPES) + 1
+        # a page without a title block gets one, the fields not sent empty
         assert values["boro"] == "Bronx" and values["violation_not_removed_due_to"] == []
         assert all(values[field] is None for field in ANNOTATION_TYPES
                    if field not in ("boro", "violation_not_removed_due_to"))
 
-    def test_the_upsert_matches_only_a_live_page_and_replaces_the_title_block(self, admin_client):
+    def test_a_null_clears_a_field(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(ANNOTATIONS, return_value=[ANNOTATION_ROW]) as run:
+            assert admin_client.put(URL, json={"contract_no": None, "violation_not_removed_due_to": None,
+                                               "date_excavated": None}).status_code == 200
+        sql = " ".join(run.call_args.args[0].split())
+        assert ("DO UPDATE SET contract_no = EXCLUDED.contract_no, violation_not_removed_due_to = "
+                "EXCLUDED.violation_not_removed_due_to, date_excavated = EXCLUDED.date_excavated, updated_at = now()") in sql
+        values = written(run)
+        assert values["contract_no"] is None and values["violation_not_removed_due_to"] == []
+        assert values["date_excavated"] is None
+
+    def test_the_three_dates_are_written(self, admin_client):
+        saved = {**ANNOTATION_ROW, "date_notice_issued": date(2026, 9, 1), "date_excavated": date(2026, 10, 1),
+                 "date_constructed": date(2026, 10, 3)}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(ANNOTATIONS, return_value=[saved]) as run:
+            response = admin_client.put(URL, json={"date_notice_issued": "2026-09-01", "date_excavated": "2026-10-01",
+                                                   "date_constructed": "2026-10-03"})
+        assert response.status_code == 200
+        assert response.json()["data"]["date_constructed"] == "2026-10-03"
+        values = written(run)
+        assert values["date_notice_issued"] == date(2026, 9, 1) and values["date_constructed"] == date(2026, 10, 3)
+        assert "%s::date" in run.call_args.args[0]
+
+    def test_a_malformed_date_is_422(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(ANNOTATIONS) as run:
+            assert admin_client.put(URL, json={"date_excavated": "10/01/2026"}).status_code == 422
+        run.assert_not_called()
+
+    def test_the_upsert_matches_only_a_live_page(self, admin_client):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(ANNOTATIONS, return_value=[ANNOTATION_ROW]) as run:
             admin_client.put(URL, json={})
         sql = " ".join(run.call_args.args[0].split())
         assert "INSERT INTO icid.pir_annotations (pir_page_id, contract_no," in sql
         assert "FROM icid.pir_pages page WHERE page.pir_page_id = %s AND page.deleted_at IS NULL" in sql
-        assert "ON CONFLICT (pir_page_id) DO UPDATE SET contract_no = EXCLUDED.contract_no" in sql
-        assert "violation_not_removed_due_to = EXCLUDED.violation_not_removed_due_to, updated_at = now()" in sql
+        assert "ON CONFLICT (pir_page_id) DO UPDATE SET updated_at = now()" in sql
         assert "%s::text[]" in sql and "%s::numeric" in sql
 
     @pytest.mark.parametrize("body", [

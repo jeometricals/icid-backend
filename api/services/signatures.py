@@ -19,9 +19,18 @@ from uuid import UUID, uuid4
 from api.core.config import SIGNATURE_BUCKET_NAME
 from api.queries.users import set_user_signature
 from api.services.attachments import SUPABASE_UPLOAD_URL_LIFETIME_SECONDS, remove_storage_files
-from api.storage.client import copy_file, create_signed_upload_url, object_exists
+from api.storage.client import copy_file, create_signed_upload_url, download_file, object_exists
 
 logger = logging.getLogger(__name__)
+
+
+def fetch_signature_file(path: str) -> bytes:
+    """
+    Fetch a signature file's bytes from the signatures bucket: an IDR's copy, for the documents that print it (the IDR export, the Construction Report).
+    Takes the object path.
+    Returns the bytes; raises the Storage client's error, or a timeout, when it can't be fetched.
+    """
+    return download_file(path, SIGNATURE_BUCKET_NAME)
 
 
 class SignatureError(Exception):

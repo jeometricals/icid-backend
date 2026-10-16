@@ -458,9 +458,9 @@ def editable_idr(idr_id: UUID) -> dict[str, Any]:
     return idr
 
 
-def _initials(first_name: Optional[str], last_name: Optional[str]) -> str:
+def initials(first_name: Optional[str], last_name: Optional[str]) -> str:
     """
-    Make an editor's initials: the first letter of their first name and of their last name.
+    Make a person's initials (an editor's, a report's inspector's): the first letter of their first name and of their last name.
     Takes the two names (either may be missing).
     Returns the initials in capitals, e.g. "OE"; one letter, or none, when names are missing.
     """
@@ -478,5 +478,5 @@ def field_edits_for(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
         return None
     return [{**row,
              "editor_name": " ".join(n for n in (row.get("editor_first_name"), row.get("editor_last_name")) if n) or None,
-             "editor_initials": _initials(row.get("editor_first_name"), row.get("editor_last_name"))}
+             "editor_initials": initials(row.get("editor_first_name"), row.get("editor_last_name"))}
             for row in rows]

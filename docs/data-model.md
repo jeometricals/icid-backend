@@ -487,6 +487,7 @@ Demo users only read (since S2).
 | `digitized_at` | TIMESTAMPTZ NOT NULL | `now()` at creation |
 | `as_built_signed_by` | UUID | FK → `users.uuid`, **ON DELETE SET NULL**. Set by a later slice's sign route; no route writes it yet |
 | `as_built_signed_at` | TIMESTAMPTZ | Likewise |
+| `north_bearing` | `icid.compass_point` | Which way North is on the PIR's sketch, every page alike: `N` `NE` `E` `SE` `S` `SW` `W` `NW` (migration 038). NULL: not known, and the Construction Report draws no north arrow. Set through `PATCH /v1/pirs/{id}`, where a null clears it |
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
 
@@ -623,8 +624,9 @@ Curb runs drawn on a page, one row each. Added by migration 034. Same access as 
 
 ### pir_annotations
 
-A page's title block, one row per page. Added by migration 034. Set whole with `PUT /v1/pir-pages/{id}/annotations`
-(a field left out is cleared); project members and admins, not demo users. It has no `deleted_at`: a replaced page
+A page's title block, one row per page. Added by migration 034. Set with `PUT /v1/pir-pages/{id}/annotations`
+(since R1h a field left out keeps its value and a null clears it; the Smart PIR import still replaces a block
+whole); project members and admins, not demo users. The Construction Report prints page 1's. It has no `deleted_at`: a replaced page
 keeps its title block, and the new page starts without one.
 
 | Column | Type | Notes |
@@ -635,7 +637,8 @@ keeps its title block, and the new page starts without one.
 | `tax_map_width_ft`, `cc_curb_to_curb_ft` | NUMERIC(10,2) | ≥ 0 |
 | `property_status` | TEXT | `all_defects_corrected`, `some_defects_corrected` or `no_work_done` |
 | `corner_property_status` | TEXT | `ped_ramp_installed`, `no_ped_ramp_exists` or `existing_ped_ramp` |
-| `violation_not_removed_due_to` | TEXT[] NOT NULL | Free text, default `{}` |
+| `violation_not_removed_due_to` | TEXT[] NOT NULL | Free text, default `{}`. The Construction Report ticks its nine boxes for the codes `work_already_done`, `distinctive_material`, `landmark`, `subway`, `tree`, `vault`, `scaffolding`, `other_perm_obstruction` and `other_temp_obstruction`, and drops any other text |
+| `date_notice_issued`, `date_excavated`, `date_constructed` | DATE | As typed on the title block (migration 038). `date_constructed` is the pour, not `flags.constructed_on` (the claiming IDR's `report_date`, which billing and Progress use). The Construction Report prints them, blank when NULL |
 | `created_at`, `updated_at` | TIMESTAMPTZ NOT NULL | |
 
 ### report_attachments
@@ -882,6 +885,7 @@ content as TEXT, linked to a report and a form template).
 | 032 | `032_flags.sql` | R1b | Created `flags` (FK to `pirs` with no cascade; FK to `contract_items` ON DELETE SET NULL; FKs to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`; CHECKs on `display_order`, `shape`, `surveyed_mark`, `surveyed_non_assessable_reason`, `surveyed_thickness` and `reported_quantity`) with the partial indexes `idx_flags_pir` and `idx_flags_pay_item`. No existing table or row changed. |
 | 033 | `033_pir_pages_and_flag_coords.sql` | R1e | Created `pir_pages` (FK to `pirs` ON DELETE CASCADE, FK to `users` for `deleted_by` ON DELETE SET NULL, CHECKs on `page_number`, `width_px`, `height_px`, `scale_px_per_ft` and `rotation_deg`) with the partial unique index `pir_pages_pir_page_num_live_uq` and `pir_pages_pir_idx`. Dropped `pirs.source_image_url` and `source_image_scale` (no PIR had an image). Soft-deleted the 3 flags made through R1b's form, then added `flags.pir_page_id` (FK to `pir_pages`, no action), CHECK `chk_flags_live_on_a_page` and `flags_pir_page_idx`. |
 | 035 | `035_property_subtyping.sql` | Property kinds | Created the enum types `property_kind`, `boro`, `quadrant`, `facing_street` and `ramp_type`. Added `properties.kind` (NOT NULL DEFAULT `sidewalk`), `boro` (backfilled from each BBL's first digit, then NOT NULL), `violation_no`, `intersection_street_1`, `intersection_street_2`, `quadrant`, `facing_street` and `ramp_type`; dropped NOT NULL on `bbl`, `address` and `property_type`; added CHECK `properties_kind_fields_consistent`. The 4 existing rows became sidewalks (3 Brooklyn, 1 Queens). |
+| 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |
 | 036 | `036_split_bbl_into_block_lot.sql` | R1e.3 | Added `properties.block` and `lot` (TEXT, CHECKs `chk_properties_block_format` and `chk_properties_lot_format`), backfilled from each sidewalk's BBL without leading zeros; replaced `properties_kind_fields_consistent` (block and lot where it had bbl); dropped `uq_properties_project_bbl` and the `bbl` column; created `uq_properties_project_sidewalk_bbl` on `(project_id, boro, block, lot)` `WHERE kind = 'sidewalk' AND deleted_at IS NULL`. The 6 rows: 5 sidewalks backfilled, 1 ped ramp untouched. |
 | 034 | `034_smart_pir_data_model.sql` | Smart PIR | Added `flags.defect_codes` (TEXT[] NOT NULL DEFAULT `{}`, CHECK `chk_flags_defect_codes`) and widened `chk_flags_non_assessable_reason` to R1b's nine values plus the R1e.1 survey's (22). Created `non_assessable_areas` (FK to `flags`, no action; partial unique index `nas_flag_order_live_uq`), `features` (FKs to `pir_pages` and `flags`, no action; to `contract_items` ON DELETE SET NULL), `segments` (FK to `pir_pages`, no action; to `contract_items` ON DELETE SET NULL) and `pir_annotations` (keyed by `pir_page_id`, no action), the first three with `created_by` and, ON DELETE SET NULL, `deleted_by` FKs to `users` (20 → 26 FKs to `users`). Added `projects.cost_per_sf_4in` and `cost_per_sf_7in` (NUMERIC(10,4), ≥ 0). No existing row changed; the thickness CHECK already held `7in_as_4in`. |
@@ -908,6 +912,8 @@ Where each current column came from:
 | `flags` | all but `pir_page_id` | 032 |
 | `pir_pages`; `flags.pir_page_id` | all | 033 |
 | `non_assessable_areas`, `features`, `segments`, `pir_annotations`; `flags.defect_codes`, `chk_flags_defect_codes`, the wider `chk_flags_non_assessable_reason`; `projects.cost_per_sf_4in`, `cost_per_sf_7in`, `chk_projects_assessment_rates` | all | 034 |
+| `pirs` | `north_bearing` (and the type `icid.compass_point`) | 038 |
+| `pir_annotations` | `date_notice_issued`, `date_excavated`, `date_constructed` | 038 |
 | `project_users` | `role`, `chk_project_users_role`, the three-column primary key | 018 |
 | `idrs` | everything except the flag | 004 |
 | `idrs` | `has_dismissed_auto_general` | 006 |

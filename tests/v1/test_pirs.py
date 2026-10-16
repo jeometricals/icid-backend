@@ -198,13 +198,31 @@ class TestUpdatePir:
         assert response.status_code == 200 and response.json()["data"]["inspector_initials"] == "JDX"
         sql, params = run.call_args.args
         assert "UPDATE icid.pirs pir" in sql and "updated_at = now()" in sql and "as_built" not in sql.split("RETURNING")[0]
-        assert params == ("JDX", date(2026, 10, 1), PIR_ID)
+        assert params == ("JDX", date(2026, 10, 1), False, None, PIR_ID)
 
     def test_a_null_counts_as_not_sent(self, admin_client):
         with patch(PIRS, return_value=[PIR_ROW]) as run:
             assert admin_client.patch(URL, json={"inspector_initials": None, "inspector_sign_date": "2026-10-01"}) \
                 .status_code == 200
-        assert run.call_args.args[1] == (None, date(2026, 10, 1), PIR_ID)
+        assert run.call_args.args[1] == (None, date(2026, 10, 1), False, None, PIR_ID)
+
+    def test_the_north_bearing_is_set(self, admin_client):
+        with patch(PIRS, return_value=[{**PIR_ROW, "north_bearing": "NE"}]) as run:
+            response = admin_client.patch(URL, json={"north_bearing": "NE"})
+        assert response.status_code == 200 and response.json()["data"]["north_bearing"] == "NE"
+        sql, params = run.call_args.args
+        assert "north_bearing = CASE WHEN %s THEN %s::icid.compass_point ELSE pir.north_bearing END" in sql
+        assert params == (None, None, True, "NE", PIR_ID)
+
+    def test_a_null_north_bearing_clears_it(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]) as run:
+            assert admin_client.patch(URL, json={"north_bearing": None}).status_code == 200
+        assert run.call_args.args[1] == (None, None, True, None, PIR_ID)
+
+    def test_a_north_bearing_that_isnt_a_compass_point_is_422(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]) as run:
+            assert admin_client.patch(URL, json={"north_bearing": "NNE"}).status_code == 422
+        assert run.call_count <= 1  # nothing written
 
     def test_nothing_to_change_is_400(self, admin_client):
         with patch(PIRS, return_value=[PIR_ROW]) as run:

@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 from api.services import export_conc_cyl
 from api.services.export import TEMPLATE_PATH
 from api.services.export_redlines import Redlines
-from api.services.field_edits import FieldEditError, _initials, parse_report_path, resolve_report_path
+from api.services.field_edits import FieldEditError, initials as _initials, parse_report_path, resolve_report_path
 from api.services.xlsx_template import WorkbookTemplate
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 

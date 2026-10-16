@@ -256,12 +256,12 @@ def put_page_annotations(
     pir_page_id: UUID, body: PirAnnotationIn, found: dict = Depends(_writable_page), user: UserOut = Depends(current_user)
 ) -> PirAnnotationResponse:
     """
-    Set a page's title block, every field at once (a field left out is cleared). Same access as the scale.
+    Set a page's title block: the fields sent are written (a null clears one), the others keep their values. Same access as the scale.
     Takes the page's id as a path parameter, the title block in the body, the page (loaded by _writable_page) and the user.
     Returns a PirAnnotationResponse with the title block as it now is; raises 400 for a deleted page, PIR or property, 403 and 404 as for the scale, and 422 for a value that doesn't fit.
     """
     refuse_deleted_chain(found, user, PAGE_CHAIN)
-    row = upsert_annotations(pir_page_id, body.model_dump())
+    row = upsert_annotations(pir_page_id, body.model_dump(exclude_unset=True))
     if row is None:
         raise HTTPException(status_code=400, detail=PAGE_DELETED)
     return PirAnnotationResponse(status="success", message="Annotations saved", data=PirAnnotationOut.model_validate(row))

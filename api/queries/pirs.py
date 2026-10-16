@@ -17,6 +17,7 @@ _PIR_COLUMNS = """
              WHERE pg.pir_id = pir.id AND pg.page_number = 1 AND pg.deleted_at IS NULL) AS source_image_scale,
             pir.inspector_initials, pir.inspector_sign_date,
             pir.digitized_by, pir.digitized_at, pir.as_built_signed_by, pir.as_built_signed_at,
+            pir.north_bearing::text AS north_bearing,
             pir.created_at, pir.updated_at, pir.deleted_at, pir.deleted_by"""
 
 
@@ -89,8 +90,8 @@ def create_pir(property_id: UUID, digitized_by_uuid: UUID, data: dict[str, Any])
 
 def update_pir(pir_id: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
-    Change some of a PIR; a column left out keeps its value.
-    Takes the PIR's id and the new values keyed by column (inspector_initials, inspector_sign_date).
+    Change some of a PIR; a column left out keeps its value. north_bearing, when it is there, is set even to None (clearing it).
+    Takes the PIR's id and the new values keyed by column (inspector_initials, inspector_sign_date, north_bearing).
     Returns the updated PIR dict, or None if no PIR matches.
     """
     sql = (
@@ -98,13 +99,16 @@ def update_pir(pir_id: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
         UPDATE icid.pirs pir
         SET inspector_initials = COALESCE(%s, pir.inspector_initials),
             inspector_sign_date = COALESCE(%s::date, pir.inspector_sign_date),
+            north_bearing = CASE WHEN %s THEN %s::icid.compass_point ELSE pir.north_bearing END,
             updated_at = now()
         WHERE pir.id = %s
         RETURNING"""
         + _PIR_COLUMNS
         + ";"
     )
-    rows = run_query(sql, (data.get("inspector_initials"), data.get("inspector_sign_date"), pir_id))
+    params = (data.get("inspector_initials"), data.get("inspector_sign_date"), "north_bearing" in data,
+              data.get("north_bearing"), pir_id)
+    rows = run_query(sql, params)
     return rows[0] if rows else None
 
 

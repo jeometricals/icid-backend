@@ -13,6 +13,8 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    # A download's file name (the Construction Reports), readable from the frontend's origin
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -37,6 +39,8 @@ def include_routers(app: FastAPI):
     from api.v1.progress import project_router as project_progress_router
     from api.v1.progress import router as task_order_progress_router
     from api.v1.pirs import property_router as property_pirs_router
+    from api.v1.construction_reports import property_router as property_construction_report_router
+    from api.v1.construction_reports import router as idr_construction_reports_router
     from api.v1.pirs import router as pirs_router
     from api.v1.pir_pages import pir_router as pir_pages_router
     from api.v1.pir_pages import router as page_router
@@ -76,6 +80,7 @@ def include_routers(app: FastAPI):
     app.include_router(project_progress_router)
     app.include_router(task_order_progress_router)
     app.include_router(property_pirs_router)
+    app.include_router(property_construction_report_router)
     app.include_router(pirs_router)
     app.include_router(pir_pages_router)
     app.include_router(page_router)
@@ -96,6 +101,7 @@ def include_routers(app: FastAPI):
     app.include_router(idrs_router)
     app.include_router(field_edits_router)
     app.include_router(idr_flags_router)
+    app.include_router(idr_construction_reports_router)
     app.include_router(attachments_router)
     app.include_router(contract_items_router)
     app.include_router(exports_router)

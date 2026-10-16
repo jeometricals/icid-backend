@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
@@ -34,12 +35,12 @@ def _from_x(columns: dict[str, str]) -> str:
 
 def _json_ready(rows: list[dict[str, Any]]) -> Jsonb:
     """
-    Wrap an import's rows as one JSON parameter, decimals and uuids as text (so a NUMERIC column gets every digit).
+    Wrap an import's rows as one JSON parameter, decimals, uuids and dates as text (so a NUMERIC column gets every digit, and a date is ISO).
     Takes the rows keyed by column.
     Returns the Jsonb parameter.
     """
     def ready(value: Any) -> Any:
-        return str(value) if isinstance(value, (Decimal, UUID)) else value
+        return str(value) if isinstance(value, (Decimal, UUID, date)) else value
 
     return Jsonb([{column: ready(value) for column, value in row.items()} for row in rows])
 

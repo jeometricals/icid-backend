@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, Optional
 from uuid import UUID
@@ -18,7 +18,7 @@ Width = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class PirAnnotationIn(BaseModel):
-    """A page's title block, as a PUT sets it whole (a field left out is cleared). Text is trimmed, and blank is none."""
+    """A page's title block, as a PUT sets it: a field left out keeps its value, a null clears it. Text is trimmed, and blank is none."""
 
     contract_no: Optional[str] = Field(default=None, max_length=MAX_TEXT_LENGTH)
     violation_no: Optional[str] = Field(default=None, max_length=MAX_TEXT_LENGTH)
@@ -33,7 +33,10 @@ class PirAnnotationIn(BaseModel):
     cc_curb_to_curb_ft: Optional[Decimal] = Width
     property_status: Optional[PropertyStatus] = None
     corner_property_status: Optional[CornerPropertyStatus] = None
-    violation_not_removed_due_to: list[str] = []
+    violation_not_removed_due_to: Optional[list[str]] = []
+    date_notice_issued: Optional[date] = None
+    date_excavated: Optional[date] = None
+    date_constructed: Optional[date] = None
 
     @field_validator(*_TEXT_FIELDS, mode="before")
     @classmethod
@@ -49,13 +52,13 @@ class PirAnnotationIn(BaseModel):
 
     @field_validator("violation_not_removed_due_to")
     @classmethod
-    def _reasons(cls, value: list[str]) -> list[str]:
+    def _reasons(cls, value: Optional[list[str]]) -> list[str]:
         """
-        Trim each reason the violation wasn't removed, dropping blank ones.
+        Trim each reason the violation wasn't removed, dropping blank ones; a null is none.
         Takes the reasons as sent.
         Returns them trimmed; raises ValueError for one over 200 characters.
         """
-        reasons = [reason.strip() for reason in value if reason.strip()]
+        reasons = [reason.strip() for reason in value or [] if reason.strip()]
         if any(len(reason) > MAX_TEXT_LENGTH for reason in reasons):
             raise ValueError(f"each reason can be at most {MAX_TEXT_LENGTH} characters")
         return reasons

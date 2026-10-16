@@ -48,7 +48,7 @@ def _pir_writer_on_property(
 
 def _clean_fields(body: PirCreate | PirUpdate) -> dict[str, Any]:
     """
-    Read a PIR's fields off the request: the initials trimmed and refused when blank or too long. A field sent as null is left out.
+    Read a PIR's fields off the request: the initials trimmed and refused when blank or too long. A field sent as null is left out, but for north_bearing, whose null clears it.
     Takes the request body.
     Returns the values keyed by column, for the fields sent; raises 400 for a value that doesn't fit.
     """
@@ -57,6 +57,8 @@ def _clean_fields(body: PirCreate | PirUpdate) -> dict[str, Any]:
         fields["inspector_initials"] = clean_text(body.inspector_initials, "inspector_initials", MAX_INITIALS_LENGTH)
     if body.inspector_sign_date is not None:
         fields["inspector_sign_date"] = body.inspector_sign_date
+    if "north_bearing" in body.model_fields_set:
+        fields["north_bearing"] = getattr(body, "north_bearing")
     return fields
 
 
@@ -174,7 +176,7 @@ def update_pir_record(
     pir_id: UUID, body: PirUpdate, found: dict = Depends(writable_pir), user: UserOut = Depends(current_user)
 ) -> PirResponse:
     """
-    Change a PIR's inspector initials or sign date. For a user on its property's project, or an admin; not a demo user. Only an admin changes a soft-deleted PIR, or a PIR of a soft-deleted property. A field left out, or sent as null, keeps its value; the as-built signature is never changed here.
+    Change a PIR's inspector initials, sign date or north bearing. For a user on its property's project, or an admin; not a demo user. Only an admin changes a soft-deleted PIR, or a PIR of a soft-deleted property. A field left out keeps its value, and so does one sent as null, but for north_bearing, which null clears; the as-built signature is never changed here.
     Takes the PIR's id as a path parameter, the fields to change in the body, the PIR (loaded by writable_pir) and the user.
     Returns a PirResponse with the PIR as it now is; raises 400 when nothing is sent, the initials don't fit, or a user who isn't an admin edits a deleted PIR or one of a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown PIR and 422 for a malformed date.
     """

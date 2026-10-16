@@ -590,7 +590,7 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 124
+        assert len(PROTECTED_ROUTES) == 126
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}/attributed-flags"),
                          ("POST", "/v1/idrs/{idr_id}/attributed-flags/{flag_id}/exclude"),
@@ -624,6 +624,8 @@ class TestEveryRouteNeedsSignIn:
                          ("POST", "/v1/projects/{project_id}/task-orders"),
                          ("GET", "/v1/task-orders/{task_order_id}"), ("PATCH", "/v1/task-orders/{task_order_id}"),
                          ("GET", "/v1/projects/{project_id}/progress-rollup"),
+                         ("GET", "/v1/properties/{property_id}/construction-report"),
+                         ("GET", "/v1/idrs/{idr_id}/construction-reports"),
                          ("GET", "/v1/task-orders/{task_order_id}/progress-rollup"),
                          ("POST", "/v1/task-orders/{task_order_id}/admin/soft-delete"),
                          ("POST", "/v1/task-orders/{task_order_id}/admin/undelete"),
@@ -821,8 +823,9 @@ class TestDemoFences:
         attachments.assert_not_called()
 
     def test_the_fence_covers_every_route_under_an_idr(self):
-        assert len(IDR_ROUTES) == 30
+        assert len(IDR_ROUTES) == 31
         assert ("GET", "/v1/idrs/{idr_id}/attributed-flags") in IDR_ROUTES  # R1f's
+        assert ("GET", "/v1/idrs/{idr_id}/construction-reports") in IDR_ROUTES  # R1h's
         assert ("POST", "/v1/idrs/{idr_id}/approve-stage2") in IDR_ROUTES  # the review routes too
         assert ("GET", "/v1/idrs/{idr_id}/export") in IDR_ROUTES
         assert ("GET", "/v1/idrs/{idr_id}/reports/{report_id}/attachments") in IDR_ROUTES

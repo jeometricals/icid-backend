@@ -369,6 +369,8 @@ CREATE INDEX idx_task_order_properties_property ON icid.task_order_properties (p
 -- PIR (a property's digitized DOT survey sheet; one live PIR per property; soft-deleted; migrations/031)
 -- property_id has no cascade: a PIR is a record of its own. as_built_signed_* are set by a sign route, never by hand
 ------------------------------------------------------------
+CREATE TYPE icid.compass_point AS ENUM ('N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW');
+
 CREATE TABLE icid.pirs (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     property_id          UUID NOT NULL REFERENCES icid.properties(id),
@@ -378,6 +380,8 @@ CREATE TABLE icid.pirs (
     digitized_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     as_built_signed_by   UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
     as_built_signed_at   TIMESTAMPTZ,
+    -- Which way North is on its sketch, every page alike (migrations/038); NULL: not known
+    north_bearing        icid.compass_point,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at           TIMESTAMPTZ,
@@ -605,6 +609,10 @@ CREATE TABLE icid.pir_annotations (
     property_status              TEXT,
     corner_property_status       TEXT,
     violation_not_removed_due_to TEXT[] NOT NULL DEFAULT '{}',
+    -- The form's three dates, as typed (migrations/038). date_constructed is the pour, not flags.constructed_on
+    date_notice_issued           DATE,
+    date_excavated               DATE,
+    date_constructed             DATE,
     created_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_pir_annotations_boro

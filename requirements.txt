@@ -31,6 +31,10 @@ pillow-heif==1.1.0
 # PIR images: a scanned PIR PDF's first page is rendered to PNG (Apache-2.0; bundles PDFium, no system packages)
 pypdfium2==4.30.0
 
+# Construction Report: the per-property PDF on DOT form 5/95 is drawn at exact coordinates (BSD; pure Python + C
+# accelerators, no system packages). Its tests read the text back with pypdfium2.
+reportlab==4.2.5
+
 # IDR export: the signed date prints as the day it was in New York; time-zone data where the system has none
 tzdata==2026.4
 
