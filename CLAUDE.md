@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 037 is in the live database; 038 (R1h) is not yet (see "Construction Report"). When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 039 is in the live database. A data migration (039, M1: SE384's site data moved to HWS0023) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. |
@@ -1089,8 +1089,6 @@ Any change must follow these.
     `as_built_signed_*` are never set, so they aren't used.
   - Downloads carry `Content-Disposition` (`{address}_construction_report.pdf`, `IDR_{number}_construction_reports.zip`),
     which CORS exposes (`expose_headers`). ~40–60 KB a page (`pageCompression`).
-  - **Migration 038 must be in the database before this code runs:** every PIR read names `north_bearing`. The code
-    before it keeps working after it.
 - **Assessment Summary** (R1i; `api/v1/assessment_summary.py`, `api/queries/assessment_summary.py`,
   `api/services/assessment_summary.py`): a project's monthly .xlsx for DOT, built with openpyxl in memory.
   - **The same measure as the Construction Report,** flag by flag (`flag_areas`), over every flag a project's approved
