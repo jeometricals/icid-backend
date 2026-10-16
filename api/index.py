@@ -57,6 +57,7 @@ def include_routers(app: FastAPI):
     from api.v1.segments import pir_router as pir_segments_router
     from api.v1.segments import router as segments_router
     from api.v1.pir_import import router as pir_import_router
+    from api.v1.pir_title_block import pir_router as pir_title_block_router
     from api.v1.reviews import router as reviews_router
     from api.v1.field_edits import router as field_edits_router
     from api.v1.idr_flags import router as idr_flags_router
@@ -98,6 +99,7 @@ def include_routers(app: FastAPI):
     app.include_router(pir_segments_router)
     app.include_router(segments_router)
     app.include_router(pir_import_router)
+    app.include_router(pir_title_block_router)
     # Before the IDRs router, so /v1/idrs/queue isn't read as /v1/idrs/{idr_id}
     app.include_router(reviews_router)
     app.include_router(idrs_router)
