@@ -163,7 +163,7 @@ class TestPropertyReport:
         # 7" assessed as 4": nothing; 7": 171.81 gross, 94.14 assessable at $12.64
         assert "— — — $11.54 —" in text
         assert "171.81 77.67 94.14 $12.64 $1,189.93" in text
-        assert "422.75" in text and "$2,496.14" in text
+        assert "Estimated Sq.Ft 207.33" in text and "$2,496.14" in text  # the assessable total
 
     def test_it_is_certified_by_the_idrs_inspector_on_the_day_it_was_approved(self, admin_client, storage):
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):

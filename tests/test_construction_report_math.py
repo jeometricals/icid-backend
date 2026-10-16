@@ -84,7 +84,7 @@ class TestComputeMeasure:
             Decimal("250.94"), Decimal("137.75"), Decimal("113.19"))
         assert four.cost == Decimal("113.19") * Decimal("11.54")
         assert row(measure, "7in").cost == Decimal("94.14") * Decimal("12.64")
-        assert measure.estimated_sf == Decimal("422.75")
+        assert measure.estimated_sf == Decimal("207.33")  # the assessable total, as DOT's sheets print it
         assert round(measure.estimated_cost, 2) == Decimal("2496.14")
 
     def test_7in_assessed_as_4in_is_billed_at_the_4in_rate(self):
@@ -102,6 +102,10 @@ class TestComputeMeasure:
         measure = compute_measure([flag("4in", "10", "10")], {"cost_per_sf_4in": None, "cost_per_sf_7in": None})
         assert row(measure, "4in").cost is None and measure.estimated_cost is None
         assert measure.estimated_sf == 10
+
+    def test_the_estimate_counts_only_what_is_assessed(self):
+        measure = compute_measure([flag("4in", "90.25", "90.25", assessable=False), flag("7in", "60", "40")], RATES)
+        assert measure.estimated_sf == Decimal("40")
 
 
 # ---------------------------------------------------------------------------

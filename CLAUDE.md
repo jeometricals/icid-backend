@@ -1092,7 +1092,8 @@ Any change must follow these.
   - **Construction Measure** (`compute_measure`): per flag the IDR claimed there, Total SF = `computed_quantity`;
     Assessable = 0 for a flag surveyed non-assessable, else its quantity (override, or net area: billing's);
     Non-Assessable = the rest, never below 0. Rows by `surveyed_thickness`; cost = assessable × `cost_per_sf_4in` (4"
-    and 7" assessed as 4") or `cost_per_sf_7in`; no rate, no cost. Kept as `Decimal`, rounded for display.
+    and 7" assessed as 4") or `cost_per_sf_7in`; no rate, no cost. Kept as `Decimal`, rounded for display. The
+    header's Estimated Sq.Ft is the assessable total, as DOT's sheets print it (R1h.4; the gross total before).
   - **Sketch** (`construction_sketch.py`): outlines exactly as the frontend's `lib/flagGeometry.js`, the page's
     rotation applied, fitted with 4% padding (R1h.4; 10% before) to the left of the band, room left round it. 422 when
     the flags are on more than one page or would print below `MIN_POINTS_PER_FOOT` (4) (`MULTI_SHEET_MESSAGE`, R1h.1's),

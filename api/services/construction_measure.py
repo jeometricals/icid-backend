@@ -43,7 +43,7 @@ class MeasureRow:
 
 @dataclass
 class Measure:
-    """The Construction Measure: its rows and the form's two estimates (square feet in all, and cost; None when no row has a rate)."""
+    """The Construction Measure: its rows and the form's two estimates (the assessable square feet, as DOT's sheets print them, and cost; None when no row has a rate)."""
 
     rows: list[MeasureRow]
     estimated_sf: Decimal
@@ -81,7 +81,7 @@ def compute_measure(flags: list[dict[str, Any]], rates: dict[str, Optional[Decim
         rows.append(MeasureRow(thickness, label, total, non_assessable, assessable, rate,
                                None if rate is None else assessable * rate))
     costs = [row.cost for row in rows if row.cost is not None]
-    return Measure(rows, sum((row.total_sf for row in rows), ZERO), sum(costs, ZERO) if costs else None)
+    return Measure(rows, sum((row.assessable_sf for row in rows), ZERO), sum(costs, ZERO) if costs else None)
 
 
 @dataclass
