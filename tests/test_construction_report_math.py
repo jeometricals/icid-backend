@@ -193,10 +193,10 @@ class TestFit:
 
 
 class TestNorth:
-    @pytest.mark.parametrize("bearing, rotation, expected", [("N", 0, 0), ("NE", 0, 45), ("W", 0, 270),
-                                                             ("S", 90, 270), ("NW", 90, 45)])
-    def test_the_arrow_follows_the_bearing_and_the_page(self, bearing, rotation, expected):
-        assert north_degrees(bearing, rotation) == expected
+    @pytest.mark.parametrize("bearing, expected", [("N", 0), ("NE", 45), ("E", 90), ("S", 180), ("W", 270),
+                                                   ("NW", 315)])
+    def test_the_arrow_follows_the_bearing(self, bearing, expected):
+        assert north_degrees(bearing) == expected
 
     def test_no_bearing_no_arrow(self):
         assert north_degrees(None) is None

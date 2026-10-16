@@ -195,12 +195,12 @@ def fit_to_pane(items: list[SketchItem], pane: tuple[float, float, float, float]
     return Fit(points_per_foot, origin, pane)
 
 
-def north_degrees(bearing: Optional[str], page_rotation: float = 0) -> Optional[float]:
+def north_degrees(bearing: Optional[str]) -> Optional[float]:
     """
-    Which way the north arrow points on the sheet: the PIR's bearing, turned with its page.
-    Takes the north bearing (a compass point, or None) and the page's rotation in degrees.
+    Which way the north arrow points on the sheet: the PIR's bearing, read on the page as shown (upright), as the sketch is drawn, so not turned again by the page's rotation.
+    Takes the north bearing (a compass point, or None).
     Returns degrees clockwise from straight up, or None without a bearing (no arrow).
     """
     if bearing not in COMPASS_DEGREES:
         return None
-    return (COMPASS_DEGREES[bearing] + page_rotation) % 360
+    return float(COMPASS_DEGREES[bearing])

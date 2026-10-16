@@ -144,8 +144,7 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
     measure = compute_measure(flags, {"cost_per_sf_4in": header["cost_per_sf_4in"],
                                       "cost_per_sf_7in": header["cost_per_sf_7in"]})
     signature = _signature(header["inspector_signature_path"], idr_id)
-    content = draw_report(header, measure, items, fit, signature, north_degrees(header["north_bearing"],
-                                                                             flags[0]["rotation_deg"] or 0))
+    content = draw_report(header, measure, items, fit, signature, north_degrees(header["north_bearing"]))
     address = _address(header)
     return ReportFile(f"{file_stem(address)}_construction_report.pdf", content)
 

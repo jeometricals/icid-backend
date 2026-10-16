@@ -1090,7 +1090,7 @@ Any change must follow these.
   - **Sketch** (`construction_sketch.py`): outlines exactly as the frontend's `lib/flagGeometry.js`, the page's
     rotation applied, fitted to the pane with 10% padding. 422 when the flags are on more than one page or would print
     below `MIN_POINTS_PER_FOOT` (4) (`MULTI_SHEET_MESSAGE`, R1h.1's), or the page has no scale. North arrow from
-    `pirs.north_bearing`, turned with the page; none when unset.
+    `pirs.north_bearing`, read on the upright page (not turned again by its rotation); none when unset.
   - **Certification:** the IDR's own inspector signature copy (`inspector_signature_path`, fetched through
     `fetch_signature_file` in `api/services/signatures.py`, as the IDR export does; best-effort, blank when it can't
     be), its reporter as Inspected By, `idr_number`, and their initials with the day the IDR was approved. The PIR's

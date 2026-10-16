@@ -9,7 +9,7 @@ import pypdfium2 as pdfium
 import pytest
 from PIL import Image
 
-from api.services import signatures
+from api.services import construction_report, signatures
 from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 
 # ---------------------------------------------------------------------------
@@ -230,6 +230,13 @@ class TestPropertyReport:
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
             response = admin_client.get(URL)
         assert response.status_code == 422 and "R1h.1" in response.json()["detail"]
+
+    @pytest.mark.parametrize("bearing, expected", [("N", 0), ("NE", 45)])
+    def test_the_north_arrow_is_not_turned_by_the_pages_rotation(self, admin_client, storage, bearing, expected):
+        rotated = [{**flag, "rotation_deg": 90} for flag in FLAGS]
+        with patch(PROPS, return_value=[PROPERTY_ROW]),                 patch(REPORT, side_effect=report_query(header={**HEADER, "north_bearing": bearing}, flags=rotated)),                 patch("api.services.construction_report.draw_report", wraps=construction_report.draw_report) as draw:
+            assert admin_client.get(URL).status_code == 200
+        assert draw.call_args.args[5] == expected
 
     def test_a_page_without_a_scale_is_422(self, admin_client, storage):
         flags = [{**flag, "scale_px_per_ft": None} for flag in FLAGS]
