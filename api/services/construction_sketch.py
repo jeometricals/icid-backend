@@ -22,8 +22,9 @@ Point = tuple[float, float]
 ARC_STEPS = 32
 # The least a foot may print at, in points; below it the sketch needs more than one sheet
 MIN_POINTS_PER_FOOT = 4.0
-# The margin around the drawing, as a share of its size on each side
-PADDING = 0.10
+# The margin around the drawing, as a share of its size on each side (the streets, PL, TAX MAP and CC have room
+# of their own round the pane)
+PADDING = 0.04
 # A marker-only feature's glyph, in feet across, for the bounding box
 GLYPH_FEET = 1.5
 
@@ -125,14 +126,14 @@ def material(item: SketchItem) -> Optional[str]:
     """
     What a flag or an area is made of, as the sketch fills and labels it.
     Takes the item.
-    Returns '4in' (4", stippled), '7in' (7" or 7" assessed as 4", diagonal lines) or 'non_assessable' (a flag surveyed non-assessable, or an area); None for a feature or a segment.
+    Returns '4in' (4", stippled), '7in' (7" or 7" assessed as 4", diagonal lines), 'driveway' (an area, or a flag surveyed non-assessable, for a driveway: DW's stripes) or 'non_assessable' (any other such flag or area); None for a feature or a segment.
     """
     if item.kind == "area":
-        return "non_assessable"
+        return "driveway" if item.source.get("reason") == "driveway" else "non_assessable"
     if item.kind != "flag":
         return None
     if not item.source["surveyed_is_assessable"]:
-        return "non_assessable"
+        return "driveway" if item.source.get("surveyed_non_assessable_reason") == "driveway" else "non_assessable"
     return "4in" if item.source["surveyed_thickness"] == "4in" else "7in"
 
 

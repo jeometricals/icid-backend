@@ -23,6 +23,7 @@ from api.schemas.pir_import import (
     SmartPirPageImport,
 )
 from api.schemas.segment import SegmentCreate
+from api.services.area_containment import TOLERANCE_SF, area_outside_flag
 from api.services.flag_area import compute_area
 from api.services.pay_item_units import FLAG_UNITS
 
@@ -83,13 +84,15 @@ class _Importer:
     """Turns a file into a PreparedImport, item by item."""
 
     def __init__(self, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
-                 flag_pay_item_ids: Optional[set[UUID]] = None) -> None:
+                 flag_pay_item_ids: Optional[set[UUID]] = None,
+                 page_scales: Optional[dict[int, Any]] = None) -> None:
         """
         Start with nothing prepared.
-        Takes the PIR's live pages' ids by page number, the ids of its project's pay items, and those of them in a unit a flag can be measured in (all of them when None).
+        Takes the PIR's live pages' ids by page number, the ids of its project's pay items, those of them in a unit a flag can be measured in (all of them when None), and the live pages' scales by page number (for checking each area lies within its flag).
         Returns nothing.
         """
         self.page_ids, self.pay_item_ids = page_ids, pay_item_ids
+        self.page_scales = page_scales or {}
         self.flag_pay_item_ids = pay_item_ids if flag_pay_item_ids is None else flag_pay_item_ids
         self.out = PreparedImport()
 
@@ -159,13 +162,15 @@ class _Importer:
             values = flag.model_dump(exclude={"non_assessable_areas"})
             self.out.flags.append({"id": flag_id, "pir_page_id": page_id, **values,
                                    "computed_quantity": compute_area(flag.shape, flag.dimensions)})
-            self.areas(flag.non_assessable_areas, flag_id, entry.page_number, index)
+            scale = entry.scale_px_per_ft or self.page_scales.get(entry.page_number)
+            self.areas(flag.non_assessable_areas, flag_id, entry.page_number, index, values, scale)
         return kept
 
-    def areas(self, raws: list[Any], flag_id: UUID, page_number: int, flag_index: int) -> None:
+    def areas(self, raws: list[Any], flag_id: UUID, page_number: int, flag_index: int,
+              flag: Optional[dict[str, Any]] = None, scale: Optional[Any] = None) -> None:
         """
-        Take a flag's non-assessable areas, each display order once.
-        Takes the areas as the file has them, the new flag's id, its page entry's number and its place in the list.
+        Take a flag's non-assessable areas, each display order once, each within its flag (when that can be told).
+        Takes the areas as the file has them, the new flag's id, its page entry's number, its place in the list, its values (shape and place) and its page's scale (the entry's, else the live page's).
         Returns nothing.
         """
         orders: set[int] = set()
@@ -177,6 +182,11 @@ class _Importer:
             if area.display_order in orders:
                 self.drop("non_assessable_area", page_number, index,
                           f"display_order {area.display_order} is used by another area of this flag", flag_index)
+                continue
+            outside = None if flag is None else area_outside_flag(area.model_dump(), flag, scale)
+            if outside is not None and outside > TOLERANCE_SF:
+                self.drop("non_assessable_area", page_number, index,
+                          f"extends past its flag's bounds by {outside:.2f} SF", flag_index)
                 continue
             orders.add(area.display_order)
             self.out.areas.append({"flag_id": flag_id, **area.model_dump(),
@@ -253,13 +263,14 @@ class _Importer:
 
 
 def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
-                   flag_pay_item_ids: Optional[set[UUID]] = None) -> PreparedImport:
+                   flag_pay_item_ids: Optional[set[UUID]] = None,
+                   page_scales: Optional[dict[int, Any]] = None) -> PreparedImport:
     """
     Check a Smart PIR import item by item and turn what passes into the rows the import statement writes. The file's own annotations go to page 1, unless page 1's entry brings its own.
-    Takes the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items and those of them a flag can be measured in (all of them when None).
+    Takes the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None) and the live pages' scales by page number.
     Returns the PreparedImport: the rows, and every item dropped with why.
     """
-    importer = _Importer(page_ids, pay_item_ids, flag_pay_item_ids)
+    importer = _Importer(page_ids, pay_item_ids, flag_pay_item_ids, page_scales)
     seen: set[int] = set()
     for entry in body.pages:
         importer.page(entry, seen)
@@ -278,14 +289,14 @@ def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids
 
 def run_import(
     pir_id: UUID, created_by: UUID, body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
-    flag_pay_item_ids: Optional[set[UUID]] = None,
+    flag_pay_item_ids: Optional[set[UUID]] = None, page_scales: Optional[dict[int, Any]] = None,
 ) -> Optional[PirImportResult]:
     """
     Import a Smart PIR file: check it, then write what passed in one statement. An item the statement couldn't write (its page replaced or its pay item deleted meanwhile) is counted as dropped.
-    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items and those of them a flag can be measured in (all of them when None).
+    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None) and the live pages' scales by page number.
     Returns the PirImportResult, or None if the statement failed.
     """
-    prepared = prepare_import(body, page_ids, pay_item_ids, flag_pay_item_ids)
+    prepared = prepare_import(body, page_ids, pay_item_ids, flag_pay_item_ids, page_scales)
     wanted = prepared.counts()
 
     if not (prepared.pages or prepared.flags or prepared.features or prepared.segments or prepared.annotations):

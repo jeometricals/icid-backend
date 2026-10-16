@@ -105,6 +105,7 @@ class CalcGroup:
     adjustment: Decimal
     non_assessable: Decimal
     assessable: Decimal
+    thickness: str = ""
 
 
 def _length(value: Any) -> str:
@@ -171,5 +172,5 @@ def calc_groups(flags: list[dict[str, Any]], measure: Measure, labels: dict[str,
         pieces.sort(key=lambda calc: _number(calc.label))
         listed = sum((piece.sub_total for piece in pieces), ZERO)
         groups.append(CalcGroup(row.label, rows, row.total_sf, pieces, row.non_assessable_sf - listed,
-                                row.non_assessable_sf, row.assessable_sf))
+                                row.non_assessable_sf, row.assessable_sf, row.thickness))
     return groups

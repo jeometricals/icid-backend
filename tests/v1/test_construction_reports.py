@@ -286,6 +286,65 @@ class TestPropertyReport:
             response = admin_client.get(URL)
         assert response.status_code == 422 and "calculations panel" in response.json()["detail"]
 
+    def test_abutting_flags_are_one_slab_dimensioned_once(self, admin_client, storage):
+        # Two 5 x 5 4" flags side by side (at 24 px/ft, 120 px apart): one 10.00' by 5.00' slab, labelled once
+        side_by_side = [flag_row(1, "4in", "25", "25"), flag_row(2, "4in", "25", "25", x=5)]
+        real, found = construction_report.slab_groups, []
+
+        def recorded(items):
+            found.extend(real(items))
+            return found
+
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=side_by_side)), \
+                patch("api.services.construction_report.slab_groups", side_effect=recorded):
+            text = pdf_text(admin_client.get(URL).content)
+        assert [len(group) for group in found] == [2]
+        assert "10.00'" in text and "5.00'" in text
+        assert text.count('4" Conc.') == 1
+
+    def test_a_driveway_area_is_striped_and_labelled_DW(self, admin_client, storage):
+        big = [{**flag_row(1, "4in", "500", "420"), "dimensions": {"L": 25, "W": 20},
+                "areas": [{"id": "a0000000-0000-4000-8000-000000000001", "display_order": 1, "reason": "driveway",
+                           "shape": "rectangle", "dimensions": {"L": 10, "W": 8}, "sketch_x": 200.0,
+                           "sketch_y": 200.0, "rotation": 0, "computed_quantity": 80}]}]
+        fills = {"4in": MagicMock(), "7in": MagicMock(), "non_assessable": MagicMock(), "driveway": MagicMock()}
+        with patch.dict(construction_report._FILLS, fills), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(REPORT, side_effect=report_query(flags=big)):
+            text = pdf_text(admin_client.get(URL).content)
+        assert fills["driveway"].call_count == 1 and fills["non_assessable"].call_count == 0
+        assert "10.00' DW" in text
+
+    def test_a_depressed_curb_is_ticked_and_measured(self, admin_client, storage):
+        # 17.16 ft of depressed curb at 24 px/ft
+        drawings = {"features": [], "segments": [
+            {"segment_type": "curb_concrete_depressed", "points": [{"x": 100, "y": 330}, {"x": 100 + 17.16 * 24, "y": 330}]}]}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
+            text = pdf_text(admin_client.get(URL).content)
+        assert "17.16'" in text
+
+    def test_the_4_and_7_inch_tables_print_side_by_side(self, admin_client, storage):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
+            content = admin_client.get(URL).content
+        page = pdfium.PdfDocument(content)[0]
+        text = page.get_textpage()
+        four = text.search('Total 4" Sidewalk Sq.Ft').get_next()
+        seven = text.search('Total 7" Sidewalk Sq.Ft').get_next()
+        assert four and seven
+        # The two titles sit on one line, the 7" to the right
+        (four_left, four_bottom, _, _), (seven_left, seven_bottom, _, _) = (text.get_charbox(four[0]),
+                                                                            text.get_charbox(seven[0]))
+        assert abs(four_bottom - seven_bottom) < 1 and seven_left > four_left + 100
+
+    def test_the_signature_is_fitted_inside_its_cell(self, admin_client, storage):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
+            content = admin_client.get(URL).content
+        page = pdfium.PdfDocument(content)[0]
+        image = next(obj for obj in page.get_objects() if obj.type == pdfium.raw.FPDF_PAGEOBJ_IMAGE)
+        left, bottom, right, top = image.get_pos()
+        # The cell: the strip's right 210 points, above its line; the 120 x 40 image keeps its proportions
+        assert left >= 546 + 5 and right <= 756 - 5 and bottom >= 14 + 10 and top <= 14 + 48
+        assert (right - left) / (top - bottom) == pytest.approx(3, abs=0.05)
+
     def test_a_page_without_a_scale_is_422(self, admin_client, storage):
         flags = [{**flag, "scale_px_per_ft": None} for flag in FLAGS]
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):

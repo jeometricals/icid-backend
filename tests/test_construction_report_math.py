@@ -5,7 +5,16 @@ from uuid import UUID
 import pytest
 
 from api.services.construction_measure import calc_groups, compute_measure, flag_areas, shape_terms
-from api.services.construction_report import calc_lines, label_fits, material_label, reason_text
+from api.services.construction_report import (
+    CALC_WIDTH,
+    CALC_WIDTH_TWO,
+    calc_lines,
+    label_fits,
+    material_label,
+    reason_text,
+    report_layout,
+    signature_box,
+)
 from api.services.construction_sketch import (
     MIN_POINTS_PER_FOOT,
     MULTI_SHEET_MESSAGE,
@@ -179,7 +188,7 @@ class TestFit:
     def test_a_sketch_is_fitted_to_the_pane_keeping_its_proportions(self):
         items = [SketchItem("flag", [(0, 0), (50, 0), (50, 10), (0, 10)], {})]
         fit = fit_to_pane(items, self.PANE)
-        assert fit.points_per_foot == pytest.approx(720 / 60)  # 50 ft wide, 10% padding each side
+        assert fit.points_per_foot == pytest.approx(720 / 54)  # 50 ft wide, 4% padding each side
         # centred: the drawing's middle is the pane's
         assert fit.place((25, 5)) == pytest.approx((36 + 360, 98 + 144))
 
@@ -288,12 +297,19 @@ class TestMaterials:
         item = SketchItem("flag", [], piece(1, thickness=thickness, assessable=assessable))
         assert material(item) == expected and material_label(item) == label
 
-    @pytest.mark.parametrize("reason, label", [("grass", "Grass"), ("dirt", "Dirt"), ("driveway", "Driveway"),
-                                               ("tree_pit", "Tree Pit"), ("other", "Non-Ass."), (None, "Non-Ass."),
+    @pytest.mark.parametrize("reason, label", [("grass", "Grass"), ("dirt", "Dirt"), ("tree_pit", "Tree Pit"),
+                                               ("other", "Non-Ass."), (None, "Non-Ass."),
                                                ("other_perm_obstruction", "Non-Ass.")])
     def test_an_area_is_non_assessable_and_labelled_by_its_reason(self, reason, label):
         item = SketchItem("area", [], area(1, reason=reason))
         assert material(item) == "non_assessable" and material_label(item) == label and reason_text(reason) == label
+
+    def test_a_driveway_is_its_own_material_labelled_DW_with_its_width(self):
+        driveway = SketchItem("area", [(0, 0), (17.16, 0), (17.16, 4.41), (0, 4.41)], area(1, reason="driveway"))
+        assert material(driveway) == "driveway" and material_label(driveway) == "17.16' DW"
+        flag = SketchItem("flag", [(0, 0), (5, 0), (5, 5), (0, 5)],
+                          {**piece(1, assessable=False), "surveyed_non_assessable_reason": "driveway"})
+        assert material(flag) == "driveway" and material_label(flag) == "5.00' DW"
 
     def test_a_label_prints_only_where_it_fits(self):
         assert label_fits('4" Conc.', [(0, 0), (80, 0), (80, 30), (0, 30)])
@@ -349,3 +365,30 @@ class TestCalculations:
         assert kinds == ["title", "heads", "row", "total", "title", "heads", "row", "total", "title", "subtraction",
                          "title", "heads", "row", "total", "title", "total"]
         assert calc_lines(groups)[9] == ("subtraction", Decimal("50"), Decimal("4"), Decimal("46"))
+
+
+class TestLayout:
+    def test_the_4_and_7_inch_tables_stand_side_by_side_and_the_sketch_gives_up_the_width(self):
+        flags = [piece(1), piece(2, "7in", x=20)]
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        layout = report_layout(groups)
+        assert [[group.thickness for group in column] for column in layout.columns] == [["4in"], ["7in"]]
+        assert layout.calc_pane[2] == CALC_WIDTH_TWO and layout.sketch_width == 720 - CALC_WIDTH_TWO - 12
+        assert layout.pane[2] == layout.sketch_width - 52
+
+    def test_one_thickness_is_one_column_and_a_wider_sketch(self):
+        flags = [piece(1), piece(2, x=20)]
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        layout = report_layout(groups)
+        assert len(layout.columns) == 1 and layout.calc_pane[2] == CALC_WIDTH
+        assert layout.sketch_width == 720 - CALC_WIDTH - 12
+
+    def test_7_as_4_inch_shares_the_4_inch_column(self):
+        flags = [piece(1), piece(2, "7in_as_4in", x=10), piece(3, "7in", x=20)]
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        assert [[group.thickness for group in column] for column in report_layout(groups).columns] == [
+            ["4in", "7in_as_4in"], ["7in"]]
+
+    def test_the_signature_fits_its_cell_above_the_line(self):
+        x, y, w, h = signature_box(546.0, 14.0, 48.0)
+        assert (x, y) == (552.0, 25.5) and x + w <= 546 + 210 and y + h <= 14 + 48

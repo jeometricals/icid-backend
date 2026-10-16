@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 
-from api.queries.flags import _WRITABLE, list_flags, soft_delete_flag, undelete_flag
+from api.queries.flags import _WRITABLE, get_flag_placement, list_flags, soft_delete_flag, undelete_flag
 from tests.conftest import ADMIN_USER_ROW, signed_in
 
 # ---------------------------------------------------------------------------
@@ -707,3 +707,14 @@ class TestFlagPayItemUnits:
         assert (data["claimed_by_idr_id"], data["claimed_by_idr_number"], data["constructed_on"]) == (None, None, None)
         sql = " ".join(run.call_args.args[0].split())
         assert "f.claimed_by_idr_id, f.constructed_on" in sql and "AS claimed_by_idr_number" in sql
+
+
+class TestFlagPlacement:
+    def test_it_reads_the_flags_shape_and_place_and_its_pages_scale(self):
+        row = {"shape": "rectangle", "dimensions": {"L": 5, "W": 4}, "sketch_x": 10.0, "sketch_y": 12.0,
+               "rotation": 0.0, "scale_px_per_ft": Decimal("24")}
+        with patch(FLAGS, return_value=[row]) as run:
+            assert get_flag_placement(FLAG_ID) == [row]
+        sql = " ".join(run.call_args.args[0].split())
+        assert "pg.scale_px_per_ft FROM icid.flags f LEFT JOIN icid.pir_pages pg" in sql
+        assert run.call_args.args[1] == (FLAG_ID,)

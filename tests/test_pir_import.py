@@ -146,6 +146,24 @@ class TestDrops:
         assert len(result.flags) == 5 and len(result.areas) == 1
         assert [(item.kind, item.flag_index) for item in result.dropped] == [("non_assessable_area", 0)]
 
+    def test_an_area_reaching_past_its_flag_is_dropped_saying_by_how_much(self):
+        raw = sample()
+        # Flag 0 is 5 x 4 ft at 15 px/ft, its middle at (100, 120): its right edge is at x 137.5. The 1 x 2 ft area,
+        # its middle moved onto that edge, has half of it (1 SF) outside
+        page_one(raw)["flags"][0]["non_assessable_areas"][0]["sketch_x"] = 137.5
+        result = prepared(raw)
+        assert len(result.flags) == 5 and len(result.areas) == 1
+        assert [(item.kind, item.flag_index, item.reason) for item in result.dropped] == [
+            ("non_assessable_area", 0, "extends past its flag's bounds by 1.00 SF")]
+
+    def test_without_the_files_scale_the_live_pages_is_used(self):
+        raw = sample()
+        page_one(raw)["scale_px_per_ft"] = None
+        page_one(raw)["flags"][0]["non_assessable_areas"][0]["sketch_x"] = 137.5
+        assert len(prepared(raw).areas) == 2  # no scale anywhere: it can't be told, so it is kept
+        result = prepare_import(SmartPirImport.model_validate(raw), PAGE_IDS, {PAY_ITEM}, page_scales={1: 15})
+        assert len(result.areas) == 1 and "extends past its flag's bounds" in result.dropped[0].reason
+
     def test_a_flag_index_at_a_dropped_flag(self):
         raw = sample()
         page_one(raw)["flags"][0]["shape"] = "hexagon"

@@ -37,6 +37,7 @@ def import_pir(
         pir_id, user.uuid, body, {page["page_number"]: page["pir_page_id"] for page in pages},
         {item["pay_item_uuid"] for item in pay_items},
         {item["pay_item_uuid"] for item in pay_items if flag_unit(item["unit"]) is not None},
+        {page["page_number"]: page.get("scale_px_per_ft") for page in pages},
     )
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to import the PIR")

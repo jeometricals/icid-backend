@@ -124,6 +124,21 @@ def list_flags_for_page(pir_page_id: UUID) -> Optional[list[dict[str, Any]]]:
     return run_query(sql, (pir_page_id,))
 
 
+def get_flag_placement(flag_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch where a flag sits on its page, for checking an area against it: its shape, dimensions and place, and its page's scale.
+    Takes the flag's id.
+    Returns [{shape, dimensions, sketch_x, sketch_y, rotation, scale_px_per_ft}] ([] for no such flag), or None on failure.
+    """
+    sql = """
+        SELECT f.shape, f.dimensions, f.sketch_x, f.sketch_y, f.rotation, pg.scale_px_per_ft
+        FROM icid.flags f
+        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id
+        WHERE f.id = %s;
+    """
+    return run_query(sql, (flag_id,))
+
+
 def get_flag(flag_id: UUID) -> Optional[dict[str, Any]]:
     """
     Fetch one flag, deleted or not.

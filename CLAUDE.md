@@ -22,7 +22,7 @@ every request to it.
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
-| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. **Sign-in and users:** `auth.py` (the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, `current_user` / `current_admin`, and the role, member and demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit). **IDRs:** `auto_general.py`, `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field, running the edit, keeping an auto-General in step), `idr_purge.py` (a permanent delete: the row, then its files in the three buckets), `attachments.py`, `quantities.py` (an IDR's pay items as `icid.quantities` rows: `extract_rows`, `quantity_rows_for_idr`, `write_quantities`), `disciplines.py` (report type to discipline and back). **Pay items:** `pay_items.py` (a pay item's field rules, for the form and the CSV), `pay_item_units.py` (bid units and their short forms; `FLAG_UNITS`), `pay_item_import.py` (a pay-item CSV), `budget_rollup.py` (budget against actual). **PIRs and flags:** `pir_image.py` (a PIR's scan as pages: the signed upload, the file's first bytes, rendering within the caps, replacing the pages, signing a page's URL), `flag_area.py` (an area from its shape, in square feet), `pir_import.py` (the Smart PIR import's checks), `idr_flags.py` (an IDR's flags, their rollup, the pay items they fence off and the export's "PIR Flags" lines), `progress_rollup.py` (progress from flags), `construction_measure.py`, `construction_sketch.py` and `construction_report.py` (the Construction Report: its measure, its sketch's geometry, and the PDF and ZIP), `assessment_summary.py` (the monthly .xlsx). **The export:** `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps both signatures, stores the file and signs its URL), `export_common.py` (shared layouts and stampers, and how a redline is drawn), `export_redlines.py` (the IDR's edits as each field's chain and each pay item's rows), one module per form (`export_general.py`: Gen Fr / Gen Bk / Report Cont; `export_swcb.py`: Conc Fr / Conc Bk; `export_ac.py`: AC Fr / AC Bk; `export_conc_mix.py`, `export_conc_cyl.py`; `export_attachments.py`: pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
+| `api/services/` | Logic spanning several queries or Storage. Endpoints call it; it never builds SQL. **Sign-in and users:** `auth.py` (the `AuthProvider` interface, `LocalAuthProvider` with bcrypt and JWTs, the `auth_provider` singleton, `current_user` / `current_admin`, and the role, member and demo-mode dependencies), `demo.py` (deleting a demo user at sign-out), `signatures.py` (a user's signature upload and confirm, and the copy an IDR keeps at submit). **IDRs:** `auto_general.py`, `field_edits.py` (a reviewer's edit: the field-path grammar, finding the field, running the edit, keeping an auto-General in step), `idr_purge.py` (a permanent delete: the row, then its files in the three buckets), `attachments.py`, `quantities.py` (an IDR's pay items as `icid.quantities` rows: `extract_rows`, `quantity_rows_for_idr`, `write_quantities`), `disciplines.py` (report type to discipline and back). **Pay items:** `pay_items.py` (a pay item's field rules, for the form and the CSV), `pay_item_units.py` (bid units and their short forms; `FLAG_UNITS`), `pay_item_import.py` (a pay-item CSV), `budget_rollup.py` (budget against actual). **PIRs and flags:** `pir_image.py` (a PIR's scan as pages: the signed upload, the file's first bytes, rendering within the caps, replacing the pages, signing a page's URL), `flag_area.py` (an area from its shape, in square feet), `pir_import.py` (the Smart PIR import's checks), `idr_flags.py` (an IDR's flags, their rollup, the pay items they fence off and the export's "PIR Flags" lines), `progress_rollup.py` (progress from flags), `construction_measure.py`, `construction_sketch.py`, `construction_slabs.py` and `construction_report.py` (the Construction Report: its measure, its sketch's geometry, its slabs, and the PDF and ZIP), `area_containment.py` (how much of a non-assessable area lies outside its flag), `assessment_summary.py` (the monthly .xlsx). **The export:** `export.py` (the dispatcher: loads the IDR, allocates and orders the sheets, numbers pages, stamps both signatures, stores the file and signs its URL), `export_common.py` (shared layouts and stampers, and how a redline is drawn), `export_redlines.py` (the IDR's edits as each field's chain and each pay item's rows), one module per form (`export_general.py`: Gen Fr / Gen Bk / Report Cont; `export_swcb.py`: Conc Fr / Conc Bk; `export_ac.py`: AC Fr / AC Bk; `export_conc_mix.py`, `export_conc_cyl.py`; `export_attachments.py`: pages copied from Sketch Cont) and `xlsx_template.py` (`WorkbookTemplate`: edits the .xlsx package XML directly — cells, text runs, styles, sheet copies, pictures, text boxes, print setup). |
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
@@ -969,7 +969,11 @@ Any change must follow these.
     same shapes and `DIMENSIONS_BY_SHAPE`, native page pixels); `display_order` ≥ 1 and unique per flag among live
     areas (`nas_flag_order_live_uq`: create is `ON CONFLICT DO NOTHING`, and edit checks with `NOT EXISTS`, each a
     409). Nobody adds one to a deleted flag or a flag on a replaced page. Their area is taken off the flag's (see
-    "Flags", net area).
+    "Flags", net area). **An area lies within its flag** (R1h.4, `api/services/area_containment.py`): create and edit
+    (the merged area) place both on their page as the sketch does (`placed_outline`, the flag's page scale read by
+    `get_flag_placement`) and refuse with 400 one more than 0.01 SF outside (`Non-assessable area <n> extends past flag
+    <id>'s bounds by X SF; ...`); the flag is cut into triangles, so a concave polygon is exact. Without a page scale or
+    a place it can't be told, and isn't refused. Changing a flag's own shape doesn't re-check its areas.
   - **Features** are point obstructions and sized features (`feature_type`: `manhole` `grate` `utility_cover`
     `hydrant` `fire_alarm` `tree_pit` `meter` `sign_or_meter` `mail_box` `telephone` `cellar_door` `pole`
     `detectable_warning` `other`). `area_impact` is `marker_only` (default), `subtract` or `sits_on_top`; the last
@@ -1021,7 +1025,8 @@ Any change must follow these.
     route checks it (and a pay item must be the project's); one that fails is **dropped** and listed in
     `dropped_items` with its kind, page, place and reason, and the rest go in. A page number the PIR has no live page
     for, or one listed twice, drops everything in that entry. An area whose flag is dropped goes with it; a feature
-    whose `flag_index` names a dropped flag is dropped. Nothing already on the pages changes, but a page's title block
+    whose `flag_index` names a dropped flag is dropped. An area reaching past its flag is dropped (`extends past its
+    flag's bounds by X SF`), checked at the entry's scale, else the live page's. Nothing already on the pages changes, but a page's title block
     is replaced and its scale and rotation set (re-working out its existing segments' lengths).
   - **One statement** (`import_pir_drawings`): data-modifying CTEs over one JSON parameter per table, as
     `bulk_upsert_pay_items` does, so what passed lands together or not at all. Flags get their ids in Python so
@@ -1089,7 +1094,7 @@ Any change must follow these.
     Non-Assessable = the rest, never below 0. Rows by `surveyed_thickness`; cost = assessable × `cost_per_sf_4in` (4"
     and 7" assessed as 4") or `cost_per_sf_7in`; no rate, no cost. Kept as `Decimal`, rounded for display.
   - **Sketch** (`construction_sketch.py`): outlines exactly as the frontend's `lib/flagGeometry.js`, the page's
-    rotation applied, fitted with 10% padding to the left two thirds of the band (R1h.3), room left round it. 422 when
+    rotation applied, fitted with 4% padding (R1h.4; 10% before) to the left of the band, room left round it. 422 when
     the flags are on more than one page or would print below `MIN_POINTS_PER_FOOT` (4) (`MULTI_SHEET_MESSAGE`, R1h.1's),
     or the page has no scale. North arrow from `pirs.north_bearing`, read on the upright page (not turned again by its
     rotation); none when unset.
@@ -1107,11 +1112,23 @@ Any change must follow these.
     dimensions (`shape_terms`: a trapezoid `0.5(a+b)` × w, a triangle `0.5(a)` × b, a polygon or an arc the Sub-Total
     alone), the non-assessable pieces, then Total − Non-Assessable = Assessable. Its totals are box 2's; when the pieces
     don't add up to it (an override, a subtracted feature, an area larger than its flag) an `Adjustment to box 2` row
-    carries the difference. More lines than fit at 6 pt is a 422 (`CALC_TOO_LONG_MESSAGE`).
+    carries the difference. More lines than fit at 6 pt is a 422 (`CALC_TOO_LONG_MESSAGE`). The 4" (with 7" assessed
+    as 4") and the 7" tables stand side by side when both have flags (`report_layout`: the panel `CALC_WIDTH_TWO`
+    wide, the sketch narrower), else one column `CALC_WIDTH` wide.
+  - **Sketch polish (R1h.4).** Flags that abut (an edge along another's, within 0.1 ft) and share thickness and
+    assessment are one slab (`slab_groups` in `construction_slabs.py`): drawn with one border and thin grey lines where
+    its flags meet (`edge_runs`), labelled once; a group whose flags overlap by more than 0.5 SF is drawn flag by flag.
+    Each slab is dimensioned (`_straps`): its width on a horizontal strap above (else below) and its height on a
+    vertical one left (else right), wherever it clears every piece, label and dimension; TAX MAP and CC stand a lane
+    (`STRAP_LANE`) off the drawing so a strap fits between. A driveway (an area, or a flag surveyed non-assessable,
+    for `driveway`) is its own material: dense 30-degree stripes, labelled `17.16' DW` (its width across the sheet). A
+    `curb_concrete_depressed` segment (a curb cut) is ticked at its ends and its length printed. No schema change:
+    there is no driveway feature or curb-cut segment type; these are the data that already model them.
   - **Certification:** the IDR's own inspector signature copy (`inspector_signature_path`, fetched through
     `fetch_signature_file` in `api/services/signatures.py`, as the IDR export does; best-effort, blank when it can't
-    be), its reporter as Inspected By, `idr_number`, and their initials with the day the IDR was approved. The PIR's
-    `as_built_signed_*` are never set, so they aren't used.
+    be), its reporter as Inspected By, `idr_number`, and their initials with the day the IDR was approved. The
+    signature is fitted to its own Print Sign Date cell at the strip's right end (`signature_box`, R1h.4), its
+    proportions kept, centred. The PIR's `as_built_signed_*` are never set, so they aren't used.
   - Downloads carry `Content-Disposition` (`{address}_construction_report.pdf`, `IDR_{number}_construction_reports.zip`),
     which CORS exposes (`expose_headers`). ~40–60 KB a page (`pageCompression`).
 - **Assessment Summary** (R1i; `api/v1/assessment_summary.py`, `api/queries/assessment_summary.py`,

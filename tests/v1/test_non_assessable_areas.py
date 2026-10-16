@@ -52,6 +52,17 @@ BODY = {"display_order": 1, "shape": "rectangle", "dimensions": {"L": 2, "W": 1.
         "reason": "driveway"}
 
 ON_PROJECT = [{"?column?": 1}]
+PLACEMENT = "api.v1.non_assessable_areas.get_flag_placement"
+# A 5 x 4 ft flag at 10 px/ft, its middle at (10, 12): it spans x -15..35, y -8..32 on its page
+PLACED_FLAG = {"shape": "rectangle", "dimensions": {"L": 5.0, "W": 4.0}, "sketch_x": 10.0, "sketch_y": 12.0,
+               "rotation": 0.0, "scale_px_per_ft": Decimal("10")}
+
+
+@pytest.fixture(autouse=True)
+def no_flag_place():
+    """Answer the flag's place for the within-its-flag check with no flag, so it passes, unless a test sets it."""
+    with patch(PLACEMENT, return_value=[]) as placement:
+        yield placement
 DEMO_READ_ONLY = {"detail": "Demo mode: flags are read-only"}
 
 # Where a write's parameters sit: the writable columns, then the computed area, then (on create) the creator
@@ -184,6 +195,42 @@ class TestCreateArea:
             response = admin_client.post(FLAG_AREAS_URL, json=BODY)
         assert response.status_code == 404 and response.json() == {"detail": "Flag not found"}
         run.assert_not_called()
+
+
+class TestWithinItsFlag:
+    def test_an_area_inside_its_flag_is_created(self, admin_client, no_flag_place):
+        no_flag_place.return_value = [PLACED_FLAG]
+        with patch(FLAGS, return_value=[FLAG_ROW]), patch(AREAS, return_value=[AREA_ROW]):
+            assert admin_client.post(FLAG_AREAS_URL, json=BODY).status_code == 201
+        no_flag_place.assert_called_once_with(FLAG_ID)
+
+    def test_an_area_reaching_past_its_flag_is_400_and_nothing_is_written(self, admin_client, no_flag_place):
+        no_flag_place.return_value = [PLACED_FLAG]
+        # 2 x 1.5 ft with its middle on the flag's right edge (x 35): half of it, 1.50 SF, outside
+        with patch(FLAGS, return_value=[FLAG_ROW]), patch(AREAS, return_value=[AREA_ROW]) as run:
+            response = admin_client.post(FLAG_AREAS_URL, json={**BODY, "sketch_x": 35})
+        assert response.status_code == 400
+        assert response.json() == {"detail": f"Non-assessable area 1 extends past flag {FLAG_ID}'s bounds by 1.50 SF; "
+                                             "please redraw or split across adjacent flags."}
+        run.assert_not_called()
+
+    def test_an_edit_that_moves_it_past_its_flag_is_400(self, admin_client, no_flag_place):
+        no_flag_place.return_value = [PLACED_FLAG]
+        with patch(AREAS, return_value=[AREA_ROW]) as run:
+            response = admin_client.patch(URL, json={"dimensions": {"L": 2, "W": 50}})
+        assert response.status_code == 400 and "extends past flag" in response.json()["detail"]
+        assert run.call_count == 1  # read, not written
+        no_flag_place.assert_called_once_with(FLAG_ID)
+
+    def test_without_a_scale_it_cant_be_told_and_is_allowed(self, admin_client, no_flag_place):
+        no_flag_place.return_value = [{**PLACED_FLAG, "scale_px_per_ft": None}]
+        with patch(FLAGS, return_value=[FLAG_ROW]), patch(AREAS, return_value=[AREA_ROW]):
+            assert admin_client.post(FLAG_AREAS_URL, json={**BODY, "sketch_x": 900}).status_code == 201
+
+    def test_a_flag_place_that_cant_be_read_is_500(self, admin_client, no_flag_place):
+        no_flag_place.return_value = None
+        with patch(FLAGS, return_value=[FLAG_ROW]), patch(AREAS, return_value=[AREA_ROW]):
+            assert admin_client.post(FLAG_AREAS_URL, json=BODY).status_code == 500
 
 
 class TestListAndReadAreas:

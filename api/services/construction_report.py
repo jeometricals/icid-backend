@@ -13,10 +13,17 @@ crossed through), numbered (1..n, A1..An) and labelled when the label fits; the 
 TAX MAP at scale when the title block has its width), the curb-to-curb at scale along the bottom (CC), the frontage
 street under it and the cross streets at the sides. The right third is the calculations panel
 (construction_measure.calc_groups), whose totals are box 2's.
+
+R1h.4 brings it closer still: flags that abut are drawn as one slab with light division lines (construction_slabs.py),
+each slab labelled once and dimensioned along a side where nothing else is (straps); a driveway is striped and labelled
+DW with its width; a depressed curb (a curb cut) is ticked at its ends and its length printed; the 4" and 7" tables
+stand side by side when both have flags (the sketch gives up the width); and the inspector's signature is fitted to its
+own Print Sign Date cell.
 """
 
 import io
 import logging
+import math
 import re
 import zipfile
 from dataclasses import dataclass
@@ -42,6 +49,7 @@ from api.services.construction_measure import CalcGroup, CalcRow, Measure, calc_
 from api.services.construction_sketch import (
     MULTI_SHEET_MESSAGE,
     Fit,
+    Point,
     SketchError,
     SketchItem,
     bounds_of,
@@ -51,6 +59,7 @@ from api.services.construction_sketch import (
     number_items,
     sketch_items,
 )
+from api.services.construction_slabs import edge_runs, group_bounds, slab_groups
 from api.services.export_common import signed_date
 from api.services.field_edits import initials
 from api.services.signatures import fetch_signature_file
@@ -60,13 +69,10 @@ logger = logging.getLogger(__name__)
 PAGE_WIDTH, PAGE_HEIGHT = landscape(letter)  # 792 x 612 points
 LEFT, RIGHT = 36.0, PAGE_WIDTH - 36.0
 FONT, BOLD, ITALIC, BOLD_ITALIC = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"
-# The band between box 3 and the KEY: x, bottom y, width, height. The sketch takes its left SKETCH_WIDTH points
+# The band between box 3 and the KEY: x, bottom y, width, height. The sketch takes its left part, the calculations
+# panel the rest (Layout): CALC_WIDTH for one column of tables, CALC_WIDTH_TWO for the 4" and 7" side by side
 BAND = (LEFT, 98.0, RIGHT - LEFT, 288.0)
-SKETCH_WIDTH = 480.0
-# Where the drawing is fitted: the sketch's part of the band less the room round it for the streets, PL, TAX MAP and CC
-PANE = (LEFT + 26.0, BAND[1] + 34.0, SKETCH_WIDTH - 52.0, BAND[3] - 76.0)
-# The calculations panel: the band's right third
-CALC_PANE = (LEFT + SKETCH_WIDTH + 4.0, BAND[1] + 4.0, RIGHT - LEFT - SKETCH_WIDTH - 10.0, BAND[3] - 8.0)
+CALC_WIDTH, CALC_WIDTH_TWO = 228.0, 300.0
 # Its title's height, and the least height a line of its tables may have
 CALC_TITLE_HEIGHT = 16.0
 MIN_CALC_LINE = 6.0
@@ -75,6 +81,13 @@ CALC_TOO_LONG_MESSAGE = ("This property has too many pieces for one sheet's calc
 # A label printed inside a shape, and a number's circle
 LABEL_PT = 6.5
 MARK_RADIUS = 4.5
+# A strap dimension: its text, and how far its line sits from the slab
+STRAP_PT = 6.0
+STRAP_GAP = 7.0
+# The lane a strap takes beside a slab, which the overall dimensions keep clear of
+STRAP_LANE = STRAP_GAP + STRAP_PT + 3
+# The certification strip's Print Sign Date cell, at its right end
+SIGN_CELL_WIDTH = 210.0
 CENT = Decimal("0.01")
 
 # Box 4's nine reasons, in the form's order: (the code a title block stores, the label); any other reason is dropped
@@ -90,6 +103,32 @@ CORNER_STATUSES = (("ped_ramp_installed", "Ped Ramp Installed ____"), ("no_ped_r
                    ("existing_ped_ramp", "Existing Ped Ramp"))
 CERTIFICATION = ("I certify that this survey has been updated to reflect the condition of the sidewalk found "
                  "immediately prior to replacement")
+
+
+@dataclass
+class Layout:
+    """How the band is shared: the sketch's width and where its drawing is fitted, the calculations panel, and its columns of tables."""
+
+    sketch_width: float
+    pane: tuple[float, float, float, float]
+    calc_pane: tuple[float, float, float, float]
+    columns: list[list[CalcGroup]]
+
+
+def report_layout(groups: list[CalcGroup]) -> Layout:
+    """
+    Share the band between the sketch and the calculations: one column of tables, or the 4" (and 7" assessed as 4") beside the 7" when both have flags, the panel wider and the sketch narrower for it.
+    Takes the calculations' groups (calc_groups).
+    Returns the Layout: the drawing fitted with room round it for the streets, PL, TAX MAP and CC.
+    """
+    left = [group for group in groups if group.thickness != "7in"]
+    right = [group for group in groups if group.thickness == "7in"]
+    columns = [left, right] if left and right else [groups]
+    calc_width = CALC_WIDTH_TWO if len(columns) == 2 else CALC_WIDTH
+    band_x, band_y, band_w, band_h = BAND
+    sketch_width = band_w - calc_width - 12.0
+    return Layout(sketch_width, (band_x + 26.0, band_y + 42.0, sketch_width - 52.0, band_h - 90.0),
+                  (band_x + sketch_width + 4.0, band_y + 4.0, calc_width, band_h - 8.0), columns)
 
 
 class ReportNotFound(Exception):
@@ -162,14 +201,16 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
         raise SketchError(MULTI_SHEET_MESSAGE)
     drawings = _read(list_page_drawings(pages)) if pages else {"features": [], "segments": []}
     items = sketch_items(flags, drawings)
-    fit = fit_to_pane(items, PANE, max(_width_ft(header.get("tb_tax_map_width_ft")),
-                                       _width_ft(header.get("tb_cc_curb_to_curb_ft"))))
     labels = number_items(flags, items)
     measure = compute_measure(flags, {"cost_per_sf_4in": header["cost_per_sf_4in"],
                                       "cost_per_sf_7in": header["cost_per_sf_7in"]})
     groups = calc_groups(flags, measure, labels)
-    if len(calc_lines(groups)) * MIN_CALC_LINE > CALC_PANE[3] - CALC_TITLE_HEIGHT:
+    layout = report_layout(groups)
+    if any(len(calc_lines(column)) * MIN_CALC_LINE > layout.calc_pane[3] - CALC_TITLE_HEIGHT
+           for column in layout.columns):
         raise SketchError(CALC_TOO_LONG_MESSAGE)
+    fit = fit_to_pane(items, layout.pane, max(_width_ft(header.get("tb_tax_map_width_ft")),
+                                              _width_ft(header.get("tb_cc_curb_to_curb_ft"))))
     signature = _signature(header["inspector_signature_path"], idr_id)
     content = draw_report(header, measure, items, fit, signature, north_degrees(header["north_bearing"]), labels,
                           groups)
@@ -308,10 +349,15 @@ def reason_text(reason: Optional[str]) -> str:
 
 def material_label(item: SketchItem) -> str:
     """
-    The label printed inside a flag or an area: 4" Conc. or 7" Conc. for an assessable flag, the reason for a flag surveyed non-assessable or an area.
+    The label printed inside a flag or an area: 4" Conc. or 7" Conc. for an assessable flag; for a driveway, its width and DW ("17.16' DW", its width across the sheet); the reason for any other flag surveyed non-assessable or area.
     Takes the item.
     Returns the label; "" for a feature or a segment.
     """
+    if material(item) == "driveway":
+        if not item.points:
+            return "DW"
+        min_x, _, max_x, _ = bounds_of(item.points)
+        return f"{width_text(Decimal(str(round(max_x - min_x, 2))))} DW"
     if item.kind == "area":
         return reason_text(item.source.get("reason"))
     if item.kind != "flag":
@@ -608,8 +654,24 @@ def _cross_hatch(c: Canvas, min_x: float, min_y: float, max_x: float, max_y: flo
     _lines_45(c, min_x, min_y, max_x, max_y, 5.0, rising=False)
 
 
+def _driveway(c: Canvas, min_x: float, min_y: float, max_x: float, max_y: float) -> None:
+    """
+    A driveway's fill: dense stripes at 30 degrees, as DOT's sheets mark DW.
+    Takes the canvas and the box to cover.
+    Returns nothing.
+    """
+    c.setStrokeColorRGB(0.45, 0.45, 0.45)
+    c.setLineWidth(0.3)
+    rise = math.tan(math.radians(30))
+    span = (max_y - min_y) / rise
+    x = min_x - span
+    while x <= max_x:
+        c.line(x, min_y, x + span, max_y)
+        x += 3.0
+
+
 # Each material's fill
-_FILLS = {"4in": _stipple, "7in": _diagonal, "non_assessable": _cross_hatch}
+_FILLS = {"4in": _stipple, "7in": _diagonal, "non_assessable": _cross_hatch, "driveway": _driveway}
 
 
 def _centre(points: list[tuple[float, float]]) -> tuple[float, float]:
@@ -682,10 +744,10 @@ def draw_north(c: Canvas, x: float, y: float, degrees: float, size: float = 14.0
     c.restoreState()
 
 
-def _draw_piece(c: Canvas, item: SketchItem, points: list[tuple[float, float]]) -> None:
+def _draw_piece(c: Canvas, item: SketchItem, points: list[tuple[float, float]], outline: bool = True) -> None:
     """
-    Draw a flag or a non-assessable area: white, filled by its material (_FILLS), outlined (an area more finely), and a flag surveyed non-assessable crossed through, as the KEY's Non-Assessable Flag.
-    Takes the canvas, the item and its points on the sheet.
+    Draw a flag or a non-assessable area: white, filled by its material (_FILLS), outlined (an area more finely; a flag of a slab is outlined by its slab instead), and a flag surveyed non-assessable crossed through, as the KEY's Non-Assessable Flag.
+    Takes the canvas, the item, its points on the sheet and whether to outline it.
     Returns nothing.
     """
     path = _path(c, points)
@@ -693,8 +755,9 @@ def _draw_piece(c: Canvas, item: SketchItem, points: list[tuple[float, float]]) 
     c.drawPath(path, stroke=0, fill=1)
     _fill_pattern(c, path, points, _FILLS[material(item)])
     c.setStrokeColorRGB(0, 0, 0)
-    c.setLineWidth(0.8 if item.kind == "flag" else 0.5)
-    c.drawPath(_path(c, points), stroke=1, fill=0)
+    if outline:
+        c.setLineWidth(0.8 if item.kind == "flag" else 0.5)
+        c.drawPath(_path(c, points), stroke=1, fill=0)
     if item.kind == "flag" and not item.source["surveyed_is_assessable"]:
         min_x, min_y, max_x, max_y = bounds_of(points)
         c.setLineWidth(0.5)
@@ -770,19 +833,61 @@ def piece_marks(item: SketchItem, points: list[tuple[float, float]],
     return marks
 
 
-def _draw_labels(c: Canvas, pieces: list[tuple[SketchItem, list[tuple[float, float]]]], labels: dict[str, str]) -> None:
+def _inside(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
     """
-    Print the pieces' labels and numbers over the drawing: every number (piece_marks) on top, and each material label (on white, as DOT's sheets box it) at its piece's middle when it fits there and clears every number and the labels printed before it, areas' first (an area usually sits at its flag's middle).
-    Takes the canvas, the flags and areas with their points on the sheet, and the labels (number_items).
+    Whether a point lies inside a polygon (even-odd rule).
+    Takes the point and the polygon's points.
+    Returns True when it does.
+    """
+    x, y = point
+    inside = False
+    for (x1, y1), (x2, y2) in zip(polygon, polygon[1:] + polygon[:1]):
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def label_spots(slabs: list[list[SketchItem]], areas: list[SketchItem],
+                place: Callable[[Point], tuple[float, float]]) -> list[tuple[str, tuple[float, float], Box]]:
+    """
+    Where the material labels go: each area's at its middle (first: an area usually sits at its flag's middle), each single flag's at its middle, and a slab's once, at its middle when that lies on one of its flags, else at its largest flag's; each with the box it must fit in (the piece's, or the slab's).
+    Takes the slabs (slab_groups), the areas and how a point in feet is placed on the sheet.
+    Returns (label, middle, box to fit) for each, in the order they are tried.
+    """
+    spots = []
+    for group in [[area] for area in areas] + slabs:
+        sheet = [[place(point) for point in item.points] for item in group]
+        box = bounds_of(point for points in sheet for point in points)
+        middle = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        if len(group) > 1 and not any(_inside(middle, points) for points in sheet):
+            largest = max(range(len(group)), key=lambda index: abs(_shoelace(sheet[index])))
+            middle = _centre(sheet[largest])
+        spots.append((material_label(group[0]), middle, box))
+    return spots
+
+
+def _shoelace(points: list[tuple[float, float]]) -> float:
+    """
+    A polygon's signed area.
+    Takes its points.
+    Returns the area (positive anticlockwise).
+    """
+    return sum(x1 * y2 - x2 * y1 for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1])) / 2
+
+
+def _draw_labels(c: Canvas, pieces: list[tuple[SketchItem, list[tuple[float, float]]]], labels: dict[str, str],
+                 spots: list[tuple[str, tuple[float, float], Box]], taken: list[Box]) -> None:
+    """
+    Print the labels and numbers over the drawing: every number (piece_marks) on top, and each material label (on white, as DOT's sheets box it) at its spot when it fits its box and clears every number and every label and dimension placed before it.
+    Takes the canvas, the flags and areas with their points on the sheet, the labels (number_items), the label spots (label_spots) and the boxes already taken (added to).
     Returns nothing.
     """
     marks = [mark for item, points in pieces for mark in piece_marks(item, points, labels)]
-    taken: list[Box] = [(x - MARK_RADIUS, y - MARK_RADIUS, x + MARK_RADIUS, y + MARK_RADIUS) for x, y, _, _ in marks]
-    for item, points in sorted(pieces, key=lambda piece: piece[0].kind != "area"):
-        text = material_label(item)
-        if not label_fits(text, points):
+    taken += [(x - MARK_RADIUS, y - MARK_RADIUS, x + MARK_RADIUS, y + MARK_RADIUS) for x, y, _, _ in marks]
+    for text, (x, y), fit_box in spots:
+        corners = [(fit_box[0], fit_box[1]), (fit_box[2], fit_box[3])]
+        if not label_fits(text, corners):
             continue
-        x, y = _centre(points)
         width = stringWidth(text, BOLD, LABEL_PT) + 4
         box = (x - width / 2, y - 4, x + width / 2, y + 4.5)
         if _overlaps(box, taken):
@@ -794,6 +899,30 @@ def _draw_labels(c: Canvas, pieces: list[tuple[SketchItem, list[tuple[float, flo
         _text(c, x, y - 2.2, text, LABEL_PT, BOLD, align="centre")
     for x, y, text, filled in marks:
         _mark(c, x, y, text, filled)
+
+
+def _draw_slab(c: Canvas, group: list[SketchItem], fit: Fit) -> None:
+    """
+    Draw a slab: its flags filled, then where they meet in thin light grey and its border at a flag's weight. A slab of one flag is that flag, outlined.
+    Takes the canvas, the slab's flags and the sketch's Fit.
+    Returns nothing.
+    """
+    if len(group) == 1:
+        _draw_piece(c, group[0], [fit.place(point) for point in group[0].points])
+        return
+    for item in group:
+        _draw_piece(c, item, [fit.place(point) for point in item.points], outline=False)
+    runs = edge_runs(group)
+    c.setStrokeColorRGB(0.6, 0.6, 0.6)
+    c.setLineWidth(0.3)
+    for run in runs:
+        if run.inner:
+            c.line(*fit.place(run.start), *fit.place(run.end))
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(0.8)
+    for run in runs:
+        if not run.inner:
+            c.line(*fit.place(run.start), *fit.place(run.end))
 
 
 def _draw_item(c: Canvas, item: SketchItem, fit: Fit) -> None:
@@ -822,6 +951,27 @@ def _draw_item(c: Canvas, item: SketchItem, fit: Fit) -> None:
             c.setDash(4, 2)
         c.drawPath(_path(c, points, close=False), stroke=1, fill=0)
         c.setDash([], 0)
+        if item.source["segment_type"] == "curb_concrete_depressed":
+            _curb_cut(c, item, points)
+
+
+def _curb_cut(c: Canvas, item: SketchItem, points: list[tuple[float, float]]) -> None:
+    """
+    Mark a depressed curb (a curb cut): a tick across each end, and its length (from its points, in feet) beside its middle stretch.
+    Takes the canvas, the segment and its points on the sheet.
+    Returns nothing.
+    """
+    length = sum(math.dist(a, b) for a, b in zip(item.points, item.points[1:]))
+    c.setLineWidth(0.6)
+    for end, towards in ((points[0], points[1]), (points[-1], points[-2])):
+        dx, dy = towards[0] - end[0], towards[1] - end[1]
+        size = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / size * 4, dx / size * 4
+        c.line(end[0] - nx, end[1] - ny, end[0] + nx, end[1] + ny)
+    middle = len(points) // 2
+    a, b = points[middle - 1], points[middle]
+    _text(c, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 9, width_text(Decimal(str(round(length, 2)))), STRAP_PT,
+          BOLD_ITALIC, align="centre")
 
 
 def _arrowhead(c: Canvas, x: float, y: float, pointing_left: bool) -> None:
@@ -851,17 +1001,22 @@ def _dimension(c: Canvas, left: float, right: float, y: float, text: str) -> Non
     _text(c, (left + right) / 2, y + 2, text, 6.5, align="centre")
 
 
-def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit) -> None:
+def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, sketch_width: float) -> list[Box]:
     """
     Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at each end, the tax map's width at scale between them when known, else the drawing's ends), the curb-to-curb at scale along the bottom (CC), the frontage street under it and the cross streets up the sides.
-    Takes the canvas, the header row (tb_ streets and widths), the items and their Fit.
-    Returns nothing.
+    Takes the canvas, the header row (tb_ streets and widths), the items, their Fit and the sketch's width.
+    Returns the boxes its dimensions and PLs take, for the straps to keep clear of.
     """
+    c.setFillColorRGB(0, 0, 0)
+    c.setStrokeColorRGB(0, 0, 0)
     min_x, min_y, max_x, max_y = bounds_of(fit.place(point) for item in items if item.kind in ("flag", "area")
                                            for point in item.points)
     middle = (min_x + max_x) / 2
     tax_map, curb = header.get("tb_tax_map_width_ft"), header.get("tb_cc_curb_to_curb_ft")
-    line_y = max_y + 16
+    # The overall dimensions stand a strap's lane off the drawing, so a slab's strap can sit between them
+    line_y = max_y + STRAP_LANE + 6
+    taken: list[Box] = [(min(min_x, middle - float(tax_map or 0) * fit.points_per_foot / 2) - 8, line_y - 4,
+                         max(max_x, middle + float(tax_map or 0) * fit.points_per_foot / 2) + 8, line_y + 16)]
     if tax_map:
         half = float(tax_map) * fit.points_per_foot / 2
         ends = (middle - half, middle + half)
@@ -874,41 +1029,107 @@ def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: 
         _text(c, x, line_y + 9, "PL", 6.5, BOLD, align="centre")
     if curb:
         half = float(curb) * fit.points_per_foot / 2
-        _dimension(c, middle - half, middle + half, min_y - 12, f"CC= {width_text(curb)}")
+        curb_y = min_y - STRAP_LANE - 4
+        _dimension(c, middle - half, middle + half, curb_y, f"CC= {width_text(curb)}")
+        taken.append((middle - half - 4, curb_y - 4, middle + half + 4, curb_y + 9))
     band_x, band_y, _, band_h = BAND
     if header.get("tb_frontage_street"):
         _text(c, middle, band_y + 6, header["tb_frontage_street"], 8.5, BOLD_ITALIC,
-              SKETCH_WIDTH - 60, "centre")
+              sketch_width - 60, "centre")
     for street, side, angle in ((header.get("tb_cross_street_left"), band_x + 13, 90),
-                                (header.get("tb_cross_street_right"), band_x + SKETCH_WIDTH - 13, 270)):
+                                (header.get("tb_cross_street_right"), band_x + sketch_width - 13, 270)):
         if street:
             c.saveState()
             c.translate(side, band_y + band_h / 2)
             c.rotate(angle)
             _text(c, 0, -3, street, 8.5, BOLD_ITALIC, band_h - 70, "centre")
             c.restoreState()
+    return taken
+
+
+def _strap(c: Canvas, start: float, end: float, at: float, text: str, vertical: bool, text_after: bool) -> None:
+    """
+    Draw a strap dimension: a thin line with an arrowhead at each end and its length in bold italic beside it.
+    Takes the canvas, where the line starts and ends along its run, where it sits across it, the text, whether it runs up the sheet, and whether its text goes after the line (above, or right) or before it (below, or left).
+    Returns nothing.
+    """
+    c.saveState()
+    if vertical:
+        c.translate(at, 0)
+        c.rotate(90)
+        at, text_after = 0.0, not text_after
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setFillColorRGB(0, 0, 0)
+    c.setLineWidth(0.4)
+    c.line(start, at, end, at)
+    for x in (start, end):
+        c.line(x, at - 2.5, x, at + 2.5)
+    _arrowhead(c, start, at, True)
+    _arrowhead(c, end, at, False)
+    _text(c, (start + end) / 2, at + 2 if text_after else at - STRAP_PT - 1, text, STRAP_PT, BOLD_ITALIC,
+          align="centre")
+    c.restoreState()
+
+
+def _straps(c: Canvas, slabs: list[list[SketchItem]], fit: Fit, taken: list[Box], room: Box) -> None:
+    """
+    Dimension each slab, as DOT's sheets do: its full width along a horizontal strap (above it, else below) and its full height along a vertical one (left of it, else right), each where it clears every piece, label, dimension and strap already placed and stays in the sketch's room; a strap that fits nowhere is left out.
+    Takes the canvas, the slabs (slab_groups), the sketch's Fit, the boxes already taken (added to) and the room the straps must stay in.
+    Returns nothing.
+    """
+    inside = lambda box: room[0] <= box[0] and box[2] <= room[2] and room[1] <= box[1] and box[3] <= room[3]  # noqa: E731
+    for group in slabs:
+        feet_box = group_bounds(group)
+        x0, y1 = fit.place((feet_box[0], feet_box[1]))
+        x1, y0 = fit.place((feet_box[2], feet_box[3]))
+        width = width_text(Decimal(str(round(feet_box[2] - feet_box[0], 2))))
+        height = width_text(Decimal(str(round(feet_box[3] - feet_box[1], 2))))
+        tall = STRAP_LANE
+        horizontal = ((y1 + STRAP_GAP, (x0, y1 + 2, x1, y1 + tall), True),
+                      (y0 - STRAP_GAP, (x0, y0 - tall, x1, y0 - 2), False))
+        for at, box, after in horizontal:
+            if inside(box) and not _overlaps(box, taken):
+                _strap(c, x0, x1, at, width, False, after)
+                taken.append(box)
+                break
+        vertical = ((x0 - STRAP_GAP, (x0 - tall, y0, x0 - 2, y1), False),
+                    (x1 + STRAP_GAP, (x1 + 2, y0, x1 + tall, y1), True))
+        for at, box, after in vertical:
+            if inside(box) and not _overlaps(box, taken):
+                _strap(c, y0, y1, at, height, True, after)
+                taken.append(box)
+                break
 
 
 def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, north: Optional[float],
-            labels: dict[str, str]) -> None:
+            labels: dict[str, str], sketch_width: float) -> None:
     """
-    Draw the sketch, in the band's left part: segments under flags, flags under their areas, features on top, then the pieces' labels and numbers over all; its perimeter (_perimeter); the north arrow when the bearing is known.
-    Takes the canvas, the header row, the items, their Fit, the north arrow's direction (None: no arrow) and the labels (number_items).
+    Draw the sketch, in the band's left part: segments, then the flags as slabs (construction_slabs), their areas, features on top; its perimeter (_perimeter); then the labels and numbers, and the straps where they find room; the north arrow when the bearing is known.
+    Takes the canvas, the header row, the items, their Fit, the north arrow's direction (None: no arrow), the labels (number_items) and the sketch's width.
     Returns nothing.
     """
     x, y, _, h = BAND
+    slabs = slab_groups(items)
     c.saveState()
-    c.clipPath(_path(c, [(x, y), (x + SKETCH_WIDTH, y), (x + SKETCH_WIDTH, y + h), (x, y + h)]), stroke=0, fill=0)
-    for kind in ("segment", "flag", "area", "feature"):
+    c.clipPath(_path(c, [(x, y), (x + sketch_width, y), (x + sketch_width, y + h), (x, y + h)]), stroke=0, fill=0)
+    for item in items:
+        if item.kind == "segment":
+            _draw_item(c, item, fit)
+    for group in slabs:
+        _draw_slab(c, group, fit)
+    for kind in ("area", "feature"):
         for item in items:
             if item.kind == kind:
                 _draw_item(c, item, fit)
-    _draw_labels(c, [(item, [fit.place(point) for point in item.points]) for item in items
-                     if item.kind in ("flag", "area")], labels)
-    _perimeter(c, header, items, fit)
+    taken = _perimeter(c, header, items, fit, sketch_width)
+    pieces = [(item, [fit.place(point) for point in item.points]) for item in items if item.kind in ("flag", "area")]
+    spots = label_spots(slabs, [item for item in items if item.kind == "area"], fit.place)
+    _draw_labels(c, pieces, labels, spots, taken)
+    taken += [bounds_of(points) for _, points in pieces]
+    _straps(c, slabs, fit, taken, (x + 22, y + 16, x + sketch_width - 22, y + h - 4))
     c.restoreState()
     if north is not None:
-        draw_north(c, x + SKETCH_WIDTH - 40, y + h - 22, north)
+        draw_north(c, x + sketch_width - 40, y + h - 22, north)
 
 
 # The calculations tables' columns, as shares of the panel's width: Area, Length, x, Width, Sub-Total
@@ -987,21 +1208,26 @@ def _calc_line(c: Canvas, line: tuple[Any, ...], x: float, y: float, w: float, h
         cell(4, calc_amount(line[3]), BOLD, "right")
 
 
-def _calculations(c: Canvas, groups: list[CalcGroup]) -> None:
+def _calculations(c: Canvas, layout: Layout) -> None:
     """
-    Draw the calculations panel in the band's right third: its title, then each thickness's tables line by line, the lines as tall as the panel allows (at most 10 points, at least MIN_CALC_LINE, which _render checks).
-    Takes the canvas and the groups (calc_groups).
+    Draw the calculations panel: its title, then its columns of tables (the 4" and the 7" side by side when both have flags), each line by line, every line as tall as the longest column allows (at most 10 points, at least MIN_CALC_LINE, which _render checks).
+    Takes the canvas and the Layout (calc_pane, columns).
     Returns nothing.
     """
-    x, y, w, h = CALC_PANE
+    x, y, w, h = layout.calc_pane
     _text(c, x + w / 2, y + h - 11, "Calculations", 9, BOLD_ITALIC, align="centre")
-    lines = calc_lines(groups)
-    if not lines:
+    columns = [calc_lines(column) for column in layout.columns]
+    longest = max((len(lines) for lines in columns), default=0)
+    if not longest:
         return
-    line_h = min(10.0, (h - CALC_TITLE_HEIGHT) / len(lines))
+    line_h = min(10.0, (h - CALC_TITLE_HEIGHT) / longest)
     top = y + h - CALC_TITLE_HEIGHT
-    for index, line in enumerate(lines):
-        _calc_line(c, line, x, top - (index + 1) * line_h, w, line_h)
+    gap = 4.0
+    width = (w - gap * (len(columns) - 1)) / len(columns)
+    for number, lines in enumerate(columns):
+        left = x + number * (width + gap)
+        for index, line in enumerate(lines):
+            _calc_line(c, line, left, top - (index + 1) * line_h, width, line_h)
 
 
 _KEY = (("utility_cover", "Utility Cover"), ("hydrant", "Hydrant"), ("sign_or_meter", "Sign or Meter"),
@@ -1034,22 +1260,34 @@ def _certification(c: Canvas, header: dict[str, Any], signature: Optional[ImageR
     """
     x, y, w, h = LEFT, 14.0, RIGHT - LEFT, 48.0
     _box(c, x, y, w, h)
+    cell_x = x + w - SIGN_CELL_WIDTH
     _text(c, x + 6, y + h - 10, "DIFFERENCES FROM PRELIMINARY INSPECTION", 7, BOLD)
-    _text(c, x + 6, y + h - 20, CERTIFICATION, 6.5, ITALIC, width=w - 12)
+    _text(c, x + 6, y + h - 20, CERTIFICATION, 6.5, ITALIC, width=cell_x - x - 12)
     inspector = _name(header.get("reporter_first_name"), header.get("reporter_last_name"))
     _text(c, x + 6, y + 8, "Inspected By", 7, BOLD)
     _text(c, x + 62, y + 8, inspector, 7.5, width=170)
     _text(c, x + 250, y + 8, "IR #", 7, BOLD)
     _text(c, x + 272, y + 8, header.get("idr_number") or "", 7.5, width=60)
-    line_x, line_w = x + 360, 190.0
+    c.setLineWidth(0.6)
+    c.line(cell_x, y, cell_x, y + h)
     c.setLineWidth(0.4)
-    c.line(line_x, y + 6, line_x + line_w, y + 6)
+    c.line(cell_x + 4, y + 10, x + w - 4, y + 10)
+    box = signature_box(cell_x, y, h)
     if signature is not None:
-        c.drawImage(signature, line_x, y + 7, line_w, 26, preserveAspectRatio=True, anchor="c", mask="auto")
-    _text(c, line_x + line_w / 2, y + 0.5, "Print Sign Date", 5.5, ITALIC, align="centre")
+        c.drawImage(signature, *box, preserveAspectRatio=True, anchor="c", mask="auto")
+    _text(c, cell_x + 4, y + 3, "Print Sign Date", 5.5, ITALIC)
     stamp = " ".join(part for part in (initials(header.get("reporter_first_name"), header.get("reporter_last_name")),
                                        iso_day(header.get("re_signed_at"))) if part)
-    _text(c, x + w - 6, y + 8, stamp, 7.5, BOLD, align="right")
+    _text(c, x + w - 5, y + 3, stamp, 7, BOLD, align="right")
+
+
+def signature_box(cell_x: float, y: float, h: float) -> tuple[float, float, float, float]:
+    """
+    Where the signature is fitted: the Print Sign Date cell above its line, a margin round it. The image keeps its proportions and is centred in it.
+    Takes the cell's left edge, the strip's bottom and its height.
+    Returns (x, bottom y, width, height).
+    """
+    return cell_x + 6, y + 11.5, SIGN_CELL_WIDTH - 12, h - 15
 
 
 def draw_report(header: dict[str, Any], measure: Measure, items: list[SketchItem], fit: Fit,
@@ -1057,7 +1295,7 @@ def draw_report(header: dict[str, Any], measure: Measure, items: list[SketchItem
                 groups: list[CalcGroup]) -> bytes:
     """
     Draw a Construction Report on one letter-landscape page.
-    Takes the header row (get_report_header), the Measure, the sketch items and their Fit, the signature image (or None), the north arrow's direction (or None), the pieces' labels (number_items) and the calculations (calc_groups).
+    Takes the header row (get_report_header), the Measure, the sketch items and their Fit (fitted to report_layout's pane), the signature image (or None), the north arrow's direction (or None), the pieces' labels (number_items) and the calculations (calc_groups).
     Returns the PDF's bytes.
     """
     buffer = io.BytesIO()
@@ -1071,8 +1309,9 @@ def draw_report(header: dict[str, Any], measure: Measure, items: list[SketchItem
     c.setStrokeColorRGB(0, 0, 0)
     c.setLineWidth(0.8)
     c.rect(*BAND)
-    _sketch(c, header, items, fit, north, labels)
-    _calculations(c, groups)
+    layout = report_layout(groups)
+    _sketch(c, header, items, fit, north, labels, layout.sketch_width)
+    _calculations(c, layout)
     _key(c)
     _certification(c, header, signature)
     c.showPage()
