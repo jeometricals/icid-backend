@@ -79,6 +79,8 @@ FONT, BOLD, ITALIC, BOLD_ITALIC = "Helvetica", "Helvetica-Bold", "Helvetica-Obli
 # panel the rest (Layout): CALC_WIDTH for one column of tables, CALC_WIDTH_TWO for the 4" and 7" side by side
 BAND = (LEFT, 98.0, RIGHT - LEFT, 288.0)
 CALC_WIDTH, CALC_WIDTH_TWO = 228.0, 300.0
+# One column's tables split over two (a long sheet's): narrower than CALC_WIDTH_TWO, so a long sketch keeps its scale
+CALC_WIDTH_SPLIT = 240.0
 # Its title's height, and the least height a line of its tables may have
 CALC_TITLE_HEIGHT = 16.0
 MIN_CALC_LINE = 6.0
@@ -131,22 +133,42 @@ class Layout:
     pane: tuple[float, float, float, float]
     calc_pane: tuple[float, float, float, float]
     columns: list[list[CalcGroup]]
+    # One column's tables run on into a second, when they are too long for one (panel_columns)
+    split: bool = False
 
 
-def report_layout(groups: list[CalcGroup]) -> Layout:
+def report_layout(groups: list[CalcGroup], split: bool = False) -> Layout:
     """
-    Share the band between the sketch and the calculations: one column of tables, or the 4" (and 7" assessed as 4") beside the 7" when both have flags, the panel wider and the sketch narrower for it.
-    Takes the calculations' groups (calc_groups).
+    Share the band between the sketch and the calculations: one column of tables, or the 4" (and 7" assessed as 4") beside the 7" when both have flags, or one column's tables running on into a second when split; the panel wider and the sketch narrower for two columns.
+    Takes the calculations' groups (calc_groups) and whether to split one column's tables over two.
     Returns the Layout: the drawing fitted with room round it for the streets, PL, TAX MAP and CC.
     """
     left = [group for group in groups if group.thickness != "7in"]
     right = [group for group in groups if group.thickness == "7in"]
     columns = [left, right] if left and right else [groups]
-    calc_width = CALC_WIDTH_TWO if len(columns) == 2 else CALC_WIDTH
+    split = split and len(columns) == 1
+    calc_width = CALC_WIDTH_TWO if len(columns) == 2 else CALC_WIDTH_SPLIT if split else CALC_WIDTH
     band_x, band_y, band_w, band_h = BAND
     sketch_width = band_w - calc_width - 12.0
     return Layout(sketch_width, (band_x + 26.0, band_y + 42.0, sketch_width - 52.0, band_h - 90.0),
-                  (band_x + sketch_width + 4.0, band_y + 4.0, calc_width, band_h - 8.0), columns)
+                  (band_x + sketch_width + 4.0, band_y + 4.0, calc_width, band_h - 8.0), columns, split)
+
+
+def panel_columns(layout: Layout, extra_lines: list[tuple[Any, ...]]) -> list[list[tuple[Any, ...]]]:
+    """
+    The calculations panel's columns, line by line: each column's tables (calc_lines), the last ending with the extra lines; when the layout is split, the one column's lines run on into a second at about half, never leaving a table's title or its column heads at the foot of the first.
+    Takes the Layout and the lines the last column adds.
+    Returns the columns' lines.
+    """
+    columns = [calc_lines(column) for column in layout.columns]
+    columns[-1] = columns[-1] + extra_lines
+    if not layout.split:
+        return columns
+    lines = columns[0]
+    cut = (len(lines) + 1) // 2
+    while 0 < cut < len(lines) and lines[cut - 1][0] in ("title", "heads"):
+        cut -= 1
+    return [lines[:cut], lines[cut:]]
 
 
 @dataclass
@@ -252,9 +274,8 @@ def _too_long(layout: Layout, extra_lines: list[tuple[Any, ...]]) -> bool:
     Takes the sheet's Layout and the lines its last column adds.
     Returns True when a column is too long.
     """
-    columns = [calc_lines(column) for column in layout.columns]
-    columns[-1] = columns[-1] + extra_lines
-    return any(len(lines) * MIN_CALC_LINE > layout.calc_pane[3] - CALC_TITLE_HEIGHT for lines in columns)
+    return any(len(lines) * MIN_CALC_LINE > layout.calc_pane[3] - CALC_TITLE_HEIGHT
+               for lines in panel_columns(layout, extra_lines))
 
 
 def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
@@ -282,7 +303,8 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
     for page_id in pages or [None]:
         page_flags = [flag for flag in flags if flag["pir_page_id"] == page_id]
         number = numbers.get(page_id)
-        page_drawings = {kind: [row for row in drawings[kind] if row.get("pir_page_id") == page_id]
+        # The drawings come back as JSON, their page ids as text
+        page_drawings = {kind: [row for row in drawings[kind] if str(row.get("pir_page_id")) == str(page_id)]
                          for kind in ("features", "segments")}
         page_lines = [{**line, "caption": match_line_caption(line["label"], number, label_pages, sheet_of_page)}
                       for line in lines if line["pir_page_id"] == page_id]
@@ -298,6 +320,9 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
         groups = calc_groups(page_flags, compute_measure(page_flags, rates) if many else measure, labels)
         layout = report_layout(groups)
         extra = total_lines(measure) if many and index == len(per_page) - 1 else []
+        if _too_long(layout, extra):
+            # One table too long for its column runs on into a second
+            layout = report_layout(groups, split=True)
         if _too_long(layout, extra):
             raise SketchError(CALC_TOO_LONG_MESSAGE if not many else
                               f"PIR page {number} has too many pieces for one sheet's calculations panel; split its "
@@ -807,6 +832,8 @@ def draw_glyph(c: Canvas, kind: str, x: float, y: float, size: float = 7.0) -> N
     c.setFillColorRGB(0, 0, 0)
     if kind == "hydrant":
         c.circle(x, y, half * 0.8, stroke=1, fill=1)
+    elif kind == "detectable_warning":
+        _text(c, x, y - 2, "DWS", 6, BOLD, align="centre")
     elif kind == "pole":
         c.circle(x, y, half * 0.8)
         c.line(x - half * 0.8, y, x + half * 0.8, y)
@@ -1228,7 +1255,7 @@ def _straps(c: Canvas, slabs: list[list[SketchItem]], fit: Fit, taken: list[Box]
 
 def _match_line(c: Canvas, item: SketchItem, fit: Fit) -> None:
     """
-    Draw a match line at its endpoints as its page places them: a heavy dashed line, a circle with its letter at each end, and its caption along it.
+    Draw a match line at its endpoints as its page places them: a heavy dashed line, a circle with its letter at each end, and its caption along it, on the side away from the drawing.
     Takes the canvas, the line (its source carries label and caption) and the sheet's Fit.
     Returns nothing.
     """
@@ -1247,13 +1274,18 @@ def _match_line(c: Canvas, item: SketchItem, fit: Fit) -> None:
         c.circle(x, y, MATCH_LINE_RADIUS, stroke=1, fill=1)
         c.setFillColorRGB(0, 0, 0)
         _text(c, x, y - 2.2, label, 6.5, BOLD, align="centre")
-    # The caption along the line, reading left to right, a little to its side
+    # The caption along the line, reading left to right, on the side away from the drawing (the pane's middle)
     angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
     if angle > 90 or angle <= -90:
         angle += 180
-    c.translate((x1 + x2) / 2, (y1 + y2) / 2)
+    middle_x, middle_y = (x1 + x2) / 2, (y1 + y2) / 2
+    pane_x, pane_y, pane_w, pane_h = fit.pane
+    radians = math.radians(angle)
+    # The caption's own "up" on the sheet; when it points at the drawing, the caption goes below the line instead
+    towards = (-math.sin(radians)) * (pane_x + pane_w / 2 - middle_x) + math.cos(radians) * (pane_y + pane_h / 2 - middle_y)
+    c.translate(middle_x, middle_y)
     c.rotate(angle)
-    _text(c, 0, 4, caption, 6, BOLD, align="centre")
+    _text(c, 0, -11 if towards > 0 else 7, caption, 6, BOLD, align="centre")
     c.restoreState()
 
 
@@ -1281,6 +1313,10 @@ def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit
         if item.kind == "match_line":
             _match_line(c, item, fit)
     taken = _perimeter(c, header, items, fit, sketch_width)
+    # A match line and its caption, on either side, keep the straps away
+    taken += [(min(xs) - 14, min(ys) - 4, max(xs) + 14, max(ys) + 4)
+              for xs, ys in ([[fit.place(point)[0] for point in item.points], [fit.place(point)[1] for point in item.points]]
+                             for item in items if item.kind == "match_line")]
     pieces = [(item, [fit.place(point) for point in item.points]) for item in items if item.kind in ("flag", "area")]
     spots = label_spots(slabs, [item for item in items if item.kind == "area"], fit.place)
     _draw_labels(c, pieces, labels, spots, taken)
@@ -1369,14 +1405,13 @@ def _calc_line(c: Canvas, line: tuple[Any, ...], x: float, y: float, w: float, h
 
 def _calculations(c: Canvas, layout: Layout, extra_lines: Optional[list[tuple[Any, ...]]] = None) -> None:
     """
-    Draw the calculations panel: its title, then its columns of tables (the 4" and the 7" side by side when both have flags), each line by line, every line as tall as the longest column allows (at most 10 points, at least MIN_CALC_LINE, which _render checks); the last column ends with the extra lines (the whole property's totals on the last of several sheets).
+    Draw the calculations panel: its title, then its columns of tables (the 4" and the 7" side by side when both have flags, or one column's tables running on into a second, panel_columns), each line by line, every line as tall as the longest column allows (at most 10 points, at least MIN_CALC_LINE, which _render checks); the last column ends with the extra lines (the whole property's totals on the last of several sheets).
     Takes the canvas, the Layout (calc_pane, columns) and the extra lines (none when None).
     Returns nothing.
     """
     x, y, w, h = layout.calc_pane
     _text(c, x + w / 2, y + h - 11, "Calculations", 9, BOLD_ITALIC, align="centre")
-    columns = [calc_lines(column) for column in layout.columns]
-    columns[-1] = columns[-1] + (extra_lines or [])
+    columns = panel_columns(layout, extra_lines or [])
     longest = max((len(lines) for lines in columns), default=0)
     if not longest:
         return

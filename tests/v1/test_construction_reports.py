@@ -90,7 +90,8 @@ def report_query(found=({"idr_id": IDR_ID},), header=HEADER, flags=FLAGS, drawin
         if "AS areas" in sql:
             return flags
         if "AS features" in sql:
-            return [{kind: [{"pir_page_id": PAGE_ID, **row} for row in rows] for kind, rows in drawings.items()}]
+            # As jsonb_build_object returns them: the page id as text
+            return [{kind: [{"pir_page_id": str(PAGE_ID), **row} for row in rows] for kind, rows in drawings.items()}]
         if "WHERE p.id IN" in sql:
             return properties or []
         raise AssertionError(f"unexpected statement: {sql[:80]}")
@@ -325,11 +326,26 @@ class TestPropertyReport:
             text = pdf_text(admin_client.get(URL).content)
         assert '4" Conc.' in text and "Grass" in text and "A1" in text
 
-    def test_too_many_pieces_for_the_calculations_panel_is_422(self, admin_client, storage):
+    def test_a_table_too_long_for_one_column_runs_on_into_a_second(self, admin_client, storage):
         flags = [{**flag_row(1, "4in", "25", "25", x=(n % 8) * 0.2), "id": UUID(int=n + 1)} for n in range(45)]
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)),                 patch("api.services.construction_report._calc_line", wraps=construction_report._calc_line) as line:
+            response = admin_client.get(URL)
+        assert response.status_code == 200
+        # The rows' left edges: two columns
+        assert len({round(call.args[2], 1) for call in line.call_args_list}) == 2
+
+    def test_too_many_pieces_even_for_two_columns_is_422(self, admin_client, storage):
+        flags = [{**flag_row(1, "4in", "25", "25", x=(n % 8) * 0.2), "id": UUID(int=n + 1)} for n in range(90)]
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
             response = admin_client.get(URL)
         assert response.status_code == 422 and "calculations panel" in response.json()["detail"]
+
+    def test_a_split_column_never_ends_on_a_title_or_its_heads(self):
+        layout = construction_report.Layout(0, (0, 0, 0, 0), (0, 0, 300, 280), [[]], split=True)
+        lines = [("title", "a"), ("heads",), ("row", 1), ("total", 1), ("title", "b"), ("heads",), ("row", 2)]
+        with patch("api.services.construction_report.calc_lines", return_value=lines):
+            first, second = construction_report.panel_columns(layout, [])
+        assert first[-1][0] not in ("title", "heads") and first + second == lines
 
     def test_abutting_flags_are_one_slab_dimensioned_once(self, admin_client, storage):
         # Two 5 x 5 4" flags side by side (at 24 px/ft, 120 px apart): one 10.00' by 5.00' slab, labelled once

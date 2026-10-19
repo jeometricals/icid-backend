@@ -1124,7 +1124,8 @@ Any change must follow these.
     (409 `Match line "A" is already on this page` / `... on pages 1 and 2`; the statements check it too). The report
     places both endpoints with the sheet's transform and draws the dashed line, a circled letter at each end and the
     caption `MATCH LINE "A" — SEE SHEET 2 OF 2`, or `— SEE PIR PAGE 3` when the partner page doesn't print, or the label
-    alone (`match_line_caption`). Routes: `GET /v1/pirs/{id}/match-lines`, `GET`/`POST /v1/pir-pages/{id}/match-lines`,
+    alone (`match_line_caption`), on the side of the line away from the drawing; the straps keep clear of it. A sheet's
+    features and segments are its page's (`list_page_drawings` returns page ids as text, compared as text). Routes: `GET /v1/pirs/{id}/match-lines`, `GET`/`POST /v1/pir-pages/{id}/match-lines`,
     `GET`/`PATCH`/`DELETE /v1/match-lines/{id}`, for the project's members as features are (`match_line_member`; demo
     users read). Soft delete only; replacing the scan retires them. There is no drawing tool yet (R1h.1b): lines come
     from the Smart PIR import or these routes. Progress, the Assessment Summary, the export, quantities and IDR claims
@@ -1166,8 +1167,10 @@ Any change must follow these.
     dimensions (`shape_terms`: a trapezoid `0.5(a+b)` × w, a triangle `0.5(a)` × b, a polygon or an arc the Sub-Total
     alone), the non-assessable pieces, then Total − Non-Assessable = Assessable. Its totals are box 2's; when the pieces
     don't add up to it (an override, a subtracted feature, an area larger than its flag) an `Adjustment to box 2` row
-    carries the difference. More lines than fit at 6 pt on a sheet is a 422 (`CALC_TOO_LONG_MESSAGE`, naming the PIR page on a report of
-    several sheets; calc-only overflow sheets are deferred). The 4" (with 7" assessed
+    carries the difference. A single table too long for its column runs on into a second (`panel_columns`, `split`; the panel
+    `CALC_WIDTH_SPLIT` wide, narrower than two tables', so a long sketch keeps its scale; a column never ends on a title
+    or its heads). More lines than that fits at 6 pt is a 422 (`CALC_TOO_LONG_MESSAGE`, naming the PIR page on a report
+    of several sheets; calc-only overflow sheets are deferred). The 4" (with 7" assessed
     as 4") and the 7" tables stand side by side when both have flags (`report_layout`: the panel `CALC_WIDTH_TWO`
     wide, the sketch narrower), else one column `CALC_WIDTH` wide.
   - **Sketch polish (R1h.4).** Flags that abut (an edge along another's, within 0.1 ft) and share thickness and
