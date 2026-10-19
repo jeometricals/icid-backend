@@ -26,6 +26,7 @@ from api.queries.idrs import get_idr_by_id
 from api.queries.non_assessable_areas import get_area
 from api.queries.pir_pages import get_page
 from api.queries.pirs import get_pir
+from api.queries.ped_ramp_corners import get_corner
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.properties import get_property
 from api.queries.segments import get_segment
@@ -377,6 +378,15 @@ def match_line_member(match_line_id: UUID, user: UserOut = Depends(current_user)
     Returns the match line dict (with its page's, PIR's and property's deleted states); raises 404 or 403 as _readable_on_project does.
     """
     return _readable_on_project(get_match_line(match_line_id), user, "Match line not found")
+
+
+def corner_member(corner_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one ped ramp corner: the signed-in user must be assigned to its project (in any role), or be an admin.
+    Takes the corner_id path parameter and the current user.
+    Returns the corner dict, with its live ramps; raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_corner(corner_id), user, "Corner not found")
 
 
 def task_order_member(task_order_id: UUID, user: UserOut = Depends(current_user)) -> dict:

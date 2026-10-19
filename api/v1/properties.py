@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from api.queries.ped_ramp_corners import get_live_corner_of_project
 from api.queries.properties import (
     create_property,
     get_property,
@@ -60,6 +61,7 @@ _OPTIONAL_TEXT = {
 }
 # The fields the body's model checks and puts in their stored form: the choices, and a sidewalk's block and lot
 _MODEL_CHECKED = ("kind", "boro", "block", "lot", "property_type", "quadrant", "facing_street", "ramp_type")
+CORNER_ELSEWHERE = "Corner must be a live ped ramp corner of this project"
 KIND_CHANGED = "Property kind cannot be changed. Delete and recreate."
 CONFLICT = {409: {"model": PropertyConflict}}
 # What a member who isn't an admin is told when they change a soft-deleted property
@@ -93,7 +95,19 @@ def _clean_fields(body: PropertyCreate | PropertyUpdate) -> dict[str, Any]:
     for field in _MODEL_CHECKED:
         if getattr(body, field) is not None:
             fields[field] = getattr(body, field)
+    if "corner_id" in body.model_fields_set:
+        fields["corner_id"] = body.corner_id
     return fields
+
+
+def _check_corner(project_id: str, corner_id: Optional[UUID]) -> None:
+    """
+    Refuse a ped ramp's corner that isn't a live corner of its project.
+    Takes the project id and the corner's id (None for none).
+    Returns nothing; raises 400 when the project has no such live corner.
+    """
+    if corner_id is not None and get_live_corner_of_project(corner_id, project_id) is None:
+        raise HTTPException(status_code=400, detail=CORNER_ELSEWHERE)
 
 
 def _site(fields: dict[str, Any]) -> str:
@@ -178,9 +192,10 @@ def create_project_property(
     """
     Add a property to a project, created by the signed-in user: a sidewalk or a ped ramp. For a user on the project, in any role, or an admin; not a demo user.
     Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes, violation_no and community_board are none) and the user.
-    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value, a block or lot that isn't digits, or fields that don't fit the kind and 409 (with existing_property_id) when a live sidewalk of the project is at the borough, block and lot.
+    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value or a corner_id that isn't a live corner of the project, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value, a block or lot that isn't digits, or fields that don't fit the kind and 409 (with existing_property_id) when a live sidewalk of the project is at the borough, block and lot.
     """
     fields = _clean_fields(body)
+    _check_corner(project_id, fields.get("corner_id"))
     row = create_property(project_id, user.uuid, fields)
 
     if row is None:
@@ -209,7 +224,7 @@ def update_property_record(
     """
     Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes, violation_no and community_board clear them. Its kind can't change.
     Takes the property's id as a path parameter, the fields to change in the body, the property (loaded by _writable_property) and the user.
-    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live sidewalk of its project is at the borough, block and lot it would end up with.
+    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, a new corner_id isn't a live corner of its project, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live sidewalk of its project is at the borough, block and lot it would end up with.
     """
     refuse_deleted_for_member(found, user, PROPERTY_DELETED)
 
@@ -224,6 +239,8 @@ def update_property_record(
 
     merged = {**{field: found.get(field) for field in PropertyCreate.model_fields}, **changes}
     validated(PropertyCreate, merged)
+    if changes.get("corner_id") is not None and changes["corner_id"] != found.get("corner_id"):
+        _check_corner(found["project_id"], changes["corner_id"])
     row = update_property(property_id, merged)
 
     if row is None:

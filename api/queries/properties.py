@@ -9,7 +9,7 @@ from api.db.runner import run_query
 _PROPERTY_COLUMNS = """
             p.id, p.project_id, p.kind::text AS kind, p.boro::text AS boro, p.block, p.lot, p.address, p.property_type,
             p.violation_no, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
-            p.facing_street::text AS facing_street, p.ramp_type::text AS ramp_type, p.community_board, p.notes,
+            p.facing_street::text AS facing_street, p.ramp_type::text AS ramp_type, p.corner_id, p.community_board, p.notes,
             p.created_at, p.updated_at, p.created_by, p.deleted_at, p.deleted_by"""
 # What properties are ordered by: a sidewalk's address, a ped ramp's intersection (then its quadrant)
 PROPERTY_ORDER = (
@@ -36,7 +36,7 @@ _LATEST_TASK_ORDER = """LEFT JOIN LATERAL (
 _WRITTEN = (
     ("boro", "%s::icid.boro"), ("block", "%s"), ("lot", "%s"), ("address", "%s"), ("property_type", "%s"), ("violation_no", "%s"),
     ("intersection_street_1", "%s"), ("intersection_street_2", "%s"), ("quadrant", "%s::icid.quadrant"),
-    ("facing_street", "%s::icid.facing_street"), ("ramp_type", "%s::icid.ramp_type"), ("community_board", "%s"),
+    ("facing_street", "%s::icid.facing_street"), ("ramp_type", "%s::icid.ramp_type"), ("corner_id", "%s"), ("community_board", "%s"),
     ("notes", "%s"),
 )
 
@@ -131,7 +131,7 @@ def get_sidewalk_at(project_id: str, boro: str, block: str, lot: str) -> Optiona
 def create_property(project_id: str, created_by_uuid: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
     Add a property to a project. Adds nothing when a live sidewalk of the project is already at its borough, block and lot.
-    Takes the project id, the uuid of the user adding it, and the values keyed by column: kind, boro, a sidewalk's block, lot, address, property_type and violation_no or a ped ramp's intersection_street_1 and _2, quadrant, facing_street and ramp_type, and community_board and notes (one left out is None).
+    Takes the project id, the uuid of the user adding it, and the values keyed by column: kind, boro, a sidewalk's block, lot, address, property_type and violation_no or a ped ramp's intersection_street_1 and _2, quadrant, facing_street, ramp_type and corner_id, and community_board and notes (one left out is None).
     Returns the new property dict, or None when the borough, block and lot are taken.
     """
     sql = (

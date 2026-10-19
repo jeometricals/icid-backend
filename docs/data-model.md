@@ -419,6 +419,7 @@ read (since S2).
 | `quadrant` | `icid.quadrant` | Ped ramp only, required there: `NE`, `NW`, `SE` or `SW` |
 | `facing_street` | `icid.facing_street` | Ped ramp only, required there: `street_1` or `street_2`, which of the two streets the ramp faces |
 | `ramp_type` | `icid.ramp_type` | Ped ramp only, required there: `PERPENDICULAR`, `PARALLEL` or `CUT_THROUGH` |
+| `corner_id` | UUID | Ped ramp only, optional (047): the inspection corner it is at; FK → `ped_ramp_corners.corner_id`, no action; CHECK `chk_properties_corner_kind`; `idx_properties_corner`. The API takes only a live corner of the property's project |
 | `notes` | TEXT | Blank is NULL |
 | `created_by` | UUID NOT NULL | The signed-in user who added it: any project member or admin; FK → `users.uuid` |
 | `deleted_at` | TIMESTAMPTZ | Soft delete: when an admin deleted it. NULL for one that isn't deleted |
@@ -434,6 +435,41 @@ statements cast their parameters (`%s::icid.quadrant`) and read them back `::tex
 label is stored: `display_address` is worked out by the API (see `CLAUDE.md`). **Rolling 036 back** is
 deterministic: add `bbl` back as the borough's digit, `LPAD(block, 5, '0')` and `LPAD(lot, 4, '0')`.
 **Rolling 035 back** then needs every row to have a BBL and an address again first: delete or fill the ped ramps.
+
+### ped_ramp_corners
+
+A corner of an intersection as NYC DOT's Pedestrian Ramp Inspection Form (version 1.6) records it: its sections 1-3
+(inspection, location, construction), one row per corner inspection (migration 047, pedramp 2a). Its ramps are the
+ped ramp properties whose `corner_id` names it; section 4 (the corner's ramp types) is read off them, not stored.
+Members of the project and admins read, add and change corners; only admins soft-delete them (the ramps keep their
+`corner_id`). Demo users only read.
+
+| Column | Type | Notes |
+|---|---|---|
+| `corner_id` | UUID PK | `gen_random_uuid()` |
+| `project_id` | TEXT NOT NULL | FK → `projects.project_id`; `idx_ped_ramp_corners_project` (live ones) |
+| `inspected_by`, `inspection_date`, `entity` (`dob` / `other`), `entity_if_other` | TEXT, DATE, TEXT, TEXT | Section 1 |
+| `boro` | `icid.boro` NOT NULL | Section 2, with `dot_corner_id` (the form's CORNER ID), `corner_number` (CORNER №), `north_south_street` and `east_west_street` (NOT NULL), `traffic_control_ns` / `_ew` (`signal` `signal_aps` `stop_yield` `none`), `corner_type` (`intersection_corner` `island_median` `mid_block` `top_of_t`), `corner_direction` (`SW` `NW` `NE` `SE` `N` `S` `E` `W`), `number_of_ramps` (1-3), `t_intersection`, `painted_roadway` |
+| `contractor_name`, `permittee_id`, `fms_id`, `permit_number`, `construction_completion_date`, `contract_type` (`simple` / `complex`), `curb_material`, `sidewalk_material` | TEXT, DATE | Section 3; curb `steel_faced` `concrete` `concrete_and_gutter` `granite` `bluestone` `cobblestone` `other`, sidewalk `concrete` `pigmented_concrete` `bluestone` `cobblestone` `other` |
+| `comments` | TEXT | |
+| `created_at`, `updated_at` | TIMESTAMPTZ NOT NULL | |
+| `created_by` | UUID NOT NULL | FK → `users.uuid` |
+| `deleted_at`, `deleted_by` | TIMESTAMPTZ, UUID | Soft delete; `deleted_by` FK → `users.uuid`, **ON DELETE SET NULL** |
+
+Every choice is TEXT with a CHECK. The text fields are trimmed, blank NULL, and capped by the API.
+
+### ped_ramp_attributes
+
+A ped ramp's section 5 (migration 047), one row per ped ramp property, keyed by `property_id` (FK → `properties.id`,
+**ON DELETE CASCADE**). Every column is nullable: the fields every ramp has (`ramp_id_label`, `is_there_ponding`,
+`maximum_curb_reveal_at_ramp_in`, the DWS fields, `construction`, `action_taken`, `comments`), then those of its ramp
+type: a perpendicular ramp's flares, ramp, landing, gutter and left and right sidewalk approaches; a parallel ramp's
+bottom landing and left and right ramps; a cut-through's ramp, gutter, `cut_through_length_in` and
+`min_clearance_between_dws_in`. `clear_space_within_crosswalk` and `dws_aligned_with_ramp` are a perpendicular's
+and a parallel's; `outside_of_parallel_travel_lane` is a perpendicular's, where the form has it. A cut-through's two
+ramps are two properties with a row each; its length and clearance are kept on both. Slopes are percent, lengths,
+widths, offsets and the reveal inches (NUMERIC, the lengths `>= 0`). The API refuses a field of another ramp type than
+the property's; nothing in the table does. The ADA warnings are worked out by the API, not stored.
 
 ### task_orders
 
@@ -913,6 +949,7 @@ content as TEXT, linked to a report and a form template).
 | 043 | `043_property_community_board.sql` | A | Added `properties.community_board` (TEXT, nullable) and CHECK `chk_properties_community_board_length` (at most 10 characters). No backfill: every existing row is NULL. |
 | 044 | `044_curb_billing.sql` | Curb billing | Added `segments.claimed_by_idr_id` (FK to `idrs`, no action) and `constructed_on`, CHECK `chk_segments_claim_consistent`, `idx_segments_claimed_by_idr`; created `idr_segment_attributions` (PK `(idr_id, segment_id)`, FKs to `idrs` and `segments` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 27 → 28 FKs to `users`); widened `chk_quantities_source` with `from_segments`. Added HWS0023's contract items 4.08 AB (Depressed Concrete Curb, $55/LF, 500 LF) and 4.08 GA (Granite Curb, $150/LF, 400 LF). |
 | 045 | `045_claim_approved_segments.sql` | Curb billing | Data only, no schema change. Gave HWS0023's live curb segments the pay item of their kind (concrete 4.08 AA, depressed 4.08 AB, granite 4.08 GA: 13, 2 and 1 segments) and had IDR-001 and Walk004, approved before curb billing, claim their task orders' segments and get their `from_segments` rows (IDR-001: 281.50 / 10.00 / 81.00 LF; Walk004: 17.09 / 17.16 LF). |
+| 047 | `047_ped_ramp_inspection.sql` | Pedramp 2a | Created `ped_ramp_corners` (FK to `projects`; to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`: 30 → 32 FKs to `users`; `idx_ped_ramp_corners_project`) and `ped_ramp_attributes` (PK and FK `property_id` → `properties` ON DELETE CASCADE). Added `properties.corner_id` (FK to `ped_ramp_corners`, no action), CHECK `chk_properties_corner_kind` and `idx_properties_corner`. No existing row changed. |
 | 046 | `046_pir_match_lines.sql` | R1h.1a | Created `pir_match_lines` (FK to `pir_pages`, no action; to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`: 28 → 30 FKs to `users`; CHECKs `chk_match_lines_label` and `chk_match_lines_length`; partial unique `pir_match_lines_page_label_live_uq` and `pir_match_lines_page_idx`). No existing row changed. |
 | 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |
@@ -938,6 +975,7 @@ Where each current column came from:
 | `properties` | `community_board`, `chk_properties_community_board_length` | 043 |
 | `idr_segment_attributions`; `segments.claimed_by_idr_id`, `constructed_on`, `chk_segments_claim_consistent`, `idx_segments_claimed_by_idr`; `chk_quantities_source` with `from_segments` | all | 044 |
 | `pir_match_lines` | all | 046 |
+| `ped_ramp_corners`, `ped_ramp_attributes`; `properties.corner_id`, `chk_properties_corner_kind`, `idx_properties_corner` | all | 047 |
 | `idr_flag_attributions`; `idrs.task_order_id`, `idx_idrs_task_order`; `flags.claimed_by_idr_id`, `constructed_on`, `chk_flags_claim_consistent`, `idx_flags_claimed_by_idr`, `idx_flags_scope_rollup`; `quantities.source`, `chk_quantities_source` | all | 037 |
 | `task_orders`, `task_order_properties` | all | 030 |
 | `pirs` | all | 031 |

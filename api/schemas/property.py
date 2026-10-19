@@ -23,7 +23,7 @@ REQUIRED_BY_KIND: dict[str, tuple[str, ...]] = {
 }
 ONLY_BY_KIND: dict[str, tuple[str, ...]] = {
     "sidewalk": ("block", "lot", "address", "property_type", "violation_no"),
-    "ped_ramp": ("intersection_street_1", "intersection_street_2", "quadrant", "facing_street", "ramp_type"),
+    "ped_ramp": ("intersection_street_1", "intersection_street_2", "quadrant", "facing_street", "ramp_type", "corner_id"),
 }
 
 
@@ -65,6 +65,7 @@ class PropertyCreate(BaseModel):
     quadrant: Optional[Quadrant] = None
     facing_street: Optional[FacingStreet] = None
     ramp_type: Optional[RampType] = None
+    corner_id: Optional[UUID] = None
     community_board: Optional[str] = None
     notes: Optional[str] = None
 
@@ -88,7 +89,8 @@ class PropertyCreate(BaseModel):
 class PropertyUpdate(BaseModel):
     """
     What is being changed on a property. Any field may be left out; a null counts as left out, except for notes,
-    violation_no and community_board, where a null or a blank clears them. kind can't change: sending another kind is a 400.
+    violation_no and community_board, where a null or a blank clears them, and a ped ramp's corner_id, where a null
+    takes it off its corner. kind can't change: sending another kind is a 400.
     """
 
     kind: Optional[Kind] = None
@@ -103,6 +105,7 @@ class PropertyUpdate(BaseModel):
     quadrant: Optional[Quadrant] = None
     facing_street: Optional[FacingStreet] = None
     ramp_type: Optional[RampType] = None
+    corner_id: Optional[UUID] = None
     community_board: Optional[str] = None
     notes: Optional[str] = None
 
@@ -127,6 +130,7 @@ class PropertyOut(BaseModel):
     quadrant: Optional[Quadrant] = None
     facing_street: Optional[FacingStreet] = None
     ramp_type: Optional[RampType] = None
+    corner_id: Optional[UUID] = None
     community_board: Optional[str] = None
     notes: Optional[str] = None
     created_at: datetime

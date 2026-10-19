@@ -46,7 +46,7 @@ RAMP_BODY = {"kind": "ped_ramp", "boro": "Brooklyn", "intersection_street_1": "M
              "intersection_street_2": "1st Ave", "quadrant": "NE", "facing_street": "street_2",
              "ramp_type": "PERPENDICULAR"}
 TZ = "America/New_York"
-SIDEWALK_NOTHING_ELSE = (None,) * 7  # violation_no, the five ped-ramp columns and community_board
+SIDEWALK_NOTHING_ELSE = (None,) * 8  # violation_no, the five ped-ramp columns, corner_id and community_board
 BODY = {"boro": "Queens", "block": "1234", "lot": "56", "address": "12-34 56th Ave", "property_type": "1_3_family"}
 TAKEN = "A site at Queens Block 1234 Lot 56 already exists in this project."
 
@@ -94,14 +94,14 @@ class TestCreateProperty:
     def test_notes_are_kept_trimmed(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]) as run:
             admin_client.post(LIST_URL, json={**BODY, "notes": " corner lot "})
-        assert run.call_args.args[1][14] == "corner lot"
+        assert run.call_args.args[1][15] == "corner lot"
 
     def test_a_community_board_is_kept_trimmed_and_returned(self, admin_client):
         row = {**PROPERTY_ROW, "community_board": "QN13"}
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, return_value=[row]) as run:
             response = admin_client.post(LIST_URL, json={**BODY, "community_board": " QN13 "})
         assert response.status_code == 201 and response.json()["data"]["community_board"] == "QN13"
-        assert run.call_args.args[1][13] == "QN13" and "p.community_board" in run.call_args.args[0]
+        assert run.call_args.args[1][14] == "QN13" and "p.community_board" in run.call_args.args[0]
 
     @pytest.mark.parametrize("kind_body", ["sidewalk", "ped_ramp"])
     def test_either_kind_takes_a_community_board(self, admin_client, kind_body):
@@ -120,7 +120,7 @@ class TestCreateProperty:
     def test_a_blank_community_board_is_none(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]) as run:
             admin_client.post(LIST_URL, json={**BODY, "community_board": "  "})
-        assert run.call_args.args[1][13] is None
+        assert run.call_args.args[1][14] is None
 
     def test_a_sidewalk_at_a_taken_borough_block_and_lot_is_409(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS, side_effect=[[], [OTHER_ROW]]) as run:
@@ -272,18 +272,18 @@ class TestUpdateProperty:
     def test_null_community_board_clears_it(self, admin_client):
         with patch(PROPS, side_effect=[[{**PROPERTY_ROW, "community_board": "QN13"}], [PROPERTY_ROW]]) as run:
             response = admin_client.patch(URL, json={"community_board": None})
-        assert response.status_code == 200 and run.call_args.args[1][11] is None
+        assert response.status_code == 200 and run.call_args.args[1][12] is None
 
     def test_a_community_board_is_set_on_its_own(self, admin_client):
         with patch(PROPS, side_effect=[[PROPERTY_ROW], [{**PROPERTY_ROW, "community_board": "QN13"}]]) as run:
             response = admin_client.patch(URL, json={"community_board": "QN13"})
         assert response.status_code == 200 and response.json()["data"]["community_board"] == "QN13"
-        assert run.call_args.args[1][11] == "QN13"
+        assert run.call_args.args[1][12] == "QN13"
 
     def test_null_notes_clear_them(self, admin_client):
         with patch(PROPS, side_effect=[[{**PROPERTY_ROW, "notes": "old"}], [PROPERTY_ROW]]) as run:
             assert admin_client.patch(URL, json={"notes": None}).status_code == 200
-        assert run.call_args.args[1][11] is None
+        assert run.call_args.args[1][12] is None
 
     def test_an_unknown_property_type_is_422(self, admin_client):
         with patch(PROPS, return_value=[PROPERTY_ROW]) as run:
@@ -464,7 +464,8 @@ class TestPedRamps:
             response = admin_client.post(LIST_URL, json={**RAMP_BODY, "intersection_street_1": " Main St "})
         assert response.status_code == 201
         assert run.call_args.args[1] == ("HWS0023", "ped_ramp", "Brooklyn", None, None, None, None, None, "Main St",
-                                         "1st Ave", "NE", "street_2", "PERPENDICULAR", None, None, ADMIN_ID)
+                                         "1st Ave", "NE", "street_2", "PERPENDICULAR", None, None, None,
+                                         ADMIN_ID)
         sql = run.call_args.args[0]
         assert "%s::icid.property_kind" in sql and "%s::icid.boro" in sql and "%s::icid.quadrant" in sql
         assert "%s::icid.facing_street" in sql and "%s::icid.ramp_type" in sql
@@ -560,7 +561,8 @@ class TestEditingByKind:
             response = admin_client.patch(f"/v1/properties/{RAMP_ID}", json={"quadrant": "SE", "kind": "ped_ramp"})
         assert response.status_code == 200 and response.json()["data"]["quadrant"] == "SE"
         assert run.call_args.args[1] == ("Brooklyn", None, None, None, None, None, "Main St", "1st Ave", "SE",
-                                         "street_2", "PERPENDICULAR", None, None, RAMP_ID, "Brooklyn", None, None)
+                                         "street_2", "PERPENDICULAR", None, None, None, RAMP_ID, "Brooklyn", None,
+                                         None)
 
     def test_a_sidewalks_field_on_a_ped_ramp_is_422(self, admin_client):
         with patch(PROPS, return_value=[RAMP_ROW]) as run:
@@ -699,3 +701,53 @@ class TestBlockAndLot:
             response = admin_client.post(f"/v1/properties/{RAMP_ID}/admin/undelete")
         assert response.status_code == 404 and response.json() == {"detail": "Property is not deleted"}
         assert run.call_count == 2  # read, the statement; no lot lookup for a ped ramp
+
+
+CORNERS = "api.queries.ped_ramp_corners.run_query"
+CORNER_ID = UUID("3e2f3a4b-5c6d-4e7f-8a8b-9c0d1e2f3a4b")
+CORNER_ELSEWHERE = {"detail": "Corner must be a live ped ramp corner of this project"}
+
+
+class TestRampCorner:
+    def test_a_ped_ramp_is_created_at_a_live_corner_of_its_project(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), \
+             patch(CORNERS, return_value=[{"corner_id": CORNER_ID}]) as corner, \
+             patch(PROPS, return_value=[{**RAMP_ROW, "corner_id": CORNER_ID}]) as run:
+            response = admin_client.post(LIST_URL, json={**RAMP_BODY, "corner_id": str(CORNER_ID)})
+        assert response.status_code == 201 and response.json()["data"]["corner_id"] == str(CORNER_ID)
+        sql, params = corner.call_args.args
+        assert "deleted_at IS NULL" in sql and params == (CORNER_ID, "HWS0023")
+        assert run.call_args.args[1][-4] == CORNER_ID
+
+    def test_a_corner_that_isnt_a_live_one_of_the_project_is_400(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CORNERS, return_value=[]), patch(PROPS) as run:
+            response = admin_client.post(LIST_URL, json={**RAMP_BODY, "corner_id": str(CORNER_ID)})
+        assert (response.status_code, response.json()) == (400, CORNER_ELSEWHERE)
+        run.assert_not_called()
+
+    def test_a_sidewalk_takes_no_corner(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(PROPS) as run:
+            response = admin_client.post(LIST_URL, json={**BODY, "corner_id": str(CORNER_ID)})
+        assert response.status_code == 422 and "corner_id" in str(response.json())
+        run.assert_not_called()
+
+    def test_an_edit_moves_a_ramp_to_another_corner_after_checking_it(self, admin_client):
+        with patch(PROPS, side_effect=[[RAMP_ROW], [{**RAMP_ROW, "corner_id": CORNER_ID}]]) as run, \
+             patch(CORNERS, return_value=[{"corner_id": CORNER_ID}]) as corner:
+            response = admin_client.patch(f"/v1/properties/{RAMP_ID}", json={"corner_id": str(CORNER_ID)})
+        assert response.status_code == 200 and corner.call_count == 1
+        assert CORNER_ID in run.call_args.args[1]
+
+    def test_a_null_takes_a_ramp_off_its_corner_without_a_check(self, admin_client):
+        with patch(PROPS, side_effect=[[{**RAMP_ROW, "corner_id": CORNER_ID}], [RAMP_ROW]]) as run, \
+             patch(CORNERS) as corner:
+            response = admin_client.patch(f"/v1/properties/{RAMP_ID}", json={"corner_id": None})
+        assert response.status_code == 200 and response.json()["data"]["corner_id"] is None
+        corner.assert_not_called()
+        assert CORNER_ID not in run.call_args.args[1]
+
+    def test_an_edit_to_a_corner_of_another_project_is_400(self, admin_client):
+        with patch(PROPS, return_value=[RAMP_ROW]) as run, patch(CORNERS, return_value=[]):
+            response = admin_client.patch(f"/v1/properties/{RAMP_ID}", json={"corner_id": str(CORNER_ID)})
+        assert (response.status_code, response.json()) == (400, CORNER_ELSEWHERE)
+        assert run.call_count == 1

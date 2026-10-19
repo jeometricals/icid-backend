@@ -289,6 +289,52 @@ CREATE TYPE icid.quadrant AS ENUM ('NE', 'NW', 'SE', 'SW');
 CREATE TYPE icid.facing_street AS ENUM ('street_1', 'street_2');
 CREATE TYPE icid.ramp_type AS ENUM ('PERPENDICULAR', 'PARALLEL', 'CUT_THROUGH');
 
+------------------------------------------------------------
+-- PED RAMP CORNER (one DOT pedestrian ramp inspection's corner: the form's inspection, location and construction
+-- sections; soft-deleted; migrations/047, pedramp 2a). Its ramps are ped_ramp properties naming it (corner_id)
+------------------------------------------------------------
+CREATE TABLE icid.ped_ramp_corners (
+    corner_id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id                    TEXT NOT NULL REFERENCES icid.projects(project_id),
+    -- 1. Inspection information
+    inspected_by                  TEXT,
+    inspection_date               DATE,
+    entity                        TEXT CHECK (entity IN ('dob', 'other')),
+    entity_if_other               TEXT,
+    -- 2. Location information
+    boro                          icid.boro NOT NULL,
+    dot_corner_id                 TEXT,
+    corner_number                 TEXT,
+    north_south_street            TEXT NOT NULL,
+    east_west_street              TEXT NOT NULL,
+    traffic_control_ns            TEXT CHECK (traffic_control_ns IN ('signal', 'signal_aps', 'stop_yield', 'none')),
+    traffic_control_ew            TEXT CHECK (traffic_control_ew IN ('signal', 'signal_aps', 'stop_yield', 'none')),
+    corner_type                   TEXT CHECK (corner_type IN ('intersection_corner', 'island_median', 'mid_block',
+                                                              'top_of_t')),
+    corner_direction              TEXT CHECK (corner_direction IN ('SW', 'NW', 'NE', 'SE', 'N', 'S', 'E', 'W')),
+    number_of_ramps               INT CHECK (number_of_ramps BETWEEN 1 AND 3),
+    t_intersection                BOOLEAN,
+    painted_roadway               BOOLEAN,
+    -- 3. Construction information
+    contractor_name               TEXT,
+    permittee_id                  TEXT,
+    fms_id                        TEXT,
+    permit_number                 TEXT,
+    construction_completion_date  DATE,
+    contract_type                 TEXT CHECK (contract_type IN ('simple', 'complex')),
+    curb_material                 TEXT CHECK (curb_material IN ('steel_faced', 'concrete', 'concrete_and_gutter',
+                                                                'granite', 'bluestone', 'cobblestone', 'other')),
+    sidewalk_material             TEXT CHECK (sidewalk_material IN ('concrete', 'pigmented_concrete', 'bluestone',
+                                                                    'cobblestone', 'other')),
+    comments                      TEXT,
+    created_at                    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by                    UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at                    TIMESTAMPTZ,
+    deleted_by                    UUID REFERENCES icid.users(uuid) ON DELETE SET NULL
+);
+CREATE INDEX idx_ped_ramp_corners_project ON icid.ped_ramp_corners (project_id) WHERE deleted_at IS NULL;
+
 CREATE TABLE icid.properties (
     id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id             TEXT NOT NULL REFERENCES icid.projects(project_id),
@@ -317,6 +363,9 @@ CREATE TABLE icid.properties (
     CONSTRAINT chk_properties_block_format CHECK (block IS NULL OR block ~ '^(0|[1-9][0-9]{0,4})$'),
     CONSTRAINT chk_properties_lot_format CHECK (lot IS NULL OR lot ~ '^(0|[1-9][0-9]{0,3})$'),
     CONSTRAINT chk_properties_community_board_length CHECK (community_board IS NULL OR char_length(community_board) <= 10),
+    -- The corner a ped ramp is at (migration 047); a sidewalk has none
+    corner_id              UUID REFERENCES icid.ped_ramp_corners(corner_id),
+    CONSTRAINT chk_properties_corner_kind CHECK (corner_id IS NULL OR kind = 'ped_ramp'),
     CONSTRAINT properties_kind_fields_consistent CHECK (
         (kind = 'sidewalk' AND
          block IS NOT NULL AND lot IS NOT NULL AND address IS NOT NULL AND property_type IS NOT NULL AND
@@ -333,6 +382,74 @@ CREATE TABLE icid.properties (
 -- One live sidewalk per borough, block and lot in a project; a soft-deleted one frees it
 CREATE UNIQUE INDEX uq_properties_project_sidewalk_bbl
     ON icid.properties (project_id, boro, block, lot) WHERE kind = 'sidewalk' AND deleted_at IS NULL;
+CREATE INDEX idx_properties_corner ON icid.properties (corner_id) WHERE corner_id IS NOT NULL;
+
+------------------------------------------------------------
+-- PED RAMP ATTRIBUTES (one ped ramp property's measurements, the DOT form's section 5; migrations/047). Fields of
+-- every ramp, then of its ramp type, all nullable; slopes in percent, lengths in inches. A cut-through's two ramps
+-- are two properties, its length and DWS clearance kept on both
+------------------------------------------------------------
+CREATE TABLE icid.ped_ramp_attributes (
+    property_id                       UUID PRIMARY KEY REFERENCES icid.properties(id) ON DELETE CASCADE,
+    -- Every ramp
+    ramp_id_label                     TEXT,
+    is_there_ponding                  BOOLEAN,
+    maximum_curb_reveal_at_ramp_in    NUMERIC CHECK (maximum_curb_reveal_at_ramp_in >= 0),
+    clear_space_within_crosswalk      BOOLEAN,
+    dws_length_min_24_inch            BOOLEAN,
+    dws_full_ramp_width               BOOLEAN,
+    dws_aligned_with_ramp             TEXT CHECK (dws_aligned_with_ramp IN ('yes', 'no', 'na')),
+    dws_left_offset_from_curb_in      NUMERIC CHECK (dws_left_offset_from_curb_in >= 0),
+    dws_right_offset_from_curb_in     NUMERIC CHECK (dws_right_offset_from_curb_in >= 0),
+    dws_color                         TEXT CHECK (dws_color IN ('red', 'white', 'yellow', 'other')),
+    dws_material                      TEXT CHECK (dws_material IN ('preformed_plastic', 'cast_in_place_plastic',
+                                                                    'cast_iron', 'stone', 'other')),
+    construction                      TEXT CHECK (construction IN ('existing_ramp', 'ramp_removed', 'new_install',
+                                                                    'upgrade')),
+    action_taken                      TEXT CHECK (action_taken IN ('ada_compliant_constructed', 'max_extent_feasible',
+                                                                    'ada_compliant_exists', 'ramp_removed', 'other')),
+    comments                          TEXT,
+    -- Perpendicular (and, for the ramp, gutter and its running/cross slopes and width, cut-through too)
+    left_flare_traversable_path       BOOLEAN,
+    right_flare_traversable_path      BOOLEAN,
+    outside_of_parallel_travel_lane   BOOLEAN,
+    ramp_running_slope_pct            NUMERIC,
+    ramp_cross_slope_pct              NUMERIC,
+    ramp_length_in                    NUMERIC CHECK (ramp_length_in >= 0),
+    ramp_width_in                     NUMERIC CHECK (ramp_width_in >= 0),
+    landing_running_slope_pct         NUMERIC,
+    landing_cross_slope_pct           NUMERIC,
+    landing_length_in                 NUMERIC CHECK (landing_length_in >= 0),
+    landing_width_in                  NUMERIC CHECK (landing_width_in >= 0),
+    left_flare_slope_pct              NUMERIC,
+    right_flare_slope_pct             NUMERIC,
+    gutter_cross_slope_pct            NUMERIC,
+    gutter_flow_slope_pct             NUMERIC,
+    left_sidewalk_approach_width_in   NUMERIC CHECK (left_sidewalk_approach_width_in >= 0),
+    left_sidewalk_running_slope_pct   NUMERIC,
+    left_sidewalk_cross_slope_pct     NUMERIC,
+    right_sidewalk_approach_width_in  NUMERIC CHECK (right_sidewalk_approach_width_in >= 0),
+    right_sidewalk_running_slope_pct  NUMERIC,
+    right_sidewalk_cross_slope_pct    NUMERIC,
+    -- Parallel
+    bottom_landing_running_slope_pct  NUMERIC,
+    bottom_landing_cross_slope_pct    NUMERIC,
+    bottom_landing_length_in          NUMERIC CHECK (bottom_landing_length_in >= 0),
+    bottom_landing_width_in           NUMERIC CHECK (bottom_landing_width_in >= 0),
+    left_ramp_running_slope_pct       NUMERIC,
+    left_ramp_cross_slope_pct         NUMERIC,
+    left_ramp_length_in               NUMERIC CHECK (left_ramp_length_in >= 0),
+    left_ramp_width_in                NUMERIC CHECK (left_ramp_width_in >= 0),
+    right_ramp_running_slope_pct      NUMERIC,
+    right_ramp_cross_slope_pct        NUMERIC,
+    right_ramp_length_in              NUMERIC CHECK (right_ramp_length_in >= 0),
+    right_ramp_width_in               NUMERIC CHECK (right_ramp_width_in >= 0),
+    -- Cut-through (kept on both of its ramps' rows)
+    cut_through_length_in             NUMERIC CHECK (cut_through_length_in >= 0),
+    min_clearance_between_dws_in      NUMERIC CHECK (min_clearance_between_dws_in >= 0),
+    created_at                        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 ------------------------------------------------------------
 -- TASK ORDER (a project's task orders; soft-deleted like properties; migrations/030)
