@@ -316,20 +316,27 @@ class TestPropertyReport:
         assert fills["driveway"].call_count == 1 and fills["non_assessable"].call_count == 0
         assert "10.00' DW" in text
 
-    def test_cc_is_the_concrete_curb_segments_length_over_the_title_blocks_figure(self, admin_client, storage):
-        # Two concrete curb segments of 10 and 15.5 ft at 24 px/ft, with a depressed one between that CC doesn't count;
-        # the title block's 34.25 is only a fallback
+    def test_cc_is_every_curb_segments_length_over_the_title_blocks_figure(self, admin_client, storage):
+        # Two concrete curb segments of 10 and 15.5 ft at 24 px/ft and a 5 ft depressed one between them, which CC
+        # counts too (DOT totals every kind of curb); the title block's 34.25 is only a fallback
         drawings = {"features": [], "segments": [
             {"segment_type": "curb_concrete", "points": [{"x": 100, "y": 330}, {"x": 100 + 10 * 24, "y": 330}]},
             {"segment_type": "curb_concrete_depressed", "points": [{"x": 340, "y": 330}, {"x": 460, "y": 330}]},
             {"segment_type": "curb_concrete", "points": [{"x": 460, "y": 330}, {"x": 460 + 15.5 * 24, "y": 330}]}]}
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
             text = pdf_text(admin_client.get(URL).content)
-        assert "CC= 25.50'" in text and "CC= 34.25'" not in text
+        assert "CC= 30.50'" in text and "CC= 34.25'" not in text
 
-    def test_without_a_concrete_curb_segment_cc_is_the_title_blocks_figure(self, admin_client, storage):
+    def test_a_granite_curb_counts_in_cc(self, admin_client, storage):
         drawings = {"features": [], "segments": [
             {"segment_type": "curb_granite", "points": [{"x": 100, "y": 330}, {"x": 340, "y": 330}]}]}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
+            text = pdf_text(admin_client.get(URL).content)
+        assert "CC= 10.00'" in text and "CC= 34.25'" not in text
+
+    def test_without_a_curb_segment_cc_is_the_title_blocks_figure(self, admin_client, storage):
+        drawings = {"features": [], "segments": [
+            {"segment_type": "other", "points": [{"x": 100, "y": 330}, {"x": 340, "y": 330}]}]}
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
             text = pdf_text(admin_client.get(URL).content)
         assert "CC= 34.25'" in text

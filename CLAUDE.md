@@ -1111,8 +1111,9 @@ Any change must follow these.
     and cross-hatched (a non-assessable flag crossed through too). Labels (`4" Conc.`, `7" Conc.`, the reason in words,
     `Non-Ass.` for none or other) only where they fit and clear every number and earlier label, areas' first. The
     perimeter from page 1's title block, no migration (041 was skipped): PL along the top, `TAX MAP` at scale between
-    the PLs when `tax_map_width_ft` is set, `CC=` (Concrete Curb) along the bottom: the summed length of the page's
-    curb segments of `CC_SEGMENT_TYPES`, under the stretch they span (R1h.4), else `cc_curb_to_curb_ft` at scale, the frontage
+    the PLs when `tax_map_width_ft` is set, `CC=` (the curb along the frontage) along the bottom: the summed length of the
+    page's curb segments of every kind (`CC_SEGMENT_TYPES`: concrete, depressed, steel-faced and granite, not `other`;
+    DOT totals them, HWS2014Q's CC= 34.25 being 17.16 depressed + 17.09 concrete), under the stretch they span (R1h.4), else `cc_curb_to_curb_ft` at scale, the frontage
     street under it and the cross streets up the sides; the fit makes room for either width.
   - **Calculations panel** (the band's right third; `calc_groups` in `construction_measure.py`, `calc_lines` in
     `construction_report.py`): per thickness with flags, each flag's Length × Width = Sub-Total from its stored
@@ -1243,8 +1244,8 @@ Not rules — current state, documented so nobody mistakes these for the intende
   `api/queries/` does. Imports work regardless, but don't take the inconsistency as intent.
 - **R1d upload routes unused since R1f; remove in a cleanup slice:** the DEPRECATED (R1e) routes, bodies and keys
   `docs/endpoints.md` names, and a PIR's `source_image_url` / `source_image_scale`. The frontend calls none of them.
-- **`pir_annotations.cc_curb_to_curb_ft` is misnamed.** On DOT's sheets CC is the Concrete Curb along the frontage,
-  not the street's curb-to-curb width. The Construction Report prints CC from the page's concrete curb segments and
+- **`pir_annotations.cc_curb_to_curb_ft` is misnamed.** On DOT's sheets CC is the curb along the frontage,
+  not the street's curb-to-curb width. The Construction Report prints CC from the page's curb segments (every kind) and
   uses the column only as a manual figure when there are none (R1h.4). Rename it in a cosmetic slice (the column,
   the title-block route's field and the editor's label).
 - CORS is `allow_origins=["*"]`. Tighten before production.
