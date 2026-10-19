@@ -44,6 +44,7 @@ from api.schemas.idr import (
     IdrWithReports,
     IdrWithReportsResponse,
 )
+from api.schemas.dsp_report import DspReportError, check_dsp_report
 from api.schemas.idr_report import (
     IdrReport,
     IdrReportConflict,
@@ -213,9 +214,9 @@ def save_report(
     idr_id: UUID, report_id: UUID, body: Annotated[ReportData, Body()]
 ) -> IdrReportResponse:
     """
-    Replace a report's data with the body as-is, bumping updated_at on the report and its IDR. Its pay items can't include one the IDR's flags already fill.
+    Replace a report's data with the body, bumping updated_at on the report and its IDR. Its pay items can't include one the IDR's flags already fill. Any JSON object is stored as-is, but a Daily Site Patrol's, which must be a DspReport and is stored tidied (check_dsp_report).
     Takes the IDR and report uuids as path parameters and any JSON object as the body.
-    Returns an IdrReportResponse; raises 404 (no IDR), 409 (IDR not draft), 400 (a pay item the IDR's flags fill) and 404 (report not in this IDR).
+    Returns an IdrReportResponse; raises 404 (no IDR), 409 (IDR not draft), 400 (a pay item the IDR's flags fill), 404 (report not in this IDR) and 400 (a DSP body that isn't a DspReport).
     """
     idr = get_idr_by_id(idr_id)
 
@@ -226,6 +227,17 @@ def save_report(
         raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
 
     refuse_flag_filled_pay_items(idr, body.get("payItems"))
+
+    report = get_idr_report(idr_id, report_id)
+
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found in this IDR")
+
+    if report["report_type"] == ReportType.DSP:
+        try:
+            body = check_dsp_report(body)
+        except DspReportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     rows = save_report_data(idr_id, report_id, body)
 

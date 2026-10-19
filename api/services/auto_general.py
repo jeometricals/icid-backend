@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # reports; below it, an existing auto-General is removed.
 AUTO_GENERAL_MIN_REPORTS = 2
 
+# Main-report types that never feed the summary: the addendums by nature, and a Daily Site Patrol, a checklist of the
+# site's upkeep with no description of work and no pay items. They don't count toward AUTO_GENERAL_MIN_REPORTS.
+NON_CONTRIBUTING_TYPES = ADDENDUM_TYPES | {ReportType.DSP}
+
 # Contributing types whose description and pay items stay out of the auto-General: the IDR export prints them on
 # their own sheets (AC Fr carries its pay items). They still count toward AUTO_GENERAL_MIN_REPORTS.
 MERGE_EXCLUDED_TYPES = frozenset({ReportType.AC.value})
@@ -148,12 +152,20 @@ def build_auto_general_data(children: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _contributing_reports(idr_id: UUID) -> list[dict[str, Any]]:
     """
-    Fetch the reports that feed the auto-summary: non-addendum, non-General, and not an addendum-by-nature type.
+    Fetch the reports that feed the auto-summary: non-addendum, non-General, and not of a NON_CONTRIBUTING_TYPES type.
     Takes the IDR uuid.
     Returns the contributing report rows (empty when none).
     """
-    reports = list_non_general_main_reports(idr_id) or []
-    return [report for report in reports if report["report_type"] not in ADDENDUM_TYPES]
+    return contributing_reports(list_non_general_main_reports(idr_id) or [])
+
+
+def contributing_reports(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Keep the main reports that feed the auto-summary, leaving out the NON_CONTRIBUTING_TYPES.
+    Takes non-addendum, non-General report rows.
+    Returns those that contribute, in the order given.
+    """
+    return [report for report in reports if report["report_type"] not in NON_CONTRIBUTING_TYPES]
 
 
 def regenerate_auto_general(idr_id: UUID) -> None:

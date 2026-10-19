@@ -102,7 +102,7 @@ class TestExtractRows:
         reports = [report("GEN", 1, [pay_item(quantity="5")]), report("SWCB", 2, [pay_item()])]
         assert [r["report_type"] for r in extract_rows(IDR, reports)] == ["GEN", "SWCB"]
 
-    @pytest.mark.parametrize("report_type", ["CONC_MIX", "CONC_CYL", "SWR", "SKETCH"])
+    @pytest.mark.parametrize("report_type", ["CONC_MIX", "CONC_CYL", "DSP", "SWR", "SKETCH"])
     def test_a_report_type_without_a_pay_items_table_gives_nothing(self, report_type):
         assert extract_rows(IDR, [report(report_type, pay_items=[pay_item()])]) == []
 

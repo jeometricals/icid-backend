@@ -345,7 +345,7 @@ by migration 020 to the items that existed and by submit to any item without one
 | `is_addendum` | BOOLEAN NOT NULL | Default `false` |
 | `parent_report_id` | UUID | FK → `idr_reports.report_id`, **ON DELETE CASCADE**. The report an addendum belongs to. |
 | `page_number` | INTEGER | NULL while draft; set on submit |
-| `report_data` | JSONB NOT NULL | Default `{}`. The form content. Its shape depends on `report_type`, and the API accepts any JSON object. |
+| `report_data` | JSONB NOT NULL | Default `{}`. The form content. Its shape depends on `report_type`, and the API accepts any JSON object but a Daily Site Patrol's (see [Daily Site Patrol report](#daily-site-patrol-report)). |
 | `is_auto_generated` | BOOLEAN NOT NULL | Default `false`. `true` only for a backend-built General |
 
 Constraints and indexes:
@@ -860,6 +860,34 @@ the inspector can edit any of them afterwards or type a row by hand (change orde
 in the database ties a pay item to `contract_items`. `unit` was added in Slice F; rows saved
 before it have none, and the frontend loads them with `unit: ''`.
 
+## Daily Site Patrol report
+
+A `DSP` report's `report_data` is the one report body the server checks (`DspReport`, `api/schemas/dsp_report.py`),
+on every save (`PUT /v1/idrs/{idr_id}/reports/{report_id}`); a refusal is a 400 naming the first problem
+(`DSP report: mptChecklist[3].answer: Input should be 'yes', 'no' or 'na'`). A new DSP is created `{}` like any
+report, so the form's first save writes it whole. No migration: `report_type` is plain text.
+
+```json
+{"timeOfPatrol": "14:30",
+ "mosChecklist": [{"item": "waste_rubbish_debris_removed", "answer": "no", "details": "Trench left open"}, ...],
+ "mptChecklist": [{"item": "traffic_maintained_per_plan", "answer": "yes", "details": null}, ...],
+ "fieldOrderIssued": true, "fieldOrderNumber": "FO-12"}
+```
+
+| Key | Rule |
+|---|---|
+| `timeOfPatrol` | `HH:MM`, 24-hour, or null (blank is null) |
+| `mosChecklist` | Exactly the 6 Maintenance of Site items, in the form's order, each once: `waste_rubbish_debris_removed`, `open_trenches_plated_fenced`, `stored_materials_secured`, `open_paved_areas_swept`, `trees_protected`, `temporary_pavement_maintained` |
+| `mptChecklist` | Exactly the 16 Maintenance and Protection of Traffic items, the same way: `traffic_maintained_per_plan`, `advance_warning_signs`, `traffic_control_signs`, `tapers_transitions`, `barrels`, `flashing_lights`, `breakaway_barricades`, `arrow_boards`, `timber_curbs_concrete_barriers`, `steel_pedestrian_fencing`, `pedestrian_building_access`, `fire_hydrant_access`, `open_sidewalks_clean`, `closed_sidewalk_signs`, `commercial_area_access`, `flaggers_temp_signs` |
+| a row's `answer` | `yes`, `no`, `na` or null (unanswered; allowed, submit doesn't check) |
+| a row's `details` | Text, at most 2000 characters, or null (blank is null). A `no` without details is only a warning, in the frontend |
+| `fieldOrderIssued` | true, false or null (default false) |
+| `fieldOrderNumber` | At most 50 characters, or null (blank is null); required when `fieldOrderIssued` is true |
+
+Any other key, at the top or in a row, is refused, and the types are strict (`"true"` is not a boolean). Text is
+stored trimmed. The day of the week, the sheet number and the I.R. No. are not stored: the export works them out from
+the IDR. A DSP has no pay items: it gives no quantities and doesn't feed the auto-General.
+
 ## Auto-generated General
 
 Added in Phase R, Slice R4a. The General is the IDR's summary page. When an inspector files
@@ -882,7 +910,8 @@ The two flags:
   never reset.
 
 Rules, where "contributing reports" means the IDR's main reports that are neither addenda nor
-the General:
+the General, nor of a type in `NON_CONTRIBUTING_TYPES` (the addendums by nature, and `DSP`, a checklist with no
+description of work or pay items):
 
 | Situation | What the backend does |
 |---|---|
