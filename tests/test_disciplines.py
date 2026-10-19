@@ -14,6 +14,7 @@ class TestDisciplines:
         assert disciplines_for_report_type("AC") == ("AC Pavement",)
         assert disciplines_for_report_type("CONC_MIX") == ("Concrete (delivery)",)
         assert disciplines_for_report_type("CONC_CYL") == ("Concrete (testing)",)
+        assert disciplines_for_report_type("DSP") == ("Daily Site Patrol",)
 
     def test_swcb_covers_sidewalk_and_curb(self):
         assert disciplines_for_report_type("SWCB") == ("Sidewalk", "Curb")
@@ -29,6 +30,7 @@ class TestDisciplines:
         assert report_types_for_discipline("AC Pavement") == ("AC",)
         assert report_types_for_discipline("Concrete (delivery)") == ("CONC_MIX",)
         assert report_types_for_discipline("Concrete (testing)") == ("CONC_CYL",)
+        assert report_types_for_discipline("Daily Site Patrol") == ("DSP",)
 
     def test_an_unknown_discipline_has_no_report_types(self):
         assert report_types_for_discipline("Sewer") == ()

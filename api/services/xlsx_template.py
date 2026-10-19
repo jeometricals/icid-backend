@@ -424,6 +424,24 @@ class WorkbookTemplate:
             xml = xml[:at] + f'<mergeCells count="1"><mergeCell ref="{reference}"/></mergeCells>' + xml[at:]
         self._write(self._sheet_paths[sheet], xml)
 
+    def unmerge_cells(self, sheet: str, reference: str) -> None:
+        """
+        Undo one merge, so its cells can join a larger area (merges may not overlap).
+        Takes the sheet name and the merged range, exactly as the sheet has it, e.g. 'AK8:AL8'.
+        Returns nothing; raises ValueError if the sheet has no such merge.
+        """
+        xml = self._sheet(sheet)
+        tag = f'<mergeCell ref="{reference}"/>'
+        if tag not in xml:
+            raise ValueError(f"{sheet}!{reference} is not merged")
+        count = int(re.search(r'<mergeCells count="(\d+)">', xml).group(1))
+        xml = xml.replace(tag, "", 1)
+        if count == 1:
+            xml = re.sub(r'<mergeCells count="1">\s*</mergeCells>', "", xml)
+        else:
+            xml = xml.replace(f'<mergeCells count="{count}">', f'<mergeCells count="{count - 1}">', 1)
+        self._write(self._sheet_paths[sheet], xml)
+
     def ensure_merged(self, sheet: str, reference: str) -> None:
         """
         Merge a range of cells unless the sheet already has that exact merge.
@@ -755,6 +773,22 @@ class WorkbookTemplate:
         if target is None:
             raise ValueError(f"{sheet} has no drawing to add a picture to")
         return posixpath.normpath(posixpath.join(posixpath.dirname(sheet_part), target.group(1)))
+
+    def clear_shape_fill(self, sheet: str, shape_name: str) -> None:
+        """
+        Make one drawn shape see-through, keeping its outline: a white-filled checkbox rectangle hides the "X" stamped in
+        the cell beneath it. Takes the sheet name and the shape's name in its drawing (e.g. "Rectangle 1").
+        Returns nothing; raises ValueError when the sheet's drawing has no such shape. A shape already unfilled is left.
+        """
+        part = self._drawing_part(sheet)
+        xml = self._text(part)
+        shape = re.search(rf'<xdr:sp\b(?:(?!</xdr:sp>).)*?name="{re.escape(shape_name)}".*?</xdr:sp>', xml, re.DOTALL)
+        if shape is None:
+            raise ValueError(f"{sheet} has no shape named {shape_name}")
+        fill_area = shape.group(0).split("<a:ln", 1)[0]  # the shape's own fill comes before its outline
+        cleared = re.sub(r"<a:solidFill>.*?</a:solidFill>", "<a:noFill/>", fill_area, count=1, flags=re.DOTALL)
+        if cleared != fill_area:
+            self._write(part, xml[:shape.start()] + shape.group(0).replace(fill_area, cleared, 1) + xml[shape.end():])
 
     def _ensure_drawing(self, sheet: str) -> str:
         """

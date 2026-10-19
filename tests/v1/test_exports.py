@@ -4186,7 +4186,7 @@ class TestReSignatureLayouts:
                "Sketch Cont": export.RE_SIGNATURE_LAYOUTS["Attachments"]}
 
     def test_every_page_the_inspector_signs_has_an_re_layout_too(self):
-        assert set(export.RE_SIGNATURE_LAYOUTS) == set(export.SIGNATURE_LAYOUTS)
+        assert set(export.RE_SIGNATURE_LAYOUTS) == set(export.SIGNATURE_LAYOUTS) | {"DSP Fr"}  # DSP Fr: the RE's only
         assert set(self.layouts) == set(RE_LINES)
 
     @pytest.mark.parametrize("sheet", sorted(RE_LINES))

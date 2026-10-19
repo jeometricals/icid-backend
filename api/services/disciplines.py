@@ -3,8 +3,8 @@ Maps a report type to the disciplines it covers, and the reverse.
 
 A quantity row keeps the type of the report its pay item is on; its disciplines are read off that type here. The
 quantities reader resolves a discipline filter to report types the other way round, and the archive filter lists the
-disciplines an IDR has. Concrete Truck & Mix Info and Concrete Cylinder Data carry no pay items, so they never tag a
-quantity; they are here for the lists. PIR_FLAGS is no report's type: it tags the quantity rows an IDR's flags give
+disciplines an IDR has. Concrete Truck & Mix Info, Concrete Cylinder Data and Daily Site Patrol carry no pay items, so
+they never tag a quantity; they are here for the lists. PIR_FLAGS is no report's type: it tags the quantity rows an IDR's flags give
 (migration 037), which are sidewalk work, so it maps a quantity row's type, never a report's.
 """
 
@@ -16,6 +16,7 @@ REPORT_TYPE_TO_DISCIPLINES: dict[str, tuple[str, ...]] = {
     ReportType.CONC_MIX.value: ("Concrete (delivery)",),
     ReportType.AC.value: ("AC Pavement",),
     ReportType.CONC_CYL.value: ("Concrete (testing)",),
+    ReportType.DSP.value: ("Daily Site Patrol",),
 }
 # A quantity row's types: its report's, or PIR_FLAGS for a row an IDR's flags gave
 QUANTITY_TYPE_TO_DISCIPLINES: dict[str, tuple[str, ...]] = {**REPORT_TYPE_TO_DISCIPLINES, "PIR_FLAGS": ("Sidewalk",)}

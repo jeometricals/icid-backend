@@ -14,6 +14,7 @@ from tests.conftest import ADMIN_USER_ROW, DEMO_USER_ROW, signed_in
 from api.services.signatures import SignatureStorageError
 from api.schemas.idr import Idr
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, TYPE_LABELS, label_for
+from api.schemas.dsp_report import MOS_ITEMS, MPT_ITEMS, blank_dsp_report
 from api.services.auto_general import DESCRIPTION_FOOTER, build_auto_general_data, regenerate_auto_general
 
 # ---------------------------------------------------------------------------
@@ -614,7 +615,7 @@ class TestSaveReportData:
     def test_single_statement_replaces_data_and_stamps_both_updated_at(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
             admin_client.put(self.url, json=SAVE_BODY)
-        assert mocks["idr_reports"].call_count == 1
+        assert mocks["idr_reports"].call_count == 2  # the report's type is read first (DSP), then the save
         assert mocks["idrs"].call_count == 1  # IDR lookup only; the touch is inside the CTE
         sql = mocks["idr_reports"].call_args.args[0]
         assert "UPDATE icid.idr_reports" in sql
@@ -698,9 +699,126 @@ class TestSaveReportData:
         assert admin_client.put(f"/v1/idrs/{IDR_ID}/reports/R1", json={}).status_code == 422
 
     def test_update_failure_returns_500(self, admin_client):
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=None):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([MOCK_SAVED_ROW], None)):
             response = admin_client.put(self.url, json=SAVE_BODY)
         assert response.status_code == 500
+
+
+DSP_REPORT_ID = "f7a8b9c0-d1e2-4f3a-8b4c-5d6e7f809102"
+MOCK_DSP_ROW = {**MOCK_GEN_REPORT_ROW, "report_id": UUID(DSP_REPORT_ID), "report_type": "DSP",
+                "report_data": blank_dsp_report()}
+
+
+def dsp_body(**fields) -> dict:
+    """
+    Build a DSP report body: the blank form with the given top-level fields.
+    Takes the fields as keyword arguments.
+    Returns the body.
+    """
+    return {**blank_dsp_report(), **fields}
+
+
+class TestSaveDspReport:
+    url = f"/v1/idrs/{IDR_ID}/reports/{DSP_REPORT_ID}"
+
+    def save(self, admin_client, body):
+        """
+        Save a DSP report through the endpoint, the report read returning a DSP row.
+        Takes the test client and the body.
+        Returns (the response, the idr_reports run_query mock).
+        """
+        saved = {**MOCK_DSP_ROW, "report_data": body}
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([MOCK_DSP_ROW], [saved])) as mocks:
+            response = admin_client.put(self.url, json=body)
+        return response, mocks["idr_reports"]
+
+    def test_a_blank_form_saves(self, admin_client):
+        response, run = self.save(admin_client, blank_dsp_report())
+        assert response.status_code == 200
+        assert run.call_count == 2
+        assert run.call_args.args[1][0].obj == blank_dsp_report()
+
+    def test_a_filled_form_is_stored_tidied(self, admin_client):
+        body = dsp_body(timeOfPatrol=" 14:30 ", fieldOrderIssued=True, fieldOrderNumber=" FO-12 ")
+        body["mosChecklist"][1].update(answer="no", details="  Trench left open  ")
+        body["mptChecklist"][0].update(answer="na", details="   ")
+        response, run = self.save(admin_client, body)
+        assert response.status_code == 200
+        stored = run.call_args.args[1][0].obj
+        assert (stored["timeOfPatrol"], stored["fieldOrderNumber"]) == ("14:30", "FO-12")
+        assert stored["mosChecklist"][1] == {"item": MOS_ITEMS[1], "answer": "no", "details": "Trench left open"}
+        assert stored["mptChecklist"][0] == {"item": MPT_ITEMS[0], "answer": "na", "details": None}
+
+    def test_a_no_without_details_is_not_refused(self, admin_client):
+        body = dsp_body()
+        body["mosChecklist"][0]["answer"] = "no"
+        assert self.save(admin_client, body)[0].status_code == 200
+
+    @pytest.mark.parametrize("change, detail", [
+        (lambda b: b.update(fieldOrderIssued=True), "DSP report: fieldOrderNumber is required when fieldOrderIssued "
+                                                    "is true"),
+        (lambda b: b.update(fieldOrderIssued=True, fieldOrderNumber="  "), "DSP report: fieldOrderNumber is required "
+                                                                            "when fieldOrderIssued is true"),
+        (lambda b: b.update(fieldOrderNumber="x" * 51), "DSP report: fieldOrderNumber: String should have at most 50 "
+                                                         "characters"),
+        (lambda b: b.update(timeOfPatrol="2:30 PM"), "DSP report: timeOfPatrol: must be HH:MM, 24-hour (e.g. 14:30)"),
+        (lambda b: b.update(timeOfPatrol="24:00"), "DSP report: timeOfPatrol: must be HH:MM, 24-hour (e.g. 14:30)"),
+        (lambda b: b["mptChecklist"][3].update(answer="maybe"), "DSP report: mptChecklist[3].answer: Input should be "
+                                                                "'yes', 'no' or 'na'"),
+        (lambda b: b["mosChecklist"][0].update(details="x" * 2001), "DSP report: mosChecklist[0].details: String "
+                                                                     "should have at most 2000 characters"),
+        (lambda b: b.update(fieldOrderIssued="yes"), "DSP report: fieldOrderIssued: Input should be a valid boolean"),
+        (lambda b: b.update(payItems=[]), "DSP report: payItems: Extra inputs are not permitted"),
+        (lambda b: b.pop("mptChecklist"), "DSP report: mptChecklist: Field required"),
+    ])
+    def test_a_bad_value_is_400_and_nothing_is_saved(self, admin_client, change, detail):
+        body = dsp_body()
+        change(body)
+        response, run = self.save(admin_client, body)
+        assert response.status_code == 400
+        assert response.json() == {"detail": detail}
+        assert run.call_count == 1  # the report read only
+
+    @pytest.mark.parametrize("change", [
+        lambda b: b["mosChecklist"].pop(),                                  # an item missing
+        lambda b: b["mosChecklist"].append(dict(b["mosChecklist"][0])),     # an item twice
+        lambda b: b["mosChecklist"].reverse(),                              # out of order
+        lambda b: b["mosChecklist"][0].update(item="not_an_item"),          # an unknown item
+    ])
+    def test_the_maintenance_of_site_items_must_be_the_forms_in_order(self, admin_client, change):
+        body = dsp_body()
+        change(body)
+        response, _ = self.save(admin_client, body)
+        assert response.status_code == 400
+        assert response.json()["detail"].startswith(
+            "DSP report: mosChecklist: must list the 6 Maintenance of Site items in order: waste_rubbish_debris_removed,")
+
+    def test_the_traffic_items_must_be_the_forms_too(self, admin_client):
+        body = dsp_body()
+        body["mptChecklist"] = body["mptChecklist"][:15]
+        response, _ = self.save(admin_client, body)
+        assert response.status_code == 400
+        assert "must list the 16 Maintenance and Protection of Traffic items in order" in response.json()["detail"]
+
+    def test_an_empty_body_is_400_for_a_dsp(self, admin_client):
+        assert self.save(admin_client, {})[0].status_code == 400
+
+    def test_a_dsp_shaped_body_on_another_report_is_stored_as_is(self, admin_client):
+        body = dsp_body(timeOfPatrol="2:30 PM")
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[MOCK_SAVED_ROW]) as mocks:
+            response = admin_client.put(f"/v1/idrs/{IDR_ID}/reports/{GEN_REPORT_ID}", json=body)
+        assert response.status_code == 200
+        assert mocks["idr_reports"].call_args.args[1][0].obj == body
+
+    def test_a_report_not_in_the_idr_is_404_before_any_check(self, admin_client):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
+            response = admin_client.put(self.url, json={})
+        assert response.status_code == 404 and response.json()["detail"] == "Report not found in this IDR"
+        assert mocks["idr_reports"].call_count == 1
+
+    def test_the_form_keys_are_the_ones_dsp_fr_prints(self):
+        assert len(MOS_ITEMS) == 6 and len(MPT_ITEMS) == 16
+        assert len(set(MOS_ITEMS + MPT_ITEMS)) == 22
 
 
 # ---------------------------------------------------------------------------
@@ -1429,6 +1547,7 @@ class TestListIdrsArchiveFilters:
         (["AC"], ["AC Pavement"]),
         (["CONC_MIX"], ["Concrete (delivery)"]),
         (["CONC_CYL"], ["Concrete (testing)"]),
+        (["DSP"], ["Daily Site Patrol"]),
         (["SWCB", "GEN", "CONC_MIX", "CONC_CYL", "AC"],
          ["AC Pavement", "Concrete (delivery)", "Concrete (testing)", "Curb", "General", "Sidewalk"]),
         (["NOT_A_TYPE"], []),  # a type with no discipline adds none
@@ -1917,6 +2036,27 @@ class TestRegenerateAutoGeneral:
         m["create"].assert_called_once()  # two contributing reports, AC one of them
         assert m["create"].call_args.args[1] == {
             "description": f"Sidewalk, Curb, Concrete Base: Poured curb.\n\n{DESCRIPTION_FOOTER}", "payItems": []}
+
+    def test_a_dsp_contributes_nothing_and_does_not_count(self, admin_client):
+        children = [_child("SWCB", {"description": "Poured curb."}), _child("DSP", blank_dsp_report())]
+        with patched_service(idr=IDR_ACTIVE, general=None, main_reports=children) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["create"].assert_not_called()  # one contributing report: the SWCB
+
+    def test_a_dsp_leaves_the_auto_general_as_the_other_reports_make_it(self, admin_client):
+        children = [_child("SWCB", {"description": "Poured curb."}), _child("DSP", blank_dsp_report()),
+                    _child("SWR", {"description": "Laid pipe."})]
+        with patched_service(idr=IDR_ACTIVE, general=None, main_reports=children) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        assert m["create"].call_args.args[1] == {
+            "description": f"Sidewalk, Curb, Concrete Base: Poured curb.\n\nSewer: Laid pipe.\n\n{DESCRIPTION_FOOTER}",
+            "payItems": []}
+
+    def test_an_auto_general_left_with_a_dsp_alone_beside_one_report_is_removed(self, admin_client):
+        children = [_child("SWCB", {"description": "Poured curb."}), _child("DSP", blank_dsp_report())]
+        with patched_service(idr=IDR_ACTIVE, general=AUTO_GENERAL, main_reports=children) as m:
+            regenerate_auto_general(IDR_ID_UUID)
+        m["delete"].assert_called_once()
 
     def test_swcb_contributes_to_auto_general_with_its_label(self, admin_client):
         children = [

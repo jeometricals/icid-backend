@@ -1246,9 +1246,10 @@ class SignatureLayout:
     """
     Where one form page takes a signature. The image is fitted to signature_cells: the signature line and the blank
     row above it (the line alone is one 17 px row, too low to read a signature in).
-    The inspector's layout names the Date cell on the same line, which takes the IDR's work date. The Resident
-    Engineer's has no Date cell of its own (the page has one, and it is the inspector's), so it names the caption
-    under its line instead, which is replaced by "RE: <name>, <date>".
+    The inspector's layout names the Date cell on the same line, which takes the day of the latest signature printed.
+    The Resident Engineer's has no Date cell of its own (the page has one, and it is the inspector's), but on a page
+    without an inspector's line (DSP Fr), where it names the page's Date cell; it names the caption under its line,
+    which is replaced by "RE: <name>".
     """
 
     signature_cells: str                 # the range the image is fitted to, e.g. "C58:M59"
@@ -1388,8 +1389,8 @@ def stamp_signature_date(workbook: WorkbookTemplate, sheet: str, layout: Signatu
     """
     Stamp the signature line's Date cell, the one Date a page has, with the day a signature was made: m/d/yy, the day
     it was in FORM_TIMEZONE.
-    Takes the workbook, the sheet, the inspector's SignatureLayout (it names the Date cell) and the signing time
-    (None leaves the cell blank).
+    Takes the workbook, the sheet, the SignatureLayout that names the page's Date cell (the inspector's, or the RE's on
+    a page without one) and the signing time (None leaves the cell blank).
     Returns nothing.
     """
     if signed_at is not None:
