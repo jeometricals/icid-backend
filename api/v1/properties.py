@@ -49,12 +49,15 @@ MAX_ADDRESS_LENGTH = 200
 MAX_NOTES_LENGTH = 2000
 MAX_STREET_LENGTH = 200
 MAX_VIOLATION_NO_LENGTH = 200
+MAX_COMMUNITY_BOARD_LENGTH = 10
 # The text fields a null leaves alone, and the ones it clears (blank is none), each with its longest value
 _REQUIRED_TEXT = {
     "address": MAX_ADDRESS_LENGTH,
     "intersection_street_1": MAX_STREET_LENGTH, "intersection_street_2": MAX_STREET_LENGTH,
 }
-_OPTIONAL_TEXT = {"violation_no": MAX_VIOLATION_NO_LENGTH, "notes": MAX_NOTES_LENGTH}
+_OPTIONAL_TEXT = {
+    "violation_no": MAX_VIOLATION_NO_LENGTH, "community_board": MAX_COMMUNITY_BOARD_LENGTH, "notes": MAX_NOTES_LENGTH,
+}
 # The fields the body's model checks and puts in their stored form: the choices, and a sidewalk's block and lot
 _MODEL_CHECKED = ("kind", "boro", "block", "lot", "property_type", "quadrant", "facing_street", "ramp_type")
 KIND_CHANGED = "Property kind cannot be changed. Delete and recreate."
@@ -76,7 +79,7 @@ def _writable_property(
 
 def _clean_fields(body: PropertyCreate | PropertyUpdate) -> dict[str, Any]:
     """
-    Read a property's fields off the request: text trimmed, address and streets refused when blank or too long. A field sent as null is left out, but for notes and violation_no, which are optional: blank or null ones are None.
+    Read a property's fields off the request: text trimmed, address and streets refused when blank or too long. A field sent as null is left out, but for notes, violation_no and community_board, which are optional: blank or null ones are None.
     Takes the request body.
     Returns the values keyed by column, for the fields sent (and a create's kind); raises 400 for a value that doesn't fit.
     """
@@ -174,7 +177,7 @@ def create_project_property(
 ) -> PropertyResponse | JSONResponse:
     """
     Add a property to a project, created by the signed-in user: a sidewalk or a ped ramp. For a user on the project, in any role, or an admin; not a demo user.
-    Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes and violation_no are none) and the user.
+    Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes, violation_no and community_board are none) and the user.
     Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value, a block or lot that isn't digits, or fields that don't fit the kind and 409 (with existing_property_id) when a live sidewalk of the project is at the borough, block and lot.
     """
     fields = _clean_fields(body)
@@ -204,7 +207,7 @@ def update_property_record(
     user: UserOut = Depends(current_user),
 ) -> PropertyResponse | JSONResponse:
     """
-    Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes and violation_no clear them. Its kind can't change.
+    Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes, violation_no and community_board clear them. Its kind can't change.
     Takes the property's id as a path parameter, the fields to change in the body, the property (loaded by _writable_property) and the user.
     Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live sidewalk of its project is at the borough, block and lot it would end up with.
     """

@@ -310,10 +310,13 @@ CREATE TABLE icid.properties (
     ramp_type              icid.ramp_type,
     block                  TEXT,
     lot                    TEXT,
+    -- Community Board, as DOT's sheets list it (Slice A, migration 043); optional for both kinds
+    community_board        TEXT,
     CONSTRAINT chk_properties_type CHECK (property_type IN ('1_3_family', '4_plus_family', 'expedited')),
     -- A tax map number without its leading zeros: block at most 5 digits, lot at most 4
     CONSTRAINT chk_properties_block_format CHECK (block IS NULL OR block ~ '^(0|[1-9][0-9]{0,4})$'),
     CONSTRAINT chk_properties_lot_format CHECK (lot IS NULL OR lot ~ '^(0|[1-9][0-9]{0,3})$'),
+    CONSTRAINT chk_properties_community_board_length CHECK (community_board IS NULL OR char_length(community_board) <= 10),
     CONSTRAINT properties_kind_fields_consistent CHECK (
         (kind = 'sidewalk' AND
          block IS NOT NULL AND lot IS NOT NULL AND address IS NOT NULL AND property_type IS NOT NULL AND

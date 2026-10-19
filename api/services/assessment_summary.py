@@ -29,10 +29,13 @@ MONTH = re.compile(r"^(\d{4})-(\d{2})$")
 SF_FORMAT = "#,##0.00"
 MONEY_FORMAT = "$#,##0.00"
 DASH = "—"
-COLUMNS = ("Property Address", '4" Assessable (SF)', '4" Non-Assessable (SF)', '4" Total (SF)', '4" Amount ($)',
+COLUMNS = ("Property Address", "CB", '4" Assessable (SF)', '4" Non-Assessable (SF)', '4" Total (SF)', '4" Amount ($)',
            '7" Assessable (SF)', '7" Non-Assessable (SF)', '7" Total (SF)', '7" Amount ($)', "Grand Total ($)",
            "Remarks")
-COLUMN_WIDTHS = (34, 14, 16, 12, 14, 14, 16, 12, 14, 15, 40)
+COLUMN_WIDTHS = (34, 8, 14, 16, 12, 14, 14, 16, 12, 14, 15, 40)
+# Where the amounts and the square feet are, by column number
+MONEY_COLUMNS = (6, 10, 11)
+SF_COLUMNS = (3, 4, 5, 7, 8, 9)
 TOTALS_FILL = PatternFill("solid", fgColor="D9D9D9")
 NO_ACTIVITY = "No activity"
 EMPTY_PROJECT = "No approved IDRs in this project yet."
@@ -63,6 +66,7 @@ class SummaryRow:
 
     property_id: UUID
     address: str
+    community_board: Optional[str] = None
     four_assessable: Decimal = ZERO
     four_non_assessable: Decimal = ZERO
     four_total: Decimal = ZERO
@@ -113,7 +117,7 @@ def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decima
             continue
         address = display_address_of(flag["property_kind"], flag["address"], flag["intersection_street_1"],
                                      flag["intersection_street_2"], flag["quadrant"], flag["facing_street"])
-        row = rows.setdefault((month, flag["property_id"]), SummaryRow(flag["property_id"], address))
+        row = rows.setdefault((month, flag["property_id"]), SummaryRow(flag["property_id"], address, flag.get("community_board")))
         row.used_approval_date = row.used_approval_date or fallback
         total, assessable, non_assessable = flag_areas(flag)
         if flag["surveyed_thickness"] == "7in":
@@ -169,8 +173,8 @@ def _header(sheet: Worksheet, project: dict[str, Any], label: str) -> None:
     sheet["A1"].font = Font(bold=True, size=12)
     sheet["A2"] = label
     sheet["A2"].font = Font(bold=True)
-    sheet["B2"] = _rate_label('4"', project.get("cost_per_sf_4in"))
-    sheet["F2"] = _rate_label('7"', project.get("cost_per_sf_7in"))
+    sheet["C2"] = _rate_label('4"', project.get("cost_per_sf_4in"))
+    sheet["G2"] = _rate_label('7"', project.get("cost_per_sf_7in"))
     for index, width in enumerate(COLUMN_WIDTHS, start=1):
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
 
@@ -187,14 +191,14 @@ def _sf(value: Decimal) -> Any:
 def _write_row(sheet: Worksheet, row_number: int, values: list[Any], bold: bool = False) -> None:
     """
     Write one row of a tab, numbers formatted by their column: SF to two decimals, amounts in dollars.
-    Takes the sheet, the row's number, its eleven values (None leaves a cell blank) and whether it is the totals row.
+    Takes the sheet, the row's number, its twelve values (None leaves a cell blank) and whether it is the totals row.
     Returns nothing.
     """
     for column, value in enumerate(values, start=1):
         cell = sheet.cell(row_number, column, value)
-        if column in (5, 9, 10):
+        if column in MONEY_COLUMNS:
             cell.number_format = MONEY_FORMAT
-        elif column in (2, 3, 4, 6, 7, 8):
+        elif column in SF_COLUMNS:
             cell.number_format = SF_FORMAT
             if value == DASH:
                 cell.alignment = Alignment(horizontal="right")
@@ -217,7 +221,7 @@ def _month_tab(workbook: Workbook, project: dict[str, Any], month: date, rows: l
     sheet.freeze_panes = "A4"
     for offset, row in enumerate(rows):
         _write_row(sheet, 4 + offset, [
-            row.address, _sf(row.four_assessable), _sf(row.four_non_assessable), _sf(row.four_total), row.four_amount,
+            row.address, row.community_board, _sf(row.four_assessable), _sf(row.four_non_assessable), _sf(row.four_total), row.four_amount,
             _sf(row.seven_assessable), _sf(row.seven_non_assessable), _sf(row.seven_total), row.seven_amount,
             row.grand_total, "; ".join(row.remarks) or None,
         ])
@@ -229,7 +233,7 @@ def _month_tab(workbook: Workbook, project: dict[str, Any], month: date, rows: l
 
     totals_row = 4 + len(rows)
     _write_row(sheet, totals_row, [
-        "Totals", total("four_assessable"), total("four_non_assessable"), total("four_total"), total("four_amount"),
+        "Totals", None, total("four_assessable"), total("four_non_assessable"), total("four_total"), total("four_amount"),
         total("seven_assessable"), total("seven_non_assessable"), total("seven_total"), total("seven_amount"),
         total("grand_total"), None,
     ], bold=True)

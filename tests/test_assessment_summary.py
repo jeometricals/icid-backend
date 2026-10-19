@@ -60,11 +60,11 @@ def tab(content: bytes, name: str):
 
 def values(sheet, row: int) -> list:
     """
-    Read one row's eleven cells.
+    Read one row's twelve cells.
     Takes the sheet and the row number.
     Returns the values.
     """
-    return [sheet.cell(row, column).value for column in range(1, 12)]
+    return [sheet.cell(row, column).value for column in range(1, 13)]
 
 
 class TestGrouping:
@@ -144,30 +144,38 @@ class TestWorkbook:
         assert book.sheetnames == ["2026-10"]
         sheet = book["2026-10"]
         assert sheet["A1"].value == "Sidewalks Queens · Project ID: SE384 · Reg: 2024123456 · Borough: Queens"
-        assert (sheet["A2"].value, sheet["B2"].value, sheet["F2"].value) == (
+        assert (sheet["A2"].value, sheet["C2"].value, sheet["G2"].value) == (
             "October 2026", '4" rate: $11.54', '7" rate: $12.64')
-        assert values(sheet, 3)[0] == "Property Address" and values(sheet, 3)[10] == "Remarks"
+        assert values(sheet, 3)[:3] == ["Property Address", "CB", '4" Assessable (SF)']
+        assert values(sheet, 3)[11] == "Remarks"
         assert sheet.freeze_panes == "A4"
         main = values(sheet, 4)
-        assert main[0] == "138-22 227 STREET"
-        assert [round(Decimal(str(v)), 2) for v in main[1:10]] == [
+        assert main[0] == "138-22 227 STREET" and main[1] is None  # no CB set
+        assert [round(Decimal(str(v)), 2) for v in main[2:11]] == [
             Decimal("113.19"), Decimal("137.75"), Decimal("250.94"), Decimal("1306.21"), Decimal("94.14"),
             Decimal("77.67"), Decimal("171.81"), Decimal("1189.93"), Decimal("2496.14")]
         elm = values(sheet, 5)
-        assert elm[0] == "350 Main St, Brooklyn" and elm[2] == "—"  # no non-assessable square feet
+        assert elm[0] == "350 Main St, Brooklyn" and elm[3] == "—"  # no non-assessable square feet
         totals = values(sheet, 6)
-        assert totals[0] == "Totals" and sheet["A6"].font.bold and sheet["A6"].fill.fgColor.rgb.endswith("D9D9D9")
-        assert round(Decimal(str(totals[1])), 2) == Decimal("293.19")
-        assert round(Decimal(str(totals[2])), 2) == Decimal("137.75")
-        assert round(Decimal(str(totals[5])), 2) == Decimal("139.14")
-        assert round(Decimal(str(totals[9])), 2) == Decimal("5142.14")
-        assert sheet["B4"].number_format == "#,##0.00" and sheet["E4"].number_format == "$#,##0.00"
+        assert totals[0] == "Totals" and totals[1] is None
+        assert sheet["A6"].font.bold and sheet["A6"].fill.fgColor.rgb.endswith("D9D9D9")
+        assert round(Decimal(str(totals[2])), 2) == Decimal("293.19")
+        assert round(Decimal(str(totals[3])), 2) == Decimal("137.75")
+        assert round(Decimal(str(totals[6])), 2) == Decimal("139.14")
+        assert round(Decimal(str(totals[10])), 2) == Decimal("5142.14")
+        assert sheet["C4"].number_format == "#,##0.00" and sheet["F4"].number_format == "$#,##0.00"
+        assert sheet["J4"].number_format == "$#,##0.00" and sheet["K4"].number_format == "$#,##0.00"
         assert sheet["A8"].value == "2 rows used IDR approval date (no page-level Date Constructed)."
         assert len(content) < 30_000
 
     def test_cells_keep_full_precision(self):
         content = build_workbook(PROJECT, summary_months([flag(MAIN, "4in", "1.005", "1.005")], RATES), False)
-        assert tab(content, "2026-10")["B4"].value == pytest.approx(1.005)
+        assert tab(content, "2026-10")["C4"].value == pytest.approx(1.005)
+
+    def test_each_row_carries_its_propertys_community_board(self):
+        flags = [{**flag(MAIN, "4in", "10", "10"), "community_board": "QN13"}]
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "2026-10")
+        assert sheet["B3"].value == "CB" and sheet["B4"].value == "QN13"
 
     def test_with_dates_typed_there_is_no_footer_note(self):
         flags = [flag(MAIN, "4in", "10", "10", constructed=date(2026, 10, 3))]
@@ -177,8 +185,8 @@ class TestWorkbook:
     def test_a_missing_rate_reads_as_a_dash_in_the_header(self):
         project = {**PROJECT, "cost_per_sf_7in": None}
         sheet = tab(build_workbook(project, summary_months(SE384, {**RATES, "cost_per_sf_7in": None}), False), "2026-10")
-        assert sheet["F2"].value == '7" rate: —'
-        assert sheet["I4"].value is None and sheet["K4"].value == '7" rate not set'
+        assert sheet["G2"].value == '7" rate: —'
+        assert sheet["J4"].value is None and sheet["L4"].value == '7" rate not set'
 
     def test_two_months_are_two_tabs(self):
         flags = [flag(MAIN, "4in", "10", "10"), flag(MAIN, "4in", "20", "20", approved=NOV_2)]

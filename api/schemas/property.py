@@ -65,6 +65,7 @@ class PropertyCreate(BaseModel):
     quadrant: Optional[Quadrant] = None
     facing_street: Optional[FacingStreet] = None
     ramp_type: Optional[RampType] = None
+    community_board: Optional[str] = None
     notes: Optional[str] = None
 
     @model_validator(mode="after")
@@ -86,8 +87,8 @@ class PropertyCreate(BaseModel):
 
 class PropertyUpdate(BaseModel):
     """
-    What is being changed on a property. Any field may be left out; a null counts as left out, except for notes and
-    violation_no, where a null or a blank clears them. kind can't change: sending another kind is a 400.
+    What is being changed on a property. Any field may be left out; a null counts as left out, except for notes,
+    violation_no and community_board, where a null or a blank clears them. kind can't change: sending another kind is a 400.
     """
 
     kind: Optional[Kind] = None
@@ -102,6 +103,7 @@ class PropertyUpdate(BaseModel):
     quadrant: Optional[Quadrant] = None
     facing_street: Optional[FacingStreet] = None
     ramp_type: Optional[RampType] = None
+    community_board: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -125,6 +127,7 @@ class PropertyOut(BaseModel):
     quadrant: Optional[Quadrant] = None
     facing_street: Optional[FacingStreet] = None
     ramp_type: Optional[RampType] = None
+    community_board: Optional[str] = None
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime

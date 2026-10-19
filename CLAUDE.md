@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 042 is in the live database (041 was skipped). A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 043 is in the live database (041 was skipped). A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. |
@@ -754,7 +754,9 @@ Any change must follow these.
     `facing_street` (`street_1` or `street_2`) and `ramp_type` (`PERPENDICULAR` `PARALLEL` `CUT_THROUGH`), all
     required. Both have `boro` (the five boroughs spelled out). `PropertyCreate` refuses a field the kind needs
     left out and any field of the other kind (422, before the database's CHECK `properties_kind_fields_consistent`
-    can); the text is trimmed, a blank street is 400, streets and `violation_no` at most 200 characters.
+    can); the text is trimmed, a blank street is 400, streets and `violation_no` at most 200 characters. Either kind
+    takes an optional `community_board` (CB, migration 043): trimmed, blank or null is NULL, at most 10 characters
+    (400), cleared by a PATCH null as `notes` is.
   - **Borough, block and lot, no BBL** (migration 036 dropped `bbl`). The borough is sent, for either kind, and
     can be changed. A block is at most 5 digits and a lot at most 4, sent as text and stored without their leading
     zeros (`"00123"` is `"123"`, `"0000"` is `"0"`; `_tax_map_number` in `api/schemas/property.py`, a 422 for
@@ -1145,8 +1147,8 @@ Any change must follow these.
   - **The month** is the property's `date_constructed` (page 1's title block of its live PIR, as the report prints it),
     else the day its IDR was approved (`re_signed_at`, in `FORM_TIMEZONE`); the tab's footer counts the rows that went
     by approval. A property approved twice in a month is one row.
-  - **The workbook:** a tab per month with rows (`YYYY-MM`, oldest first), rows by address any case, a bold grey totals
-    row, panes frozen under the column titles; SF `#,##0.00` (none reads `—`), money `$#,##0.00`; values written whole.
+  - **The workbook:** a tab per month with rows (`YYYY-MM`, oldest first), rows by address any case, the property's
+    `community_board` in a CB column after its address (Slice A), a bold grey totals row, panes frozen under the column titles; SF `#,##0.00` (none reads `—`), money `$#,##0.00`; values written whole.
     Nothing (or nothing in `from`..`to`) is one `No activity` tab, a 200. The file name carries today in New York.
 - **Progress** (R1g; `api/v1/progress.py`, `api/services/progress_rollup.py`, `api/queries/progress.py`,
   `api/schemas/progress.py`): how much of the sidewalk work the PIR flags describe is approved, in flight or not yet

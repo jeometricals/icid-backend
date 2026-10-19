@@ -414,6 +414,7 @@ read (since S2).
 | `address` | TEXT | Sidewalk only, required there. Trimmed |
 | `property_type` | TEXT | Sidewalk only, required there: `1_3_family`, `4_plus_family` or `expedited`; CHECK `chk_properties_type` |
 | `violation_no` | TEXT | Sidewalk only, optional. Trimmed, blank is NULL |
+| `community_board` | TEXT | Either kind, optional: the Community Board (CB). Trimmed, blank is NULL, at most 10 characters; CHECK `chk_properties_community_board_length` (043) |
 | `intersection_street_1`, `intersection_street_2` | TEXT | Ped ramp only, required there. Trimmed |
 | `quadrant` | `icid.quadrant` | Ped ramp only, required there: `NE`, `NW`, `SE` or `SW` |
 | `facing_street` | `icid.facing_street` | Ped ramp only, required there: `street_1` or `street_2`, which of the two streets the ramp faces |
@@ -889,6 +890,7 @@ content as TEXT, linked to a report and a form template).
 | 040 | `040_retag_walk004_flag_quantity_descriptions.sql` | M1 | Data only, no schema change. Gave Walk004's `from_flags` quantity rows the descriptions of the HWS0023 contract items they match (039 had left SE384's text; one row, `4.13 AAS`, differed in capitals). Amounts, units and codes unchanged. |
 | 041 | (none) | | Skipped: R1h.3 needed no migration. |
 | 042 | `042_walk003_budget_code_3482.sql` | E | Data only, no schema change. Moved Walk003's 4.02 CA pay item (its GEN report and its manual quantity row) from the budget code an inspector typed, `3482`, which no contract item has, to `HW-200(S)`, so its 2 TN counts as budgeted. |
+| 043 | `043_property_community_board.sql` | A | Added `properties.community_board` (TEXT, nullable) and CHECK `chk_properties_community_board_length` (at most 10 characters). No backfill: every existing row is NULL. |
 | 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |
 | 036 | `036_split_bbl_into_block_lot.sql` | R1e.3 | Added `properties.block` and `lot` (TEXT, CHECKs `chk_properties_block_format` and `chk_properties_lot_format`), backfilled from each sidewalk's BBL without leading zeros; replaced `properties_kind_fields_consistent` (block and lot where it had bbl); dropped `uq_properties_project_bbl` and the `bbl` column; created `uq_properties_project_sidewalk_bbl` on `(project_id, boro, block, lot)` `WHERE kind = 'sidewalk' AND deleted_at IS NULL`. The 6 rows: 5 sidewalks backfilled, 1 ped ramp untouched. |
@@ -910,6 +912,7 @@ Where each current column came from:
 | `properties` | all | 029 |
 | `properties` | `kind`, `boro`, `violation_no`, `intersection_street_1`, `intersection_street_2`, `quadrant`, `facing_street`, `ramp_type`, `properties_kind_fields_consistent`; `bbl`, `address` and `property_type` nullable | 035 |
 | `properties` | `block`, `lot`, `chk_properties_block_format`, `chk_properties_lot_format`, `uq_properties_project_sidewalk_bbl`, the `properties_kind_fields_consistent` of today; `bbl` and `uq_properties_project_bbl` dropped | 036 |
+| `properties` | `community_board`, `chk_properties_community_board_length` | 043 |
 | `idr_flag_attributions`; `idrs.task_order_id`, `idx_idrs_task_order`; `flags.claimed_by_idr_id`, `constructed_on`, `chk_flags_claim_consistent`, `idx_flags_claimed_by_idr`, `idx_flags_scope_rollup`; `quantities.source`, `chk_quantities_source` | all | 037 |
 | `task_orders`, `task_order_properties` | all | 030 |
 | `pirs` | all | 031 |
