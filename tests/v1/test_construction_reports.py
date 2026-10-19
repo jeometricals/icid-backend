@@ -35,7 +35,7 @@ PROPERTY_ROW = {"id": PROPERTY_ID, "project_id": "SE384", "kind": "sidewalk", "b
                 "lot": "49", "address": "138-22 227 STREET", "deleted_at": None}
 HEADER = {
     "property_id": PROPERTY_ID, "project_id": "SE384", "property_kind": "sidewalk", "boro": "Queens", "block": "13140",
-    "lot": "49", "address": "138-22 227 STREET", "intersection_street_1": None, "intersection_street_2": None,
+    "lot": "49", "property_type": "1_3_family", "address": "138-22 227 STREET", "intersection_street_1": None, "intersection_street_2": None,
     "quadrant": None, "facing_street": None, "project_name": "Sidewalks Queens",
     "cost_per_sf_4in": Decimal("11.5400"), "cost_per_sf_7in": Decimal("12.6400"),
     "pir_id": UUID("6f000000-0000-4000-8000-000000000001"), "inspector_initials": "RC",
@@ -150,7 +150,7 @@ class TestPropertyReport:
     def test_it_prints_the_property_and_the_title_block(self, admin_client, storage):
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
             text = pdf_text(admin_client.get(URL).content)
-        for expected in ("CONSTRUCTION REPORT", "CITY PROPERTY", "Sheet 1 of 1", "HWS2014Q", "61188", "Queens",
+        for expected in ("CONSTRUCTION REPORT", "1-3 FAMILY", "Sheet 1 of 1", "HWS2014Q", "61188", "Queens",
                          "138-22 227 STREET", "13140", "49", "2026-09-01", "2026-10-03", "RC 2026-10-15",
                          "Genghis Khan 2026-10-15", "Ada Admin 2026-10-15", "139 AVENUE", "227 STREET"):
             assert expected in text, expected

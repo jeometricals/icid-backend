@@ -10,7 +10,9 @@ from api.services.construction_report import (
     CALC_WIDTH_TWO,
     calc_lines,
     label_fits,
+    SIGNATURE_MAX_WIDTH,
     material_label,
+    property_class,
     reason_text,
     report_layout,
     signature_box,
@@ -393,6 +395,14 @@ class TestLayout:
         assert [[group.thickness for group in column] for column in report_layout(groups).columns] == [
             ["4in", "7in_as_4in"], ["7in"]]
 
-    def test_the_signature_fits_its_cell_above_the_line(self):
+    def test_the_signature_fits_its_cell_above_the_line_at_most_1_3_inches_wide(self):
         x, y, w, h = signature_box(546.0, 14.0, 48.0)
-        assert (x, y) == (552.0, 25.5) and x + w <= 546 + 210 and y + h <= 14 + 48
+        assert w == SIGNATURE_MAX_WIDTH == 94.0 and y == 25.5 and y + h <= 14 + 48
+        # Centred across the 210 pt cell
+        assert x == 546 + (210 - 94) / 2 and x + w <= 546 + 210
+
+    @pytest.mark.parametrize("property_type, label", [
+        ("1_3_family", "1-3 FAMILY"), ("4_plus_family", "4+ FAMILY"), ("expedited", "EXPEDITED"),
+        (None, "CITY PROPERTY")])
+    def test_the_header_prints_the_property_class(self, property_type, label):
+        assert property_class(property_type) == label

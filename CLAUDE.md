@@ -1083,7 +1083,9 @@ Any change must follow these.
   - **Which IDR:** the one in `?idr_id=`, or by default the most recently approved (`re_signed_at`) that claimed a flag
     on the property; it must be approved, not deleted, and have claimed a flag there (404 otherwise). The IDR route
     (`require_project_role` on all three roles, and the demo fence) zips one PDF per property it claimed flags on.
-  - **What prints.** Page 1's title block of the live PIR (contract and violation numbers, the streets, the three
+  - **What prints.** Above the title, the property's class from its `property_type` (`property_class`: `1-3 FAMILY`,
+    `4+ FAMILY`, `EXPEDITED`; `CITY PROPERTY` for a property without one, a ped ramp). Page 1's title block of the
+    live PIR (contract and violation numbers, the streets, the three
     dates, blank when NULL; the status boxes), the property's address, block and lot, and box 1's Survey (the PIR's
     initials and sign date), Computerized by (`digitized_by`, `digitized_at`) and Checked by (the IDR's RE,
     `re_signed_at`). Box 4 ticks `work_already_done`, `distinctive_material`, `landmark`, `subway`, `tree`,
@@ -1128,8 +1130,8 @@ Any change must follow these.
   - **Certification:** the IDR's own inspector signature copy (`inspector_signature_path`, fetched through
     `fetch_signature_file` in `api/services/signatures.py`, as the IDR export does; best-effort, blank when it can't
     be), its reporter as Inspected By, `idr_number`, and their initials with the day the IDR was approved. The
-    signature is fitted to its own Print Sign Date cell at the strip's right end (`signature_box`, R1h.4), its
-    proportions kept, centred. The PIR's `as_built_signed_*` are never set, so they aren't used.
+    signature is fitted to its own Print Sign Date cell at the strip's right end (`signature_box`, R1h.4), at most
+    `SIGNATURE_MAX_WIDTH` (94 pt, about 1.3 in, DOT's sign-date box) wide, its proportions kept, centred. The PIR's `as_built_signed_*` are never set, so they aren't used.
   - Downloads carry `Content-Disposition` (`{address}_construction_report.pdf`, `IDR_{number}_construction_reports.zip`),
     which CORS exposes (`expose_headers`). ~40–60 KB a page (`pageCompression`).
 - **Assessment Summary** (R1i; `api/v1/assessment_summary.py`, `api/queries/assessment_summary.py`,

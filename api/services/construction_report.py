@@ -88,6 +88,11 @@ STRAP_GAP = 7.0
 STRAP_LANE = STRAP_GAP + STRAP_PT + 3
 # The certification strip's Print Sign Date cell, at its right end
 SIGN_CELL_WIDTH = 210.0
+# The widest the inspector's signature prints (about 1.3 in), as DOT's sign-date box holds it
+SIGNATURE_MAX_WIDTH = 94.0
+# The class printed above the title, by property_type; a property without one (a ped ramp) is city property
+PROPERTY_CLASS_LABELS = {"1_3_family": "1-3 FAMILY", "4_plus_family": "4+ FAMILY", "expedited": "EXPEDITED"}
+CITY_PROPERTY = "CITY PROPERTY"
 CENT = Decimal("0.01")
 
 # Box 4's nine reasons, in the form's order: (the code a title block stores, the label); any other reason is dropped
@@ -446,6 +451,15 @@ def _checkbox(c: Canvas, x: float, y: float, label: str, checked: bool, width: f
     _text(c, x + 9, y + 0.8, label, 6.5, width=width - 9)
 
 
+def property_class(property_type: Optional[str]) -> str:
+    """
+    The property's class as the report's header prints it.
+    Takes the property's property_type (None for a ped ramp).
+    Returns its label (PROPERTY_CLASS_LABELS), or CITY PROPERTY when it has none.
+    """
+    return PROPERTY_CLASS_LABELS.get(property_type or "", CITY_PROPERTY)
+
+
 def _chrome(c: Canvas, header: dict[str, Any]) -> None:
     """
     Draw the form's chrome: the title bar, the vertical margins and the header line.
@@ -453,7 +467,7 @@ def _chrome(c: Canvas, header: dict[str, Any]) -> None:
     Returns nothing.
     """
     _text(c, PAGE_WIDTH / 2, 590, "CONSTRUCTION REPORT", 14, BOLD, align="centre")
-    _text(c, LEFT, 592, "CITY PROPERTY", 8, BOLD)
+    _text(c, LEFT, 592, property_class(header.get("property_type")), 8, BOLD)
     _text(c, RIGHT, 592, "Sheet 1 of 1", 8, align="right")
     for x, angle, text in ((20, 90, "55 Water Street, New York, NY 10041"),
                            (PAGE_WIDTH - 20, 270, "New York City Department of Transportation")):
@@ -1283,11 +1297,12 @@ def _certification(c: Canvas, header: dict[str, Any], signature: Optional[ImageR
 
 def signature_box(cell_x: float, y: float, h: float) -> tuple[float, float, float, float]:
     """
-    Where the signature is fitted: the Print Sign Date cell above its line, a margin round it. The image keeps its proportions and is centred in it.
+    Where the signature is fitted: the Print Sign Date cell above its line, a margin round it, at most SIGNATURE_MAX_WIDTH wide and centred across the cell. The image keeps its proportions and is centred in it.
     Takes the cell's left edge, the strip's bottom and its height.
     Returns (x, bottom y, width, height).
     """
-    return cell_x + 6, y + 11.5, SIGN_CELL_WIDTH - 12, h - 15
+    width = min(SIGN_CELL_WIDTH - 12, SIGNATURE_MAX_WIDTH)
+    return cell_x + (SIGN_CELL_WIDTH - width) / 2, y + 11.5, width, h - 15
 
 
 def draw_report(header: dict[str, Any], measure: Measure, items: list[SketchItem], fit: Fit,

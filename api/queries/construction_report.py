@@ -51,7 +51,7 @@ def get_report_header(property_id: UUID, idr_id: UUID) -> Optional[dict[str, Any
     sql = f"""
         SELECT
             p.id AS property_id, p.project_id, p.kind::text AS property_kind, p.boro::text AS boro, p.block, p.lot,
-            p.address, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
+            p.property_type, p.address, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
             p.facing_street::text AS facing_street,
             pr.project_name, pr.cost_per_sf_4in, pr.cost_per_sf_7in,
             pir.id AS pir_id, pir.inspector_initials, pir.inspector_sign_date, pir.digitized_at,
