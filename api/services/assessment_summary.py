@@ -1,19 +1,21 @@
 """
 The Assessment Summary (R1i): a project's assessable quantities and amounts per property and month of construction,
-an .xlsx workbook with one tab per month that has any, for the OE or RE to send DOT each month.
+an .xlsx workbook with one tab per month that has any, for the OE or RE to send DOT each month. Slice C adds the same
+figures a row per site, summed over a range of days (summary_sites), for the As-Builts & Assessments page and its
+tailored one-sheet download.
 
 Each flag is measured exactly as the Construction Report measures it (construction_measure.flag_areas), so a
-property's row adds up to its PDFs. A flag's month is its property's Date Constructed (page 1's title block), or the
-day its IDR was approved when that isn't typed (counted in the tab's footer). 7" assessed as 4" counts in the 4"
-columns at the 4" rate, noted in Remarks. Values are written whole; the cells show two decimals.
+property's row adds up to its PDFs. A flag's day is its property's Date Constructed (page 1's title block), or the
+day its IDR was approved when that isn't typed (counted in the tab's footer); its month is that day's. 7" assessed as
+4" counts in the 4" columns at the 4" rate, noted in Remarks. Values are written whole; the cells show two decimals.
 """
 
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Callable, Hashable, Optional
 from uuid import UUID
 
 from openpyxl import Workbook
@@ -21,6 +23,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
 from api.schemas.property import display_address_of
+from api.services.budget_rollup import money
 from api.services.construction_measure import ZERO, flag_areas
 from api.services.export_common import signed_date
 
@@ -40,6 +43,11 @@ TOTALS_FILL = PatternFill("solid", fgColor="D9D9D9")
 NO_ACTIVITY = "No activity"
 EMPTY_PROJECT = "No approved IDRs in this project yet."
 EMPTY_RANGE = "No approved IDRs in the selected range."
+EMPTY_VIEW = "No constructed sites in this view."
+# The figures a row (and a totals row) sums: square feet, and the amounts, which are None without a rate
+SF_FIELDS = ("four_assessable", "four_non_assessable", "four_total", "seven_assessable", "seven_non_assessable",
+             "seven_total")
+AMOUNT_FIELDS = ("four_amount", "seven_amount", "grand_total")
 
 
 class MonthError(ValueError):
@@ -62,11 +70,15 @@ def parse_month(value: Optional[str], name: str) -> Optional[date]:
 
 @dataclass
 class SummaryRow:
-    """One property in one month: its square feet and amounts by pay type, and what Remarks says."""
+    """One property (in one month, or over a range of days): its square feet and amounts by pay type, and what Remarks says."""
 
     property_id: UUID
     address: str
     community_board: Optional[str] = None
+    kind: Optional[str] = None
+    block: Optional[str] = None
+    lot: Optional[str] = None
+    violation_no: Optional[str] = None
     four_assessable: Decimal = ZERO
     four_non_assessable: Decimal = ZERO
     four_total: Decimal = ZERO
@@ -81,16 +93,16 @@ class SummaryRow:
     remarks: list[str] = field(default_factory=list)
 
 
-def _month_of(flag: dict[str, Any]) -> tuple[Optional[date], bool]:
+def _day_of(flag: dict[str, Any]) -> tuple[Optional[date], bool]:
     """
-    The month a flag counts in: its property's Date Constructed, else the day its IDR was approved in New York.
+    The day a flag counts on: its property's Date Constructed, else the day its IDR was approved in New York.
     Takes the flag row.
-    Returns (the month's first day, whether the approval date stood in); (None, True) with neither.
+    Returns (the day, whether the approval date stood in); (None, True) with neither.
     """
     if flag["date_constructed"] is not None:
-        return flag["date_constructed"].replace(day=1), False
+        return flag["date_constructed"], False
     if flag["re_signed_at"] is not None:
-        return signed_date(flag["re_signed_at"]).replace(day=1), True
+        return signed_date(flag["re_signed_at"]), True
     return None, True
 
 
@@ -103,21 +115,33 @@ def _money(sf: Decimal, rate: Optional[Decimal]) -> Optional[Decimal]:
     return None if rate is None else sf * Decimal(rate)
 
 
-def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]],
-                   first: Optional[date] = None, last: Optional[date] = None) -> dict[date, list[SummaryRow]]:
+def _new_row(flag: dict[str, Any]) -> SummaryRow:
     """
-    Group a project's claimed flags by month and property, measured as the Construction Report measures them.
-    Takes the flags (list_assessment_flags), the project's rates (cost_per_sf_4in, cost_per_sf_7in) and the months to keep (first and last, inclusive; None: open).
-    Returns {month: rows}, the months in order and each month's rows by address, any case; amounts None without a rate.
+    Start a property's row from one of its flags.
+    Takes the flag row (with its property's fields).
+    Returns the empty row.
     """
-    rows: dict[tuple[date, UUID], SummaryRow] = {}
+    address = display_address_of(flag["property_kind"], flag["address"], flag["intersection_street_1"],
+                                 flag["intersection_street_2"], flag["quadrant"], flag["facing_street"])
+    return SummaryRow(flag["property_id"], address, flag.get("community_board"), flag["property_kind"],
+                      flag.get("block"), flag.get("lot"), flag.get("violation_no"))
+
+
+def _rows_by(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]], first: Optional[date],
+             last: Optional[date], key: Callable[[date, dict[str, Any]], Hashable]) -> list[tuple[Hashable, SummaryRow]]:
+    """
+    Sum claimed flags into rows, measured as the Construction Report measures them, with their amounts and remarks.
+    Takes the flags (list_assessment_flags), the project's rates (cost_per_sf_4in, cost_per_sf_7in), the days to keep (first and last, inclusive; None: open) and what makes a row (a function of a flag's day and the flag).
+    Returns (key, row) pairs in no set order; amounts None without a rate.
+    """
+    rows: dict[Hashable, SummaryRow] = {}
     for flag in flags:
-        month, fallback = _month_of(flag)
-        if month is None or (first and month < first) or (last and month > last):
+        day, fallback = _day_of(flag)
+        if day is None or (first and day < first) or (last and day > last):
             continue
-        address = display_address_of(flag["property_kind"], flag["address"], flag["intersection_street_1"],
-                                     flag["intersection_street_2"], flag["quadrant"], flag["facing_street"])
-        row = rows.setdefault((month, flag["property_id"]), SummaryRow(flag["property_id"], address, flag.get("community_board")))
+        row = rows.get(key(day, flag))
+        if row is None:
+            row = rows[key(day, flag)] = _new_row(flag)
         row.used_approval_date = row.used_approval_date or fallback
         total, assessable, non_assessable = flag_areas(flag)
         if flag["surveyed_thickness"] == "7in":
@@ -132,8 +156,7 @@ def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decima
                 row.built_7_billed_4 += total
 
     rate_4, rate_7 = rates.get("cost_per_sf_4in"), rates.get("cost_per_sf_7in")
-    months: dict[date, list[SummaryRow]] = {}
-    for (month, _), row in sorted(rows.items(), key=lambda item: (item[0][0], item[1].address.lower())):
+    for row in rows.values():
         row.four_amount, row.seven_amount = _money(row.four_assessable, rate_4), _money(row.seven_assessable, rate_7)
         amounts = [amount for amount in (row.four_amount, row.seven_amount) if amount is not None]
         row.grand_total = sum(amounts, ZERO) if amounts else None
@@ -143,8 +166,93 @@ def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decima
             row.remarks.append('4" rate not set')
         if rate_7 is None and row.seven_total:
             row.remarks.append('7" rate not set')
+    return list(rows.items())
+
+
+def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]],
+                   first: Optional[date] = None, last: Optional[date] = None) -> dict[date, list[SummaryRow]]:
+    """
+    Group a project's claimed flags by month and property, measured as the Construction Report measures them.
+    Takes the flags (list_assessment_flags), the project's rates (cost_per_sf_4in, cost_per_sf_7in) and the months to keep (first and last, each a month's first day, inclusive; None: open).
+    Returns {month: rows}, the months in order and each month's rows by address, any case; amounts None without a rate.
+    """
+    def by_month(day: date, flag: dict[str, Any]) -> Hashable:
+        return day.replace(day=1), flag["property_id"]
+
+    # The last month's last day: the next month's first, less one
+    end = None if last is None else date(last.year + last.month // 12, last.month % 12 + 1, 1) - timedelta(days=1)
+    rows = _rows_by(flags, rates, first, end, by_month)
+    months: dict[date, list[SummaryRow]] = {}
+    for (month, _), row in sorted(rows, key=lambda item: (item[0][0], item[1].address.lower())):
         months.setdefault(month, []).append(row)
     return months
+
+
+def summary_sites(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]], first: Optional[date] = None,
+                  last: Optional[date] = None, property_ids: Optional[set[UUID]] = None) -> list[SummaryRow]:
+    """
+    Sum a project's claimed flags a row per property, over a range of days, measured as the Construction Report measures them.
+    Takes the flags (list_assessment_flags), the project's rates, the days to keep (first and last, inclusive; None: open) and the properties to keep (None: all).
+    Returns the rows by address, any case; amounts None without a rate.
+    """
+    kept = [flag for flag in flags if property_ids is None or flag["property_id"] in property_ids]
+    rows = _rows_by(kept, rates, first, last, lambda day, flag: flag["property_id"])
+    return sorted((row for _, row in rows), key=lambda row: row.address.lower())
+
+
+def total(rows: list[SummaryRow], attribute: str) -> Optional[Decimal]:
+    """
+    Sum one figure over rows, as a totals row shows it.
+    Takes the rows and the attribute.
+    Returns the sum of the values that are known; None when none is.
+    """
+    known = [getattr(row, attribute) for row in rows if getattr(row, attribute) is not None]
+    return sum(known, ZERO) if known else None
+
+
+def _figures(values: Callable[[str], Optional[Decimal]]) -> dict[str, Optional[float]]:
+    """
+    Round a row's (or the totals') figures for the page: square feet and amounts to 2 decimal places, halves up.
+    Takes how to read a figure by its name.
+    Returns them keyed by name; an amount without a rate stays None.
+    """
+    return {name: money(values(name) or ZERO) for name in SF_FIELDS} | {name: money(values(name)) for name in AMOUNT_FIELDS}
+
+
+def summary_payload(rows: list[SummaryRow], rates: dict[str, Optional[Decimal]], first: Optional[date],
+                    last: Optional[date]) -> dict[str, Any]:
+    """
+    Shape the page's view of the sites for its response (AssessmentSummary).
+    Takes the rows (summary_sites), the project's rates and the range asked for.
+    Returns {range, cost_per_sf_4in, cost_per_sf_7in, sites, totals}, figures rounded to the cent.
+    """
+    sites = [{
+        "property_id": row.property_id, "kind": row.kind, "display_address": row.address, "block": row.block,
+        "lot": row.lot, "violation_no": row.violation_no, "community_board": row.community_board,
+        "remarks": row.remarks, "used_approval_date": row.used_approval_date,
+        **_figures(lambda name, row=row: getattr(row, name)),
+    } for row in rows]
+    return {
+        "range": {"from": first, "to": last},
+        **{name: None if rates.get(name) is None else float(rates[name]) for name in ("cost_per_sf_4in", "cost_per_sf_7in")},
+        "sites": sites,
+        "totals": _figures(lambda name: total(rows, name)),
+    }
+
+
+def range_label(first: Optional[date], last: Optional[date]) -> str:
+    """
+    Name a range of days, as the tailored download's sheet is named.
+    Takes the first and last day (None: open).
+    Returns '2026-10-01 to 2026-10-31', 'From 2026-10-01', 'Through 2026-10-31' or 'All dates'.
+    """
+    if first and last:
+        return f"{first.isoformat()} to {last.isoformat()}"
+    if first:
+        return f"From {first.isoformat()}"
+    if last:
+        return f"Through {last.isoformat()}"
+    return "All dates"
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -162,8 +270,8 @@ def _rate_label(size: str, rate: Optional[Decimal]) -> str:
 
 def _header(sheet: Worksheet, project: dict[str, Any], label: str) -> None:
     """
-    Write a tab's first two rows: the project, and the month with the two rates.
-    Takes the sheet, the project row and the month's label.
+    Write a tab's first two rows: the project, and the month (or range) with the two rates.
+    Takes the sheet, the project row and the tab's label.
     Returns nothing.
     """
     parts = [project["project_name"] or "", f"Project ID: {project['project_id']}"]
@@ -207,14 +315,14 @@ def _write_row(sheet: Worksheet, row_number: int, values: list[Any], bold: bool 
             cell.fill = TOTALS_FILL
 
 
-def _month_tab(workbook: Workbook, project: dict[str, Any], month: date, rows: list[SummaryRow]) -> None:
+def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str, rows: list[SummaryRow]) -> None:
     """
-    Add one month's tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many.
-    Takes the workbook, the project row, the month and its rows.
+    Add a tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many.
+    Takes the workbook, the project row, the tab's name and label, and its rows (at least one).
     Returns nothing.
     """
-    sheet = workbook.create_sheet(month.strftime("%Y-%m"))
-    _header(sheet, project, month.strftime("%B %Y"))
+    sheet = workbook.create_sheet(name)
+    _header(sheet, project, label)
     for column, title in enumerate(COLUMNS, start=1):
         sheet.cell(3, column, title).font = Font(bold=True)
         sheet.cell(3, column).alignment = Alignment(wrap_text=True, vertical="top")
@@ -226,16 +334,11 @@ def _month_tab(workbook: Workbook, project: dict[str, Any], month: date, rows: l
             row.grand_total, "; ".join(row.remarks) or None,
         ])
 
-    def total(attribute: str) -> Optional[Decimal]:
-        values = [getattr(row, attribute) for row in rows]
-        known = [value for value in values if value is not None]
-        return sum(known, ZERO) if known else None
-
     totals_row = 4 + len(rows)
     _write_row(sheet, totals_row, [
-        "Totals", None, total("four_assessable"), total("four_non_assessable"), total("four_total"), total("four_amount"),
-        total("seven_assessable"), total("seven_non_assessable"), total("seven_total"), total("seven_amount"),
-        total("grand_total"), None,
+        "Totals", None, total(rows, "four_assessable"), total(rows, "four_non_assessable"), total(rows, "four_total"),
+        total(rows, "four_amount"), total(rows, "seven_assessable"), total(rows, "seven_non_assessable"),
+        total(rows, "seven_total"), total(rows, "seven_amount"), total(rows, "grand_total"), None,
     ], bold=True)
     fallback = sum(row.used_approval_date for row in rows)
     if fallback:
@@ -244,31 +347,66 @@ def _month_tab(workbook: Workbook, project: dict[str, Any], month: date, rows: l
         note.font = Font(italic=True)
 
 
+def _empty_tab(workbook: Workbook, project: dict[str, Any], name: str, message: str) -> None:
+    """
+    Add a tab with the header and a line saying why there are no rows.
+    Takes the workbook, the project row, the tab's name (also its label) and the line.
+    Returns nothing.
+    """
+    sheet = workbook.create_sheet(name)
+    _header(sheet, project, name)
+    sheet["A4"] = message
+    sheet["A4"].font = Font(italic=True)
+
+
+def _saved(workbook: Workbook) -> bytes:
+    """
+    Save a workbook in memory.
+    Takes the workbook.
+    Returns the .xlsx file's bytes.
+    """
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def build_workbook(project: dict[str, Any], months: dict[date, list[SummaryRow]], filtered: bool) -> bytes:
     """
-    Build the Assessment Summary workbook: one tab per month with rows, or a single 'No activity' tab saying why there are none.
+    Build the Assessment Summary workbook: one tab per month with rows (named 'Nov 2026'), or a single 'No activity' tab saying why there are none.
     Takes the project row, the months (summary_months) and whether a month range was asked for.
     Returns the .xlsx file's bytes.
     """
     workbook = Workbook()
     workbook.remove(workbook.active)
     for month, rows in months.items():
-        _month_tab(workbook, project, month, rows)
+        _rows_tab(workbook, project, month.strftime("%b %Y"), month.strftime("%B %Y"), rows)
     if not months:
-        sheet = workbook.create_sheet(NO_ACTIVITY)
-        _header(sheet, project, NO_ACTIVITY)
-        sheet["A4"] = EMPTY_RANGE if filtered else EMPTY_PROJECT
-        sheet["A4"].font = Font(italic=True)
-    buffer = io.BytesIO()
-    workbook.save(buffer)
-    return buffer.getvalue()
+        _empty_tab(workbook, project, NO_ACTIVITY, EMPTY_RANGE if filtered else EMPTY_PROJECT)
+    return _saved(workbook)
 
 
-def summary_filename(project_id: str, now: Optional[datetime] = None) -> str:
+def build_tailored_workbook(project: dict[str, Any], rows: list[SummaryRow], first: Optional[date],
+                            last: Optional[date]) -> bytes:
+    """
+    Build the tailored download: the rows of the page's view on one tab named for its range of days.
+    Takes the project row, the rows (summary_sites) and the range (first and last; None: open).
+    Returns the .xlsx file's bytes; the tab says so when there are no rows.
+    """
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    name = range_label(first, last)
+    if rows:
+        _rows_tab(workbook, project, name, name, rows)
+    else:
+        _empty_tab(workbook, project, name, EMPTY_VIEW)
+    return _saved(workbook)
+
+
+def summary_filename(project_id: str, now: Optional[datetime] = None, tailored: bool = False) -> str:
     """
     The workbook's file name: the project and today's date in New York.
-    Takes the project id and, for tests, the moment it is (now, UTC, by default).
-    Returns '<project_id>_assessment_summary_<YYYY-MM-DD>.xlsx'.
+    Takes the project id, for tests the moment it is (now, UTC, by default), and whether it is the tailored download.
+    Returns '<project_id>_assessment_summary_<YYYY-MM-DD>.xlsx', or '..._assessment_summary_tailored_<YYYY-MM-DD>.xlsx'.
     """
     today = signed_date(now or datetime.now(timezone.utc))
-    return f"{project_id}_assessment_summary_{today.isoformat()}.xlsx"
+    return f"{project_id}_assessment_summary_{'tailored_' if tailored else ''}{today.isoformat()}.xlsx"

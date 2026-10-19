@@ -10,10 +10,15 @@ from api.services.assessment_summary import (
     EMPTY_PROJECT,
     EMPTY_RANGE,
     MonthError,
+    EMPTY_VIEW,
+    build_tailored_workbook,
     build_workbook,
     parse_month,
+    range_label,
     summary_filename,
     summary_months,
+    summary_payload,
+    summary_sites,
 )
 
 # ---------------------------------------------------------------------------
@@ -126,6 +131,72 @@ class TestGrouping:
         assert summary_months(flags, RATES, last=date(2026, 9, 1)) == {}
 
 
+class TestSites:
+    def test_a_site_approved_in_two_months_is_one_row_summed(self):
+        flags = [flag(MAIN, "4in", "10", "10"), flag(MAIN, "4in", "20", "20", approved=NOV_2), flag(ELM, "7in", "5", "5")]
+        rows = summary_sites(flags, RATES)
+        assert [row.address for row in rows] == ["138-22 227 STREET", "350 Main St, Brooklyn"]
+        assert rows[0].four_assessable == Decimal("30") and rows[0].four_amount == Decimal("30") * RATES["cost_per_sf_4in"]
+        assert rows[1].seven_total == Decimal("5")
+
+    def test_the_range_is_of_days_and_sums_only_the_flags_inside_it(self):
+        flags = [flag(MAIN, "4in", "10", "10", constructed=date(2026, 10, 3)),
+                 flag(MAIN, "4in", "20", "20", approved=NOV_2)]
+        assert summary_sites(flags, RATES, first=date(2026, 10, 3), last=date(2026, 10, 3))[0].four_total == Decimal("10")
+        assert summary_sites(flags, RATES, first=date(2026, 10, 4))[0].four_total == Decimal("20")
+        assert summary_sites(flags, RATES, last=date(2026, 10, 2)) == []
+
+    def test_it_keeps_only_the_sites_asked_for(self):
+        assert [row.property_id for row in summary_sites(SE384, RATES, property_ids={ELM})] == [ELM]
+
+    def test_a_row_carries_what_the_page_searches_by(self):
+        flags = [{**flag(MAIN, "4in", "10", "10"), "block": "123", "lot": "45", "violation_no": "V-9",
+                  "community_board": "QN12"}]
+        row = summary_sites(flags, RATES)[0]
+        assert (row.kind, row.block, row.lot, row.violation_no, row.community_board) == (
+            "sidewalk", "123", "45", "V-9", "QN12")
+
+    def test_the_payload_rounds_to_the_cent_and_totals_the_rows(self):
+        payload = summary_payload(summary_sites(SE384, RATES), RATES, date(2026, 10, 1), None)
+        assert payload["range"] == {"from": date(2026, 10, 1), "to": None}
+        assert payload["cost_per_sf_4in"] == 11.54 and len(payload["sites"]) == 2
+        main = payload["sites"][0]
+        assert main["display_address"] == "138-22 227 STREET" and main["four_assessable"] == 113.19
+        assert main["four_amount"] == 1306.21 and main["grand_total"] == 2496.14
+        assert payload["totals"]["four_assessable"] == 293.19 and payload["totals"]["grand_total"] == 5142.14
+
+    def test_without_a_rate_its_amounts_are_none_in_the_payload(self):
+        rates = {**RATES, "cost_per_sf_7in": None}
+        payload = summary_payload(summary_sites(SE384, rates), rates, None, None)
+        assert payload["sites"][0]["seven_amount"] is None and payload["totals"]["seven_amount"] is None
+        assert payload["cost_per_sf_7in"] is None
+
+
+class TestTailoredWorkbook:
+    @pytest.mark.parametrize("first, last, name", [
+        (date(2026, 10, 1), date(2026, 10, 31), "2026-10-01 to 2026-10-31"), (date(2026, 10, 1), None, "From 2026-10-01"),
+        (None, date(2026, 10, 31), "Through 2026-10-31"), (None, None, "All dates")])
+    def test_one_tab_named_for_the_range(self, first, last, name):
+        assert range_label(first, last) == name
+        content = build_tailored_workbook(PROJECT, summary_sites(SE384, RATES), first, last)
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        assert book.sheetnames == [name] and book[name]["A2"].value == name
+
+    def test_it_holds_the_sites_and_their_totals(self):
+        sheet = tab(build_tailored_workbook(PROJECT, summary_sites(SE384, RATES), None, None), "All dates")
+        assert values(sheet, 3)[:2] == ["Property Address", "CB"]
+        assert sheet["A4"].value == "138-22 227 STREET" and sheet["A5"].value == "350 Main St, Brooklyn"
+        assert sheet["A6"].value == "Totals" and round(Decimal(str(sheet["K6"].value)), 2) == Decimal("5142.14")
+
+    def test_no_sites_says_so(self):
+        sheet = tab(build_tailored_workbook(PROJECT, [], None, date(2026, 9, 30)), "Through 2026-09-30")
+        assert sheet["A4"].value == EMPTY_VIEW
+
+    def test_its_file_is_named_tailored(self):
+        assert summary_filename("SE384", datetime(2026, 10, 16, 15, 0, tzinfo=timezone.utc), tailored=True) == \
+            "SE384_assessment_summary_tailored_2026-10-16.xlsx"
+
+
 class TestParseMonth:
     def test_a_month_is_its_first_day(self):
         assert parse_month("2026-10", "from") == date(2026, 10, 1)
@@ -141,8 +212,8 @@ class TestWorkbook:
     def test_se384_has_one_tab_with_the_header_rows_and_totals(self):
         content = build_workbook(PROJECT, summary_months(SE384, RATES), filtered=False)
         book = openpyxl.load_workbook(io.BytesIO(content))
-        assert book.sheetnames == ["2026-10"]
-        sheet = book["2026-10"]
+        assert book.sheetnames == ["Oct 2026"]
+        sheet = book["Oct 2026"]
         assert sheet["A1"].value == "Sidewalks Queens · Project ID: SE384 · Reg: 2024123456 · Borough: Queens"
         assert (sheet["A2"].value, sheet["C2"].value, sheet["G2"].value) == (
             "October 2026", '4" rate: $11.54', '7" rate: $12.64')
@@ -170,29 +241,29 @@ class TestWorkbook:
 
     def test_cells_keep_full_precision(self):
         content = build_workbook(PROJECT, summary_months([flag(MAIN, "4in", "1.005", "1.005")], RATES), False)
-        assert tab(content, "2026-10")["C4"].value == pytest.approx(1.005)
+        assert tab(content, "Oct 2026")["C4"].value == pytest.approx(1.005)
 
     def test_each_row_carries_its_propertys_community_board(self):
         flags = [{**flag(MAIN, "4in", "10", "10"), "community_board": "QN13"}]
-        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "2026-10")
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
         assert sheet["B3"].value == "CB" and sheet["B4"].value == "QN13"
 
     def test_with_dates_typed_there_is_no_footer_note(self):
         flags = [flag(MAIN, "4in", "10", "10", constructed=date(2026, 10, 3))]
-        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "2026-10")
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
         assert sheet["A7"].value is None
 
     def test_a_missing_rate_reads_as_a_dash_in_the_header(self):
         project = {**PROJECT, "cost_per_sf_7in": None}
-        sheet = tab(build_workbook(project, summary_months(SE384, {**RATES, "cost_per_sf_7in": None}), False), "2026-10")
+        sheet = tab(build_workbook(project, summary_months(SE384, {**RATES, "cost_per_sf_7in": None}), False), "Oct 2026")
         assert sheet["G2"].value == '7" rate: —'
         assert sheet["J4"].value is None and sheet["L4"].value == '7" rate not set'
 
     def test_two_months_are_two_tabs(self):
         flags = [flag(MAIN, "4in", "10", "10"), flag(MAIN, "4in", "20", "20", approved=NOV_2)]
         book = openpyxl.load_workbook(io.BytesIO(build_workbook(PROJECT, summary_months(flags, RATES), False)))
-        assert book.sheetnames == ["2026-10", "2026-11"]
-        assert book["2026-11"]["A2"].value == "November 2026"
+        assert book.sheetnames == ["Oct 2026", "Nov 2026"]
+        assert book["Nov 2026"]["A2"].value == "November 2026"
 
     @pytest.mark.parametrize("filtered, message", [(False, EMPTY_PROJECT), (True, EMPTY_RANGE)])
     def test_nothing_is_one_no_activity_tab(self, filtered, message):

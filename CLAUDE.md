@@ -43,7 +43,7 @@ auth routes:
   edit, password, soft delete, un-delete, permanent delete); `/v1/admin/projects` (list, create, assessment rates,
   pay items with their CSV import)
 - **Users and signatures:** `/v1/users/`, `/v1/users/me/password`; `/v1/signatures/upload-request`, `/confirm`
-- **Projects:** `/v1/projects/` and `/{project_id}`, `/roles` (admin), `/quantities`, `/progress-rollup`, `/assessment-summary.xlsx`,
+- **Projects:** `/v1/projects/` and `/{project_id}`, `/roles` (admin), `/quantities`, `/progress-rollup`, `/assessment-summary` (with `.xlsx` and `/tailored.xlsx`),
   `/properties`, `/task-orders`; `/v1/contract_items/`
 - **Sites:** `/v1/properties/{id}` (with `/admin/soft-delete`, `/admin/undelete`, `/pir`, `/pirs`,
   `/construction-report`); `/v1/task-orders/{id}` (with its admin routes, `/properties/{property_id}`,
@@ -1147,9 +1147,19 @@ Any change must follow these.
   - **The month** is the property's `date_constructed` (page 1's title block of its live PIR, as the report prints it),
     else the day its IDR was approved (`re_signed_at`, in `FORM_TIMEZONE`); the tab's footer counts the rows that went
     by approval. A property approved twice in a month is one row.
-  - **The workbook:** a tab per month with rows (`YYYY-MM`, oldest first), rows by address any case, the property's
+  - **The workbook (the accumulative report):** a tab per month with rows (named `Nov 2026`, oldest first; Slice C
+    renamed them from `YYYY-MM`), rows by address any case, the property's
     `community_board` in a CB column after its address (Slice A), a bold grey totals row, panes frozen under the column titles; SF `#,##0.00` (none reads `—`), money `$#,##0.00`; values written whole.
     Nothing (or nothing in `from`..`to`) is one `No activity` tab, a 200. The file name carries today in New York.
+  - **A row per site** (Slice C, `summary_sites`): the As-Builts & Assessments page's `GET .../assessment-summary`
+    (JSON) and its `tailored.xlsx` sum each property's flags over a range of **days** (`from`, `to`, `YYYY-MM-DD`,
+    inclusive, read by `day_range` in `api/v1/_shared.py`; a flag's day is the one its month comes from), one row per
+    site whatever months they span. Each row carries the property's kind, block, lot, `violation_no` and
+    `community_board` for the page's search; figures are rounded to the cent (`summary_payload`), the totals summed
+    before rounding. `tailored.xlsx` takes `property_id` (repeated) for the rows the page shows, none meaning every
+    site, and writes them on one tab named for the range (`2026-10-01 to 2026-10-31`, `From …`, `Through …`, `All
+    dates`; `range_label`), with the same columns and totals row as a month's; no rows is the tab with `No constructed
+    sites in this view.` The monthly workbook and the per-site view share one measure (`_rows_by`).
 - **Progress** (R1g; `api/v1/progress.py`, `api/services/progress_rollup.py`, `api/queries/progress.py`,
   `api/schemas/progress.py`): how much of the sidewalk work the PIR flags describe is approved, in flight or not yet
   claimed, for a project, a task order or a property. No table of its own: two reads, `list_flag_pay_items`
