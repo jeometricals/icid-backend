@@ -771,8 +771,9 @@ Any change must follow these.
   - **The list's `status`** (worked out in its statement): `{state: "constructed_on", date}` once the live PIR is
     signed as built (`as_built_signed_at`; `date` its day in `FORM_TIMEZONE`, as the export dates signatures);
     else `{state: "task_ordered", date: null}` when the property is in a live task order; else `{state: "none",
-    date: null}`. `task_order_no` is the number of the latest live task order it is in (`issued_date` newest,
-    undated last, then newest created), or null. `pir_status` stays as it was. The list orders sidewalks by
+    date: null}`. `task_order_id` and `task_order_no` are the id and number of the latest live task order it is
+    in (`issued_date` newest, undated last, then newest created; `_LATEST_TASK_ORDER`), or null; `GET
+    /v1/properties/{id}` carries both too (`PropertyDetail`), for the Site Info page's Back to task order. `pir_status` stays as it was. The list orders sidewalks by
     address and ped ramps by their intersection, then quadrant, together (`PROPERTY_ORDER`, shared with a task
     order's `properties`).
   - The five enums are Postgres enum types, unlike the rest of the schema: the statements cast their
@@ -784,7 +785,7 @@ Any change must follow these.
     `deleted_at` and `deleted_by`. Every write sets `updated_at`.
   - **`pir_status`** (`PropertyListItem`): `none` without a live PIR, `dot_signed` with one, `as_built_signed`
     once its `as_built_signed_at` is set; read in the list's statement (a LEFT JOIN to the live PIR, which
-    `uq_pirs_property` keeps to one). Only the list has it, and `status` and `task_order_no`.
+    `uq_pirs_property` keeps to one). Only the list has it, and `status`.
   - **A borough, block and lot is unique per project among live sidewalks** (`uq_properties_project_sidewalk_bbl`
     on `(project_id, boro, block, lot)`, partial, `WHERE kind = 'sidewalk' AND deleted_at IS NULL`); the same lot
     in another project, or in another borough, is fine, and ped ramps have no such rule. Create is

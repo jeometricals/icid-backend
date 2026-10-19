@@ -22,6 +22,16 @@ _SAME_LOT = """
                   AND other.boro = %s::icid.boro AND other.block = %s AND other.lot = %s
                   AND other.id <> p.id
                   AND other.deleted_at IS NULL"""
+# The latest live task order property p is in, as latest: the one issued last (undated ones after the dated), then
+# the newest
+_LATEST_TASK_ORDER = """LEFT JOIN LATERAL (
+            SELECT t.id AS task_order_id, t.task_order_number
+            FROM icid.task_order_properties tp
+            JOIN icid.task_orders t ON t.id = tp.task_order_id
+            WHERE tp.property_id = p.id AND t.deleted_at IS NULL
+            ORDER BY t.issued_date DESC NULLS LAST, t.created_at DESC
+            LIMIT 1
+        ) latest ON true"""
 # The columns a create or an edit writes (all of them, on an edit), each with its typed placeholder
 _WRITTEN = (
     ("boro", "%s::icid.boro"), ("block", "%s"), ("lot", "%s"), ("address", "%s"), ("property_type", "%s"), ("violation_no", "%s"),
@@ -47,8 +57,7 @@ def list_properties(
     Takes the project id, the time zone a signing's day is read in, whether to include soft-deleted properties and the kind (None for both).
     Returns the property dicts, each with pir_status, status ({state, date}) and task_order_no, ordered by address (a ped ramp's intersection), or None on failure.
     """
-    # At most one live PIR per property (uq_pirs_property), so the join never repeats a property. The latest task
-    # order is the one issued last (undated ones after the dated), then the newest.
+    # At most one live PIR per property (uq_pirs_property), so the join never repeats a property
     sql = (
         "\n        SELECT"
         + _PROPERTY_COLUMNS
@@ -66,17 +75,13 @@ def list_properties(
                 END,
                 'date', (pir.as_built_signed_at AT TIME ZONE %s)::date
             ) AS status,
+            latest.task_order_id,
             latest.task_order_number AS task_order_no
         FROM icid.properties p
         LEFT JOIN icid.pirs pir ON pir.property_id = p.id AND pir.deleted_at IS NULL
-        LEFT JOIN LATERAL (
-            SELECT t.task_order_number
-            FROM icid.task_order_properties tp
-            JOIN icid.task_orders t ON t.id = tp.task_order_id
-            WHERE tp.property_id = p.id AND t.deleted_at IS NULL
-            ORDER BY t.issued_date DESC NULLS LAST, t.created_at DESC
-            LIMIT 1
-        ) latest ON true
+        """
+        + _LATEST_TASK_ORDER
+        + """
         WHERE p.project_id = %s AND (%s OR p.deleted_at IS NULL)
           AND (%s::icid.property_kind IS NULL OR p.kind = %s::icid.property_kind)
         ORDER BY """
@@ -88,11 +93,17 @@ def list_properties(
 
 def get_property(property_id: UUID) -> Optional[dict[str, Any]]:
     """
-    Fetch one property, deleted or not.
+    Fetch one property, deleted or not, with the latest live task order it is in.
     Takes the property's id.
-    Returns the property dict, or None if no property matches.
+    Returns the property dict with task_order_id and task_order_no (None when it is in none), or None if no property matches.
     """
-    sql = "\n        SELECT" + _PROPERTY_COLUMNS + "\n        FROM icid.properties p\n        WHERE p.id = %s;"
+    sql = (
+        "\n        SELECT"
+        + _PROPERTY_COLUMNS
+        + ",\n            latest.task_order_id, latest.task_order_number AS task_order_no\n        FROM icid.properties p\n        "
+        + _LATEST_TASK_ORDER
+        + "\n        WHERE p.id = %s;"
+    )
     rows = run_query(sql, (property_id,))
     return rows[0] if rows else None
 

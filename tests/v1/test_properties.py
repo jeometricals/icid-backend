@@ -589,7 +589,25 @@ class TestListStatus:
     def test_only_the_list_carries_the_status(self, admin_client):
         with patch(PROPS, return_value=[PROPERTY_ROW]):
             data = admin_client.get(URL).json()["data"]
-        assert "status" not in data and "task_order_no" not in data and "display_address" in data
+        assert "status" not in data and "pir_status" not in data and "display_address" in data
+
+    def test_reading_one_carries_its_latest_task_order(self, admin_client):
+        task_order_id = UUID("d0000000-0000-4000-8000-000000000001")
+        row = {**PROPERTY_ROW, "task_order_id": task_order_id, "task_order_no": "TO-001"}
+        with patch(PROPS, return_value=[row]) as query:
+            data = admin_client.get(URL).json()["data"]
+        assert data["task_order_id"] == str(task_order_id) and data["task_order_no"] == "TO-001"
+        assert "latest.task_order_id" in query.call_args.args[0]
+
+    def test_reading_one_in_no_task_order_carries_nulls(self, admin_client):
+        with patch(PROPS, return_value=[{**PROPERTY_ROW, "task_order_id": None, "task_order_no": None}]):
+            data = admin_client.get(URL).json()["data"]
+        assert data["task_order_id"] is None and data["task_order_no"] is None
+
+    def test_the_other_responses_carry_no_task_order(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]):
+            data = admin_client.patch(URL, json={"notes": "x"}).json()["data"]
+        assert "task_order_id" not in data and "task_order_no" not in data
 
 
 class TestBlockAndLot:

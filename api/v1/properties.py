@@ -18,6 +18,8 @@ from api.schemas.property import (
     Kind,
     PropertyConflict,
     PropertyCreate,
+    PropertyDetail,
+    PropertyDetailResponse,
     PropertyListItem,
     PropertyListResponse,
     PropertyOut,
@@ -184,14 +186,14 @@ def create_project_property(
     return _response(row, "Property created")
 
 
-@router.get("/{property_id}", response_model=PropertyResponse)
-def get_property_record(found: dict = Depends(property_member)) -> PropertyResponse:
+@router.get("/{property_id}", response_model=PropertyDetailResponse)
+def get_property_record(found: dict = Depends(property_member)) -> PropertyDetailResponse:
     """
-    Fetch one property, soft-deleted or not. For a user on its project, or an admin.
+    Fetch one property, soft-deleted or not, with the latest live task order it is in. For a user on its project, or an admin.
     Takes the property (loaded and checked by property_member from the property_id path parameter).
-    Returns a PropertyResponse; raises 403 for a user who isn't on its project and 404 for an unknown property.
+    Returns a PropertyDetailResponse; raises 403 for a user who isn't on its project and 404 for an unknown property.
     """
-    return _response(found, "Property retrieved")
+    return PropertyDetailResponse(status="success", message="Property retrieved", data=PropertyDetail.model_validate(found))
 
 
 @router.patch("/{property_id}", response_model=PropertyResponse, responses=CONFLICT)

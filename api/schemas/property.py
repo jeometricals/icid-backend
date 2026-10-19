@@ -175,6 +175,14 @@ class PropertyListItem(PropertyOut):
 
     pir_status: Literal["none", "dot_signed", "as_built_signed"]
     status: PropertyStatus
+    task_order_id: Optional[UUID] = None
+    task_order_no: Optional[str] = None
+
+
+class PropertyDetail(PropertyOut):
+    """One property as its own page reads it: with the id and number of the latest live task order it is in, or None."""
+
+    task_order_id: Optional[UUID] = None
     task_order_no: Optional[str] = None
 
 
@@ -182,6 +190,12 @@ class PropertyResponse(BaseModel):
     status: str
     message: str
     data: PropertyOut
+
+
+class PropertyDetailResponse(BaseModel):
+    status: str
+    message: str
+    data: PropertyDetail
 
 
 class PropertyListResponse(BaseModel):
