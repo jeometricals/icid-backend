@@ -28,7 +28,8 @@ from api.queries.users import get_user_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES
 from api.services import export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_swcb
 from api.services.auto_general import build_auto_general_data
-from api.services.idr_flags import IdrFlagError, export_lines
+from api.services.idr_flags import EXPORT_HEADING, IdrFlagError, export_lines
+from api.services.idr_segments import IdrSegmentError, export_segment_lines
 from api.services import export_general
 from api.services.export_common import (
     REPORT_CONT, REPORT_CONT_RE_SIGNATURE, REPORT_CONT_SIGNATURE, SignatureImage, SignatureLayout, allocate_copies,
@@ -117,19 +118,20 @@ def _general_for_export(idr_id: UUID) -> tuple[dict[str, Any], Optional[int], Op
 
 def _with_flag_lines(general_data: dict[str, Any], idr: dict[str, Any]) -> dict[str, Any]:
     """
-    Add an IDR's flag rollup to the General's pay items, after its own, under a "PIR Flags" heading row (see
-    idr_flags.export_lines): live before approval, as frozen at approval after. They carry no id, so no redline
-    touches them.
+    Add an IDR's flag rollup, then its curb segments' (idr_segments.export_segment_lines), to the General's pay items,
+    after its own, under one "PIR Flags" heading row (see idr_flags.export_lines): live before approval, as frozen at
+    approval after. They carry no id, so no redline touches them.
     Takes the General's report_data and the IDR row.
     Returns the report_data with the lines added (unchanged when there are none); raises ExportDataError when the
-    IDR's flags can't be read.
+    IDR's flags or segments can't be read.
     """
     try:
-        lines = export_lines(idr)
-    except IdrFlagError as exc:
+        flag_lines, segment_lines = export_lines(idr), export_segment_lines(idr)
+    except (IdrFlagError, IdrSegmentError) as exc:
         raise ExportDataError(str(exc)) from exc
-    if not lines:
+    if not flag_lines and not segment_lines:
         return general_data
+    lines = (flag_lines or [{"description": EXPORT_HEADING}]) + segment_lines
     own = general_data.get("payItems")
     return {**general_data, "payItems": (own if isinstance(own, list) else []) + lines}
 

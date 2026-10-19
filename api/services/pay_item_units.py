@@ -42,6 +42,8 @@ def normalize_unit(raw: str) -> str:
 # The units a flag's quantity can be given in: its area (SF, SY), its volume at its thickness (CY), or the flag itself
 # (EA); the flags' FLAG_AMOUNT computes each
 FLAG_UNITS = ("SF", "SY", "CY", "EA")
+# The unit a curb segment is measured in: its length, in linear feet (curb billing)
+SEGMENT_UNITS = ("LF",)
 
 
 def flag_unit(raw: Optional[str]) -> Optional[str]:

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, Optional
 from uuid import UUID
 
@@ -38,7 +38,7 @@ class SegmentUpdate(BaseModel):
 
 
 class SegmentOut(BaseModel):
-    """A segment: a row of icid.segments, with its page's PIR, property and project. length_ft is in feet, from its points and the page's scale; None while the page has no scale."""
+    """A segment: a row of icid.segments, with its page's PIR, property and project. length_ft is in feet, from its points and the page's scale; None while the page has no scale. claimed_by_idr_id and constructed_on are set while an approved IDR claims it."""
 
     segment_id: UUID
     pir_page_id: UUID
@@ -50,6 +50,8 @@ class SegmentOut(BaseModel):
     length_ft: Optional[float] = None
     pay_item_id: Optional[UUID] = None
     note: Optional[str] = None
+    claimed_by_idr_id: Optional[UUID] = None
+    constructed_on: Optional[date] = None
     created_at: datetime
     updated_at: datetime
     created_by: UUID

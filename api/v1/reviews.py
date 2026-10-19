@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from api.queries.idr_flags import claimed_flag_ids, released_claims
+from api.queries.idr_segments import claimed_segment_ids, released_segment_claims
 from api.queries.idrs import (
     IdrNumberTakenError,
     IdrSlotTakenError,
@@ -38,6 +39,7 @@ from api.schemas.field_edit import PayItemsUntouched
 from api.services.auth import current_admin, current_user, demo_idr_fence, require_project_role
 from api.services.field_edits import FieldEditError, untouched_message, untouched_pay_items
 from api.services.idr_flags import IdrFlagError, attributed_flag_ids
+from api.services.idr_segments import IdrSegmentError, attributed_segment_ids
 from api.services.idr_purge import purge_idr
 from api.services.quantities import quantity_rows_for_idr
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
@@ -116,13 +118,13 @@ def _pay_items_waiting(idr: dict[str, Any], user: UserOut) -> Optional[JSONRespo
     return JSONResponse(status_code=400, content=waiting.model_dump(mode="json"))
 
 
-def _flags(count: int) -> str:
+def _flags(count: int, noun: str = "flag") -> str:
     """
-    Say how many flags, for a message.
-    Takes the count.
+    Say how many flags (or curb segments), for a message.
+    Takes the count and the noun ("flag" or "segment").
     Returns "1 flag" or "3 flags".
     """
-    return f"{count} flag{'' if count == 1 else 's'}"
+    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 def _number_conflict(idr: dict[str, Any], idr_number: str) -> Optional[JSONResponse]:
@@ -264,10 +266,12 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
     if quantity_rows is None:
         raise HTTPException(status_code=500, detail="Failed to load IDR reports")
 
-    # The flags it would claim, read now as its quantities are; the statement claims those still unclaimed
+    # The flags and curb segments it would claim, read now as its quantities are; the statement claims those still
+    # unclaimed
     try:
         flag_ids = attributed_flag_ids(idr)
-    except IdrFlagError as exc:
+        segment_ids = attributed_segment_ids(idr)
+    except (IdrFlagError, IdrSegmentError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # As at submit, the copy comes first: an approved IDR must never point at a signature that isn't there. If the
@@ -278,7 +282,7 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
-        rows = approve_stage2(idr_id, user.uuid, signature_copy, as_reviewer, quantity_rows, flag_ids)
+        rows = approve_stage2(idr_id, user.uuid, signature_copy, as_reviewer, quantity_rows, flag_ids, segment_ids)
     except Exception:
         logger.warning("Approval of IDR %s failed after its RE signature was copied; %s is left orphaned", idr_id, signature_copy)
         raise
@@ -289,9 +293,15 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
     response = _moved(rows, "IDR approved")
     claimed = rows[0].get("flags_claimed", 0)
     dropped = len(flag_ids) - claimed
-    if dropped:
-        response.message = f"IDR approved; {_flags(dropped)} already claimed by another IDR {'was' if dropped == 1 else 'were'} left out"
+    segments_claimed = rows[0].get("segments_claimed", 0)
+    segments_dropped = len(segment_ids) - segments_claimed
+    left_out = [_flags(count, noun) for count, noun in ((dropped, "flag"), (segments_dropped, "segment")) if count]
+    if left_out:
+        many = dropped + segments_dropped > 1
+        response.message = (f"IDR approved; {' and '.join(left_out)} already claimed by another IDR "
+                            f"{'were' if many else 'was'} left out")
     response.flags_claimed, response.flags_dropped = claimed, dropped
+    response.segments_claimed, response.segments_dropped = segments_claimed, segments_dropped
     return response
 
 
@@ -338,6 +348,7 @@ def unlock_idr(idr_id: UUID, user: UserOut = Depends(current_admin)) -> IdrRespo
     rows = admin_unlock_idr(idr_id, user.uuid)
     response = _moved(rows, "IDR unlocked for RE review")
     response.flags_released = rows[0].get("flags_released", 0)
+    response.segments_released = rows[0].get("segments_released", 0)
     return response
 
 
@@ -353,13 +364,14 @@ def delete_idr(idr_id: UUID, user: UserOut = Depends(current_admin)) -> IdrRespo
     if idr["deleted_at"] is not None:
         return IdrResponse(status="success", message="IDR was already deleted", data=Idr.model_validate(idr))
 
-    # The flags it claimed, recorded with the delete; only its own unlock or delete changes them
+    # The flags and curb segments it claimed, recorded with the delete; only its own unlock or delete changes them
     claimed = claimed_flag_ids(idr_id)
+    claimed_segments = claimed_segment_ids(idr_id)
 
-    if claimed is None:
+    if claimed is None or claimed_segments is None:
         raise HTTPException(status_code=500, detail="Failed to read the IDR's flags")
 
-    rows = admin_delete_idr(idr_id, user.uuid, claimed)
+    rows = admin_delete_idr(idr_id, user.uuid, claimed, claimed_segments)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to delete IDR")
@@ -369,7 +381,8 @@ def delete_idr(idr_id: UUID, user: UserOut = Depends(current_admin)) -> IdrRespo
         return IdrResponse(status="success", message="IDR was already deleted", data=Idr.model_validate(_load_idr(idr_id)))
 
     return IdrResponse(status="success", message="IDR deleted", data=Idr.model_validate(rows[0]),
-                       flags_released=rows[0].get("flags_released", 0))
+                       flags_released=rows[0].get("flags_released", 0),
+                       segments_released=rows[0].get("segments_released", 0))
 
 
 SLOT_CONFLICT = {409: {"model": IdrConflict, "description": "Another IDR holds this one's day or its IDR number"}}
@@ -414,6 +427,21 @@ def undelete_idr_record(idr_id: UUID, user: UserOut = Depends(current_admin)) ->
         )
         return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
 
+    # And the curb segments it claimed, as its flags
+    released_segments = released_segment_claims(idr_id)
+
+    if released_segments is None:
+        raise HTTPException(status_code=500, detail="Failed to read the IDR's released segments")
+
+    if released["status_before"] == "approved" and released_segments["taken"]:
+        taken = released_segments["taken"]
+        conflict = IdrConflict(
+            detail=f"{_flags(len(taken), 'segment')} this IDR claimed {'is' if len(taken) == 1 else 'are'} now "
+                   f"claimed by IDR {taken[0]['claimed_by_idr_number'] or 'without a number'}; unlock that IDR first",
+            existing_idr_id=taken[0]["claimed_by_idr_id"],
+        )
+        return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
+
     # Written only if the IDR comes back approved, in the statement that brings it back
     quantity_rows = quantity_rows_for_idr(idr)
 
@@ -437,7 +465,8 @@ def undelete_idr_record(idr_id: UUID, user: UserOut = Depends(current_admin)) ->
         "IDR restored as a draft: the status it had when it was deleted is not on record"
     )
     return IdrResponse(status="success", message=message, data=Idr.model_validate(rows[0]),
-                       flags_claimed=rows[0].get("flags_claimed", 0))
+                       flags_claimed=rows[0].get("flags_claimed", 0),
+                       segments_claimed=rows[0].get("segments_claimed", 0))
 
 
 @router.delete("/{idr_id}/admin/permanent", status_code=204)

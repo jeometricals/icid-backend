@@ -85,6 +85,7 @@ class UserReferences(BaseModel):
     features: int
     segments: int
     idr_flag_attributions: int
+    idr_segment_attributions: int
 
 
 class UserHasHistory(BaseModel):

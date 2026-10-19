@@ -15,7 +15,7 @@ from api.schemas.progress import (
     TaskOrderProgressRollupResponse,
 )
 from api.services.auth import current_user, demo_project_fence, project_member, task_order_member
-from api.services.pay_item_units import FLAG_UNITS
+from api.services.pay_item_units import FLAG_UNITS, SEGMENT_UNITS
 from api.services.progress_rollup import compute_progress
 
 # The project's rollup sits under /v1/projects; a demo user reaches only their own project
@@ -61,7 +61,7 @@ def _read(project_id: str, property_ids: Optional[list[UUID]]) -> tuple[list[dic
     Takes the project id and the properties covered (None: all).
     Returns (pay items, flag rows); raises 500 when either can't be read.
     """
-    pay_items = list_flag_pay_items(project_id, FLAG_UNITS)
+    pay_items = list_flag_pay_items(project_id, FLAG_UNITS + SEGMENT_UNITS)
     rows = list_flag_progress(project_id, property_ids)
     if pay_items is None or rows is None:
         raise HTTPException(status_code=500, detail="Failed to fetch progress")

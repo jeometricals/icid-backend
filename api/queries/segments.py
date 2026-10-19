@@ -19,11 +19,11 @@ def segment_length_sql(points: str, scale: str) -> str:
         )"""
 
 
-# A segment as every function here returns it: its own columns, and its page's PIR, property, project and deleted
+# A segment as every function here returns it: its own columns (its claim among them), and its page's PIR, property, project and deleted
 # states (what the routes check before a write). Read from a row source named s.
 _SEGMENT_COLUMNS = """
             s.segment_id, s.pir_page_id, s.segment_type, s.points, s.length_ft, s.pay_item_id, s.note,
-            s.created_at, s.updated_at, s.created_by, s.deleted_at, s.deleted_by,""" + PARENT_COLUMNS
+            s.claimed_by_idr_id, s.constructed_on, s.created_at, s.updated_at, s.created_by, s.deleted_at, s.deleted_by,""" + PARENT_COLUMNS
 _FROM = page_parents("s")
 # The columns a write sets from the request, in the order their values are passed, each with its type
 _WRITABLE_TYPES = {"segment_type": "text", "points": "jsonb", "pay_item_id": "uuid", "note": "text"}

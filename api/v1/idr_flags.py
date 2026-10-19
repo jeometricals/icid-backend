@@ -18,7 +18,7 @@ router = APIRouter(prefix="/v1/idrs", tags=["IDR flags"], dependencies=[Depends(
 _IN_REVIEW = ("stage1_review", "stage2_review")
 
 
-def _load_idr(idr_id: UUID) -> dict[str, Any]:
+def load_idr(idr_id: UUID) -> dict[str, Any]:
     """
     Fetch the IDR a flags route acts on.
     Takes the IDR uuid.
@@ -43,13 +43,13 @@ def _response(idr: dict[str, Any], message: str) -> IdrFlagsResponse:
     return IdrFlagsResponse(status="success", message=message, data=IdrFlags.model_validate(data))
 
 
-def _flag_editor(idr_id: UUID, user: UserOut = Depends(no_demo_idr_flag_writes)) -> dict[str, Any]:
+def attribution_editor(idr_id: UUID, user: UserOut = Depends(no_demo_idr_flag_writes)) -> dict[str, Any]:
     """
-    FastAPI dependency for excluding and including an IDR's flags: its inspector while it is a draft (before it is submitted), the reviewer who accepted it at the stage it is in while it is in review, or an admin either way; never a demo user.
+    FastAPI dependency for excluding and including an IDR's flags and its curb segments (api/v1/idr_segments.py): its inspector while it is a draft (before it is submitted), the reviewer who accepted it at the stage it is in while it is in review, or an admin either way; never a demo user.
     Takes the idr_id path parameter and the signed-in user (refused when a demo user).
     Returns the IDR dict; raises 404 (no IDR), 409 (deleted, approved, or submitted and not yet accepted) and 403 (anyone else).
     """
-    idr = _load_idr(idr_id)
+    idr = load_idr(idr_id)
     if idr["deleted_at"] is not None:
         raise HTTPException(status_code=409, detail="IDR is deleted")
     if idr["status"] == "approved":
@@ -98,16 +98,16 @@ def get_idr_flags(idr_id: UUID) -> IdrFlagsResponse:
     Takes the IDR uuid as a path parameter.
     Returns an IdrFlagsResponse; raises 404 for an unknown IDR and 500 when the flags can't be read.
     """
-    return _response(_load_idr(idr_id), "IDR flags")
+    return _response(load_idr(idr_id), "IDR flags")
 
 
 @router.post("/{idr_id}/attributed-flags/{flag_id}/exclude", response_model=IdrFlagsResponse)
-def exclude_idr_flag(flag_id: UUID, idr: dict = Depends(_flag_editor),
+def exclude_idr_flag(flag_id: UUID, idr: dict = Depends(attribution_editor),
                      user: UserOut = Depends(current_user)) -> IdrFlagsResponse:
     """
     Leave a flag out of an IDR: one on its task order's properties is excluded by an override; one it had included is dropped back out. Excluding one already out changes nothing.
-    Takes the flag uuid as a path parameter, the IDR (loaded and checked by _flag_editor) and the signed-in user.
-    Returns the IDR's flags (IdrFlagsResponse); raises 403, 404 and 409 as _flag_editor does, 404 (no such flag in its project) and 409 (another IDR claimed it).
+    Takes the flag uuid as a path parameter, the IDR (loaded and checked by attribution_editor) and the signed-in user.
+    Returns the IDR's flags (IdrFlagsResponse); raises 403, 404 and 409 as attribution_editor does, 404 (no such flag in its project) and 409 (another IDR claimed it).
     """
     _project_flag(idr, flag_id)
     if _in_default_scope(idr, flag_id):
@@ -120,12 +120,12 @@ def exclude_idr_flag(flag_id: UUID, idr: dict = Depends(_flag_editor),
 
 
 @router.post("/{idr_id}/attributed-flags/{flag_id}/include", response_model=IdrFlagsResponse)
-def include_idr_flag(flag_id: UUID, idr: dict = Depends(_flag_editor),
+def include_idr_flag(flag_id: UUID, idr: dict = Depends(attribution_editor),
                      user: UserOut = Depends(current_user)) -> IdrFlagsResponse:
     """
     Put a flag back into an IDR: one on its task order's properties loses its exclusion; one from elsewhere in its project is included by an override. Including one already in changes nothing.
-    Takes the flag uuid as a path parameter, the IDR (loaded and checked by _flag_editor) and the signed-in user.
-    Returns the IDR's flags (IdrFlagsResponse); raises 403, 404 and 409 as _flag_editor does, 404 (no such flag in its project), 400 (a deleted flag, or one on a deleted page, PIR or property) and 409 (another IDR claimed it).
+    Takes the flag uuid as a path parameter, the IDR (loaded and checked by attribution_editor) and the signed-in user.
+    Returns the IDR's flags (IdrFlagsResponse); raises 403, 404 and 409 as attribution_editor does, 404 (no such flag in its project), 400 (a deleted flag, or one on a deleted page, PIR or property) and 409 (another IDR claimed it).
     """
     flag = _project_flag(idr, flag_id)
     if any(flag[key] is not None for key in ("deleted_at", "page_deleted_at", "pir_deleted_at", "property_deleted_at")):

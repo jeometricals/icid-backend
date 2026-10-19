@@ -26,6 +26,27 @@ def _no_idr_flags(sql: str, params: object = None) -> list:
     return []
 
 
+def _no_idr_segments(sql: str, params: object = None) -> list:
+    """
+    Stand in for the IDR-segment statements (api.queries.idr_segments) in tests that don't patch them: no IDR covers any segment, and a deleted IDR's record of released segment claims is empty.
+    Takes the statement and its parameters.
+    Returns the rows: one empty record for released_segment_claims, none otherwise.
+    """
+    if "released_segment_ids" in sql:
+        return [{"released": [], "taken": []}]
+    return []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_idr_segments():
+    """
+    Patch the IDR-segment statements for the whole session (curb billing), as no_idr_flags does for flags: no IDR covers any segment unless a test patches api.queries.idr_segments.run_query itself, and an approved IDR's frozen segment rollup is empty.
+    Yields the mock of the statements.
+    """
+    with patch("api.queries.idr_segments.run_query", side_effect=_no_idr_segments) as run,             patch("api.services.idr_segments.list_source_quantities", return_value=[]):
+        yield run
+
+
 @pytest.fixture(scope="session", autouse=True)
 def no_idr_flags():
     """

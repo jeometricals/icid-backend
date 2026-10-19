@@ -188,13 +188,16 @@ def released_claims(idr_id: UUID) -> Optional[dict[str, Any]]:
 _RELEASED_IDS = "SELECT jsonb_array_elements_text(COALESCE({note}, '{{}}')::jsonb -> 'released_flag_ids')::uuid"
 
 
-def released_note(flag_ids: list[UUID]) -> str:
+def released_note(flag_ids: list[UUID], segment_ids: Optional[list[UUID]] = None) -> str:
     """
-    Write the admin_delete audit note that records which flags a delete released, for an un-delete to claim again.
-    Takes the flags' uuids.
-    Returns the note, as JSON text.
+    Write the admin_delete audit note that records which flags and curb segments a delete released, for an un-delete to claim again.
+    Takes the flags' uuids and the segments' (none when None).
+    Returns the note, as JSON text: {"released_flag_ids": [...]}, with "released_segment_ids" when there are any.
     """
-    return json.dumps({"released_flag_ids": [str(flag_id) for flag_id in flag_ids]})
+    note: dict[str, list[str]] = {"released_flag_ids": [str(flag_id) for flag_id in flag_ids]}
+    if segment_ids:
+        note["released_segment_ids"] = [str(segment_id) for segment_id in segment_ids]
+    return json.dumps(note)
 
 
 def claim_flags_cte(idrs: str, flag_ids: Optional[str] = None) -> str:

@@ -590,11 +590,14 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 130
+        assert len(PROTECTED_ROUTES) == 133
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}/attributed-flags"),
                          ("POST", "/v1/idrs/{idr_id}/attributed-flags/{flag_id}/exclude"),
                          ("POST", "/v1/idrs/{idr_id}/attributed-flags/{flag_id}/include"),
+                         ("GET", "/v1/idrs/{idr_id}/attributed-segments"),
+                         ("POST", "/v1/idrs/{idr_id}/attributed-segments/{segment_id}/exclude"),
+                         ("POST", "/v1/idrs/{idr_id}/attributed-segments/{segment_id}/include"),
                          ("GET", "/v1/idrs/{idr_id}"), ("POST", "/v1/idrs/{idr_id}/submit"),
                          ("GET", "/v1/idrs/{idr_id}/export"), ("GET", "/v1/users/"), ("GET", "/v1/contract_items/"),
                          ("POST", "/v1/idrs/{idr_id}/reports/{report_id}/attachments/upload-request"),
@@ -827,7 +830,8 @@ class TestDemoFences:
         attachments.assert_not_called()
 
     def test_the_fence_covers_every_route_under_an_idr(self):
-        assert len(IDR_ROUTES) == 31
+        assert len(IDR_ROUTES) == 34
+        assert ("GET", "/v1/idrs/{idr_id}/attributed-segments") in IDR_ROUTES  # curb billing's
         assert ("GET", "/v1/idrs/{idr_id}/attributed-flags") in IDR_ROUTES  # R1f's
         assert ("GET", "/v1/idrs/{idr_id}/construction-reports") in IDR_ROUTES  # R1h's
         assert ("POST", "/v1/idrs/{idr_id}/approve-stage2") in IDR_ROUTES  # the review routes too

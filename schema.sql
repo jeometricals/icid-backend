@@ -270,7 +270,7 @@ CREATE TABLE icid.quantities (
     unit           TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- manual: a report's pay item; from_flags: the IDR's attributed flags rolled up per pay item (migrations/037)
-    source         TEXT NOT NULL DEFAULT 'manual' CONSTRAINT chk_quantities_source CHECK (source IN ('manual', 'from_flags'))
+    source         TEXT NOT NULL DEFAULT 'manual' CONSTRAINT chk_quantities_source CHECK (source IN ('manual', 'from_flags', 'from_segments'))
 );
 
 CREATE INDEX idx_quantities_project_date ON icid.quantities(project_id, report_date);
@@ -588,10 +588,27 @@ CREATE TABLE icid.segments (
         'curb_concrete', 'curb_concrete_depressed', 'curb_steel_faced', 'curb_steel_faced_corner', 'curb_granite',
         'other')),
     CONSTRAINT chk_segments_points CHECK (jsonb_typeof(points) = 'array'),
-    CONSTRAINT chk_segments_length CHECK (length_ft IS NULL OR length_ft >= 0)
+    CONSTRAINT chk_segments_length CHECK (length_ft IS NULL OR length_ft >= 0),
+    -- Claimed by an approved IDR, and constructed on its report date (migration 044); cleared when it is unlocked or deleted
+    claimed_by_idr_id UUID REFERENCES icid.idrs(idr_id),
+    constructed_on    DATE,
+    CONSTRAINT chk_segments_claim_consistent CHECK ((claimed_by_idr_id IS NULL) = (constructed_on IS NULL))
 );
 CREATE INDEX segments_page_idx ON icid.segments (pir_page_id);
 CREATE INDEX segments_live_idx ON icid.segments (pir_page_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_segments_claimed_by_idr ON icid.segments (claimed_by_idr_id) WHERE claimed_by_idr_id IS NOT NULL;
+
+-- An IDR's overrides of its default segments: exclude one of its task order's sites', include one from elsewhere in
+-- its project (migration 044), as idr_flag_attributions for flags
+CREATE TABLE icid.idr_segment_attributions (
+    idr_id      UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    segment_id  UUID NOT NULL REFERENCES icid.segments(segment_id) ON DELETE CASCADE,
+    action      TEXT NOT NULL CHECK (action IN ('exclude', 'include')),
+    set_by      UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    set_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (idr_id, segment_id)
+);
+CREATE INDEX idx_idr_segment_attributions_segment ON icid.idr_segment_attributions (segment_id);
 
 ------------------------------------------------------------
 -- PIR ANNOTATIONS (a page's title block, one row per page; migrations/034). No deleted_at: it stays with its page

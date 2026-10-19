@@ -224,7 +224,7 @@ class TestTheView:
                                       "flag_count": None}]
         assert data["flags"][0]["constructed_on"] == "2026-10-05"
         assert "f.claimed_by_idr_id = i.idr_id" in run.call_args.args[0]
-        assert "source = 'from_flags'" in quantities.call_args.args[0]
+        assert "source = %s" in quantities.call_args.args[0] and quantities.call_args.args[1][1] == "from_flags"
 
     def test_an_unknown_idr_is_404(self, admin_client):
         with backend(idr=None):

@@ -21,6 +21,7 @@ from api.queries.properties import get_property
 from api.services.auth import MAX_PASSWORD_BYTES, no_demo_pir_writes, pir_member
 from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
 from api.services.idr_flags import IdrFlagError, manual_entry_conflicts
+from api.services.idr_segments import IdrSegmentError, manual_segment_conflicts
 
 # The shortest password sign-in takes
 MIN_PASSWORD_LENGTH = 6
@@ -223,13 +224,13 @@ def idr_list_items(rows: list[dict[str, Any]]) -> list[IdrListItem]:
 
 def refuse_flag_filled_pay_items(idr: dict[str, Any], pay_items: Any) -> None:
     """
-    Refuse pay items entered by hand that the IDR's flags already fill (a contract item attributed by flag).
+    Refuse pay items entered by hand that the IDR's flags or curb segments already fill (a contract item attributed by flag or segment).
     Takes the IDR dict and the report's payItems as sent.
-    Returns nothing; raises 400 naming the first such item, or 500 when the IDR's flags can't be read.
+    Returns nothing; raises 400 naming the first such item, or 500 when the IDR's flags or segments can't be read.
     """
     try:
-        conflicts = manual_entry_conflicts(idr, pay_items)
-    except IdrFlagError as exc:
+        conflicts = manual_entry_conflicts(idr, pay_items) or manual_segment_conflicts(idr, pay_items)
+    except (IdrFlagError, IdrSegmentError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     if conflicts:
         raise HTTPException(status_code=400, detail=conflicts[0])

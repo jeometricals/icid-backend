@@ -140,19 +140,28 @@ def replace_quantities(idr_id: UUID, rows: list[dict[str, Any]]) -> Optional[int
     return result[0]["inserted"] if result else None
 
 
-def list_flag_quantities(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+def list_source_quantities(idr_id: UUID, source: str) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch the pay-item rollup an approved IDR wrote from its flags: its from_flags quantity rows, as frozen at approval.
-    Takes the IDR's uuid.
+    Fetch the pay-item rollup an approved IDR wrote from its drawings: its quantity rows of one source, as frozen at approval.
+    Takes the IDR's uuid and the source ('from_flags' or 'from_segments').
     Returns the rows (pay_item_ref, budget_code, description, unit, amount) by item number then budget code; empty for an IDR without any; None on failure.
     """
     sql = """
         SELECT pay_item_ref, budget_code, description, unit, amount
         FROM icid.quantities
-        WHERE idr_id = %s AND source = 'from_flags'
+        WHERE idr_id = %s AND source = %s
         ORDER BY pay_item_ref NULLS LAST, budget_code;
     """
-    return run_query(sql, (idr_id,))
+    return run_query(sql, (idr_id, source))
+
+
+def list_flag_quantities(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch the pay-item rollup an approved IDR wrote from its flags: its from_flags quantity rows, as frozen at approval.
+    Takes the IDR's uuid.
+    Returns the rows (see list_source_quantities); None on failure.
+    """
+    return list_source_quantities(idr_id, "from_flags")
 
 
 def list_quantities(

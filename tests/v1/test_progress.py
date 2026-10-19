@@ -105,7 +105,7 @@ class TestStatements:
         with patch(PROGRESS, return_value=[]) as run:
             assert list_flag_progress(PROJECT_ID, [MAIN_ST]) == []
         sql, params = run.call_args.args
-        assert params == (PROJECT_ID, PROJECT_ID, [MAIN_ST], [MAIN_ST])
+        assert params == (PROJECT_ID, PROJECT_ID, PROJECT_ID, [MAIN_ST], [MAIN_ST], PROJECT_ID, [MAIN_ST], [MAIN_ST])
         assert "p.id = ANY(%s::uuid[])" in sql
 
     def test_in_flight_is_any_open_idr_of_the_project_with_the_flag_attributed(self):
@@ -151,7 +151,7 @@ class TestProjectRollup:
         assert data["overall"]["approved_pct"] == 100.0
         assert data["unmapped_flag_count"] == 0 and data["unmapped_by_property"] == []
         assert "properties" not in data
-        assert run.call_args.args[1][2] is None  # the whole project
+        assert run.call_args.args[1][3] is None  # the whole project
 
     def test_an_unlocked_idr_turns_its_flags_unclaimed(self, admin_client):
         rows = [flags(MAIN_ST, SIDEWALK, "unclaimed", 10, "383.44"), flags(ELM_ST, CONCRETE, "unclaimed", 5, "3.01")]
@@ -194,21 +194,21 @@ class TestProjectRollup:
             response = admin_client.get(URL, params={"task_order_id": str(TASK_ORDER_ID)})
         assert response.status_code == 200
         assert response.json()["data"]["scope"]["task_order_id"] == str(TASK_ORDER_ID)
-        assert run.call_args.args[1][2] == [MAIN_ST, ELM_ST, OAK_ST]
+        assert run.call_args.args[1][3] == [MAIN_ST, ELM_ST, OAK_ST]
 
     def test_a_property_filter_reads_that_property(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
                 patch(PROPS, return_value=[PROPERTY_ROW]), patch(PROGRESS, return_value=WALKTHROUGH[:1]) as run:
             response = admin_client.get(URL, params={"property_id": str(MAIN_ST)})
         assert response.status_code == 200
-        assert run.call_args.args[1][2] == [MAIN_ST]
+        assert run.call_args.args[1][3] == [MAIN_ST]
 
     def test_both_filters_narrow_to_the_property_in_the_task_order(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
                 patch(TASKS, return_value=[TASK_ORDER_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]), \
                 patch(PROGRESS, return_value=[]) as run:
             admin_client.get(URL, params={"task_order_id": str(TASK_ORDER_ID), "property_id": str(MAIN_ST)})
-        assert run.call_args.args[1][2] == [MAIN_ST]
+        assert run.call_args.args[1][3] == [MAIN_ST]
 
     def test_a_property_outside_the_task_order_is_an_empty_rollup(self, admin_client):
         outside = {**TASK_ORDER_ROW, "properties": [bundled(ELM_ST)]}
@@ -217,7 +217,7 @@ class TestProjectRollup:
                 patch(PROGRESS, return_value=[]) as run:
             response = admin_client.get(URL, params={"task_order_id": str(TASK_ORDER_ID), "property_id": str(MAIN_ST)})
         assert response.status_code == 200
-        assert run.call_args.args[1][2] == []
+        assert run.call_args.args[1][3] == []
         assert response.json()["data"]["overall"]["approved_pct"] is None
 
     @pytest.mark.parametrize("task_order", [
@@ -292,7 +292,8 @@ class TestTaskOrderRollup:
         assert line(main, "4.13 AAS")["approved"] == line(data, "4.13 AAS")["approved"]
         assert data["properties"][2]["overall"]["approved_pct"] is None
         assert data["properties"][2]["pay_items"] == []
-        assert run.call_args.args[1] == (PROJECT_ID, PROJECT_ID, [MAIN_ST, ELM_ST, OAK_ST], [MAIN_ST, ELM_ST, OAK_ST])
+        sites = [MAIN_ST, ELM_ST, OAK_ST]
+        assert run.call_args.args[1] == (PROJECT_ID, PROJECT_ID, PROJECT_ID, sites, sites, PROJECT_ID, sites, sites)
 
     def test_include_empty_lists_every_pay_item_for_each_property(self, admin_client):
         with patch(TASKS, return_value=[TASK_ORDER_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS),                 patch(PROGRESS, return_value=WALKTHROUGH):

@@ -351,8 +351,14 @@ class TestFlagQuantities:
         with patch("api.queries.quantities.run_query", return_value=rows) as query:
             assert list_flag_quantities(IDR_ID) == rows
         sql, params = query.call_args.args
-        assert "FROM icid.quantities WHERE idr_id = %s AND source = 'from_flags'" in flat(sql)
-        assert params == (IDR_ID,)
+        assert "FROM icid.quantities WHERE idr_id = %s AND source = %s" in flat(sql)
+        assert params == (IDR_ID, "from_flags")
+
+    def test_an_approved_idrs_frozen_segment_rollup_is_read_from_its_from_segments_rows(self):
+        from api.queries.quantities import list_source_quantities
+        with patch("api.queries.quantities.run_query", return_value=[]) as query:
+            assert list_source_quantities(IDR_ID, "from_segments") == []
+        assert query.call_args.args[1] == (IDR_ID, "from_segments")
 
 
 class TestFlagAmount:
