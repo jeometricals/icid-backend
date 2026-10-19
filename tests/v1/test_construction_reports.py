@@ -250,15 +250,17 @@ class TestPropertyReport:
         assert "250.94 - 137.75 113.19" in text and "Adjustment to box 2 +47.50" in text
         assert "171.81 - 77.67 94.14" in text
 
-    def test_the_perimeter_prints_the_property_line_the_tax_map_and_the_curb_to_curb(self, admin_client, storage):
+    def test_the_perimeter_prints_the_property_line_the_tax_map_and_the_concrete_curb(self, admin_client, storage):
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
             text = pdf_text(admin_client.get(URL).content)
-        assert text.count("PL") >= 2 and "TAX MAP 40.00'" in text and "CC= 34.25'" in text
+        # CC from the page's concrete curb segment: 800 px at 24 px/ft
+        assert text.count("PL") >= 2 and "TAX MAP 40.00'" in text and "CC= 33.33'" in text
         assert "139 AVENUE" in text and "138 AVENUE" in text and "227 STREET" in text
 
     def test_without_the_widths_only_the_property_line_prints(self, admin_client, storage):
         header = {**HEADER, "tb_tax_map_width_ft": None, "tb_cc_curb_to_curb_ft": None}
-        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(header=header)):
+        no_curb = {"features": [], "segments": []}
+        with patch(PROPS, return_value=[PROPERTY_ROW]),                 patch(REPORT, side_effect=report_query(header=header, drawings=no_curb)):
             text = pdf_text(admin_client.get(URL).content)
         assert "PL" in text and "TAX MAP" not in text and "CC=" not in text
 
@@ -313,6 +315,24 @@ class TestPropertyReport:
             text = pdf_text(admin_client.get(URL).content)
         assert fills["driveway"].call_count == 1 and fills["non_assessable"].call_count == 0
         assert "10.00' DW" in text
+
+    def test_cc_is_the_concrete_curb_segments_length_over_the_title_blocks_figure(self, admin_client, storage):
+        # Two concrete curb segments of 10 and 15.5 ft at 24 px/ft, with a depressed one between that CC doesn't count;
+        # the title block's 34.25 is only a fallback
+        drawings = {"features": [], "segments": [
+            {"segment_type": "curb_concrete", "points": [{"x": 100, "y": 330}, {"x": 100 + 10 * 24, "y": 330}]},
+            {"segment_type": "curb_concrete_depressed", "points": [{"x": 340, "y": 330}, {"x": 460, "y": 330}]},
+            {"segment_type": "curb_concrete", "points": [{"x": 460, "y": 330}, {"x": 460 + 15.5 * 24, "y": 330}]}]}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
+            text = pdf_text(admin_client.get(URL).content)
+        assert "CC= 25.50'" in text and "CC= 34.25'" not in text
+
+    def test_without_a_concrete_curb_segment_cc_is_the_title_blocks_figure(self, admin_client, storage):
+        drawings = {"features": [], "segments": [
+            {"segment_type": "curb_granite", "points": [{"x": 100, "y": 330}, {"x": 340, "y": 330}]}]}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
+            text = pdf_text(admin_client.get(URL).content)
+        assert "CC= 34.25'" in text
 
     def test_a_depressed_curb_is_ticked_and_measured(self, admin_client, storage):
         # 17.16 ft of depressed curb at 24 px/ft

@@ -86,6 +86,8 @@ STRAP_PT = 6.0
 STRAP_GAP = 7.0
 # The lane a strap takes beside a slab, which the overall dimensions keep clear of
 STRAP_LANE = STRAP_GAP + STRAP_PT + 3
+# The curb segments CC (Concrete Curb, along the frontage) counts
+CC_SEGMENT_TYPES = ("curb_concrete",)
 # The certification strip's Print Sign Date cell, at its right end
 SIGN_CELL_WIDTH = 210.0
 # The widest the inspector's signature prints (about 1.3 in), as DOT's sign-date box holds it
@@ -1015,9 +1017,23 @@ def _dimension(c: Canvas, left: float, right: float, y: float, text: str) -> Non
     _text(c, (left + right) / 2, y + 2, text, 6.5, align="centre")
 
 
+def concrete_curb(items: list[SketchItem], fit: Fit) -> Optional[tuple[Decimal, float, float]]:
+    """
+    The concrete curb along the frontage (CC), from the page's curb segments of the kinds CC counts (CC_SEGMENT_TYPES): their lengths, in feet from their points, summed, and the stretch of the sheet they span.
+    Takes the sketch's items and their Fit.
+    Returns (length in feet, to the hundredth; left and right x on the sheet), or None when the page has no such segment.
+    """
+    curbs = [item for item in items if item.kind == "segment" and item.source["segment_type"] in CC_SEGMENT_TYPES]
+    if not curbs:
+        return None
+    length = sum(math.dist(a, b) for item in curbs for a, b in zip(item.points, item.points[1:]))
+    xs = [fit.place(point)[0] for item in curbs for point in item.points]
+    return Decimal(str(round(length, 2))), min(xs), max(xs)
+
+
 def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, sketch_width: float) -> list[Box]:
     """
-    Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at each end, the tax map's width at scale between them when known, else the drawing's ends), the curb-to-curb at scale along the bottom (CC), the frontage street under it and the cross streets up the sides.
+    Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at each end, the tax map's width at scale between them when known, else the drawing's ends), the concrete curb along the bottom (CC: its segments' length, under the stretch they span; else the title block's cc_curb_to_curb_ft at scale, as a manual figure), the frontage street under it and the cross streets up the sides.
     Takes the canvas, the header row (tb_ streets and widths), the items, their Fit and the sketch's width.
     Returns the boxes its dimensions and PLs take, for the straps to keep clear of.
     """
@@ -1041,9 +1057,14 @@ def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: 
     for x in ends:
         c.line(x, max_y + 2, x, line_y + 6)
         _text(c, x, line_y + 9, "PL", 6.5, BOLD, align="centre")
-    if curb:
+    concrete = concrete_curb(items, fit)
+    curb_y = min_y - STRAP_LANE - 4
+    if concrete is not None:
+        length, left, right = concrete
+        _dimension(c, left, right, curb_y, f"CC= {width_text(length)}")
+        taken.append((left - 4, curb_y - 4, right + 4, curb_y + 9))
+    elif curb:
         half = float(curb) * fit.points_per_foot / 2
-        curb_y = min_y - STRAP_LANE - 4
         _dimension(c, middle - half, middle + half, curb_y, f"CC= {width_text(curb)}")
         taken.append((middle - half - 4, curb_y - 4, middle + half + 4, curb_y + 9))
     band_x, band_y, _, band_h = BAND
