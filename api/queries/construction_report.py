@@ -84,7 +84,7 @@ def list_report_flags(property_id: UUID, idr_id: UUID) -> Optional[list[dict[str
     """
     sql = f"""
         SELECT
-            f.id, f.pir_page_id, pg.page_number, pg.scale_px_per_ft, pg.rotation_deg, f.display_order, f.shape,
+            f.id, f.pir_id, f.pir_page_id, pg.page_number, pg.scale_px_per_ft, pg.rotation_deg, f.display_order, f.shape,
             f.dimensions, f.sketch_x, f.sketch_y, f.rotation, f.surveyed_thickness, f.surveyed_is_assessable,
             f.surveyed_non_assessable_reason,
             f.computed_quantity, {FLAG_QUANTITY} AS quantity,
@@ -109,20 +109,22 @@ def list_page_drawings(page_ids: list[UUID]) -> Optional[dict[str, Any]]:
     """
     Fetch the live features and segments on some PIR pages, for the report's sketch.
     Takes the pages' ids.
-    Returns {features: [{feature_type, area_impact, sketch_x, sketch_y, rotation, shape, dimensions, label}], segments: [{segment_type, points}]}, each in drawing order; None on failure.
+    Returns {features: [{pir_page_id, feature_type, area_impact, sketch_x, sketch_y, rotation, shape, dimensions, label}], segments: [{pir_page_id, segment_type, points}]}, each in drawing order; None on failure.
     """
     sql = """
         SELECT
             COALESCE((
                 SELECT jsonb_agg(jsonb_build_object(
-                    'feature_type', ft.feature_type, 'area_impact', ft.area_impact, 'sketch_x', ft.sketch_x,
+                    'pir_page_id', ft.pir_page_id, 'feature_type', ft.feature_type, 'area_impact', ft.area_impact,
+                    'sketch_x', ft.sketch_x,
                     'sketch_y', ft.sketch_y, 'rotation', ft.rotation, 'shape', ft.shape, 'dimensions', ft.dimensions,
                     'label', ft.label) ORDER BY ft.created_at)
                 FROM icid.features ft
                 WHERE ft.pir_page_id = ANY(%s::uuid[]) AND ft.deleted_at IS NULL
             ), '[]'::jsonb) AS features,
             COALESCE((
-                SELECT jsonb_agg(jsonb_build_object('segment_type', sg.segment_type, 'points', sg.points)
+                SELECT jsonb_agg(jsonb_build_object('pir_page_id', sg.pir_page_id, 'segment_type', sg.segment_type,
+                                                    'points', sg.points)
                                  ORDER BY sg.created_at)
                 FROM icid.segments sg
                 WHERE sg.pir_page_id = ANY(%s::uuid[]) AND sg.deleted_at IS NULL

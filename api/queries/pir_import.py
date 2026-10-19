@@ -48,12 +48,12 @@ def _json_ready(rows: list[dict[str, Any]]) -> Jsonb:
 def import_pir_drawings(
     pir_id: UUID, created_by: UUID, pages: list[dict[str, Any]], flags: list[dict[str, Any]],
     areas: list[dict[str, Any]], features: list[dict[str, Any]], segments: list[dict[str, Any]],
-    annotations: list[dict[str, Any]],
+    annotations: list[dict[str, Any]], match_lines: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[dict[str, int]]:
     """
-    Write a Smart PIR import in one statement, so all of it lands or none: page scales and rotations (and the lengths of the segments already on a page whose scale changed), then new flags, their non-assessable areas, features, segments, and title blocks (replacing a page's). Only live pages of the PIR take anything, a pay item must be one of the project's, an area's flag and a feature's flag must be ones this import adds.
-    Takes the PIR's id, the importing user's uuid, and the rows: pages {pir_page_id, scale_px_per_ft, rotation_deg}; flags {id, pir_page_id, the flag's writable columns, computed_quantity}; areas {flag_id, the area's writable columns, computed_quantity}; features {pir_page_id, the feature's writable columns, computed_quantity}; segments {pir_page_id, scale_px_per_ft (the import's scale for the page, or None), the segment's writable columns}; annotations {pir_page_id, the title block's fields}.
-    Returns {pages_updated, segments_rescaled, flags, non_assessable_areas, features, segments, annotations}: how many of each were written; or None on failure.
+    Write a Smart PIR import in one statement, so all of it lands or none: page scales and rotations (and the lengths of the segments already on a page whose scale changed), then new flags, their non-assessable areas, features, segments, title blocks (replacing a page's) and match lines (R1h.1a; one whose label its page already has live is left out). Only live pages of the PIR take anything, a pay item must be one of the project's, an area's flag and a feature's flag must be ones this import adds.
+    Takes the PIR's id, the importing user's uuid, and the rows: pages {pir_page_id, scale_px_per_ft, rotation_deg}; flags {id, pir_page_id, the flag's writable columns, computed_quantity}; areas {flag_id, the area's writable columns, computed_quantity}; features {pir_page_id, the feature's writable columns, computed_quantity}; segments {pir_page_id, scale_px_per_ft (the import's scale for the page, or None), the segment's writable columns}; annotations {pir_page_id, the title block's fields}; match lines {pir_page_id, label, x1, y1, x2, y2}.
+    Returns {pages_updated, segments_rescaled, flags, non_assessable_areas, features, segments, annotations, match_lines}: how many of each were written; or None on failure.
     """
     flag_columns = {"id": "uuid", "pir_page_id": "uuid", **FLAG_TYPES, "computed_quantity": "numeric"}
     area_columns = {"flag_id": "uuid", **AREA_TYPES, "computed_quantity": "numeric"}
@@ -127,6 +127,14 @@ def import_pir_drawings(
             JOIN live ON live.pir_page_id = x.pir_page_id
             ON CONFLICT (pir_page_id) DO UPDATE SET {annotation_updates}, updated_at = now()
             RETURNING pir_page_id
+        ),
+        new_match_lines AS (
+            INSERT INTO icid.pir_match_lines (pir_page_id, label, x1, y1, x2, y2, created_by)
+            SELECT live.pir_page_id, x.label, x.x1, x.y1, x.x2, x.y2, %s::uuid
+            FROM jsonb_to_recordset(%s::jsonb) AS x(pir_page_id uuid, label text, x1 real, y1 real, x2 real, y2 real)
+            JOIN live ON live.pir_page_id = x.pir_page_id
+            ON CONFLICT (pir_page_id, label) WHERE deleted_at IS NULL DO NOTHING
+            RETURNING match_line_id
         )
         SELECT
             (SELECT count(*) FROM page_settings) AS pages_updated,
@@ -135,7 +143,8 @@ def import_pir_drawings(
             (SELECT count(*) FROM new_areas) AS non_assessable_areas,
             (SELECT count(*) FROM new_features) AS features,
             (SELECT count(*) FROM new_segments) AS segments,
-            (SELECT count(*) FROM new_annotations) AS annotations;
+            (SELECT count(*) FROM new_annotations) AS annotations,
+            (SELECT count(*) FROM new_match_lines) AS match_lines;
     """
     params = (
         pir_id, _json_ready(pages),
@@ -144,6 +153,7 @@ def import_pir_drawings(
         created_by, _json_ready(features),
         created_by, _json_ready(segments),
         _json_ready(annotations),
+        created_by, _json_ready(match_lines or []),
     )
     rows = run_query(sql, params)
     return rows[0] if rows else None

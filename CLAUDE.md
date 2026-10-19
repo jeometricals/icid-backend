@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. `idr_flags.py` is which flags an IDR covers: its overrides and the claim and release CTEs the IDR statements carry; `idr_segments.py` the same for curb segments, with their quantity CTE. `progress.py` is the progress rollup's one statement: a project's flags and curb segments by property, pay item and state. `construction_report.py` reads a Construction Report's property, title block, IDR, flags and drawings; `assessment_summary.py` a project's claimed flags for the Assessment Summary. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 045 is in the live database (041 was skipped). A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 046 is in the live database (041 was skipped). A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. |
@@ -49,9 +49,10 @@ auth routes:
   `/construction-report`); `/v1/task-orders/{id}` (with its admin routes, `/properties/{property_id}`,
   `/progress-rollup`)
 - **PIRs and drawings:** `/v1/pirs/{id}` (with its admin routes, `/image/upload-request`, `/image/complete`, `/pages`,
-  `/flags`, `/features`, `/segments`, `/import`, and the deprecated R1d routes); `/v1/pir-pages/{id}` (`/scale`,
-  `/rotation`, `/flags`, `/features`, `/segments`, `/annotations`); `/v1/flags/{id}` (with its admin routes and
-  `/non-assessable-areas`); `/v1/non-assessable-areas/{id}`, `/v1/features/{id}`, `/v1/segments/{id}`
+  `/flags`, `/features`, `/segments`, `/match-lines`, `/import`, and the deprecated R1d routes); `/v1/pir-pages/{id}`
+  (`/scale`, `/rotation`, `/flags`, `/features`, `/segments`, `/match-lines`, `/annotations`); `/v1/flags/{id}` (with
+  its admin routes and `/non-assessable-areas`); `/v1/non-assessable-areas/{id}`, `/v1/features/{id}`,
+  `/v1/segments/{id}`, `/v1/match-lines/{id}`
 - **IDRs:** `/v1/idrs/` and `/{idr_id}` (header, reports, submit, export, attachments); the review queue and moves
   (`/queue`, accept / approve at both stages, `/return`); reviewer edits (`/field`, pay items, trucks); the admin
   moves (`/admin/unlock`, `/delete`, `/undelete`, `/permanent`); `/attributed-flags`; `/attributed-segments`; `/construction-reports`
@@ -170,9 +171,9 @@ Any change must follow these.
       they reported, reviewed at either stage or deleted; project roles; audit rows; field edits; attachments
       they uploaded; properties and task orders they created or deleted; properties they bundled into task
       orders; PIRs they digitized, signed as built or deleted; flags they created or deleted; PIR pages they
-      replaced or deleted; non-assessable areas, features and segments they created or deleted; IDR flag and segment
-      attributions they set. Any of those is a 409 with the counts under `references`. Those are all the foreign keys to
-      `users.uuid` (28 in `schema.sql`,
+      replaced or deleted; non-assessable areas, features, segments and match lines they created or deleted; IDR flag
+      and segment attributions they set. Any of those is a 409 with the counts under `references`. Those are all the
+      foreign keys to `users.uuid` (30 in `schema.sql`,
       `users.deleted_by` the one not counted; the `deleted_by` of a property, a task order, a PIR, a flag, a PIR
       page, an area, a feature or a segment, an attribution's `set_by` and a PIR's
       `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
@@ -947,7 +948,7 @@ Any change must follow these.
     tripped. The pages go to a **new folder per upload**, `pirs/{pir_id}/{upload uuid}/page-{n}.png`; a scale sent
     with the upload is set on every page.
   - **Replacing is one statement** (`replace_pages`): the PIR's live flags on its live pages, those flags' live
-    non-assessable areas, and the pages' live features and segments are soft-deleted (`deleted_at`, `deleted_by`;
+    non-assessable areas, and the pages' live features, segments and match lines are soft-deleted (`deleted_at`, `deleted_by`;
     `_RETIRE_DRAWINGS` in `api/queries/pir_pages.py`), those pages are marked replaced the same way (their title
     blocks stay with them), and the new pages are inserted,
     numbered 1..N. The INSERT first reads the count of replaced pages, so the old pages are out of the partial
@@ -1021,10 +1022,14 @@ Any change must follow these.
 - **Smart PIR import** (`POST /v1/pirs/{pir_id}/import`; `api/v1/pir_import.py`, `api/services/pir_import.py`,
   `api/queries/pir_import.py`, `api/schemas/pir_import.py`): a sketch tool's file of what it drew on a PIR.
   - **The file:** `{schema_version: "1.0", pir_id, annotations?, pages: [{page_number, scale_px_per_ft?,
-    rotation_deg?, annotations?, flags, features, segments}]}`. `pir_id` must be the path's (400). A flag is a flag's
+    rotation_deg?, annotations?, flags, features, segments, match_lines?}]}`. `pir_id` must be the path's (400). A flag is a flag's
     body plus `non_assessable_areas`; a feature names its flag by `flag_index` (its place in the page's `flags`
     list, 0 first), never by `flag_id`. The file's own `annotations` go to page 1, unless page 1 brings its own.
     `tests/fixtures/smart_pir_sample.json` is a valid one.
+  - **Match lines** (R1h.1a): `{label, points: [{x, y}, {x, y}]}` per page, checked as `MatchLineCreate`. Dropped item
+    by item: a line that fails its check, a label listed twice in one page entry (the second), a label its page already
+    has live, and every occurrence of a label that would end up on three pages or more (the PIR's live lines' pages
+    and the file's together). The statement's `new_match_lines` CTE skips a label taken meanwhile.
   - **Additive, item by item.** Each flag, area, feature, segment and title block is checked on its own, as its
     route checks it (and a pay item must be the project's); one that fails is **dropped** and listed in
     `dropped_items` with its kind, page, place and reason, and the rest go in. A page number the PIR has no live page
@@ -1104,7 +1109,26 @@ Any change must follow these.
     and Walk004, approved before this, claim theirs.
 - **Construction Report** (R1h; `api/v1/construction_reports.py`, `api/queries/construction_report.py`, and
   `construction_measure.py`, `construction_sketch.py`, `construction_report.py` in `api/services/`): a property's
-  as-built sheet for one approved IDR, DOT form 5/95, a one-page letter-landscape PDF drawn with ReportLab.
+  as-built sheets for one approved IDR, DOT form 5/95, a letter-landscape PDF drawn with ReportLab.
+  - **One sheet per PIR page** (R1h.1a) that holds flags the IDR claimed there, in page order, "Sheet k of N"; a page
+    without claimed flags doesn't print. Each sheet is fitted on its own, in its own page's scale and rotation (313 38
+    Street's sheet 2 is turned the other way and uses its page's `rotation_deg`). Every sheet repeats the whole form:
+    the header, box 1 (page 1's title block), boxes 3 to 5, the KEY, the perimeter from page 1's title block (CC from
+    that sheet's own curb segments) and the certification. **Box 2** (the whole property's Construction Measure) is
+    filled on sheet 1 only; later sheets leave it blank. **Calculations:** each sheet lists its own flags; the last of
+    several adds `All Sheets ... Assessable` per thickness (`total_lines`), which equals box 2. **Numbering** runs on
+    across sheets (`number_items`, page after page). Per-stretch quantities ("B - C 45.00 LF") are deferred.
+  - **Match lines** (`icid.pir_match_lines`, migration 046; `api/v1/match_lines.py`, `api/queries/match_lines.py`,
+    `api/schemas/match_line.py`): a lettered line (A..Z, AA..ZZ) drawn on one page as two endpoints in its native
+    pixels. Two pages pair by carrying the same label; a label is live once per page and on at most two pages of a PIR
+    (409 `Match line "A" is already on this page` / `... on pages 1 and 2`; the statements check it too). The report
+    places both endpoints with the sheet's transform and draws the dashed line, a circled letter at each end and the
+    caption `MATCH LINE "A" — SEE SHEET 2 OF 2`, or `— SEE PIR PAGE 3` when the partner page doesn't print, or the label
+    alone (`match_line_caption`). Routes: `GET /v1/pirs/{id}/match-lines`, `GET`/`POST /v1/pir-pages/{id}/match-lines`,
+    `GET`/`PATCH`/`DELETE /v1/match-lines/{id}`, for the project's members as features are (`match_line_member`; demo
+    users read). Soft delete only; replacing the scan retires them. There is no drawing tool yet (R1h.1b): lines come
+    from the Smart PIR import or these routes. Progress, the Assessment Summary, the export, quantities and IDR claims
+    read flags one by one and don't see pages or lines, so they are unchanged.
   - **Which IDR:** the one in `?idr_id=`, or by default the most recently approved (`re_signed_at`) that claimed a flag
     on the property; it must be approved, not deleted, and have claimed a flag there (404 otherwise). The IDR route
     (`require_project_role` on all three roles, and the demo fence) zips one PDF per property it claimed flags on.
@@ -1123,8 +1147,8 @@ Any change must follow these.
     header's Estimated Sq.Ft is the assessable total, as DOT's sheets print it (R1h.4; the gross total before).
   - **Sketch** (`construction_sketch.py`): outlines exactly as the frontend's `lib/flagGeometry.js`, the page's
     rotation applied, fitted with 4% padding (R1h.4; 10% before) to the left of the band, room left round it. 422 when
-    the flags are on more than one page or would print below `MIN_POINTS_PER_FOOT` (4) (`MULTI_SHEET_MESSAGE`, R1h.1's),
-    or the page has no scale. North arrow from `pirs.north_bearing`, read on the upright page (not turned again by its
+    a sheet would print below `MIN_POINTS_PER_FOOT` (4) (`too_large_message`: split it with a match line onto another
+    page) or its page has no scale (`Set the scale of PIR page 2 first` on a report of several sheets). North arrow from `pirs.north_bearing`, read on the upright page (not turned again by its
     rotation); none when unset.
   - **DOT parity (R1h.3).** Numbers (`number_items`): every flag 1..n and A1..An for a flag surveyed non-assessable
     (which keeps its number too) and an area on an assessable flag, both in reading order (`reading_order`: rows top
@@ -1142,7 +1166,8 @@ Any change must follow these.
     dimensions (`shape_terms`: a trapezoid `0.5(a+b)` × w, a triangle `0.5(a)` × b, a polygon or an arc the Sub-Total
     alone), the non-assessable pieces, then Total − Non-Assessable = Assessable. Its totals are box 2's; when the pieces
     don't add up to it (an override, a subtracted feature, an area larger than its flag) an `Adjustment to box 2` row
-    carries the difference. More lines than fit at 6 pt is a 422 (`CALC_TOO_LONG_MESSAGE`). The 4" (with 7" assessed
+    carries the difference. More lines than fit at 6 pt on a sheet is a 422 (`CALC_TOO_LONG_MESSAGE`, naming the PIR page on a report of
+    several sheets; calc-only overflow sheets are deferred). The 4" (with 7" assessed
     as 4") and the 7" tables stand side by side when both have flags (`report_layout`: the panel `CALC_WIDTH_TWO`
     wide, the sketch narrower), else one column `CALC_WIDTH` wide.
   - **Sketch polish (R1h.4).** Flags that abut (an edge along another's, within 0.1 ft) and share thickness and

@@ -564,6 +564,19 @@ Set by the IDR's inspector on a draft, its stage's reviewer in review, or an adm
 | `set_by` | UUID | Who set it; FK → `users.uuid`, **ON DELETE SET NULL** (counted by `count_user_references` anyway) |
 | `set_at` | TIMESTAMPTZ NOT NULL | `now()` |
 
+### pir_match_lines
+
+A lettered line joining a PIR's sheets (migration 046, R1h.1a), drawn on one page. Two pages pair by carrying the same
+label; the Construction Report draws each at its endpoints, captioned with its partner's sheet.
+
+| Column | Type | Notes |
+|---|---|---|
+| `match_line_id` | UUID PK | |
+| `pir_page_id` | UUID NOT NULL | FK → `pir_pages`, no action (pages are never hard-deleted); `pir_match_lines_page_idx` |
+| `label` | TEXT NOT NULL | `A`..`Z`, `AA`..`ZZ` (CHECK `chk_match_lines_label`); live once per page (`pir_match_lines_page_label_live_uq`, `WHERE deleted_at IS NULL`) and on at most two pages of a PIR (the API's statements) |
+| `x1`, `y1`, `x2`, `y2` | REAL NOT NULL | The endpoints, in the page's native pixels (as flags and segments); CHECK `chk_match_lines_length` (they differ) |
+| `created_at`, `updated_at`, `created_by`, `deleted_at`, `deleted_by` | | As on `features`; soft-deleted only; replacing the scan retires them |
+
 ### idr_segment_attributions
 
 The same for curb segments (migration 044, curb billing): `idr_id`, `segment_id` (FK → `segments.segment_id`, **ON
@@ -900,6 +913,7 @@ content as TEXT, linked to a report and a form template).
 | 043 | `043_property_community_board.sql` | A | Added `properties.community_board` (TEXT, nullable) and CHECK `chk_properties_community_board_length` (at most 10 characters). No backfill: every existing row is NULL. |
 | 044 | `044_curb_billing.sql` | Curb billing | Added `segments.claimed_by_idr_id` (FK to `idrs`, no action) and `constructed_on`, CHECK `chk_segments_claim_consistent`, `idx_segments_claimed_by_idr`; created `idr_segment_attributions` (PK `(idr_id, segment_id)`, FKs to `idrs` and `segments` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 27 → 28 FKs to `users`); widened `chk_quantities_source` with `from_segments`. Added HWS0023's contract items 4.08 AB (Depressed Concrete Curb, $55/LF, 500 LF) and 4.08 GA (Granite Curb, $150/LF, 400 LF). |
 | 045 | `045_claim_approved_segments.sql` | Curb billing | Data only, no schema change. Gave HWS0023's live curb segments the pay item of their kind (concrete 4.08 AA, depressed 4.08 AB, granite 4.08 GA: 13, 2 and 1 segments) and had IDR-001 and Walk004, approved before curb billing, claim their task orders' segments and get their `from_segments` rows (IDR-001: 281.50 / 10.00 / 81.00 LF; Walk004: 17.09 / 17.16 LF). |
+| 046 | `046_pir_match_lines.sql` | R1h.1a | Created `pir_match_lines` (FK to `pir_pages`, no action; to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`: 28 → 30 FKs to `users`; CHECKs `chk_match_lines_label` and `chk_match_lines_length`; partial unique `pir_match_lines_page_label_live_uq` and `pir_match_lines_page_idx`). No existing row changed. |
 | 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |
 | 036 | `036_split_bbl_into_block_lot.sql` | R1e.3 | Added `properties.block` and `lot` (TEXT, CHECKs `chk_properties_block_format` and `chk_properties_lot_format`), backfilled from each sidewalk's BBL without leading zeros; replaced `properties_kind_fields_consistent` (block and lot where it had bbl); dropped `uq_properties_project_bbl` and the `bbl` column; created `uq_properties_project_sidewalk_bbl` on `(project_id, boro, block, lot)` `WHERE kind = 'sidewalk' AND deleted_at IS NULL`. The 6 rows: 5 sidewalks backfilled, 1 ped ramp untouched. |
@@ -923,6 +937,7 @@ Where each current column came from:
 | `properties` | `block`, `lot`, `chk_properties_block_format`, `chk_properties_lot_format`, `uq_properties_project_sidewalk_bbl`, the `properties_kind_fields_consistent` of today; `bbl` and `uq_properties_project_bbl` dropped | 036 |
 | `properties` | `community_board`, `chk_properties_community_board_length` | 043 |
 | `idr_segment_attributions`; `segments.claimed_by_idr_id`, `constructed_on`, `chk_segments_claim_consistent`, `idx_segments_claimed_by_idr`; `chk_quantities_source` with `from_segments` | all | 044 |
+| `pir_match_lines` | all | 046 |
 | `idr_flag_attributions`; `idrs.task_order_id`, `idx_idrs_task_order`; `flags.claimed_by_idr_id`, `constructed_on`, `chk_flags_claim_consistent`, `idx_flags_claimed_by_idr`, `idx_flags_scope_rollup`; `quantities.source`, `chk_quantities_source` | all | 037 |
 | `task_orders`, `task_order_properties` | all | 030 |
 | `pirs` | all | 031 |

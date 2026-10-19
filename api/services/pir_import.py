@@ -22,6 +22,7 @@ from api.schemas.pir_import import (
     SmartPirImport,
     SmartPirPageImport,
 )
+from api.schemas.match_line import MatchLineCreate
 from api.schemas.segment import SegmentCreate
 from api.services.area_containment import TOLERANCE_SF, area_outside_flag
 from api.services.flag_area import compute_area
@@ -30,7 +31,7 @@ from api.services.pay_item_units import FLAG_UNITS
 PAY_ITEM_ELSEWHERE = "pay item is not one of the project's"
 FLAG_UNIT_REFUSED = f"a flag can't be measured in its pay item's unit (only {', '.join(FLAG_UNITS)})"
 KINDS = {"flag": "flags", "non_assessable_area": "non_assessable_areas", "feature": "features",
-         "segment": "segments", "annotations": "annotations"}
+         "segment": "segments", "annotations": "annotations", "match_line": "match_lines"}
 
 
 @dataclass
@@ -43,6 +44,7 @@ class PreparedImport:
     features: list[dict[str, Any]] = field(default_factory=list)
     segments: list[dict[str, Any]] = field(default_factory=list)
     annotations: list[dict[str, Any]] = field(default_factory=list)
+    match_lines: list[dict[str, Any]] = field(default_factory=list)
     dropped: list[DroppedItem] = field(default_factory=list)
 
     def counts(self) -> ImportCounts:
@@ -52,7 +54,8 @@ class PreparedImport:
         Returns the ImportCounts.
         """
         return ImportCounts(flags=len(self.flags), non_assessable_areas=len(self.areas), features=len(self.features),
-                            segments=len(self.segments), annotations=len(self.annotations))
+                            segments=len(self.segments), annotations=len(self.annotations),
+                            match_lines=len(self.match_lines))
 
 
 def _reason(exc: ValidationError) -> str:
@@ -85,13 +88,17 @@ class _Importer:
 
     def __init__(self, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
                  flag_pay_item_ids: Optional[set[UUID]] = None,
-                 page_scales: Optional[dict[int, Any]] = None) -> None:
+                 page_scales: Optional[dict[int, Any]] = None,
+                 live_labels: Optional[dict[str, set[int]]] = None) -> None:
         """
         Start with nothing prepared.
-        Takes the PIR's live pages' ids by page number, the ids of its project's pay items, those of them in a unit a flag can be measured in (all of them when None), and the live pages' scales by page number (for checking each area lies within its flag).
+        Takes the PIR's live pages' ids by page number, the ids of its project's pay items, those of them in a unit a flag can be measured in (all of them when None), the live pages' scales by page number (for checking each area lies within its flag), and the pages each of its live match lines' labels is on.
         Returns nothing.
         """
         self.page_ids, self.pay_item_ids = page_ids, pay_item_ids
+        self.live_labels = live_labels or {}
+        # The match lines that passed their own checks, before the pages-per-label check: (page number, index, row)
+        self.line_candidates: list[tuple[int, int, dict[str, Any]]] = []
         self.page_scales = page_scales or {}
         self.flag_pay_item_ids = pay_item_ids if flag_pay_item_ids is None else flag_pay_item_ids
         self.out = PreparedImport()
@@ -121,7 +128,8 @@ class _Importer:
         Takes the page entry and the reason.
         Returns nothing.
         """
-        for kind, items in (("flag", entry.flags), ("feature", entry.features), ("segment", entry.segments)):
+        for kind, items in (("flag", entry.flags), ("feature", entry.features), ("segment", entry.segments),
+                            ("match_line", entry.match_lines)):
             for index, _ in enumerate(items):
                 self.drop(kind, entry.page_number, index, reason)
         if entry.annotations is not None:
@@ -238,6 +246,43 @@ class _Importer:
                 {"pir_page_id": page_id, "scale_px_per_ft": entry.scale_px_per_ft, **segment.model_dump()}
             )
 
+    def match_lines(self, entry: SmartPirPageImport, page_id: UUID) -> None:
+        """
+        Take a page entry's match lines as candidates: each checked as MatchLineCreate, a label repeated in the entry dropped (the second), and a label the page already has live dropped (the import only adds).
+        Takes the page entry and its page's id.
+        Returns nothing; the pages-per-label check runs once every page is read (match_lines_on_pages).
+        """
+        labels: set[str] = set()
+        for index, raw in enumerate(entry.match_lines):
+            line, reason = _checked(MatchLineCreate, raw)
+            if line is None:
+                self.drop("match_line", entry.page_number, index, reason)
+                continue
+            if line.label in labels:
+                self.drop("match_line", entry.page_number, index, f'label "{line.label}" is listed twice on this page')
+                continue
+            if entry.page_number in self.live_labels.get(line.label, set()):
+                self.drop("match_line", entry.page_number, index, f'label "{line.label}" is already on this page')
+                continue
+            labels.add(line.label)
+            self.line_candidates.append((entry.page_number, index, {"pir_page_id": page_id, **line.columns()}))
+
+    def match_lines_on_pages(self) -> None:
+        """
+        Keep the candidate match lines whose label ends up on at most two pages of the PIR (its live lines' pages and the file's together); every occurrence in the file of a label that would be on more is dropped, so none is picked by its place.
+        Takes nothing.
+        Returns nothing.
+        """
+        pages: dict[str, set[int]] = {label: set(numbers) for label, numbers in self.live_labels.items()}
+        for page_number, _, row in self.line_candidates:
+            pages.setdefault(row["label"], set()).add(page_number)
+        for page_number, index, row in self.line_candidates:
+            count = len(pages[row["label"]])
+            if count > 2:
+                self.drop("match_line", page_number, index, f'label "{row["label"]}" would be on {count} pages')
+            else:
+                self.out.match_lines.append(row)
+
     def page(self, entry: SmartPirPageImport, seen: set[int]) -> None:
         """
         Take one page entry: its scale and rotation, then its flags (and their areas), features, segments and title block.
@@ -258,22 +303,25 @@ class _Importer:
         flag_ids = self.flags(entry, page_id)
         self.features(entry, page_id, flag_ids)
         self.segments(entry, page_id)
+        self.match_lines(entry, page_id)
         if entry.annotations is not None:
             self.annotations(entry.annotations, page_id, entry.page_number)
 
 
 def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
                    flag_pay_item_ids: Optional[set[UUID]] = None,
-                   page_scales: Optional[dict[int, Any]] = None) -> PreparedImport:
+                   page_scales: Optional[dict[int, Any]] = None,
+                   live_labels: Optional[dict[str, set[int]]] = None) -> PreparedImport:
     """
     Check a Smart PIR import item by item and turn what passes into the rows the import statement writes. The file's own annotations go to page 1, unless page 1's entry brings its own.
-    Takes the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None) and the live pages' scales by page number.
+    Takes the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None), the live pages' scales by page number and the pages each of the PIR's live match line labels is on.
     Returns the PreparedImport: the rows, and every item dropped with why.
     """
-    importer = _Importer(page_ids, pay_item_ids, flag_pay_item_ids, page_scales)
+    importer = _Importer(page_ids, pay_item_ids, flag_pay_item_ids, page_scales, live_labels)
     seen: set[int] = set()
     for entry in body.pages:
         importer.page(entry, seen)
+    importer.match_lines_on_pages()
 
     if body.annotations is not None:
         page_one = next((entry for entry in body.pages if entry.page_number == 1), None)
@@ -290,20 +338,23 @@ def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids
 def run_import(
     pir_id: UUID, created_by: UUID, body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
     flag_pay_item_ids: Optional[set[UUID]] = None, page_scales: Optional[dict[int, Any]] = None,
+    live_labels: Optional[dict[str, set[int]]] = None,
 ) -> Optional[PirImportResult]:
     """
     Import a Smart PIR file: check it, then write what passed in one statement. An item the statement couldn't write (its page replaced or its pay item deleted meanwhile) is counted as dropped.
-    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None) and the live pages' scales by page number.
+    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None), the live pages' scales by page number and the pages each of the PIR's live match line labels is on.
     Returns the PirImportResult, or None if the statement failed.
     """
-    prepared = prepare_import(body, page_ids, pay_item_ids, flag_pay_item_ids, page_scales)
+    prepared = prepare_import(body, page_ids, pay_item_ids, flag_pay_item_ids, page_scales, live_labels)
     wanted = prepared.counts()
 
-    if not (prepared.pages or prepared.flags or prepared.features or prepared.segments or prepared.annotations):
+    if not (prepared.pages or prepared.flags or prepared.features or prepared.segments or prepared.annotations
+            or prepared.match_lines):
         written: Optional[dict[str, int]] = {"pages_updated": 0, **ImportCounts().model_dump()}
     else:
         written = import_pir_drawings(pir_id, created_by, prepared.pages, prepared.flags, prepared.areas,
-                                      prepared.features, prepared.segments, prepared.annotations)
+                                      prepared.features, prepared.segments, prepared.annotations,
+                                      prepared.match_lines)
     if written is None:
         return None
 

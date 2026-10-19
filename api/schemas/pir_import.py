@@ -30,7 +30,9 @@ class SmartPirPageImport(BaseModel):
     """
     One page of a Smart PIR import, by its page number. scale_px_per_ft and rotation_deg, when given, are set on the
     page. Every item is checked on its own (flags as FlagImportItem, features as FeatureImportItem, segments as
-    SegmentCreate, annotations as PirAnnotationIn), so a bad one is dropped and the rest imported.
+    SegmentCreate, match lines as MatchLineCreate, annotations as PirAnnotationIn), so a bad one is dropped and the
+    rest imported. A match line ({label, points: [{x, y}, {x, y}]}, R1h.1a) pairs the page with the one carrying the
+    same label.
     """
 
     page_number: int = Field(ge=1)
@@ -40,6 +42,7 @@ class SmartPirPageImport(BaseModel):
     flags: list[dict[str, Any]] = []
     features: list[dict[str, Any]] = []
     segments: list[dict[str, Any]] = []
+    match_lines: list[dict[str, Any]] = []
 
 
 class SmartPirImport(BaseModel):
@@ -62,6 +65,7 @@ class ImportCounts(BaseModel):
     features: int = 0
     segments: int = 0
     annotations: int = 0
+    match_lines: int = 0
 
 
 class DroppedItem(BaseModel):
@@ -70,7 +74,7 @@ class DroppedItem(BaseModel):
     annotations); index its place in its list; flag_index, for a non-assessable area, its flag's place.
     """
 
-    kind: Literal["flag", "non_assessable_area", "feature", "segment", "annotations"]
+    kind: Literal["flag", "non_assessable_area", "feature", "segment", "annotations", "match_line"]
     page_number: Optional[int] = None
     index: Optional[int] = None
     flag_index: Optional[int] = None

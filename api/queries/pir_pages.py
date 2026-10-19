@@ -17,7 +17,7 @@ _FROM = """
         JOIN icid.pirs pir ON pir.id = pg.pir_id
         JOIN icid.properties p ON p.id = pir.property_id"""
 # What goes with a PIR's pages when they are replaced or deleted, all in the same statement: the live flags on them,
-# those flags' live non-assessable areas, and the live features and segments on them. Reads old_pages (pir_page_id);
+# those flags' live non-assessable areas, and the live features, segments and match lines on them. Reads old_pages (pir_page_id);
 # takes the deleting user's uuid four times.
 _RETIRE_DRAWINGS = """
         old_flags AS (
@@ -43,13 +43,20 @@ _RETIRE_DRAWINGS = """
             SET deleted_at = now(), deleted_by = %s, updated_at = now()
             WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL
             RETURNING segment_id
+        ),
+        old_match_lines AS (
+            UPDATE icid.pir_match_lines
+            SET deleted_at = now(), deleted_by = %s, updated_at = now()
+            WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL
+            RETURNING match_line_id
         )"""
 # Makes the statement wait for every CTE of _RETIRE_DRAWINGS
 _DRAWINGS_RETIRED = """
             CROSS JOIN (SELECT count(*) FROM old_flags) AS flags_retired
             CROSS JOIN (SELECT count(*) FROM old_areas) AS areas_retired
             CROSS JOIN (SELECT count(*) FROM old_features) AS features_retired
-            CROSS JOIN (SELECT count(*) FROM old_segments) AS segments_retired"""
+            CROSS JOIN (SELECT count(*) FROM old_segments) AS segments_retired
+            CROSS JOIN (SELECT count(*) FROM old_match_lines) AS match_lines_retired"""
 
 
 def list_pages_for_pir(pir_id: UUID) -> Optional[list[dict[str, Any]]]:
@@ -78,7 +85,7 @@ def get_page(pir_page_id: UUID) -> Optional[dict[str, Any]]:
 
 def replace_pages(pir_id: UUID, pages: list[dict[str, Any]], replaced_by: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Give a PIR a new set of pages in one statement: its live pages are marked replaced, with their live flags (and those flags' non-assessable areas), features and segments soft-deleted, and the new pages are inserted, numbered as given. The old pages' files and title blocks are kept, with the old pages.
+    Give a PIR a new set of pages in one statement: its live pages are marked replaced, with their live flags (and those flags' non-assessable areas), features, segments and match lines soft-deleted, and the new pages are inserted, numbered as given. The old pages' files and title blocks are kept, with the old pages.
     Takes the PIR's id, the new pages (each {page_number, image_path, image_mime, width_px, height_px, scale_px_per_ft}) and the uuid of the user replacing them.
     Returns the new page dicts ordered by page number, or None on failure.
     """
@@ -114,7 +121,7 @@ def replace_pages(pir_id: UUID, pages: list[dict[str, Any]], replaced_by: UUID) 
         {**page, "scale_px_per_ft": None if page.get("scale_px_per_ft") is None else str(page["scale_px_per_ft"])}
         for page in pages
     ])
-    return run_query(sql, (replaced_by, pir_id, *(replaced_by,) * 4, pir_id, payload))
+    return run_query(sql, (replaced_by, pir_id, *(replaced_by,) * 5, pir_id, payload))
 
 
 def delete_pages_for_pir(pir_id: UUID, deleted_by: UUID) -> Optional[list[dict[str, Any]]]:
@@ -137,7 +144,7 @@ def delete_pages_for_pir(pir_id: UUID, deleted_by: UUID) -> Optional[list[dict[s
         + _DRAWINGS_RETIRED
         + ";"
     )
-    return run_query(sql, (deleted_by, pir_id, *(deleted_by,) * 4))
+    return run_query(sql, (deleted_by, pir_id, *(deleted_by,) * 5))
 
 
 def _update_page(set_clause: str, params: tuple[Any, ...], pir_page_id: UUID) -> Optional[dict[str, Any]]:

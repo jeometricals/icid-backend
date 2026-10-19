@@ -60,7 +60,7 @@ PAGE_ROWS = [page_row(PAGE_1, 1), page_row(PAGE_2, 2)]
 PAY_ITEM_ROWS = [{"pay_item_uuid": PAY_ITEM_ID, "pay_item_ref": "4.01", "description": "Sidewalk", "unit": "SF",
                   "quantity": Decimal("100"), "unit_price": Decimal("12"), "budget_code": "SE01", "spec_section": None}]
 COUNTS = {"pages_updated": 1, "segments_rescaled": 0, "flags": 5, "non_assessable_areas": 2, "features": 3,
-          "segments": 2, "annotations": 1}
+          "segments": 2, "annotations": 1, "match_lines": 0}
 ON_PROJECT = [{"?column?": 1}]
 SAMPLE = json.loads(Path(__file__).parent.parent.joinpath("fixtures", "smart_pir_sample.json").read_text(encoding="utf-8"))
 
@@ -92,8 +92,10 @@ class TestImport:
         assert response.status_code == 200
         assert response.json() == {
             "status": "success", "message": "Imported 13 items, dropped 0",
-            "data": {"inserted": {"flags": 5, "non_assessable_areas": 2, "features": 3, "segments": 2, "annotations": 1},
-                     "dropped": {"flags": 0, "non_assessable_areas": 0, "features": 0, "segments": 0, "annotations": 0},
+            "data": {"inserted": {"flags": 5, "non_assessable_areas": 2, "features": 3, "segments": 2, "annotations": 1,
+                                  "match_lines": 0},
+                     "dropped": {"flags": 0, "non_assessable_areas": 0, "features": 0, "segments": 0, "annotations": 0,
+                                 "match_lines": 0},
                      "dropped_items": [], "pages_updated": 1}}
         assert pages.call_count == 1 and items.call_count == 1 and run.call_count == 1
         assert items.call_args.args[1] == ("HWS0023",)
@@ -113,14 +115,15 @@ class TestImport:
         sql, params = run.call_args.args
         one_line = " ".join(sql.split())
         for cte in ("live AS (", "page_settings AS (", "rescaled AS (", "new_flags AS (", "new_areas AS (",
-                    "new_features AS (", "new_segments AS (", "new_annotations AS ("):
+                    "new_features AS (", "new_segments AS (", "new_annotations AS (", "new_match_lines AS ("):
             assert cte in one_line
         assert "JOIN new_flags nf ON nf.id = x.flag_id" in one_line
         assert "LEFT JOIN new_flags nf ON nf.id = x.flag_id" in one_line
         assert "COALESCE(x.scale_px_per_ft, live.scale_px_per_ft)" in one_line
         assert "ON CONFLICT (pir_page_id) DO UPDATE" in one_line
-        assert len(params) == 11
-        assert params[0] == PIR_ID and params[2] == params[4] == params[6] == params[8] == ADMIN_ID
+        assert len(params) == 13
+        assert params[0] == PIR_ID and params[2] == params[4] == params[6] == params[8] == params[11] == ADMIN_ID
+        assert "ON CONFLICT (pir_page_id, label) WHERE deleted_at IS NULL DO NOTHING" in one_line
 
     def test_the_rows_go_as_json_with_decimals_and_uuids_as_text(self, admin_client):
         _, _, _, run = post(admin_client, body())

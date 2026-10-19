@@ -29,6 +29,7 @@ from api.queries.pirs import get_pir
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.properties import get_property
 from api.queries.segments import get_segment
+from api.queries.match_lines import get_match_line
 from api.queries.task_orders import get_task_order
 from api.queries.users import create_demo_user, get_user_by_uuid, get_user_for_auth
 from api.schemas.auth import UserOut
@@ -367,6 +368,15 @@ def segment_member(segment_id: UUID, user: UserOut = Depends(current_user)) -> d
     Returns the segment dict (with its page's, PIR's and property's deleted states); raises 404 or 403 as _readable_on_project does.
     """
     return _readable_on_project(get_segment(segment_id), user, "Segment not found")
+
+
+def match_line_member(match_line_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one match line: the signed-in user must be assigned to its page's PIR's property's project (in any role), or be an admin.
+    Takes the match_line_id path parameter and the current user.
+    Returns the match line dict (with its page's, PIR's and property's deleted states); raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_match_line(match_line_id), user, "Match line not found")
 
 
 def task_order_member(task_order_id: UUID, user: UserOut = Depends(current_user)) -> dict:

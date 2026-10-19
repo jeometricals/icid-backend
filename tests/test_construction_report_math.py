@@ -171,9 +171,26 @@ class TestSketchItems:
         # (90, -10) px is (9, -1) ft, which a quarter turn clockwise puts at (1, 9)
         assert items[0].points[0] == pytest.approx((1, 9))
 
-    def test_flags_on_two_pages_are_for_multi_sheet(self):
-        with pytest.raises(SketchError, match="R1h.1"):
-            sketch_items([sketch_flag(), sketch_flag(page=OTHER_PAGE)], NO_DRAWINGS)
+    def test_a_match_line_is_placed_in_its_pages_feet_turned_as_the_page_is(self):
+        line = {"label": "A", "x1": 200.0, "y1": 100.0, "x2": 200.0, "y2": 300.0}
+        items = sketch_items([sketch_flag(page_rotation=90)], NO_DRAWINGS, [line])
+        placed = [item for item in items if item.kind == "match_line"]
+        assert len(placed) == 1 and placed[0].source is line
+        # 10 px/ft: (20, 10) and (20, 30) ft, turned a quarter clockwise about the origin
+        assert [tuple(round(v, 6) for v in point) for point in placed[0].points] == [(-10.0, 20.0), (-30.0, 20.0)]
+
+    def test_a_page_without_a_scale_is_named_on_a_report_of_several_sheets(self):
+        with pytest.raises(SketchError) as raised:
+            sketch_items([sketch_flag(scale=None)], NO_DRAWINGS, [], 2)
+        assert str(raised.value) == "Set the scale of PIR page 2 first"
+
+    def test_numbering_runs_page_after_page(self):
+        page_1 = [{**sketch_flag(x=500), "id": "b", "page_number": 1, "surveyed_is_assessable": True},
+                  {**sketch_flag(x=100), "id": "a", "page_number": 1, "surveyed_is_assessable": True}]
+        page_2 = [{**sketch_flag(x=50, page=OTHER_PAGE), "id": "c", "page_number": 2, "surveyed_is_assessable": True}]
+        items = sketch_items(page_1, NO_DRAWINGS) + sketch_items(page_2, NO_DRAWINGS)
+        labels = number_items(page_2 + page_1, items)
+        assert (labels["flag:a"], labels["flag:b"], labels["flag:c"]) == ("1", "2", "3")
 
     def test_a_page_without_a_scale_is_refused(self):
         with pytest.raises(SketchError) as raised:

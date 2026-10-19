@@ -1,6 +1,12 @@
 """
-The Construction Report (R1h): a property's as-built sheet for one approved IDR, on DOT form 5/95, as a one-page
-letter-landscape PDF drawn with ReportLab; and an IDR's reports, one PDF per property it claimed flags on, in a ZIP.
+The Construction Report (R1h): a property's as-built sheets for one approved IDR, on DOT form 5/95, as a letter-landscape
+PDF drawn with ReportLab; and an IDR's reports, one PDF per property it claimed flags on, in a ZIP.
+
+R1h.1a: one sheet per PIR page that holds flags the IDR claimed, in page order, "Sheet k of N". Every sheet repeats the
+form; box 2 (the whole property's Construction Measure) is filled on sheet 1 only; each sheet's calculations list its
+own flags, and the last adds the whole property's assessable totals. Flags are numbered across the sheets. A page's
+match lines print dashed at their endpoints with a circled letter at each end and a caption naming the partner sheet
+("SEE SHEET 2 OF 2"), or its PIR page when that page isn't printed.
 
 What prints: the property and page 1's title block (box 1, the header line, boxes 3 to 5), the Construction Measure
 (box 2, construction_measure.py), the sketch of the flags the IDR claimed with their non-assessable areas and the
@@ -44,10 +50,10 @@ from api.queries.construction_report import (
     list_page_drawings,
     list_report_flags,
 )
+from api.queries.match_lines import list_match_lines_for_pir
 from api.schemas.property import display_address_of
 from api.services.construction_measure import CalcGroup, CalcRow, Measure, calc_groups, compute_measure
 from api.services.construction_sketch import (
-    MULTI_SHEET_MESSAGE,
     Fit,
     Point,
     SketchError,
@@ -76,8 +82,12 @@ CALC_WIDTH, CALC_WIDTH_TWO = 228.0, 300.0
 # Its title's height, and the least height a line of its tables may have
 CALC_TITLE_HEIGHT = 16.0
 MIN_CALC_LINE = 6.0
-CALC_TOO_LONG_MESSAGE = ("This property has too many pieces for one sheet's calculations panel. "
-                         "Multi-sheet support ships in R1h.1.")
+CALC_TOO_LONG_MESSAGE = ("This property has too many pieces for one sheet's calculations panel; split its flags "
+                         "across PIR pages with a match line.")
+# A match line on a sheet: its dash, its weight, and its end circles' radius
+MATCH_LINE_DASH = (7, 4)
+MATCH_LINE_WIDTH = 1.6
+MATCH_LINE_RADIUS = 5.0
 # A label printed inside a shape, and a number's circle
 LABEL_PT = 6.5
 MARK_RADIUS = 4.5
@@ -139,6 +149,18 @@ def report_layout(groups: list[CalcGroup]) -> Layout:
                   (band_x + sketch_width + 4.0, band_y + 4.0, calc_width, band_h - 8.0), columns)
 
 
+@dataclass
+class Sheet:
+    """One printed sheet: its PIR page's number, its items and their Fit, its calculations and how the band is shared, and the lines its last column adds (the whole property's totals, on the last of several sheets)."""
+
+    page_number: int
+    items: list[SketchItem]
+    fit: Fit
+    groups: list[CalcGroup]
+    layout: Layout
+    extra_lines: list[tuple[Any, ...]]
+
+
 class ReportNotFound(Exception):
     """No approved IDR covers the property's flags (or the IDR claimed none); the route's 404."""
 
@@ -194,34 +216,97 @@ def file_stem(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "property"
 
 
+def match_line_caption(label: str, page_number: int, label_pages: dict[str, set[int]],
+                       sheet_of_page: dict[int, int]) -> str:
+    """
+    Caption a match line on its sheet: the sheet its partner prints on, or the partner's PIR page when that page isn't printed, or the label alone when it has no partner.
+    Takes the line's label, its page's number, the pages each label of the PIR is on, and each printed page's sheet number.
+    Returns 'MATCH LINE "A" — SEE SHEET 2 OF 2', 'MATCH LINE "A" — SEE PIR PAGE 3' or 'MATCH LINE "A"'.
+    """
+    partners = sorted(label_pages.get(label, set()) - {page_number})
+    if not partners:
+        return f'MATCH LINE "{label}"'
+    partner = partners[0]
+    if partner in sheet_of_page:
+        return f'MATCH LINE "{label}" — SEE SHEET {sheet_of_page[partner]} OF {len(sheet_of_page)}'
+    return f'MATCH LINE "{label}" — SEE PIR PAGE {partner}'
+
+
+def total_lines(measure: Measure) -> list[tuple[Any, ...]]:
+    """
+    The whole property's assessable totals, as the last of several sheets ends its calculations: per thickness with flags, Total - Non-Assessable = Assessable, as box 2 has them.
+    Takes the whole property's Measure.
+    Returns the calculation lines (calc_lines' kinds: title, subtraction).
+    """
+    lines: list[tuple[Any, ...]] = []
+    for row in measure.rows:
+        if row.total_sf:
+            lines += [("title", f"All Sheets {row.label} Assessable"),
+                      ("subtraction", row.total_sf, row.non_assessable_sf, row.assessable_sf)]
+    return lines
+
+
+def _too_long(layout: Layout, extra_lines: list[tuple[Any, ...]]) -> bool:
+    """
+    Whether a sheet's calculations would print a line shorter than MIN_CALC_LINE.
+    Takes the sheet's Layout and the lines its last column adds.
+    Returns True when a column is too long.
+    """
+    columns = [calc_lines(column) for column in layout.columns]
+    columns[-1] = columns[-1] + extra_lines
+    return any(len(lines) * MIN_CALC_LINE > layout.calc_pane[3] - CALC_TITLE_HEIGHT for lines in columns)
+
+
 def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
     """
-    Read one property's report for one IDR and draw it.
+    Read one property's report for one IDR and draw it: one sheet per PIR page holding flags the IDR claimed, in page order.
     Takes the property's and the IDR's ids (the IDR approved, and claiming flags there).
-    Returns the PDF; raises ReportNotFound when the IDR claimed no flag there, SketchError when the sketch can't go on one sheet, and ReportReadError.
+    Returns the PDF; raises ReportNotFound when the IDR claimed no flag there, SketchError when a sheet's sketch or calculations can't go on it, and ReportReadError.
     """
     header = get_report_header(property_id, idr_id)
     flags = _read(list_report_flags(property_id, idr_id))
     if header is None or not flags:
         raise ReportNotFound("No approved IDR covers this property's flags")
-    pages = sorted({flag["pir_page_id"] for flag in flags if flag["pir_page_id"]}, key=str)
-    if len(pages) > 1:
-        raise SketchError(MULTI_SHEET_MESSAGE)
+    # The pages to print, in page order (every live flag is on a page since R1e)
+    numbers = {flag["pir_page_id"]: flag["page_number"] for flag in flags if flag["pir_page_id"]}
+    pages = sorted(numbers, key=lambda page_id: numbers[page_id])
+    many = len(pages) > 1
     drawings = _read(list_page_drawings(pages)) if pages else {"features": [], "segments": []}
-    items = sketch_items(flags, drawings)
-    labels = number_items(flags, items)
-    measure = compute_measure(flags, {"cost_per_sf_4in": header["cost_per_sf_4in"],
-                                      "cost_per_sf_7in": header["cost_per_sf_7in"]})
-    groups = calc_groups(flags, measure, labels)
-    layout = report_layout(groups)
-    if any(len(calc_lines(column)) * MIN_CALC_LINE > layout.calc_pane[3] - CALC_TITLE_HEIGHT
-           for column in layout.columns):
-        raise SketchError(CALC_TOO_LONG_MESSAGE)
-    fit = fit_to_pane(items, layout.pane, max(_width_ft(header.get("tb_tax_map_width_ft")),
-                                              _width_ft(header.get("tb_cc_curb_to_curb_ft"))))
+    lines = _read(list_match_lines_for_pir(flags[0]["pir_id"])) if pages else []
+    label_pages: dict[str, set[int]] = {}
+    for line in lines:
+        label_pages.setdefault(line["label"], set()).add(line["page_number"])
+    sheet_of_page = {numbers[page_id]: sheet for sheet, page_id in enumerate(pages, start=1)}
+
+    per_page = []
+    for page_id in pages or [None]:
+        page_flags = [flag for flag in flags if flag["pir_page_id"] == page_id]
+        number = numbers.get(page_id)
+        page_drawings = {kind: [row for row in drawings[kind] if row.get("pir_page_id") == page_id]
+                         for kind in ("features", "segments")}
+        page_lines = [{**line, "caption": match_line_caption(line["label"], number, label_pages, sheet_of_page)}
+                      for line in lines if line["pir_page_id"] == page_id]
+        per_page.append((number, page_flags,
+                         sketch_items(page_flags, page_drawings, page_lines, number if many else None)))
+
+    labels = number_items(flags, [item for _, _, items in per_page for item in items])
+    rates = {"cost_per_sf_4in": header["cost_per_sf_4in"], "cost_per_sf_7in": header["cost_per_sf_7in"]}
+    measure = compute_measure(flags, rates)
+    min_width = max(_width_ft(header.get("tb_tax_map_width_ft")), _width_ft(header.get("tb_cc_curb_to_curb_ft")))
+    sheets = []
+    for index, (number, page_flags, items) in enumerate(per_page):
+        groups = calc_groups(page_flags, compute_measure(page_flags, rates) if many else measure, labels)
+        layout = report_layout(groups)
+        extra = total_lines(measure) if many and index == len(per_page) - 1 else []
+        if _too_long(layout, extra):
+            raise SketchError(CALC_TOO_LONG_MESSAGE if not many else
+                              f"PIR page {number} has too many pieces for one sheet's calculations panel; split its "
+                              "flags across pages with a match line.")
+        fit = fit_to_pane(items, layout.pane, min_width, number if many else None)
+        sheets.append(Sheet(number or 1, items, fit, groups, layout, extra))
+
     signature = _signature(header["inspector_signature_path"], idr_id)
-    content = draw_report(header, measure, items, fit, signature, north_degrees(header["north_bearing"]), labels,
-                          groups)
+    content = draw_report(header, measure, sheets, signature, north_degrees(header["north_bearing"]), labels)
     address = _address(header)
     return ReportFile(f"{file_stem(address)}_construction_report.pdf", content)
 
@@ -463,15 +548,15 @@ def property_class(property_type: Optional[str]) -> str:
     return PROPERTY_CLASS_LABELS.get(property_type or "", CITY_PROPERTY)
 
 
-def _chrome(c: Canvas, header: dict[str, Any]) -> None:
+def _chrome(c: Canvas, header: dict[str, Any], sheet: int = 1, sheets: int = 1) -> None:
     """
-    Draw the form's chrome: the title bar, the vertical margins and the header line.
-    Takes the canvas and the report's header row.
+    Draw the form's chrome: the title bar ("Sheet k of N"), the vertical margins and the header line.
+    Takes the canvas, the report's header row, and this sheet's number and how many there are.
     Returns nothing.
     """
     _text(c, PAGE_WIDTH / 2, 590, "CONSTRUCTION REPORT", 14, BOLD, align="centre")
     _text(c, LEFT, 592, property_class(header.get("property_type")), 8, BOLD)
-    _text(c, RIGHT, 592, "Sheet 1 of 1", 8, align="right")
+    _text(c, RIGHT, 592, f"Sheet {sheet} of {sheets}", 8, align="right")
     for x, angle, text in ((20, 90, "55 Water Street, New York, NY 10041"),
                            (PAGE_WIDTH - 20, 270, "New York City Department of Transportation")):
         c.saveState()
@@ -523,10 +608,10 @@ def _property_box(c: Canvas, header: dict[str, Any]) -> None:
         _text(c, x + 112, line_y, value, 6.5, width=w - 120)
 
 
-def _measure_box(c: Canvas, measure: Measure) -> None:
+def _measure_box(c: Canvas, measure: Optional[Measure]) -> None:
     """
-    Draw box 2, the Construction Measure: a row per thickness and the two estimates.
-    Takes the canvas and the Measure.
+    Draw box 2, the Construction Measure: a row per thickness and the two estimates; on a sheet after the first, the box and its headings only, as DOT's sheets leave it.
+    Takes the canvas and the Measure (None: drawn blank).
     Returns nothing.
     """
     x, y, w, h = LEFT + 270, 452.0, RIGHT - LEFT - 270, 108.0
@@ -537,6 +622,10 @@ def _measure_box(c: Canvas, measure: Measure) -> None:
     top = y + h - 26
     for index, title in enumerate(columns):
         _text(c, x + 6 + label_width + (index + 0.5) * column_width, top, title, 6, BOLD, column_width - 4, "centre")
+    if measure is None:
+        _text(c, x + 6, y + 8, "Estimated Sq.Ft", 7, BOLD)
+        _text(c, x + w / 2, y + 8, "Estimated Cost", 7, BOLD)
+        return
     c.setLineWidth(0.3)
     for index, row in enumerate(measure.rows):
         line_y = top - 16 * (index + 1)
@@ -1137,6 +1226,37 @@ def _straps(c: Canvas, slabs: list[list[SketchItem]], fit: Fit, taken: list[Box]
                 break
 
 
+def _match_line(c: Canvas, item: SketchItem, fit: Fit) -> None:
+    """
+    Draw a match line at its endpoints as its page places them: a heavy dashed line, a circle with its letter at each end, and its caption along it.
+    Takes the canvas, the line (its source carries label and caption) and the sheet's Fit.
+    Returns nothing.
+    """
+    (x1, y1), (x2, y2) = (fit.place(point) for point in item.points)
+    label, caption = item.source["label"], item.source.get("caption") or f'MATCH LINE "{item.source["label"]}"'
+    c.saveState()
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setFillColorRGB(0, 0, 0)
+    c.setLineWidth(MATCH_LINE_WIDTH)
+    c.setDash(*MATCH_LINE_DASH)
+    c.line(x1, y1, x2, y2)
+    c.setDash()
+    c.setLineWidth(0.6)
+    for x, y in ((x1, y1), (x2, y2)):
+        c.setFillColorRGB(1, 1, 1)
+        c.circle(x, y, MATCH_LINE_RADIUS, stroke=1, fill=1)
+        c.setFillColorRGB(0, 0, 0)
+        _text(c, x, y - 2.2, label, 6.5, BOLD, align="centre")
+    # The caption along the line, reading left to right, a little to its side
+    angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+    if angle > 90 or angle <= -90:
+        angle += 180
+    c.translate((x1 + x2) / 2, (y1 + y2) / 2)
+    c.rotate(angle)
+    _text(c, 0, 4, caption, 6, BOLD, align="centre")
+    c.restoreState()
+
+
 def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, north: Optional[float],
             labels: dict[str, str], sketch_width: float) -> None:
     """
@@ -1157,6 +1277,9 @@ def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit
         for item in items:
             if item.kind == kind:
                 _draw_item(c, item, fit)
+    for item in items:
+        if item.kind == "match_line":
+            _match_line(c, item, fit)
     taken = _perimeter(c, header, items, fit, sketch_width)
     pieces = [(item, [fit.place(point) for point in item.points]) for item in items if item.kind in ("flag", "area")]
     spots = label_spots(slabs, [item for item in items if item.kind == "area"], fit.place)
@@ -1244,15 +1367,16 @@ def _calc_line(c: Canvas, line: tuple[Any, ...], x: float, y: float, w: float, h
         cell(4, calc_amount(line[3]), BOLD, "right")
 
 
-def _calculations(c: Canvas, layout: Layout) -> None:
+def _calculations(c: Canvas, layout: Layout, extra_lines: Optional[list[tuple[Any, ...]]] = None) -> None:
     """
-    Draw the calculations panel: its title, then its columns of tables (the 4" and the 7" side by side when both have flags), each line by line, every line as tall as the longest column allows (at most 10 points, at least MIN_CALC_LINE, which _render checks).
-    Takes the canvas and the Layout (calc_pane, columns).
+    Draw the calculations panel: its title, then its columns of tables (the 4" and the 7" side by side when both have flags), each line by line, every line as tall as the longest column allows (at most 10 points, at least MIN_CALC_LINE, which _render checks); the last column ends with the extra lines (the whole property's totals on the last of several sheets).
+    Takes the canvas, the Layout (calc_pane, columns) and the extra lines (none when None).
     Returns nothing.
     """
     x, y, w, h = layout.calc_pane
     _text(c, x + w / 2, y + h - 11, "Calculations", 9, BOLD_ITALIC, align="centre")
     columns = [calc_lines(column) for column in layout.columns]
+    columns[-1] = columns[-1] + (extra_lines or [])
     longest = max((len(lines) for lines in columns), default=0)
     if not longest:
         return
@@ -1327,30 +1451,29 @@ def signature_box(cell_x: float, y: float, h: float) -> tuple[float, float, floa
     return cell_x + (SIGN_CELL_WIDTH - width) / 2, y + 11.5, width, h - 15
 
 
-def draw_report(header: dict[str, Any], measure: Measure, items: list[SketchItem], fit: Fit,
-                signature: Optional[ImageReader], north: Optional[float], labels: dict[str, str],
-                groups: list[CalcGroup]) -> bytes:
+def draw_report(header: dict[str, Any], measure: Measure, sheets: list[Sheet], signature: Optional[ImageReader],
+                north: Optional[float], labels: dict[str, str]) -> bytes:
     """
-    Draw a Construction Report on one letter-landscape page.
-    Takes the header row (get_report_header), the Measure, the sketch items and their Fit (fitted to report_layout's pane), the signature image (or None), the north arrow's direction (or None), the pieces' labels (number_items) and the calculations (calc_groups).
+    Draw a Construction Report, a letter-landscape page per sheet: every sheet the whole form, box 2 filled on the first only.
+    Takes the header row (get_report_header), the whole property's Measure, the sheets (each its items, Fit, calculations and Layout), the signature image (or None), the north arrow's direction (or None) and the pieces' labels (number_items).
     Returns the PDF's bytes.
     """
     buffer = io.BytesIO()
     c = Canvas(buffer, pagesize=(PAGE_WIDTH, PAGE_HEIGHT), pageCompression=1)
     c.setTitle(f"Construction Report — {_address(header)}")
     c.setAuthor("ICID")
-    _chrome(c, header)
-    _property_box(c, header)
-    _measure_box(c, measure)
-    _status_boxes(c, header)
-    c.setStrokeColorRGB(0, 0, 0)
-    c.setLineWidth(0.8)
-    c.rect(*BAND)
-    layout = report_layout(groups)
-    _sketch(c, header, items, fit, north, labels, layout.sketch_width)
-    _calculations(c, layout)
-    _key(c)
-    _certification(c, header, signature)
-    c.showPage()
+    for number, sheet in enumerate(sheets, start=1):
+        _chrome(c, header, number, len(sheets))
+        _property_box(c, header)
+        _measure_box(c, measure if number == 1 else None)
+        _status_boxes(c, header)
+        c.setStrokeColorRGB(0, 0, 0)
+        c.setLineWidth(0.8)
+        c.rect(*BAND)
+        _sketch(c, header, sheet.items, sheet.fit, north, labels, sheet.layout.sketch_width)
+        _calculations(c, sheet.layout, sheet.extra_lines)
+        _key(c)
+        _certification(c, header, signature)
+        c.showPage()
     c.save()
     return buffer.getvalue()

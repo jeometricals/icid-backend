@@ -398,7 +398,8 @@ class TestPages:
             response = client.delete(f"{PIR_URL}/pages")
         assert response.status_code == 204 and pages.live() == [] and storage.removed == []
         sql, params = pages.calls[-1]
-        assert "UPDATE icid.flags" in sql and "INSERT" not in sql and params == (MEMBER_ID, PIR_ID, *(MEMBER_ID,) * 4)
+        assert "UPDATE icid.flags" in sql and "INSERT" not in sql and params == (MEMBER_ID, PIR_ID, *(MEMBER_ID,) * 5)
+        assert "UPDATE icid.pir_match_lines" in sql  # its match lines go with it (R1h.1a)
         for table in ("non_assessable_areas", "features", "segments"):
             assert f"UPDATE icid.{table}" in sql
 

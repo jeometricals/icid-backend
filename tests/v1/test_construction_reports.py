@@ -26,6 +26,7 @@ PROPERTY_ID = UUID("404e6cd0-75f8-4cbd-b5bf-efe8a023d3d7")
 OTHER_PROPERTY_ID = UUID("967b3653-7cce-44d3-941a-e86c8aa76e54")
 IDR_ID = UUID("1d000000-0000-4000-8000-000000000001")
 PAGE_ID = UUID("50000000-0000-4000-8000-000000000001")
+PIR_ID = UUID("40000000-0000-4000-8000-000000000001")
 URL = f"/v1/properties/{PROPERTY_ID}/construction-report"
 ZIP_URL = f"/v1/idrs/{IDR_ID}/construction-reports"
 SIGNED = datetime(2026, 10, 15, 18, 0, tzinfo=timezone.utc)
@@ -58,7 +59,7 @@ def flag_row(n: int, thickness: str, gross: str, quantity: str, assessable: bool
     Takes its drawing order, thickness, gross area, quantity, whether surveyed assessable and its x offset in feet.
     Returns the row.
     """
-    return {"id": UUID(f"f0000000-0000-4000-8000-00000000000{n}"), "pir_page_id": PAGE_ID, "page_number": 1,
+    return {"id": UUID(f"f0000000-0000-4000-8000-00000000000{n}"), "pir_id": PIR_ID, "pir_page_id": PAGE_ID, "page_number": 1,
             "scale_px_per_ft": Decimal("24"), "rotation_deg": 0, "display_order": n, "shape": "rectangle",
             "dimensions": {"L": 5, "W": 5}, "sketch_x": 200 + x * 24, "sketch_y": 200.0, "rotation": 0.0,
             "surveyed_thickness": thickness, "surveyed_is_assessable": assessable,
@@ -78,7 +79,7 @@ IDR_ROW = {"idr_id": IDR_ID, "idr_number": "001", "project_id": "SE384", "status
 def report_query(found=({"idr_id": IDR_ID},), header=HEADER, flags=FLAGS, drawings=DRAWINGS, properties=None):
     """
     Answer the report statements by their shape.
-    Takes what each returns: find_report_idr, get_report_header, list_report_flags, list_page_drawings and list_idr_report_properties.
+    Takes what each returns: find_report_idr, get_report_header, list_report_flags, list_page_drawings (a feature or segment without a pir_page_id is on PAGE_ID) and list_idr_report_properties.
     Returns the side effect for the patched run_query.
     """
     def answer(sql: str, params=None):
@@ -89,7 +90,7 @@ def report_query(found=({"idr_id": IDR_ID},), header=HEADER, flags=FLAGS, drawin
         if "AS areas" in sql:
             return flags
         if "AS features" in sql:
-            return [drawings]
+            return [{kind: [{"pir_page_id": PAGE_ID, **row} for row in rows] for kind, rows in drawings.items()}]
         if "WHERE p.id IN" in sql:
             return properties or []
         raise AssertionError(f"unexpected statement: {sql[:80]}")
@@ -217,19 +218,61 @@ class TestPropertyReport:
             assert admin_client.get(URL).status_code == 404
         run.assert_not_called()
 
-    def test_flags_on_two_pages_are_422_for_multi_sheet(self, admin_client, storage):
-        flags = [FLAGS[0], {**FLAGS[1], "pir_page_id": UUID("50000000-0000-4000-8000-000000000002")}]
+    def test_flags_on_two_pages_print_two_sheets(self, admin_client, storage):
+        page_2 = UUID("50000000-0000-4000-8000-000000000002")
+        flags = [FLAGS[0], {**FLAGS[1], "pir_page_id": page_2, "page_number": 2}]
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
             response = admin_client.get(URL)
-        assert response.status_code == 422
-        assert response.json()["detail"] == ("This property's sketch is too large to render on a single sheet. "
-                                             "Multi-sheet support ships in R1h.1.")
+        assert response.status_code == 200
+        pages = pdfium.PdfDocument(response.content)
+        assert len(pages) == 2
+        sheet_1, sheet_2 = (" ".join(page.get_textpage().get_text_range().split()) for page in pages)
+        assert "Sheet 1 of 2" in sheet_1 and "Sheet 2 of 2" in sheet_2
+        # Box 2 is filled on sheet 1 only; the last sheet ends with the whole property's totals
+        assert "Estimated Cost" in sheet_2 and "$" not in sheet_2.split("Estimated Cost")[1][:12]
+        assert 'All Sheets 4" Sidewalk Sq.Ft Assessable' in sheet_2 and "All Sheets" not in sheet_1
+        # Numbering runs across the sheets: flag 2 is on sheet 2
+        assert "2 5.00 x" in sheet_2
+
+    def test_a_page_without_a_scale_is_named(self, admin_client, storage):
+        page_2 = UUID("50000000-0000-4000-8000-000000000002")
+        flags = [FLAGS[0], {**FLAGS[1], "pir_page_id": page_2, "page_number": 2, "scale_px_per_ft": None}]
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
+            response = admin_client.get(URL)
+        assert response.status_code == 422 and response.json()["detail"] == "Set the scale of PIR page 2 first"
+
+    def test_a_match_line_prints_on_each_sheet_naming_its_partner(self, admin_client, storage):
+        page_2 = UUID("50000000-0000-4000-8000-000000000002")
+        flags = [FLAGS[0], {**FLAGS[1], "pir_page_id": page_2, "page_number": 2}]
+        lines = [{"match_line_id": UUID(int=1), "pir_page_id": PAGE_ID, "page_number": 1, "label": "A",
+                  "x1": 200.0, "y1": 100.0, "x2": 200.0, "y2": 300.0},
+                 {"match_line_id": UUID(int=2), "pir_page_id": page_2, "page_number": 2, "label": "A",
+                  "x1": 50.0, "y1": 100.0, "x2": 50.0, "y2": 300.0},
+                 {"match_line_id": UUID(int=3), "pir_page_id": page_2, "page_number": 2, "label": "B",
+                  "x1": 400.0, "y1": 100.0, "x2": 400.0, "y2": 300.0}]
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)), \
+                patch("api.queries.match_lines.run_query", return_value=lines):
+            response = admin_client.get(URL)
+        sheet_1, sheet_2 = (" ".join(page.get_textpage().get_text_range().split())
+                            for page in pdfium.PdfDocument(response.content))
+        assert 'MATCH LINE "A" — SEE SHEET 2 OF 2' in sheet_1
+        assert 'MATCH LINE "A" — SEE SHEET 1 OF 2' in sheet_2 and 'MATCH LINE "B"' in sheet_2
+
+    def test_a_partner_page_not_printed_is_named_by_its_pir_page(self, admin_client, storage):
+        lines = [{"match_line_id": UUID(int=1), "pir_page_id": PAGE_ID, "page_number": 1, "label": "A",
+                  "x1": 200.0, "y1": 100.0, "x2": 200.0, "y2": 300.0},
+                 {"match_line_id": UUID(int=2), "pir_page_id": UUID(int=9), "page_number": 3, "label": "A",
+                  "x1": 50.0, "y1": 100.0, "x2": 50.0, "y2": 300.0}]
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()), \
+                patch("api.queries.match_lines.run_query", return_value=lines):
+            text = pdf_text(admin_client.get(URL).content)
+        assert "Sheet 1 of 1" in text and 'MATCH LINE "A" — SEE PIR PAGE 3' in text
 
     def test_a_sketch_too_large_for_one_sheet_is_422(self, admin_client, storage):
         flags = [FLAGS[0], flag_row(2, "4in", "25", "25", x=400)]
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
             response = admin_client.get(URL)
-        assert response.status_code == 422 and "R1h.1" in response.json()["detail"]
+        assert response.status_code == 422 and "split it with a match line" in response.json()["detail"]
 
     @pytest.mark.parametrize("bearing, expected", [("N", 0), ("NE", 45)])
     def test_the_north_arrow_is_not_turned_by_the_pages_rotation(self, admin_client, storage, bearing, expected):
@@ -238,7 +281,7 @@ class TestPropertyReport:
                 patch(REPORT, side_effect=report_query(header={**HEADER, "north_bearing": bearing}, flags=rotated)), \
                 patch("api.services.construction_report.draw_report", wraps=construction_report.draw_report) as draw:
             assert admin_client.get(URL).status_code == 200
-        assert draw.call_args.args[5] == expected
+        assert draw.call_args.args[4] == expected
 
     def test_the_calculations_panel_lists_each_piece_and_agrees_with_box_2(self, admin_client, storage):
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):

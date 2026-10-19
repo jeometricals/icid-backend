@@ -4,11 +4,13 @@ The Construction Report's sketch geometry (R1h): where each flag, area, feature 
 The outlines follow the frontend's lib/flagGeometry.js exactly, so the sheet shows what the sketch workspace shows: a
 shape's outline in feet, centred on its bounding box, scaled by its page's px/ft, turned by its own rotation (degrees
 clockwise) and moved to (sketch_x, sketch_y) in the page's native pixels. The page's own rotation is then applied,
-as the workspace shows the page. The whole is fitted to the sketch pane; a sketch that would print too small to read,
-or spreads over more than one page, is for R1h.1's multi-sheet support.
+as the workspace shows the page. Each PIR page with claimed flags is its own sheet (R1h.1a), fitted to its own sketch
+pane in its own page's transform; a page whose sketch would print too small to read is refused, to be split with a
+match line onto another page. A match line (two endpoints in its page's native pixels) is placed like everything else
+on its page and drawn at those coordinates.
 
 Numbering (R1h.3), as DOT's sheets number them: every flag 1..n, top to bottom then left to right as the sheet shows
-it; and A1..An for what isn't assessed, ordered the same way: a flag surveyed non-assessable (which also keeps its
+it, page after page (R1h.1a); and A1..An for what isn't assessed, ordered the same way: a flag surveyed non-assessable (which also keeps its
 number) and a non-assessable area on an assessable flag. The sketch and the calculations panel both read them.
 """
 
@@ -28,13 +30,33 @@ PADDING = 0.04
 # A marker-only feature's glyph, in feet across, for the bounding box
 GLYPH_FEET = 1.5
 
-MULTI_SHEET_MESSAGE = ("This property's sketch is too large to render on a single sheet. "
-                       "Multi-sheet support ships in R1h.1.")
+MULTI_SHEET_MESSAGE = ("This property's sketch is too large to render on one sheet; split it with a match line onto "
+                       "another PIR page.")
 NO_SCALE_MESSAGE = "Set the PIR page's scale first"
 NOT_DRAWN_MESSAGE = "This property's flags have no place on their page yet"
 
 # Which way North points, as degrees clockwise from straight up the sheet
 COMPASS_DEGREES = {"N": 0, "NE": 45, "E": 90, "SE": 135, "S": 180, "SW": 225, "W": 270, "NW": 315}
+
+
+def too_large_message(page_number: Optional[int]) -> str:
+    """
+    Say a sheet's sketch is too large to read, naming its PIR page when the report has more than one.
+    Takes the page's number (None for a one-sheet report).
+    Returns the message.
+    """
+    if page_number is None:
+        return MULTI_SHEET_MESSAGE
+    return f"PIR page {page_number}'s sketch is too large for one sheet; split it with a match line onto another page."
+
+
+def no_scale_message(page_number: Optional[int]) -> str:
+    """
+    Say a sheet's page has no scale, naming it when the report has more than one.
+    Takes the page's number (None for a one-sheet report).
+    Returns the message.
+    """
+    return NO_SCALE_MESSAGE if page_number is None else f"Set the scale of PIR page {page_number} first"
 
 
 class SketchError(Exception):
@@ -116,7 +138,7 @@ def placed_outline(item: dict[str, Any], scale: float) -> list[Point]:
 class SketchItem:
     """Something to draw, its points already on the sheet's page in feet, the page turned as the workspace shows it; an area knows its flag."""
 
-    kind: str  # flag, area, feature, segment
+    kind: str  # flag, area, feature, segment, match_line
     points: list[Point]
     source: dict[str, Any]
     parent: Optional[dict[str, Any]] = None
@@ -158,15 +180,24 @@ def reading_order(boxes: dict[Any, tuple[float, float, float, float]]) -> list[A
 
 def number_items(flags: list[dict[str, Any]], items: list[SketchItem]) -> dict[str, str]:
     """
-    Number a report's flags and what isn't assessed, as the sketch and the calculations panel show them: flags 1..n and non-assessable flags and areas A1..An, each in reading order (reading_order); flags and areas not drawn come after, in drawing order. An area on a flag surveyed non-assessable gets no A-number: the whole flag is already one.
-    Takes the flags (list_report_flags) and the sketch's items (sketch_items).
+    Number a report's flags and what isn't assessed, as the sketch and the calculations panel show them: flags 1..n and non-assessable flags and areas A1..An, each in reading order (reading_order), page after page (each page's own coordinates); flags and areas not drawn come after, in drawing order. An area on a flag surveyed non-assessable gets no A-number: the whole flag is already one.
+    Takes the flags (list_report_flags) and the sketch's items (sketch_items, every page's).
     Returns the labels keyed 'flag:<id>' (its number), 'a:flag:<id>' and 'a:area:<id>' (A-numbers).
     """
     boxes = {(item.kind, str(item.source["id"])): bounds_of(item.points)
              for item in items if item.kind in ("flag", "area")}
+    # The page a flag or an area is on: its flag's
+    page_of: dict[tuple[str, str], int] = {}
+    for flag in flags:
+        page = flag.get("page_number") or 0
+        page_of[("flag", str(flag["id"]))] = page
+        for area in flag["areas"]:
+            page_of[("area", str(area["id"]))] = page
 
     def in_order(keys: list[tuple[str, str]]) -> list[tuple[str, str]]:
-        drawn = reading_order({key: boxes[key] for key in keys if key in boxes})
+        drawn = []
+        for page in sorted({page_of.get(key, 0) for key in keys}):
+            drawn += reading_order({key: boxes[key] for key in keys if key in boxes and page_of.get(key, 0) == page})
         return drawn + [key for key in keys if key not in boxes]
 
     labels = {f"flag:{key[1]}": str(number)
@@ -201,18 +232,16 @@ class Fit:
                 y + height - (point[1] - self.origin[1]) * self.points_per_foot)
 
 
-def sketch_items(flags: list[dict[str, Any]], drawings: dict[str, Any]) -> list[SketchItem]:
+def sketch_items(flags: list[dict[str, Any]], drawings: dict[str, Any], match_lines: Optional[list[dict[str, Any]]] = None,
+                 page_number: Optional[int] = None) -> list[SketchItem]:
     """
-    Lay out a property's sketch: its claimed flags, their non-assessable areas, and the features and segments on their page, in feet, the page turned by its rotation. Raises SketchError when the flags are on more than one page, the page has no scale, or no flag has a place.
-    Takes the flags (list_report_flags) and the page's drawings (list_page_drawings).
-    Returns the items, flags first.
+    Lay out one sheet's sketch: the claimed flags on one page, their non-assessable areas, the features and segments on that page, and its match lines, in feet, the page turned by its rotation. Raises SketchError when the page has no scale or no flag has a place.
+    Takes the page's flags (list_report_flags), its drawings (list_page_drawings), its match lines (each with label, x1, y1, x2, y2 and a caption) and the page's number when the report has more than one sheet (named in a message), else None.
+    Returns the items, flags first, match lines last.
     """
-    pages = {flag["pir_page_id"] for flag in flags}
-    if len(pages) > 1:
-        raise SketchError(MULTI_SHEET_MESSAGE)
     scale = flags[0]["scale_px_per_ft"] if flags else None
     if not scale:
-        raise SketchError(NO_SCALE_MESSAGE)
+        raise SketchError(no_scale_message(page_number))
     scale = float(scale)
     rotation = flags[0]["rotation_deg"] or 0
 
@@ -241,13 +270,17 @@ def sketch_items(flags: list[dict[str, Any]], drawings: dict[str, Any]) -> list[
         points = [(float(point["x"]), float(point["y"])) for point in segment["points"]]
         if len(points) >= 2:
             items.append(SketchItem("segment", in_feet(points), segment))
+    for line in match_lines or []:
+        points = [(float(line["x1"]), float(line["y1"])), (float(line["x2"]), float(line["y2"]))]
+        items.append(SketchItem("match_line", in_feet(points), line))
     return items
 
 
-def fit_to_pane(items: list[SketchItem], pane: tuple[float, float, float, float], min_width_ft: float = 0.0) -> Fit:
+def fit_to_pane(items: list[SketchItem], pane: tuple[float, float, float, float], min_width_ft: float = 0.0,
+                page_number: Optional[int] = None) -> Fit:
     """
     Fit a sketch to the pane, keeping its proportions, with PADDING round it. Raises SketchError when a foot would print smaller than MIN_POINTS_PER_FOOT.
-    Takes the items (sketch_items), the pane (x, bottom y, width, height, in points) and the least width the drawing must make room for, in feet (a dimension drawn at scale beside it: the tax map's, the curb-to-curb).
+    Takes the items (sketch_items, its match lines among them), the pane (x, bottom y, width, height, in points), the least width the drawing must make room for, in feet (a dimension drawn at scale beside it: the tax map's, the curb-to-curb), and the page's number when the report has more than one sheet (named in the message).
     Returns the Fit, the drawing centred in the pane.
     """
     min_x, min_y, max_x, max_y = bounds_of(point for item in items for point in item.points)
@@ -256,7 +289,7 @@ def fit_to_pane(items: list[SketchItem], pane: tuple[float, float, float, float]
     padded_w, padded_h = width_ft * (1 + 2 * PADDING), height_ft * (1 + 2 * PADDING)
     points_per_foot = min(pane[2] / padded_w, pane[3] / padded_h)
     if points_per_foot < MIN_POINTS_PER_FOOT:
-        raise SketchError(MULTI_SHEET_MESSAGE)
+        raise SketchError(too_large_message(page_number))
     # Centre the drawing: the feet at the pane's top-left corner
     origin = (min_x - (pane[2] / points_per_foot - width_ft) / 2, min_y - (pane[3] / points_per_foot - height_ft) / 2)
     return Fit(points_per_foot, origin, pane)

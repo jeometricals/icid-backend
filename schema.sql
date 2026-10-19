@@ -598,6 +598,31 @@ CREATE INDEX segments_page_idx ON icid.segments (pir_page_id);
 CREATE INDEX segments_live_idx ON icid.segments (pir_page_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_segments_claimed_by_idr ON icid.segments (claimed_by_idr_id) WHERE claimed_by_idr_id IS NOT NULL;
 
+------------------------------------------------------------
+-- MATCH LINE (a lettered line joining a PIR's sheets, drawn on one page; soft-deleted; migrations/046, R1h.1a)
+-- Two endpoints in the page's native pixels. Two pages pair by carrying the same label; a label is live on at most
+-- one row per page (the index) and on at most two pages of a PIR (the API's statements)
+------------------------------------------------------------
+CREATE TABLE icid.pir_match_lines (
+    match_line_id  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pir_page_id    UUID NOT NULL REFERENCES icid.pir_pages(pir_page_id),
+    label          TEXT NOT NULL,
+    x1             REAL NOT NULL,
+    y1             REAL NOT NULL,
+    x2             REAL NOT NULL,
+    y2             REAL NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by     UUID NOT NULL REFERENCES icid.users(uuid),
+    deleted_at     TIMESTAMPTZ,
+    deleted_by     UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    CONSTRAINT chk_match_lines_label CHECK (label ~ '^[A-Z]{1,2}$'),
+    CONSTRAINT chk_match_lines_length CHECK (x1 <> x2 OR y1 <> y2)
+);
+CREATE UNIQUE INDEX pir_match_lines_page_label_live_uq
+    ON icid.pir_match_lines (pir_page_id, label) WHERE deleted_at IS NULL;
+CREATE INDEX pir_match_lines_page_idx ON icid.pir_match_lines (pir_page_id);
+
 -- An IDR's overrides of its default segments: exclude one of its task order's sites', include one from elsewhere in
 -- its project (migration 044), as idr_flag_attributions for flags
 CREATE TABLE icid.idr_segment_attributions (

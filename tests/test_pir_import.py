@@ -214,7 +214,7 @@ class TestDrops:
 
 
 WRITTEN = {"pages_updated": 1, "segments_rescaled": 0, "flags": 5, "non_assessable_areas": 2, "features": 3,
-           "segments": 2, "annotations": 1}
+           "segments": 2, "annotations": 1, "match_lines": 0}
 
 
 class TestRunImport:
@@ -222,7 +222,7 @@ class TestRunImport:
         with patch(WRITE, return_value=WRITTEN) as write:
             result = run_import(PIR_ID, USER_ID, SmartPirImport.model_validate(sample()), PAGE_IDS, {PAY_ITEM})
         assert result.inserted.model_dump() == {"flags": 5, "non_assessable_areas": 2, "features": 3, "segments": 2,
-                                                "annotations": 1}
+                                                "annotations": 1, "match_lines": 0}
         assert sum(result.dropped.model_dump().values()) == 0 and result.pages_updated == 1
         args = write.call_args.args
         assert args[0] == PIR_ID and args[1] == USER_ID and len(args[3]) == 5 and len(args[4]) == 2
@@ -266,3 +266,87 @@ class TestFlagUnits:
         page_one(raw)["flags"][1]["pay_item_id"] = str(PAY_ITEM)
         result = prepare_import(SmartPirImport.model_validate(raw), PAGE_IDS, {PAY_ITEM}, {PAY_ITEM})
         assert result.dropped == [] and result.flags[1]["pay_item_id"] == PAY_ITEM
+
+
+# ---------------------------------------------------------------------------
+# Match lines (R1h.1a): a page entry's match_lines, each checked on its own, a label on at most two pages
+# ---------------------------------------------------------------------------
+
+def line(label: str = "A", x: float = 1562.0) -> dict:
+    """
+    A match line as the file has one: its label and two endpoints, a vertical line at x.
+    Takes the label and the x of the line.
+    Returns the item.
+    """
+    return {"label": label, "points": [{"x": x, "y": 640}, {"x": x, "y": 1010}]}
+
+
+def two_pages(lines_1: list, lines_2: list) -> dict:
+    """
+    A file of two empty page entries carrying the given match lines.
+    Takes page 1's and page 2's lines.
+    Returns the file as a dict.
+    """
+    return {"schema_version": "1.0", "pir_id": str(PIR_ID),
+            "pages": [{"page_number": 1, "match_lines": lines_1}, {"page_number": 2, "match_lines": lines_2}]}
+
+
+def lines_prepared(raw: dict, live_labels: dict = None):
+    """
+    Check a file as the route does, with the PIR's live match line labels.
+    Takes the file and {label: page numbers it is live on}.
+    Returns the PreparedImport.
+    """
+    return prepare_import(SmartPirImport.model_validate(raw), PAGE_IDS, {PAY_ITEM}, None, None, live_labels or {})
+
+
+class TestMatchLines:
+    def test_a_label_on_two_pages_pairs_them(self):
+        out = lines_prepared(two_pages([line("a ")], [line("A", 140)]))
+        assert out.dropped == []
+        assert out.match_lines == [
+            {"pir_page_id": PAGE_1, "label": "A", "x1": 1562.0, "y1": 640.0, "x2": 1562.0, "y2": 1010.0},
+            {"pir_page_id": PAGE_2, "label": "A", "x1": 140.0, "y1": 640.0, "x2": 140.0, "y2": 1010.0}]
+
+    def test_a_middle_sheet_carries_two_lines(self):
+        out = lines_prepared(two_pages([line("A"), line("B", 10)], []))
+        assert [row["label"] for row in out.match_lines] == ["A", "B"]
+
+    @pytest.mark.parametrize("bad, why", [
+        ({"label": "A1", "points": [{"x": 1, "y": 1}, {"x": 2, "y": 2}]}, "label"),
+        ({"label": "A", "points": [{"x": 1, "y": 1}]}, "points"),
+        ({"label": "A", "points": [{"x": 1, "y": 1}, {"x": 1, "y": 1}]}, "must differ"),
+    ])
+    def test_a_line_that_fails_its_check_is_dropped_and_the_rest_kept(self, bad, why):
+        out = lines_prepared(two_pages([bad, line("B")], []))
+        assert [row["label"] for row in out.match_lines] == ["B"]
+        assert [(item.kind, item.page_number, item.index) for item in out.dropped] == [("match_line", 1, 0)]
+        assert why in out.dropped[0].reason
+
+    def test_a_label_listed_twice_on_a_page_keeps_the_first(self):
+        out = lines_prepared(two_pages([line("A"), line("A", 20)], []))
+        assert len(out.match_lines) == 1 and out.dropped[0].reason == 'label "A" is listed twice on this page'
+
+    def test_a_label_the_page_already_has_is_dropped(self):
+        out = lines_prepared(two_pages([line("A")], []), {"A": {1}})
+        assert out.match_lines == [] and out.dropped[0].reason == 'label "A" is already on this page'
+
+    def test_a_label_that_would_be_on_three_pages_is_dropped_everywhere(self):
+        out = lines_prepared(two_pages([line("C")], [line("C")]), {"C": {3}})
+        assert out.match_lines == []
+        assert [(item.page_number, item.reason) for item in out.dropped] == [
+            (1, 'label "C" would be on 3 pages'), (2, 'label "C" would be on 3 pages')]
+
+    def test_a_dropped_page_takes_its_lines(self):
+        raw = {"schema_version": "1.0", "pir_id": str(PIR_ID), "pages": [{"page_number": 9, "match_lines": [line()]}]}
+        out = lines_prepared(raw)
+        assert out.match_lines == [] and out.dropped[0].kind == "match_line"
+
+    def test_the_counts_include_the_lines_written(self):
+        written = {**WRITTEN, "flags": 0, "non_assessable_areas": 0, "features": 0, "segments": 0, "annotations": 0,
+                   "pages_updated": 0, "match_lines": 2}
+        with patch(WRITE, return_value=written) as write:
+            result = run_import(PIR_ID, USER_ID, SmartPirImport.model_validate(two_pages([line()], [line()])),
+                                PAGE_IDS, {PAY_ITEM}, None, None, {})
+        assert result.inserted.match_lines == 2 and result.dropped.match_lines == 0
+        assert len(write.call_args.args[-1]) == 2

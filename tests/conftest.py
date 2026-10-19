@@ -38,6 +38,16 @@ def _no_idr_segments(sql: str, params: object = None) -> list:
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_match_lines():
+    """
+    Patch the match-line statements for the whole session (R1h.1a), so the routes that now read a PIR's match lines (the Smart PIR import, the Construction Report) see none unless a test patches api.queries.match_lines.run_query itself.
+    Yields the mock of the statements.
+    """
+    with patch("api.queries.match_lines.run_query", return_value=[]) as run:
+        yield run
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_idr_segments():
     """
     Patch the IDR-segment statements for the whole session (curb billing), as no_idr_flags does for flags: no IDR covers any segment unless a test patches api.queries.idr_segments.run_query itself, and an approved IDR's frozen segment rollup is empty.
