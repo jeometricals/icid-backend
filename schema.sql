@@ -167,6 +167,9 @@ CREATE TABLE icid.idrs (
     deleted_by             UUID REFERENCES icid.users(uuid),
     -- Its default flag scope (migrations/037): the live flags on this task order's properties; none without one
     task_order_id          UUID REFERENCES icid.task_orders(id),
+    -- Its last admin unlock (migrations/052): when, and by which admin
+    last_unlocked_at       TIMESTAMPTZ,
+    last_unlocked_by       UUID REFERENCES icid.users(uuid),
     CONSTRAINT chk_idrs_status CHECK (status IN ('draft', 'submitted', 'stage1_review', 'stage2_review', 'approved', 'returned', 'deleted')),
     CONSTRAINT chk_idrs_returned_from CHECK (returned_from IN ('stage1', 'stage2'))
 );
@@ -485,6 +488,9 @@ CREATE TABLE icid.ped_ramp_inspections (
     returned_by                UUID REFERENCES icid.users(uuid),
     -- The DOT form filled at approval (pedramp-exports bucket)
     dot_pdf_path               TEXT,
+    -- Its last admin unlock (migrations/051): when, and by which admin
+    last_unlocked_at           TIMESTAMPTZ,
+    last_unlocked_by           UUID REFERENCES icid.users(uuid),
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_by                 UUID NOT NULL REFERENCES icid.users(uuid),

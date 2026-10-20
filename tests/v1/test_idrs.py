@@ -1564,7 +1564,8 @@ class TestListIdrsArchiveFilters:
             first, second = admin_client.get(self.url).json()["data"]
         assert first["disciplines"] == ["Curb", "General", "Sidewalk"] and second["disciplines"] == []
         assert set(first) == set(second) == set(Idr.model_fields) | {
-            "report_count", "has_general", "reporter_name", "stage1_reviewer_name", "re_reviewer_name", "disciplines"}
+            "report_count", "has_general", "reporter_name", "stage1_reviewer_name", "re_reviewer_name", "last_unlocked_by_name",
+            "disciplines"}
 
 
 class TestListIdrsAdminOptions:

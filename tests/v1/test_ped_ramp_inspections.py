@@ -248,6 +248,46 @@ class TestApprove:
             assert admin_client.post(f"{URL}/approve").status_code == 409
 
 
+class TestAdminUnlock:
+    def test_an_admin_unlocks_an_approved_one_with_its_tifs_in_one_statement(self, admin_client):
+        after = {**DRAFT, "inspector_uuid": INSPECTOR_ROW["uuid"], "last_unlocked_at": CREATED,
+                 "last_unlocked_by": ADMIN_ID, "last_unlocked_by_name": "Ada Admin", "tif_count": 2, "draft_tif_count": 2}
+        with patch(INSPECTIONS, side_effect=[[{**APPROVED, "dot_pdf_path": "inspections/x/a.pdf"}],
+                                             [{"id": INSPECTION_ID, "tifs_reopened": 2}], [after]]) as run:
+            response = admin_client.post(f"{URL}/admin/unlock")
+        assert response.status_code == 200 and response.json()["message"] == "Inspection unlocked"
+        body = response.json()
+        assert body["tifs_reopened"] == 2 and body["data"]["status"] == "draft"
+        assert body["data"]["last_unlocked_by_name"] == "Ada Admin" and body["data"]["has_dot_pdf"] is False
+        sql, params = run.call_args_list[1].args
+        one_line = " ".join(sql.split())
+        assert "SET status = 'draft', re_uuid = NULL, re_signed_at = NULL, re_signature_path = NULL, submitted_at = NULL" in one_line
+        assert "requirements_met = NULL, dot_pdf_path = NULL, last_unlocked_at = now(), last_unlocked_by = %s" in one_line
+        assert "WHERE id = %s AND status = 'approved'" in one_line
+        assert "UPDATE icid.ped_ramp_tifs t SET status = 'draft', signer_name = NULL" in one_line
+        assert "WHERE t.inspection_id = unlocked.id AND t.status = 'approved'" in one_line
+        assert "inspector_signature_path" not in sql  # the inspector's signature stays
+        assert params == (ADMIN_ID, INSPECTION_ID)
+
+    def test_only_an_admin_unlocks(self):
+        with signed_in(RE_ROW) as re_user, patch(PROJECTS, return_value=AS_RE),              patch(INSPECTIONS, return_value=[APPROVED]) as run:
+            assert re_user.post(f"{URL}/admin/unlock").status_code == 403
+        assert all("UPDATE" not in call.args[0] for call in run.call_args_list)
+
+    def test_one_that_isnt_approved_is_409(self, admin_client):
+        for row in (DRAFT, SUBMITTED):
+            with patch(INSPECTIONS, return_value=[row]) as run:
+                response = admin_client.post(f"{URL}/admin/unlock")
+            assert (response.status_code, response.json()) == (409, {"detail": "Only an approved inspection can be unlocked"})
+            assert run.call_count == 1
+        with patch(INSPECTIONS, side_effect=[[APPROVED], []]):  # unlocked by someone else meanwhile
+            assert admin_client.post(f"{URL}/admin/unlock").status_code == 409
+
+    def test_an_unknown_one_is_404(self, admin_client):
+        with patch(INSPECTIONS, return_value=[]):
+            assert admin_client.post(f"{URL}/admin/unlock").status_code == 404
+
+
 class TestTheLock:
     """A corner's inspection keeps its corner and its ramps: submitted, the RE's or an admin's; approved, nobody's."""
 

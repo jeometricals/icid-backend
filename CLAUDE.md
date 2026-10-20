@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 050 (and 050b, the pedramp buckets) is in the live database (041 was skipped). A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 050 (and 050b, the pedramp buckets) is in the live database (041 was skipped); 051 and 052 (Slice T) must be run before Slice T's code is deployed. A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `dot-forms.md`: DOT's fillable forms, field by field. `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. `dot_ped_ramp_inspection_v1.6.pdf` and `dot_tif_v1.9.pdf` are DOT's fillable forms as published, filled by the `dot_*_pdf.py` services. |
@@ -177,7 +177,7 @@ Any change must follow these.
       replaced or deleted; non-assessable areas, features, segments and match lines they created or deleted; IDR flag
       and segment attributions they set; ped ramp corners they added or deleted; ped ramp inspections they started,
       signed, approved or returned, TIFs they drafted or signed, and ped ramp photos they uploaded. Any of those is a
-      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (39 in `schema.sql`,
+      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (41 in `schema.sql`,
       `users.deleted_by` the one not counted; the `deleted_by` of a property, a task order, a PIR, a flag, a PIR
       page, an area, a feature or a segment, an attribution's `set_by` and a PIR's
       `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
@@ -329,7 +329,10 @@ Any change must follow these.
       inspector's edit routes still take drafts only. Admin edits outside review are not built.
     - **Admin unlock** sends an approved IDR back to `stage2_review` and clears the RE's signature and the RE
       reviewer, so the export stops printing the old signature and an RE has to accept it before approving
-      again. The admin does not approve. Logged as `admin_unlock`.
+      again (any RE on the project, from the queue). The admin does not approve. Logged as `admin_unlock`, and recorded
+      on the IDR as `last_unlocked_at` / `last_unlocked_by` (migration 052; the admin list shows "Last unlocked ...
+      by ..."). Its quantity rows go and its flags' and curb segments' claims are released in the same statement;
+      approving it again writes and claims them afresh. This is how an approved IDR is corrected (Slice T2).
     - **Admin delete is a soft delete**: `status = 'deleted'` with `deleted_at` and `deleted_by`, logged as
       `admin_delete`; nothing is removed, attachments and audit rows included, but for its rows in
       `icid.quantities` (see "Quantities"). Every review statement and
@@ -865,6 +868,14 @@ Any change must follow these.
       `GET .../dot-pdf` hands it out through a signed URL (`PEDRAMP_EXPORT_URL_EXPIRY_SECONDS`), 404 before approval.
       Each ramp's photos go into its slot's photo log (`inspection_photo_bytes`), each TIF's photos and site layout into
       its form (`tif_photo_bytes`). The ICID-native inspection report stays as the internal preview.
+    - **Admin unlock** (Slice T1, migration 051; `POST .../admin/unlock`, admins only): an approved inspection goes back
+      to draft, so it can be corrected and approved again when DOT sends it back, in one statement
+      (`unlock_inspection`): the RE, their signature, the submit time, `requirements_met` and `dot_pdf_path` are
+      cleared, `last_unlocked_at` / `last_unlocked_by` set, and each of its approved TIFs goes back to draft with its
+      signing cleared (`tifs_reopened`). The inspector's signature, the measurements and the photos stay. The DOT forms
+      filed at the earlier approval, and the signature copies, stay in Storage for the record (unlinked; an admin finds
+      them in the bucket); the next approval files new ones. 409 for one that isn't approved. The inspection page gives
+      admins "Admin: Unlock inspection", confirmed with what reopens and what stays.
   - **TIFs** (Pedramp Phase 3 S3, migration 049; `api/v1/ped_ramp_tifs.py`, `api/queries/ped_ramp_tifs.py`,
     `api/schemas/ped_ramp_tif.py`): one per ramp per inspection (409 for a second), for a ramp at the inspection's
     corner (400 otherwise), drafted prefilled with the corner's `dot_corner_id` and `permittee_id`, the ramp's label as

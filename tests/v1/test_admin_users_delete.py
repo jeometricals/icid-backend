@@ -296,7 +296,7 @@ class TestPermanentDeleteUser:
             admin_client.delete(PERMANENT)
         sql, params = run.call_args.args
         one_line = flat(sql)
-        assert "%s IN (i.reporter_uuid, i.stage1_reviewer_uuid, i.re_reviewer_uuid, i.deleted_by)" in one_line
+        assert "%s IN (i.reporter_uuid, i.stage1_reviewer_uuid, i.re_reviewer_uuid, i.deleted_by, i.last_unlocked_by)" in one_line
         for reference in ("icid.project_users pu WHERE pu.user_uuid = %s", "icid.idr_audit a WHERE a.actor_uuid = %s",
                           "icid.idr_field_edits e WHERE e.editor_uuid = %s",
                           "icid.report_attachments ra WHERE ra.uploaded_by = %s",
@@ -313,17 +313,17 @@ class TestPermanentDeleteUser:
                           "icid.idr_segment_attributions isa WHERE isa.set_by = %s",
                           "icid.pir_match_lines ml WHERE %s IN (ml.created_by, ml.deleted_by)",
                           "icid.ped_ramp_corners rc WHERE %s IN (rc.created_by, rc.deleted_by)",
-                          "icid.ped_ramp_inspections ri WHERE %s IN (ri.inspector_uuid, ri.re_uuid, ri.returned_by, ri.created_by)",
+                          "icid.ped_ramp_inspections ri WHERE %s IN (ri.inspector_uuid, ri.re_uuid, ri.returned_by, ri.created_by, ri.last_unlocked_by)",
                           "icid.ped_ramp_tifs rt WHERE %s IN (rt.signed_by_uuid, rt.created_by)",
                           "icid.ped_ramp_photos rp WHERE rp.uploaded_by = %s"):
             assert reference in one_line
         assert params == (UUID(USER_ID),) * 21
         # schema.sql has no foreign key to users that the count leaves out
         schema = ROOT.joinpath("schema.sql").read_text(encoding="utf-8")
-        # the thirty-eight counted (the properties', task orders', bundles', PIRs', flags', PIR pages', non-assessable
+        # the forty counted (each table's last_unlocked_by too) (the properties', task orders', bundles', PIRs', flags', PIR pages', non-assessable
         # areas', features', segments', IDR flag and segment attributions', match lines', ped ramp corners',
         # inspections', TIFs' and photos' among them), and users.deleted_by
-        assert schema.count("REFERENCES icid.users(uuid)") == 39
+        assert schema.count("REFERENCES icid.users(uuid)") == 41
 
     def test_a_user_who_isnt_soft_deleted_is_404(self, admin_client):
         with patch(QUERY, side_effect=[[USER_ROW]]) as run, patch("api.services.attachments.remove_files") as remove:
