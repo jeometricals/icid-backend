@@ -299,7 +299,11 @@ CREATE TABLE icid.ped_ramp_corners (
     -- 1. Inspection information
     inspected_by                  TEXT,
     inspection_date               DATE,
-    entity                        TEXT CHECK (entity IN ('dob', 'other')),
+    -- DOT's 13 entities (migration 048; one-way)
+    entity                        TEXT CONSTRAINT ped_ramp_corners_entity_check CHECK (entity IN (
+                                      'ddc_city_agency_capital', 'ddc_landmark_ped_ramp', 'ddc_dot_ped_ramp',
+                                      'ddc_prior_notice', 'ddc_ta_ped_ramp', 'dep', 'dob', 'dpr', 'edc', 'mta',
+                                      'nysdot', 'sca', 'other')),
     entity_if_other               TEXT,
     -- 2. Location information
     boro                          icid.boro NOT NULL,
@@ -322,8 +326,10 @@ CREATE TABLE icid.ped_ramp_corners (
     permit_number                 TEXT,
     construction_completion_date  DATE,
     contract_type                 TEXT CHECK (contract_type IN ('simple', 'complex')),
-    curb_material                 TEXT CHECK (curb_material IN ('steel_faced', 'concrete', 'concrete_and_gutter',
-                                                                'granite', 'bluestone', 'cobblestone', 'other')),
+    -- DOT's list (048; one-way: cobblestone dropped)
+    curb_material                 TEXT CONSTRAINT ped_ramp_corners_curb_material_check CHECK (curb_material IN (
+                                      'steel_faced', 'concrete', 'concrete_and_gutter', 'granite', 'bluestone',
+                                      'other')),
     sidewalk_material             TEXT CHECK (sidewalk_material IN ('concrete', 'pigmented_concrete', 'bluestone',
                                                                     'cobblestone', 'other')),
     comments                      TEXT,
@@ -401,9 +407,12 @@ CREATE TABLE icid.ped_ramp_attributes (
     dws_aligned_with_ramp             TEXT CHECK (dws_aligned_with_ramp IN ('yes', 'no', 'na')),
     dws_left_offset_from_curb_in      NUMERIC CHECK (dws_left_offset_from_curb_in >= 0),
     dws_right_offset_from_curb_in     NUMERIC CHECK (dws_right_offset_from_curb_in >= 0),
-    dws_color                         TEXT CHECK (dws_color IN ('red', 'white', 'yellow', 'other')),
-    dws_material                      TEXT CHECK (dws_material IN ('preformed_plastic', 'cast_in_place_plastic',
-                                                                    'cast_iron', 'stone', 'other')),
+    -- DOT's lists (048; one-way: yellow, preformed_plastic, cast_in_place_plastic and the material's other dropped)
+    dws_color                         TEXT CONSTRAINT ped_ramp_attributes_dws_color_check CHECK (dws_color IN (
+                                          'red', 'white', 'dark_on_light', 'light_on_dark', 'other')),
+    dws_material                      TEXT CONSTRAINT ped_ramp_attributes_dws_material_check CHECK (dws_material IN (
+                                          'preformed_plastic_embedded', 'preformed_plastic_surface_applied',
+                                          'cast_in_place_surface_applied', 'cast_iron', 'stone', 'concrete_tile')),
     construction                      TEXT CHECK (construction IN ('existing_ramp', 'ramp_removed', 'new_install',
                                                                     'upgrade')),
     action_taken                      TEXT CHECK (action_taken IN ('ada_compliant_constructed', 'max_extent_feasible',
@@ -448,8 +457,150 @@ CREATE TABLE icid.ped_ramp_attributes (
     cut_through_length_in             NUMERIC CHECK (cut_through_length_in >= 0),
     min_clearance_between_dws_in      NUMERIC CHECK (min_clearance_between_dws_in >= 0),
     created_at                        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at                        TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at                        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- The DOT form's "ramp location at corner" diagram position (048); blank for the pilot
+    ramp_location_code                SMALLINT CONSTRAINT chk_ped_ramp_attributes_location_code
+                                          CHECK (ramp_location_code BETWEEN 0 AND 22)
 );
+
+------------------------------------------------------------
+-- PED RAMP INSPECTIONS (a corner's inspection: the review and signature wrapper around the corner and its ramps'
+-- attributes; draft -> submitted (the inspector signs) -> approved (the RE signs), or returned to draft with a
+-- comment; one live per corner; migrations/048)
+------------------------------------------------------------
+CREATE TABLE icid.ped_ramp_inspections (
+    id                         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    corner_id                  UUID NOT NULL REFERENCES icid.ped_ramp_corners(corner_id),
+    status                     TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'submitted', 'approved')),
+    requirements_met           BOOLEAN,
+    inspector_uuid             UUID REFERENCES icid.users(uuid),
+    submitted_at               TIMESTAMPTZ,
+    inspector_signed_at        TIMESTAMPTZ,
+    inspector_signature_path   TEXT,
+    re_uuid                    UUID REFERENCES icid.users(uuid),
+    re_signed_at               TIMESTAMPTZ,
+    re_signature_path          TEXT,
+    return_comment             TEXT,
+    returned_at                TIMESTAMPTZ,
+    returned_by                UUID REFERENCES icid.users(uuid),
+    -- The DOT form filled at approval (pedramp-exports bucket)
+    dot_pdf_path               TEXT,
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by                 UUID NOT NULL REFERENCES icid.users(uuid),
+    CONSTRAINT chk_ped_ramp_inspections_submitted CHECK (status = 'draft' OR (
+        inspector_uuid IS NOT NULL AND submitted_at IS NOT NULL AND inspector_signed_at IS NOT NULL
+        AND inspector_signature_path IS NOT NULL)),
+    CONSTRAINT chk_ped_ramp_inspections_approved CHECK (status <> 'approved' OR (
+        re_uuid IS NOT NULL AND re_signed_at IS NOT NULL AND re_signature_path IS NOT NULL))
+);
+CREATE UNIQUE INDEX uq_ped_ramp_inspections_live_corner
+    ON icid.ped_ramp_inspections (corner_id) WHERE status <> 'approved';
+CREATE INDEX idx_ped_ramp_inspections_corner ON icid.ped_ramp_inspections (corner_id);
+
+------------------------------------------------------------
+-- PED RAMP TIFS (a Technical Infeasibility Form for one non-compliant ramp of an inspection; DOT form v1.9's
+-- sections; drafted by an inspector or the RE, signed and approved by the RE; migrations/049)
+------------------------------------------------------------
+CREATE TABLE icid.ped_ramp_tifs (
+    id                                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    property_id                           UUID NOT NULL REFERENCES icid.properties(id),
+    inspection_id                         UUID NOT NULL REFERENCES icid.ped_ramp_inspections(id),
+    status                                TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved')),
+    -- 1. Submission information
+    submitted_by                          TEXT,
+    submission_date                       DATE,
+    application_tracking_no               TEXT,
+    sequence_no                           TEXT,
+    permittee_name                        TEXT,
+    permittee_id                          TEXT,
+    business_name                         TEXT,
+    street_address                        TEXT,
+    city                                  TEXT,
+    state                                 TEXT,
+    zip_code                              TEXT,
+    email                                 TEXT,
+    phone                                 TEXT,
+    -- 2. Project information
+    project_category                      TEXT CHECK (project_category IN ('city_agency', 'state_agency',
+                                                                           'transit_authority', 'other')),
+    project_category_name                 TEXT,
+    dot_project_id                        TEXT,
+    type_of_project                       TEXT,
+    -- 3. Location information (the rest is the corner's)
+    dot_corner_id                         TEXT,
+    dot_ramp_id                           TEXT,
+    ramp_construction                     TEXT CHECK (ramp_construction IN ('new_installation', 'upgrade')),
+    -- 4. Why it is technically infeasible
+    reason_limited_row                    BOOLEAN NOT NULL DEFAULT false,
+    reason_existing_topography            BOOLEAN NOT NULL DEFAULT false,
+    reason_existing_utilities             BOOLEAN NOT NULL DEFAULT false,
+    reason_structures                     BOOLEAN NOT NULL DEFAULT false,
+    reason_trees_natural                  BOOLEAN NOT NULL DEFAULT false,
+    reason_nyct_structures                BOOLEAN NOT NULL DEFAULT false,
+    reason_historic_features              BOOLEAN NOT NULL DEFAULT false,
+    reason_other                          BOOLEAN NOT NULL DEFAULT false,
+    reason_other_text                     TEXT,
+    -- 5.
+    why_requirements_cannot_be_achieved   TEXT,
+    -- 6. Ramp elements that don't meet the minimum ADA standards
+    element_ramp_width                    BOOLEAN NOT NULL DEFAULT false,
+    element_running_slope                 BOOLEAN NOT NULL DEFAULT false,
+    element_cross_slope                   BOOLEAN NOT NULL DEFAULT false,
+    element_flare_slopes                  BOOLEAN NOT NULL DEFAULT false,
+    element_dws                           BOOLEAN NOT NULL DEFAULT false,
+    element_landing_dimensions            BOOLEAN NOT NULL DEFAULT false,
+    element_landing_slopes                BOOLEAN NOT NULL DEFAULT false,
+    element_gutter_cross_slope            BOOLEAN NOT NULL DEFAULT false,
+    element_gutter_flow_slope             BOOLEAN NOT NULL DEFAULT false,
+    element_other                         BOOLEAN NOT NULL DEFAULT false,
+    element_other_text                    TEXT,
+    -- 7. Investigation
+    investigation_confirmed               BOOLEAN NOT NULL DEFAULT false,
+    additional_explanation                TEXT,
+    -- 10. Statement and signature (the RE, at approval)
+    signer_name                           TEXT,
+    signer_ny_license_no                  TEXT,
+    signer_signature_path                 TEXT,
+    signed_at                             TIMESTAMPTZ,
+    signed_by_uuid                        UUID REFERENCES icid.users(uuid),
+    created_at                            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by                            UUID NOT NULL REFERENCES icid.users(uuid),
+    CONSTRAINT chk_ped_ramp_tifs_signed CHECK (status <> 'approved' OR (
+        signer_name IS NOT NULL AND signer_ny_license_no IS NOT NULL AND signer_signature_path IS NOT NULL
+        AND signed_at IS NOT NULL AND signed_by_uuid IS NOT NULL))
+);
+CREATE UNIQUE INDEX uq_ped_ramp_tifs_ramp_inspection ON icid.ped_ramp_tifs (property_id, inspection_id);
+CREATE INDEX idx_ped_ramp_tifs_inspection ON icid.ped_ramp_tifs (inspection_id);
+
+------------------------------------------------------------
+-- PED RAMP PHOTOS (an inspection's or a TIF's photos, in the pedramp-photos bucket; an inspection's name their ramp;
+-- 'layout' is a TIF's section 9 image; at most 20 a parent, counted by the INSERT; migrations/050)
+------------------------------------------------------------
+CREATE TABLE icid.ped_ramp_photos (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    inspection_id   UUID REFERENCES icid.ped_ramp_inspections(id),
+    tif_id          UUID REFERENCES icid.ped_ramp_tifs(id),
+    property_id     UUID REFERENCES icid.properties(id),
+    kind            TEXT NOT NULL DEFAULT 'photo' CHECK (kind IN ('photo', 'layout')),
+    photo_number    INT NOT NULL CHECK (photo_number >= 1),
+    caption         TEXT,
+    storage_path    TEXT NOT NULL,
+    content_type    TEXT,
+    byte_size       INT CHECK (byte_size >= 0),
+    uploaded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    uploaded_by     UUID NOT NULL REFERENCES icid.users(uuid),
+    CONSTRAINT chk_ped_ramp_photos_one_parent CHECK ((inspection_id IS NULL) <> (tif_id IS NULL)),
+    CONSTRAINT chk_ped_ramp_photos_inspection_ramp CHECK (inspection_id IS NULL OR property_id IS NOT NULL),
+    CONSTRAINT chk_ped_ramp_photos_layout_on_tif CHECK (kind = 'photo' OR tif_id IS NOT NULL)
+);
+CREATE UNIQUE INDEX uq_ped_ramp_photos_inspection_number
+    ON icid.ped_ramp_photos (inspection_id, photo_number) WHERE inspection_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_ped_ramp_photos_tif_number
+    ON icid.ped_ramp_photos (tif_id, photo_number) WHERE tif_id IS NOT NULL AND kind = 'photo';
+CREATE UNIQUE INDEX uq_ped_ramp_photos_tif_layout
+    ON icid.ped_ramp_photos (tif_id) WHERE tif_id IS NOT NULL AND kind = 'layout';
 
 ------------------------------------------------------------
 -- TASK ORDER (a project's task orders; soft-deleted like properties; migrations/030)
