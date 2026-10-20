@@ -8,6 +8,7 @@ Files live in the private signatures bucket (SIGNATURE_BUCKET_NAME):
     idrs/{idr id}/re_{random}.png                   the RE's copy, stamped at final approval; the same rule
     ped-ramp-inspections/{id}/inspector_{random}.png  a ped ramp inspection's copies, at submit and at approval
     ped-ramp-inspections/{id}/re_{random}.png         (Pedramp Phase 3); the same rule
+    ped-ramp-tifs/{id}/re_{random}.png                a TIF's copy of the RE's, at its approval; the same rule
 
 Setting a signature takes two steps, like an attachment: ask for a signed upload URL, PUT the PNG to it, then
 confirm, which records the file on the user's row. Submitting copies the user's current file to the IDR's own path
@@ -129,6 +130,15 @@ def snapshot_signature_for_inspection(signature_path: str, inspection_id: UUID, 
     """
     copy_path = f"ped-ramp-inspections/{inspection_id}/{signer}_{uuid4().hex}.png"
     return _snapshot(signature_path, copy_path, "this inspection")
+
+
+def snapshot_signature_for_tif(signature_path: str, tif_id: UUID) -> str:
+    """
+    Copy the RE's current signature file to a TIF's own fresh path, ahead of approving it.
+    Takes the signature's object path and the TIF's uuid.
+    Returns the copy's object path; raises SignatureStorageError if the copy fails.
+    """
+    return _snapshot(signature_path, f"ped-ramp-tifs/{tif_id}/re_{uuid4().hex}.png", "this TIF")
 
 
 def remove_user_signature(user_uuid: UUID) -> None:

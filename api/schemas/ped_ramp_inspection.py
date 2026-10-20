@@ -98,3 +98,17 @@ class CornerInspectionResponse(BaseModel):
     status: str
     message: str
     data: Optional[InspectionOut]
+
+
+class DownloadOut(BaseModel):
+    """A file in the pedramp-exports bucket, handed out through a signed URL: never the bytes (Vercel's 4.5 MB limit)."""
+
+    url: str
+    expires_at: datetime
+    file_name: str
+
+
+class DownloadResponse(BaseModel):
+    status: str
+    message: str
+    data: DownloadOut
