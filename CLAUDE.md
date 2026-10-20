@@ -17,8 +17,8 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`, `ped_ramp_corners.py`, `ped_ramp_attributes.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
-| `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. `idr_flags.py` is which flags an IDR covers: its overrides and the claim and release CTEs the IDR statements carry; `idr_segments.py` the same for curb segments, with their quantity CTE. `progress.py` is the progress rollup's one statement: a project's flags and curb segments by property, pay item and state. `construction_report.py` reads a Construction Report's property, title block, IDR, flags and drawings; `assessment_summary.py` a project's claimed flags for the Assessment Summary. `ped_ramp_corners.py` and `ped_ramp_attributes.py` are the ped ramp inspection's. |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`, `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`, `corner_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, the lock a ped ramp corner's inspection puts on it (`refuse_locked_corner`), and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
+| `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. `idr_flags.py` is which flags an IDR covers: its overrides and the claim and release CTEs the IDR statements carry; `idr_segments.py` the same for curb segments, with their quantity CTE. `progress.py` is the progress rollup's one statement: a project's flags and curb segments by property, pay item and state. `construction_report.py` reads a Construction Report's property, title block, IDR, flags and drawings; `assessment_summary.py` a project's claimed flags for the Assessment Summary. `ped_ramp_corners.py`, `ped_ramp_attributes.py` and `ped_ramp_inspections.py` are the ped ramp inspection's. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
@@ -47,7 +47,8 @@ auth routes:
   `/properties`, `/task-orders`; `/v1/contract_items/`
 - **Sites:** `/v1/properties/{id}` (with `/admin/soft-delete`, `/admin/undelete`, `/pir`, `/pirs`,
   `/construction-report`, `/ped-ramp-attributes`); `/v1/ped-ramp-corners/{id}` (with `/inspection-report` and its
-  `.pdf`; a project's under `/v1/projects/{id}/ped-ramp-corners`, and a corner with a ramp at once under `/pedramp-sites`); `/v1/task-orders/{id}` (with its admin routes, `/properties/{property_id}`,
+  `.pdf`, and `/inspection` with `/start`; a project's under `/v1/projects/{id}/ped-ramp-corners`, and a corner with a ramp at once under `/pedramp-sites`); `/v1/ped-ramp-inspections/{id}` (with `/submit`, `/return`,
+  `/approve`); `/v1/task-orders/{id}` (with its admin routes, `/properties/{property_id}`,
   `/progress-rollup`)
 - **PIRs and drawings:** `/v1/pirs/{id}` (with its admin routes, `/image/upload-request`, `/image/complete`, `/pages`,
   `/flags`, `/features`, `/segments`, `/match-lines`, `/import`, and the deprecated R1d routes); `/v1/pir-pages/{id}`
@@ -173,8 +174,9 @@ Any change must follow these.
       they uploaded; properties and task orders they created or deleted; properties they bundled into task
       orders; PIRs they digitized, signed as built or deleted; flags they created or deleted; PIR pages they
       replaced or deleted; non-assessable areas, features, segments and match lines they created or deleted; IDR flag
-      and segment attributions they set; ped ramp corners they added or deleted. Any of those is a 409 with the counts
-      under `references`. Those are all the foreign keys to `users.uuid` (32 in `schema.sql`,
+      and segment attributions they set; ped ramp corners they added or deleted; ped ramp inspections they started,
+      signed, approved or returned, TIFs they drafted or signed, and ped ramp photos they uploaded. Any of those is a
+      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (39 in `schema.sql`,
       `users.deleted_by` the one not counted; the `deleted_by` of a property, a task order, a PIR, a flag, a PIR
       page, an area, a feature or a segment, an attribution's `set_by` and a PIR's
       `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
@@ -840,6 +842,33 @@ Any change must follow these.
     `corner_reused: true`), else one is added; the ramp takes the corner's borough and streets, and its `ramp_id_label`
     goes into an attributes row of its own. `corner_direction` is required here only (an API rule: the column stays
     nullable). Who: as for creating a corner.
+  - **The inspection workflow** (Pedramp Phase 3 S1, migration 048; `api/v1/ped_ramp_inspections.py`,
+    `api/queries/ped_ramp_inspections.py`, `api/schemas/ped_ramp_inspection.py`): `icid.ped_ramp_inspections`, one row
+    per corner (one for the pilot: a start on a corner that has one, approved or not, is 409), the review and signature
+    wrapper; the measurements stay on the corner and its ramps' attributes, edited through their own routes.
+    - **Two stages.** `draft` → `submitted` (an inspector submits, signing) → `approved` (an RE approves, signing); a
+      return (an RE, with a required comment) sends it back to `draft` and keeps the comment until the next submit
+      clears it. No OE stage. An admin stands in for either role. Roles are `project_users` roles on the corner's
+      project: start and the draft's `requirements_met` take `inspector` or `re`; submit `inspector`; return and
+      approve `re`. Demo users only read.
+    - **Signatures as an IDR's:** submit and approve copy the signer's current signature to
+      `ped-ramp-inspections/{id}/inspector_{random}.png` / `re_{random}.png` in the signatures bucket before the one
+      statement that moves it (400 without a signature, 502 when the copy fails). Each move's statement matches only the
+      status it starts from; a lost race is 409.
+    - **Approve is refused while a TIF of the inspection is a draft** (409), checked by the route and again by the
+      statement. `dot_pdf_path` (the DOT form filled at approval) is not set yet: S2 fills it at integration.
+    - **The lock** (`refuse_locked_corner` in `api/v1/_shared.py`): a corner whose inspection is submitted can be
+      changed only by an RE on its project or an admin (403 `Inspection is submitted — only the RE can edit`), one
+      whose inspection is approved by nobody (409 `Inspection is approved — no further edits`); a draft, or no
+      inspection, locks nothing. It covers the corner's PATCH and DELETE, its ramps' attributes PUT and DELETE, a ped
+      ramp's create (at a corner), PATCH (its corner and a new one), soft delete and un-delete, and `pedramp-sites`
+      when it would reuse the corner (`find_live_corner` looks it up first, with the statement's own condition).
+    - **DOT's choice lists** (048), ONE-WAY: entity takes DOT's 13 (`ddc_city_agency_capital`,
+      `ddc_landmark_ped_ramp`, `ddc_dot_ped_ramp`, `ddc_prior_notice`, `ddc_ta_ped_ramp`, `dep`, `dob`, `dpr`, `edc`,
+      `mta`, `nysdot`, `sca`, `other`); curb material lost `cobblestone`; DWS colour is `red` `white` `dark_on_light`
+      `light_on_dark` `other`; DWS material is `preformed_plastic_embedded` `preformed_plastic_surface_applied`
+      `cast_in_place_surface_applied` `cast_iron` `stone` `concrete_tile`. A value dropped can't come back without a
+      data migration. `ped_ramp_attributes.ramp_location_code` (the DOT diagram's 0-22) exists and nothing sets it.
   - **A ramp's attributes** (`icid.ped_ramp_attributes`, keyed by property) are its section 5. PUT writes them whole;
     a field of another ramp type than the property's is a 422 (`COMMON_FIELDS`, `TYPE_FIELDS`). A cut-through's two
     ramps are two sites, each with its own row, the shared length and clearance kept on both.

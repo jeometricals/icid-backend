@@ -6,6 +6,8 @@ Files live in the private signatures bucket (SIGNATURE_BUCKET_NAME):
                                                     removed when an admin deletes the user for good
     idrs/{idr id}/inspector_{random}.png            the copy stamped on one IDR at submit; never replaced or removed
     idrs/{idr id}/re_{random}.png                   the RE's copy, stamped at final approval; the same rule
+    ped-ramp-inspections/{id}/inspector_{random}.png  a ped ramp inspection's copies, at submit and at approval
+    ped-ramp-inspections/{id}/re_{random}.png         (Pedramp Phase 3); the same rule
 
 Setting a signature takes two steps, like an attachment: ask for a signed upload URL, PUT the PNG to it, then
 confirm, which records the file on the user's row. Submitting copies the user's current file to the IDR's own path
@@ -96,19 +98,37 @@ def confirm_user_signature(user_uuid: UUID, signature_type: str) -> Optional[dic
     return set_user_signature(user_uuid, path, signature_type)
 
 
+def _snapshot(signature_path: str, copy_path: str, of_what: str) -> str:
+    """
+    Copy a user's current signature file to the path of the document that keeps it.
+    Takes the signature's object path, the copy's path and what the copy is for ("this IDR"), for the error.
+    Returns the copy's object path; raises SignatureStorageError if the copy fails.
+    """
+    try:
+        copy_file(SIGNATURE_BUCKET_NAME, signature_path, copy_path)
+    except Exception as exc:
+        logger.error("Storage could not copy signature %s to %s: %s", signature_path, copy_path, exc)
+        raise SignatureStorageError(f"Could not copy the signature for {of_what}") from exc
+    return copy_path
+
+
 def snapshot_signature_for_idr(signature_path: str, idr_id: UUID, signer: str = "inspector") -> str:
     """
     Copy a user's current signature file to an IDR's own path, ahead of submitting or approving that IDR.
     Takes the signature's object path, the IDR's uuid and whose signature it is ('inspector' or 're').
     Returns the copy's object path; raises SignatureStorageError if the copy fails.
     """
-    copy_path = idr_signature_path(idr_id, signer)
-    try:
-        copy_file(SIGNATURE_BUCKET_NAME, signature_path, copy_path)
-    except Exception as exc:
-        logger.error("Storage could not copy signature %s to %s: %s", signature_path, copy_path, exc)
-        raise SignatureStorageError("Could not copy the signature for this IDR") from exc
-    return copy_path
+    return _snapshot(signature_path, idr_signature_path(idr_id, signer), "this IDR")
+
+
+def snapshot_signature_for_inspection(signature_path: str, inspection_id: UUID, signer: str = "inspector") -> str:
+    """
+    Copy a user's current signature file to a ped ramp inspection's own fresh path, ahead of submitting or approving it.
+    Takes the signature's object path, the inspection's uuid and whose signature it is ('inspector' or 're').
+    Returns the copy's object path; raises SignatureStorageError if the copy fails.
+    """
+    copy_path = f"ped-ramp-inspections/{inspection_id}/{signer}_{uuid4().hex}.png"
+    return _snapshot(signature_path, copy_path, "this inspection")
 
 
 def remove_user_signature(user_uuid: UUID) -> None:

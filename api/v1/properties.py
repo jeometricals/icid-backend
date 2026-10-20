@@ -36,7 +36,7 @@ from api.services.auth import (
     property_member,
 )
 from api.services.export_common import FORM_TIMEZONE
-from api.v1._shared import clean_text, refuse_deleted_for_member, validated
+from api.v1._shared import clean_text, refuse_deleted_for_member, refuse_locked_corner, validated
 
 # A second router under /v1/projects, for a project's properties. A demo user reaches only their own project.
 project_router = APIRouter(
@@ -192,10 +192,11 @@ def create_project_property(
     """
     Add a property to a project, created by the signed-in user: a sidewalk or a ped ramp. For a user on the project, in any role, or an admin; not a demo user.
     Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes, violation_no and community_board are none) and the user.
-    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value or a corner_id that isn't a live corner of the project, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value, a block or lot that isn't digits, or fields that don't fit the kind and 409 (with existing_property_id) when a live sidewalk of the project is at the borough, block and lot.
+    Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value or a corner_id that isn't a live corner of the project, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value, a block or lot that isn't digits, or fields that don't fit the kind and 409 (with existing_property_id) when a live sidewalk of the project is at the borough, block and lot. A ped ramp whose corner's inspection is submitted is the RE's (403), and one whose inspection is approved is frozen (409).
     """
     fields = _clean_fields(body)
     _check_corner(project_id, fields.get("corner_id"))
+    refuse_locked_corner(fields.get("corner_id"), project_id, user)
     row = create_property(project_id, user.uuid, fields)
 
     if row is None:
@@ -224,9 +225,10 @@ def update_property_record(
     """
     Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes, violation_no and community_board clear them. Its kind can't change.
     Takes the property's id as a path parameter, the fields to change in the body, the property (loaded by _writable_property) and the user.
-    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, a new corner_id isn't a live corner of its project, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live sidewalk of its project is at the borough, block and lot it would end up with.
+    Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, a new corner_id isn't a live corner of its project, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live sidewalk of its project is at the borough, block and lot it would end up with. A ped ramp whose corner's inspection is submitted is the RE's (403), and one whose inspection is approved is frozen (409).
     """
     refuse_deleted_for_member(found, user, PROPERTY_DELETED)
+    refuse_locked_corner(found.get("corner_id"), found["project_id"], user)
 
     if body.kind is not None and body.kind != found["kind"]:
         raise HTTPException(status_code=400, detail=KIND_CHANGED)
@@ -241,6 +243,7 @@ def update_property_record(
     validated(PropertyCreate, merged)
     if changes.get("corner_id") is not None and changes["corner_id"] != found.get("corner_id"):
         _check_corner(found["project_id"], changes["corner_id"])
+        refuse_locked_corner(changes["corner_id"], found["project_id"], user)
     row = update_property(property_id, merged)
 
     if row is None:
@@ -255,12 +258,14 @@ def delete_property(property_id: UUID, admin: UserOut = Depends(current_admin)) 
     """
     Soft-delete a property: it is marked deleted, with when and by whom, and kept. It leaves the project's list and, a sidewalk, frees its borough, block and lot. Admins only. Deleting a property that is already deleted succeeds and changes nothing.
     Takes the property's id as a path parameter and the signed-in admin.
-    Returns a PropertyResponse with the deleted property; raises 403 for a user who isn't an admin and 404 for an unknown property.
+    Returns a PropertyResponse with the deleted property; raises 403 for a user who isn't an admin, 404 for an unknown property and 409 for a ped ramp whose corner's inspection is approved.
     """
     current = _load_property(property_id)
 
     if current["deleted_at"] is not None:
         return _response(current, "Property was already deleted")
+
+    refuse_locked_corner(current.get("corner_id"), current["project_id"], admin)
 
     row = soft_delete_property(property_id, admin.uuid)
 
@@ -275,18 +280,21 @@ def delete_property(property_id: UUID, admin: UserOut = Depends(current_admin)) 
     "/{property_id}/admin/undelete",
     response_model=PropertyResponse,
     responses=CONFLICT,
-    dependencies=[Depends(current_admin)],
 )
-def undelete_property_record(property_id: UUID) -> PropertyResponse | JSONResponse:
+def undelete_property_record(
+    property_id: UUID, admin: UserOut = Depends(current_admin)
+) -> PropertyResponse | JSONResponse:
     """
     Bring a soft-deleted property back, at the borough, block and lot it had (a sidewalk). Admins only.
-    Takes the property's id as a path parameter.
-    Returns a PropertyResponse with the restored property; raises 403 for a user who isn't an admin, 404 for an unknown property or one that isn't deleted, and 409 (with existing_property_id) when another live sidewalk of its project is now at its borough, block and lot.
+    Takes the property's id as a path parameter and the signed-in admin.
+    Returns a PropertyResponse with the restored property; raises 403 for a user who isn't an admin, 404 for an unknown property or one that isn't deleted, and 409 (with existing_property_id) when another live sidewalk of its project is now at its borough, block and lot, or for a ped ramp whose corner's inspection is approved.
     """
     current = _load_property(property_id)
 
     if current["deleted_at"] is None:
         raise HTTPException(status_code=404, detail="Property is not deleted")
+
+    refuse_locked_corner(current.get("corner_id"), current["project_id"], admin)
 
     row = undelete_property(property_id)
 

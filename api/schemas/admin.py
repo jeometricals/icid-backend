@@ -88,6 +88,9 @@ class UserReferences(BaseModel):
     idr_segment_attributions: int
     match_lines: int
     ped_ramp_corners: int
+    ped_ramp_inspections: int
+    ped_ramp_tifs: int
+    ped_ramp_photos: int
 
 
 class UserHasHistory(BaseModel):
