@@ -8,8 +8,10 @@ from fastapi.responses import JSONResponse, Response
 from api.v1._shared import day, day_range, idr_list_items, refuse_flag_filled_pay_items, report_types_for
 
 from api.queries.idr_reports import (
+    DspTakenError,
     create_idr_report,
     delete_idr_report,
+    get_dsp_report_id,
     get_general_report_id,
     get_idr_report,
     list_reports_for_idr,
@@ -46,6 +48,9 @@ from api.schemas.idr import (
 )
 from api.schemas.dsp_report import DspReportError, check_dsp_report
 from api.schemas.idr_report import (
+    DSP_PARENT_MESSAGE,
+    DSP_PARENT_TYPES,
+    DSP_TAKEN_MESSAGE,
     IdrReport,
     IdrReportConflict,
     IdrReportCreate,
@@ -148,17 +153,28 @@ def get_idr(idr_id: UUID) -> IdrWithReportsResponse:
     )
 
 
+def _report_conflict(detail: str, existing_report_id: UUID) -> JSONResponse:
+    """
+    Build the 409 for a report the IDR may hold only one of (its General, its Daily Site Patrol).
+    Takes the message and the uuid of the report the IDR already holds.
+    Returns the JSONResponse carrying an IdrReportConflict.
+    """
+    conflict = IdrReportConflict(detail=detail, existing_report_id=existing_report_id)
+    return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
+
+
 @router.post(
     "/{idr_id}/reports",
     response_model=IdrReportResponse,
     status_code=201,
-    responses={409: {"model": IdrReportConflict, "description": "IDR is not a draft, or already has a General"}},
+    responses={409: {"model": IdrReportConflict,
+                     "description": "IDR is not a draft, or already has a General or a Daily Site Patrol"}},
 )
 def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, JSONResponse]:
     """
-    Add an empty report of the given type to a draft IDR, optionally as an addendum to one of its main reports.
+    Add an empty report of the given type to a draft IDR, optionally as an addendum to one of its main reports; a DSP only as the addendum of a DSP_PARENT_TYPES main report, one per IDR.
     Takes the IDR uuid as a path parameter and an IdrReportCreate body.
-    Returns an IdrReportResponse; raises 404 (no IDR), 409 (not draft, or second General with existing_report_id) and 400 (bad parent).
+    Returns an IdrReportResponse; raises 404 (no IDR), 409 (not draft, or a second General or DSP, with existing_report_id) and 400 (bad parent).
     """
     idr = get_idr_by_id(idr_id)
 
@@ -167,6 +183,11 @@ def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, 
 
     if idr["status"] != "draft":
         raise HTTPException(status_code=409, detail="Only draft IDRs can be edited")
+
+    is_dsp = body.report_type == ReportType.DSP
+
+    if is_dsp and (not body.is_addendum or body.parent_report_id is None):
+        raise HTTPException(status_code=400, detail=DSP_PARENT_MESSAGE)
 
     if body.parent_report_id is not None:
         if not body.is_addendum:
@@ -177,10 +198,27 @@ def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, 
         if parent is None:
             raise HTTPException(status_code=400, detail="Parent report not found in this IDR")
 
+        if is_dsp and (parent["is_addendum"] or parent["report_type"] not in DSP_PARENT_TYPES):
+            raise HTTPException(status_code=400, detail=DSP_PARENT_MESSAGE)
+
         if parent["is_addendum"]:
             raise HTTPException(status_code=400, detail="An addendum's parent must be a main report, not another addendum")
 
-    rows = create_idr_report(idr_id, body.report_type.value, body.is_addendum, body.parent_report_id)
+    if is_dsp:
+        existing_dsp_id = get_dsp_report_id(idr_id)
+
+        if existing_dsp_id is not None:
+            return _report_conflict(DSP_TAKEN_MESSAGE, existing_dsp_id)
+
+    try:
+        rows = create_idr_report(idr_id, body.report_type.value, body.is_addendum, body.parent_report_id)
+    except DspTakenError:
+        existing_dsp_id = get_dsp_report_id(idr_id)
+
+        if existing_dsp_id is None:
+            raise HTTPException(status_code=500, detail="Failed to add report")
+
+        return _report_conflict(DSP_TAKEN_MESSAGE, existing_dsp_id)
 
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to add report")
@@ -191,11 +229,7 @@ def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, 
         if existing_report_id is None:
             raise HTTPException(status_code=500, detail="Failed to add report")
 
-        conflict = IdrReportConflict(
-            detail="IDR already has a General report",
-            existing_report_id=existing_report_id,
-        )
-        return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
+        return _report_conflict("IDR already has a General report", existing_report_id)
 
     touch_idr(idr_id)
 

@@ -838,7 +838,7 @@ in the frontend dropdown.
 | `JACK` | Jacking | |
 | `CCL` | Community Construction Liaison | |
 | `RE` | Resident Engineer's Daily Diary | |
-| `DSP` | Daily Site Patrol | Either (deliberately not listed) |
+| `DSP` | Daily Site Patrol | Always, of its own kind (not listed; see below) |
 | `OFF` | Office Report | |
 | `SKETCH` | Sketch Sheet | ✓ |
 | `CONT` | Report Continuation | ✓ |
@@ -866,6 +866,12 @@ A `DSP` report's `report_data` is the one report body the server checks (`DspRep
 on every save (`PUT /v1/idrs/{idr_id}/reports/{report_id}`); a refusal is a 400 naming the first problem
 (`DSP report: mptChecklist[3].answer: Input should be 'yes', 'no' or 'na'`). A new DSP is created `{}` like any
 report, so the form's first save writes it whole. No migration: `report_type` is plain text.
+
+**An addendum, one per IDR** (U1). A DSP is added only as the addendum of a main General, SWCB, AC, Conc Mix or Conc
+Cyl report of the same IDR (`DSP_PARENT_TYPES`), else 400 `A Daily Site Patrol is added to a General, SWCB, AC, Conc
+Mix or Conc Cyl report, as its addendum`; a second is 409 `This IDR already has a Daily Site Patrol` with
+`existing_report_id`. The route checks first, and `uq_idr_reports_one_dsp_per_idr` (migration 053, partial on
+`(idr_id) WHERE report_type = 'DSP'`) backs it. DSPs made before U1 as main reports are left as they are.
 
 ```json
 {"timeOfPatrol": "14:30",
