@@ -707,11 +707,12 @@ class TestAdminUnlock:
         assert data["inspector_signature_path"] == APPROVED_IDR["inspector_signature_path"]  # and so does the inspector's
         sql, params = seen["moves"][0]
         assert "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL" in sql
+        assert "last_unlocked_at = now(), last_unlocked_by = %s" in sql  # the unlock is recorded on the IDR
         assert "stage1_accepted_at" not in sql.split("RETURNING")[0]  # the OE's acceptance stands
         assert "idr_number" not in sql.split("RETURNING")[0] and "inspector_signature_path" not in sql.split("RETURNING")[0]
         assert "WHERE idr_id = %s AND status = ANY(%s) AND deleted_at IS NULL" in flat(sql)
         assert params == (UUID(IDR_ID), ["approved", "stage2_review"], "stage2_review", ADMIN_USER_ROW["uuid"],
-                          "admin_unlock", None)
+                          ADMIN_USER_ROW["uuid"], "admin_unlock", None)
         seen["signature"].assert_not_called()  # the admin does not approve, so nothing is signed
 
     def test_it_is_logged_in_the_same_statement_as_admin_unlock(self, admin_client):
@@ -1182,7 +1183,7 @@ class TestUnlockAndDeleteRemoveQuantities:
         sql, params = seen["moves"][0]
         assert DELETE_QUANTITIES in flat(sql) and INSERT_QUANTITIES not in flat(sql) and sql.count(";") == 1
         assert params == (UUID(IDR_ID), ["approved", "stage2_review"], "stage2_review", ADMIN_USER_ROW["uuid"],
-                          "admin_unlock", None)  # the delete takes no parameter: it reads the moved IDR
+                          ADMIN_USER_ROW["uuid"], "admin_unlock", None)  # the delete takes no parameter: it reads the moved IDR
 
     def test_a_soft_delete_deletes_them_too_and_keeps_the_idr(self, admin_client):
         with review(idr=APPROVED_IDR, roles=(), moved=[DELETED_IDR]) as seen:

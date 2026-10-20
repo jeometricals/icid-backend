@@ -55,6 +55,9 @@ class Idr(BaseModel):
     deleted_at: Optional[datetime] = None
     deleted_by: Optional[UUID] = None
     task_order_id: Optional[UUID] = None
+    # Its last admin unlock (migration 052)
+    last_unlocked_at: Optional[datetime] = None
+    last_unlocked_by: Optional[UUID] = None
 
 
 class IdrResponse(BaseModel):
@@ -82,6 +85,7 @@ class IdrListItem(Idr):
     reporter_name: Optional[str] = None
     stage1_reviewer_name: Optional[str] = None
     re_reviewer_name: Optional[str] = None
+    last_unlocked_by_name: Optional[str] = None
     # The disciplines its reports cover, in alphabetical order; empty for an IDR with no reports
     disciplines: list[str] = []
 

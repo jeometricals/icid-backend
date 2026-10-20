@@ -54,11 +54,13 @@ IDR_COLUMNS = """
     returned_from,
     deleted_at,
     deleted_by,
-    task_order_id
+    task_order_id,
+    last_unlocked_at,
+    last_unlocked_by
 """
 
 # What the IDR lists add to each row (FROM icid.idrs i): its report count, whether it holds a General, the types of
-# its reports (each once) and the names of its inspector and reviewers
+# its reports (each once) and the names of its inspector, its reviewers and the admin who last unlocked it
 IDR_LIST_EXTRAS = """
             ARRAY(
                 SELECT DISTINCT r.report_type
@@ -89,7 +91,12 @@ IDR_LIST_EXTRAS = """
                 SELECT NULLIF(concat_ws(' ', u.first_name, u.last_name), '')
                 FROM icid.users u
                 WHERE u.uuid = i.re_reviewer_uuid
-            ) AS re_reviewer_name
+            ) AS re_reviewer_name,
+            (
+                SELECT NULLIF(concat_ws(' ', u.first_name, u.last_name), '')
+                FROM icid.users u
+                WHERE u.uuid = i.last_unlocked_by
+            ) AS last_unlocked_by_name
 """
 
 # The project roles that see each review queue
@@ -541,12 +548,13 @@ UNLOCKABLE_STATUSES = ["approved", "stage2_review"]
 
 def admin_unlock_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again. Its number, the inspector's signature and stage1_accepted_at stay. Its quantity rows are deleted and its flags' and curb segments' claims released in the same statement: it is no longer approved, and approving it again claims and writes them afresh. Its attribution overrides stay.
+    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again, and record the unlock (last_unlocked_at, last_unlocked_by). Its number, the inspector's signature and stage1_accepted_at stay. Its quantity rows are deleted and its flags' and curb segments' claims released in the same statement: it is no longer approved, and approving it again claims and writes them afresh. Its attribution overrides stay.
     Takes the IDR uuid and the admin's uuid.
     Returns a one-row list with the IDR, flags_released and segments_released, an empty list if it isn't in one of UNLOCKABLE_STATUSES (or is deleted), or None on failure.
     """
-    assignments = "re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL"
-    return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments,
+    assignments = ("re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL, "
+                   "last_unlocked_at = now(), last_unlocked_by = %s")
+    return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments, (actor_uuid,),
                      also=f"{delete_quantities_cte('moved')},{release_flags_cte('moved')},{release_segments_cte('moved')}",
                      also_columns="(SELECT count(*) FROM released_flags) AS flags_released, "
                                   "(SELECT count(*) FROM released_segments) AS segments_released")

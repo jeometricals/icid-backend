@@ -6,9 +6,11 @@ from api.queries.ped_ramp_inspections import (
     approve_inspection,
     create_inspection,
     get_corner_inspection,
+    get_inspection,
     return_inspection,
     set_requirements_met,
     submit_inspection,
+    unlock_inspection,
 )
 from api.queries.projects import get_user_roles_on_project
 from api.schemas.auth import UserOut
@@ -21,7 +23,7 @@ from api.schemas.ped_ramp_inspection import (
     InspectionReturn,
     InspectionUpdate,
 )
-from api.services.auth import corner_member, current_user, inspection_member, no_demo_property_writes
+from api.services.auth import corner_member, current_admin, current_user, inspection_member, no_demo_property_writes
 from api.services.ped_ramp_exports import (
     PedRampExportError,
     inspection_download_name,
@@ -206,3 +208,23 @@ def download_dot_pdf(found: dict = Depends(inspection_member)) -> DownloadRespon
     except PedRampExportError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return DownloadResponse(status="success", message="DOT forms ready", data=DownloadOut(**data))
+
+
+@router.post("/{inspection_id}/admin/unlock", response_model=InspectionResponse)
+def unlock_inspection_record(
+    found: dict = Depends(inspection_member), admin: UserOut = Depends(current_admin)
+) -> InspectionResponse:
+    """
+    Unlock an approved inspection, so it can be corrected and approved again (when DOT sends it back): it returns to draft with the RE's approval undone (the RE, their signature, the submit time, the requirements answer and the link to the filed DOT forms cleared), and each of its approved TIFs returns to draft with its signing cleared. The inspector's signature, the measurements and the photos stay, and so do the earlier DOT forms and signature copies in Storage. The unlock is recorded (last_unlocked_at, last_unlocked_by). Admins only.
+    Takes the inspection (loaded by inspection_member from the inspection_id path parameter) and the signed-in admin.
+    Returns an InspectionResponse with the inspection as it now is and tifs_reopened; raises 403 for a user who isn't an admin, 404 for an unknown inspection and 409 for one that isn't approved.
+    """
+    if found["status"] != "approved":
+        raise HTTPException(status_code=409, detail="Only an approved inspection can be unlocked")
+    row = unlock_inspection(found["id"], admin.uuid)
+    if row is None:
+        raise HTTPException(status_code=409, detail="Only an approved inspection can be unlocked")
+    # Read it again: the statement's own read can't see the TIFs it moved
+    response = _response(get_inspection(found["id"]), "Inspection unlocked", "Inspection not found")
+    response.tifs_reopened = row["tifs_reopened"]
+    return response

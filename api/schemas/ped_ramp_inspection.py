@@ -69,6 +69,9 @@ class InspectionOut(BaseModel):
     returned_by: Optional[UUID] = None
     returned_by_name: Optional[str] = None
     dot_pdf_path: Optional[str] = Field(default=None, exclude=True)
+    last_unlocked_at: Optional[datetime] = None
+    last_unlocked_by: Optional[UUID] = None
+    last_unlocked_by_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     created_by: UUID
@@ -90,6 +93,7 @@ class InspectionResponse(BaseModel):
     status: str
     message: str
     data: InspectionOut
+    tifs_reopened: Optional[int] = None
 
 
 class CornerInspectionResponse(BaseModel):

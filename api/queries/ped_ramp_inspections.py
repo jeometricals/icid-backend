@@ -6,7 +6,7 @@ from psycopg.errors import UniqueViolation
 from api.db.runner import run_query
 
 # An inspection as every function here returns it (i), with its corner's project and streets, the names of who
-# signed and returned it, and how many TIFs it has (in all, and still drafts)
+# signed, returned and last unlocked it, and how many TIFs it has (in all, and still drafts)
 _INSPECTION_COLUMNS = """
             i.id, i.corner_id, c.project_id, c.north_south_street, c.east_west_street, c.corner_direction,
             i.status, i.requirements_met,
@@ -16,7 +16,9 @@ _INSPECTION_COLUMNS = """
             i.re_signed_at, i.re_signature_path,
             i.return_comment, i.returned_at, i.returned_by,
             NULLIF(concat_ws(' ', bu.first_name, bu.last_name), '') AS returned_by_name,
-            i.dot_pdf_path, i.created_at, i.updated_at, i.created_by,
+            i.dot_pdf_path, i.last_unlocked_at, i.last_unlocked_by,
+            NULLIF(concat_ws(' ', lu.first_name, lu.last_name), '') AS last_unlocked_by_name,
+            i.created_at, i.updated_at, i.created_by,
             (SELECT count(*)::int FROM icid.ped_ramp_tifs t WHERE t.inspection_id = i.id) AS tif_count,
             (SELECT count(*)::int FROM icid.ped_ramp_tifs t
              WHERE t.inspection_id = i.id AND t.status = 'draft') AS draft_tif_count"""
@@ -25,7 +27,8 @@ _FROM = """
         JOIN icid.ped_ramp_corners c ON c.corner_id = i.corner_id
         LEFT JOIN icid.users iu ON iu.uuid = i.inspector_uuid
         LEFT JOIN icid.users ru ON ru.uuid = i.re_uuid
-        LEFT JOIN icid.users bu ON bu.uuid = i.returned_by"""
+        LEFT JOIN icid.users bu ON bu.uuid = i.returned_by
+        LEFT JOIN icid.users lu ON lu.uuid = i.last_unlocked_by"""
 
 
 def _one(sql: str, params: tuple[Any, ...]) -> Optional[dict[str, Any]]:
@@ -151,3 +154,34 @@ def approve_inspection(inspection_id: UUID, re_uuid: UUID, signature_path: str,
               AND NOT EXISTS (SELECT 1 FROM icid.ped_ramp_tifs t WHERE t.inspection_id = ins.id AND t.status = 'draft')
             RETURNING ins.*"""
     return _changed(cte, (re_uuid, signature_path, dot_pdf_path, inspection_id))
+
+
+def unlock_inspection(inspection_id: UUID, admin_uuid: UUID) -> Optional[dict[str, Any]]:
+    """
+    Unlock an approved inspection, in one statement: back to draft with its approval undone (the RE, their signature,
+    the submit time, the requirements answer and the link to its filed DOT forms cleared; the inspector's signature
+    kept), the unlock recorded, and each of its approved TIFs back to draft with its signing cleared. The files stay
+    in Storage.
+    Takes the inspection's id and the admin's uuid.
+    Returns {id, tifs_reopened}, or None when none matches or it isn't approved.
+    """
+    sql = """
+        WITH unlocked AS (
+            UPDATE icid.ped_ramp_inspections
+            SET status = 'draft', re_uuid = NULL, re_signed_at = NULL, re_signature_path = NULL, submitted_at = NULL,
+                requirements_met = NULL, dot_pdf_path = NULL, last_unlocked_at = now(), last_unlocked_by = %s,
+                updated_at = now()
+            WHERE id = %s AND status = 'approved'
+            RETURNING id
+        ),
+        reopened AS (
+            UPDATE icid.ped_ramp_tifs t
+            SET status = 'draft', signer_name = NULL, signer_ny_license_no = NULL, signer_signature_path = NULL,
+                signed_at = NULL, signed_by_uuid = NULL, updated_at = now()
+            FROM unlocked
+            WHERE t.inspection_id = unlocked.id AND t.status = 'approved'
+            RETURNING t.id
+        )
+        SELECT unlocked.id, (SELECT count(*)::int FROM reopened) AS tifs_reopened
+        FROM unlocked;"""
+    return _one(sql, (admin_uuid, inspection_id))
