@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 from uuid import UUID
 
+from api.services.ped_ramp_exports import PedRampExportError
 from api.services.signatures import SignatureStorageError
 from tests.conftest import ADMIN_USER_ROW, UNSIGNED_USER_ROW, signed_in
 
@@ -15,6 +16,8 @@ INSPECTIONS = "api.queries.ped_ramp_inspections.run_query"
 CORNERS = "api.queries.ped_ramp_corners.run_query"
 PROJECTS = "api.queries.projects.run_query"
 SNAPSHOT = "api.v1.ped_ramp_inspections.snapshot_signature_for_inspection"
+PACKAGE = "api.v1.ped_ramp_inspections.store_inspection_package"
+SIGNED = "api.v1.ped_ramp_inspections.signed_download"
 
 ADMIN_ID = ADMIN_USER_ROW["uuid"]
 CORNER_ID = UUID("3e2f3a4b-5c6d-4e7f-8a8b-9c0d1e2f3a4b")
@@ -198,13 +201,37 @@ class TestApprove:
         signer = {**RE_ROW, "signature_path": "users/b3/signature.png"}
         with signed_in(signer) as re_user, patch(PROJECTS, return_value=AS_RE), \
              patch(SNAPSHOT, return_value="ped-ramp-inspections/i/re_1.png") as snapshot, \
+             patch(PACKAGE, return_value=f"inspections/{INSPECTION_ID}/p.zip") as package, \
              patch(INSPECTIONS, side_effect=[[SUBMITTED], [APPROVED]]) as run:
             response = re_user.post(f"{URL}/approve")
         assert response.status_code == 200 and response.json()["data"]["status"] == "approved"
         snapshot.assert_called_once_with("users/b3/signature.png", INSPECTION_ID, "re")
+        package.assert_called_once()
         sql, params = run.call_args.args
         assert "SET status = 'approved'" in sql and "t.status = 'draft'" in sql
-        assert params == (RE_ROW["uuid"], "ped-ramp-inspections/i/re_1.png", None, INSPECTION_ID)
+        assert params == (RE_ROW["uuid"], "ped-ramp-inspections/i/re_1.png", f"inspections/{INSPECTION_ID}/p.zip",
+                          INSPECTION_ID)
+
+    def test_forms_that_cant_be_filed_are_502_and_approve_nothing(self, admin_client):
+        with patch(INSPECTIONS, return_value=[SUBMITTED]) as run, patch(SNAPSHOT, return_value="p"), \
+             patch(PACKAGE, side_effect=PedRampExportError("Could not fill the DOT inspection form")):
+            response = admin_client.post(f"{URL}/approve")
+        assert (response.status_code, response.json()) == (502, {"detail": "Could not fill the DOT inspection form"})
+        assert run.call_count == 1  # read only
+
+    def test_an_approved_inspections_forms_download_through_a_signed_url(self, admin_client):
+        row = {**APPROVED, "dot_pdf_path": f"inspections/{INSPECTION_ID}/x.zip"}
+        signed = {"url": "https://s/x", "expires_at": CREATED.isoformat(), "file_name": "f.zip"}
+        with patch(INSPECTIONS, return_value=[row]), patch(SIGNED, return_value=signed) as sign:
+            response = admin_client.get(f"{URL}/dot-pdf")
+        assert response.status_code == 200 and response.json()["data"]["url"] == "https://s/x"
+        sign.assert_called_once_with(f"inspections/{INSPECTION_ID}/x.zip",
+                                     "3rd_Ave_and_38_Street_NE_DOT_ped_ramp_inspection.zip")
+
+    def test_no_forms_before_approval(self, admin_client):
+        with patch(INSPECTIONS, return_value=[SUBMITTED]), patch(SIGNED) as sign:
+            assert admin_client.get(f"{URL}/dot-pdf").status_code == 404
+        sign.assert_not_called()
 
     def test_a_draft_tif_blocks_it(self, admin_client):
         with patch(INSPECTIONS, return_value=[{**SUBMITTED, "tif_count": 2, "draft_tif_count": 1}]), \

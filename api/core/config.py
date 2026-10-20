@@ -47,3 +47,8 @@ PIR_IMAGE_RENDER_DPI: int = int(os.getenv("PIR_IMAGE_RENDER_DPI", "150"))
 # A PIR upload's caps: how many pages, and how big a page may render (megapixels at PIR_IMAGE_RENDER_DPI)
 PIR_UPLOAD_MAX_PAGES: int = int(os.getenv("PIR_UPLOAD_MAX_PAGES", "15"))
 PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE: float = float(os.getenv("PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE", "25"))
+
+# Ped ramp exports (Pedramp Phase 3): the DOT forms filled at an inspection's approval, and the listing's bulk ZIPs,
+# kept in this private bucket and handed out as signed download URLs
+PEDRAMP_EXPORT_BUCKET_NAME: str = os.getenv("PEDRAMP_EXPORT_BUCKET_NAME", "pedramp-exports")
+PEDRAMP_EXPORT_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_EXPORT_URL_EXPIRY_SECONDS", "600"))

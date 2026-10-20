@@ -38,7 +38,7 @@ CORNER_TEXT = {
 CORNER_REQUIRED = ("boro", "north_south_street", "east_west_street")
 
 
-def _clean_text(values: dict[str, Any], limits: dict[str, int]) -> dict[str, Any]:
+def clean_text_fields(values: dict[str, Any], limits: dict[str, int]) -> dict[str, Any]:
     """
     Trim the text fields of a body, blank ones to None, refusing one that is too long.
     Takes the raw values and the text fields' limits.
@@ -93,7 +93,7 @@ class CornerFields(BaseModel):
         Takes the value and the field's info.
         Returns the cleaned value; raises ValueError when too long.
         """
-        return _clean_text({info.field_name: value}, {info.field_name: CORNER_TEXT[info.field_name]})[info.field_name]
+        return clean_text_fields({info.field_name: value}, {info.field_name: CORNER_TEXT[info.field_name]})[info.field_name]
 
 
 class CornerCreate(CornerFields):
@@ -200,7 +200,7 @@ class PedrampSiteCreate(CornerFields):
         Takes the value and the field's info.
         Returns the cleaned value; raises ValueError when too long.
         """
-        return _clean_text({info.field_name: value}, {info.field_name: SITE_RAMP_TEXT[info.field_name]})[info.field_name]
+        return clean_text_fields({info.field_name: value}, {info.field_name: SITE_RAMP_TEXT[info.field_name]})[info.field_name]
 
     @model_validator(mode="after")
     def _required(self) -> "PedrampSiteCreate":
@@ -334,7 +334,7 @@ class RampAttributesIn(BaseModel):
         Takes the value and the field's info.
         Returns the cleaned value; raises ValueError when too long.
         """
-        return _clean_text({info.field_name: value}, {info.field_name: ATTRIBUTE_TEXT[info.field_name]})[info.field_name]
+        return clean_text_fields({info.field_name: value}, {info.field_name: ATTRIBUTE_TEXT[info.field_name]})[info.field_name]
 
 
 class AdaWarning(BaseModel):

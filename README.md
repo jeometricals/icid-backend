@@ -38,6 +38,8 @@ start without the two required ones.
 | `STORAGE_URL_EXPIRY_SECONDS` | no | `300` | Lifetime of an attachment's signed download URL |
 | `EXPORT_BUCKET_NAME` | no | `idr-exports` | Bucket for exported IDRs |
 | `EXPORT_URL_EXPIRY_SECONDS` | no | `600` | Lifetime of an export's signed download URL |
+| `PEDRAMP_EXPORT_BUCKET_NAME` | no | `pedramp-exports` | Bucket for ped ramp inspections' DOT forms (filled at approval) and bulk ZIPs |
+| `PEDRAMP_EXPORT_URL_EXPIRY_SECONDS` | no | `600` | Lifetime of a ped ramp export's signed download URL |
 | `SIGNATURE_BUCKET_NAME` | no | `signatures` | Bucket for signatures |
 | `SIGNATURE_URL_EXPIRY_SECONDS` | no | `300` | Lifetime of a signature's signed URL |
 | `PIR_IMAGE_BUCKET_NAME` | no | `pir-images` | Bucket for PIRs' scanned sheets |

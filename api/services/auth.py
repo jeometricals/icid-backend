@@ -28,6 +28,7 @@ from api.queries.pir_pages import get_page
 from api.queries.pirs import get_pir
 from api.queries.ped_ramp_corners import get_corner
 from api.queries.ped_ramp_inspections import get_inspection
+from api.queries.ped_ramp_tifs import get_tif
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.properties import get_property
 from api.queries.segments import get_segment
@@ -397,6 +398,15 @@ def inspection_member(inspection_id: UUID, user: UserOut = Depends(current_user)
     Returns the inspection dict; raises 404 or 403 as _readable_on_project does.
     """
     return _readable_on_project(get_inspection(inspection_id), user, "Inspection not found")
+
+
+def tif_member(tif_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one TIF: the signed-in user must be assigned to its ramp's project (in any role), or be an admin.
+    Takes the tif_id path parameter and the current user.
+    Returns the TIF dict; raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_tif(tif_id), user, "TIF not found")
 
 
 def task_order_member(task_order_id: UUID, user: UserOut = Depends(current_user)) -> dict:

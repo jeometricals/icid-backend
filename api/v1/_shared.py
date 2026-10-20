@@ -91,6 +91,20 @@ INSPECTION_APPROVED = "Inspection is approved — no further edits"
 INSPECTION_SUBMITTED = "Inspection is submitted — only the RE can edit"
 
 
+# What signing a ped ramp inspection or a TIF needs
+SIGNATURE_REQUIRED = "Signature required before signing an inspection"
+
+
+def require_roles(project_id: str, user: UserOut, roles: tuple[str, ...]) -> None:
+    """
+    Refuse a user who holds none of the roles on the project; an admin passes.
+    Takes the project id, the signed-in user and the roles that may pass.
+    Returns nothing; raises 403 "Role required: ..." otherwise.
+    """
+    if user.role != "admin" and not get_user_roles_on_project(user.uuid, project_id) & set(roles):
+        raise HTTPException(status_code=403, detail="Role required: " + "/".join(roles))
+
+
 def refuse_locked_corner(corner_id: Optional[UUID], project_id: str, user: UserOut) -> None:
     """
     Keep a corner, and its ramps, as its inspection's status allows: anyone who may write edits a draft (or a corner without an inspection); only the RE or an admin a submitted one; nobody an approved one.
