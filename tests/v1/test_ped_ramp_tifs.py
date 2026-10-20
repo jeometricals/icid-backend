@@ -161,8 +161,9 @@ class TestDeleteAndDownload:
         with signed_in(RE_ROW) as re_user, patch(PROJECTS, return_value=AS_RE), patch(TIFS, return_value=[DRAFT]) as run:
             assert re_user.delete(URL).status_code == 403
         assert run.call_count == 1
-        with patch(TIFS, side_effect=[[DRAFT], [{"id": TIF_ID, "photo_paths": []}]]) as run:
+        with patch(TIFS, side_effect=[[DRAFT], [{"id": TIF_ID, "photo_paths": ["tifs/t/1.jpg", "tifs/t/2.jpg"]}]]) as run,              patch("api.v1.ped_ramp_tifs.remove_photo_file") as remove:
             assert admin_client.delete(URL).status_code == 204
+        assert [call.args[0] for call in remove.call_args_list] == ["tifs/t/1.jpg", "tifs/t/2.jpg"]
         sql = run.call_args.args[0]
         assert "DELETE FROM icid.ped_ramp_photos ph USING target" in sql and "i.status <> 'approved'" in sql
 

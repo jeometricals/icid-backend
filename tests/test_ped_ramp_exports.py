@@ -4,7 +4,9 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from PIL import Image
 
+from api.services import dot_inspection_pdf
 from api.services.ped_ramp_exports import (
     PedRampExportError,
     corner_file_stem,
@@ -24,6 +26,28 @@ CORNER_ID = UUID("3e2f3a4b-5c6d-4e7f-8a8b-9c0d1e2f3a4b")
 INSPECTION_ID = UUID("4f3a4b5c-6d7e-4f8a-9b0c-1d2e3f4a5b6c")
 CORNER = {"corner_id": CORNER_ID, "project_id": "HWS0023", "boro": "Queens", "north_south_street": "3rd Ave",
           "east_west_street": "38 Street", "corner_direction": "NE", "ramps": []}
+
+
+@pytest.fixture(autouse=True)
+def photos():
+    """
+    Give every inspection and TIF no photos unless a test says otherwise, so no test reads them from Storage.
+    Yields {inspection, tif}: the mocks of inspection_photo_bytes and tif_photo_bytes.
+    """
+    with patch("api.services.ped_ramp_exports.inspection_photo_bytes", return_value={}) as inspection, \
+         patch("api.services.ped_ramp_exports.tif_photo_bytes", return_value=([], None)) as tif_photos:
+        yield {"inspection": inspection, "tif": tif_photos}
+
+
+def jpeg() -> bytes:
+    """
+    Make a small JPEG photo.
+    Takes nothing.
+    Returns its bytes.
+    """
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 48), (120, 140, 160)).save(buffer, "JPEG")
+    return buffer.getvalue()
 
 
 def ramp(number: int, ramp_type: str = "PERPENDICULAR", label: str | None = None) -> dict:
@@ -71,21 +95,35 @@ class TestPackage:
         data, kind = dot_package(CORNER, [ramp(1), ramp(2, "PARALLEL"), ramp(3)], [], {})
         assert kind == "zip" and members(data) == ["inspection_1.pdf", "inspection_2.pdf"]
 
+    def test_a_tifs_photos_and_layout_are_filled_into_it(self, photos):
+        one = ramp(1, label="R1")
+        photos["tif"].return_value = ([(1, "Existing", jpeg())], jpeg())
+        with patch("api.services.ped_ramp_exports.fill_tif_form", return_value=b"%PDF") as fill:
+            fill_tif(tif(one), CORNER, [one])
+        photos["tif"].assert_called_once_with(tif(one)["id"])
+        assert fill.call_args.args[3][0][:2] == (1, "Existing") and fill.call_args.args[4] is not None
+
     def test_a_tif_of_a_ramp_no_longer_at_the_corner_is_an_error(self):
         with pytest.raises(PedRampExportError):
             fill_tif(tif(ramp(5)), CORNER, [ramp(1)])
 
 
 class TestStore:
-    def test_it_reads_fills_and_stores_the_package(self):
-        with patch("api.services.ped_ramp_exports.get_corner", return_value=CORNER), \
-             patch("api.services.ped_ramp_exports.list_corner_ramps", return_value=[ramp(1)]), \
+    def test_it_reads_fills_and_stores_the_package_with_the_photos(self, photos):
+        one = ramp(1)
+        photos["inspection"].return_value = {str(one["property_id"]): [(1, "Ramp from the left", jpeg())]}
+        with patch("api.services.ped_ramp_exports.fill_inspection_forms",
+                   wraps=dot_inspection_pdf.fill_inspection_forms) as fill, \
+             patch("api.services.ped_ramp_exports.get_corner", return_value=CORNER), \
+             patch("api.services.ped_ramp_exports.list_corner_ramps", return_value=[one]), \
              patch("api.services.ped_ramp_exports.list_inspection_tifs", return_value=[]), \
              patch("api.services.ped_ramp_exports.upload_file") as upload:
             path = store_inspection_package({"id": INSPECTION_ID, "corner_id": CORNER_ID})
         bucket, stored, data, content_type = upload.call_args.args
         assert bucket == "pedramp-exports" and stored == path and content_type == "application/pdf"
         assert path.startswith(f"inspections/{INSPECTION_ID}/") and path.endswith(".pdf") and data.startswith(b"%PDF")
+        photos["inspection"].assert_called_once_with(INSPECTION_ID)
+        assert fill.call_args.args[2] == photos["inspection"].return_value
 
     def test_a_read_or_a_storage_failure_is_an_error(self):
         with patch("api.services.ped_ramp_exports.get_corner", return_value=None), \
