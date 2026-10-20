@@ -48,6 +48,11 @@ PIR_IMAGE_RENDER_DPI: int = int(os.getenv("PIR_IMAGE_RENDER_DPI", "150"))
 PIR_UPLOAD_MAX_PAGES: int = int(os.getenv("PIR_UPLOAD_MAX_PAGES", "15"))
 PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE: float = float(os.getenv("PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE", "25"))
 
+# Ped ramp exports (the DOT forms filled at approval, a listing's bulk downloads): a private bucket, handed out
+# through signed URLs. The main thread's S3 adds these same two settings; keep theirs on merge
+PEDRAMP_EXPORT_BUCKET_NAME: str = os.getenv("PEDRAMP_EXPORT_BUCKET_NAME", "pedramp-exports")
+PEDRAMP_EXPORT_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_EXPORT_URL_EXPIRY_SECONDS", "600"))
+
 # Ped ramp photos: an inspection's or a TIF's photos live in this private bucket, shown through signed URLs
 PEDRAMP_PHOTO_BUCKET_NAME: str = os.getenv("PEDRAMP_PHOTO_BUCKET_NAME", "pedramp-photos")
 PEDRAMP_PHOTO_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_PHOTO_URL_EXPIRY_SECONDS", "3600"))
