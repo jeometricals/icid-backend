@@ -98,9 +98,9 @@ def create_corner(project_id: str, created_by_uuid: UUID, data: dict[str, Any]) 
 
 def update_corner(corner_id: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
-    Write a corner's record whole, as an edit leaves it.
+    Write a corner's record whole, as an edit leaves it, and its borough and streets onto its live ramps in the same statement.
     Takes the corner's id and every written column's value keyed by column (one left out is written as None).
-    Returns the updated corner dict with its live ramps, or None when no corner matches.
+    Returns the updated corner dict with its live ramps as they were before the statement, or None when no corner matches.
     """
     sql = (
         """
@@ -112,6 +112,15 @@ def update_corner(corner_id: UUID, data: dict[str, Any]) -> Optional[dict[str, A
                 updated_at = now()
             WHERE corner_id = %s
             RETURNING *
+        ),
+        ramps AS (
+            UPDATE icid.properties p
+            SET boro = c.boro, intersection_street_1 = c.north_south_street,
+                intersection_street_2 = c.east_west_street, updated_at = now()
+            FROM c
+            WHERE p.corner_id = c.corner_id AND p.deleted_at IS NULL
+              AND (p.boro, p.intersection_street_1, p.intersection_street_2)
+                  IS DISTINCT FROM (c.boro, c.north_south_street, c.east_west_street)
         )
         SELECT"""
         + _CORNER_COLUMNS
@@ -153,4 +162,62 @@ def get_live_corner_of_project(corner_id: UUID, project_id: str) -> Optional[dic
         SELECT corner_id FROM icid.ped_ramp_corners
         WHERE corner_id = %s AND project_id = %s AND deleted_at IS NULL;"""
     rows = run_query(sql, (corner_id, project_id))
+    return rows[0] if rows else None
+
+
+def create_pedramp_site(project_id: str, created_by_uuid: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """
+    Add a ped ramp site in one statement: a live corner of the project at the same borough, streets (any case) and direction is reused, else one is added; then the ramp, a ped ramp property at it (its borough and streets the corner's), and an attributes row holding its label when one is given.
+    Takes the project id, the uuid of the user adding it, and the corner's and the ramp's values keyed by column.
+    Returns {corner_id, property_id, corner_reused}, or None on failure.
+    """
+    sql = (
+        """
+        WITH found AS (
+            SELECT corner_id, boro, north_south_street, east_west_street
+            FROM icid.ped_ramp_corners
+            WHERE project_id = %s AND deleted_at IS NULL AND boro = %s::icid.boro
+              AND lower(north_south_street) = lower(%s) AND lower(east_west_street) = lower(%s)
+              AND corner_direction = %s
+            ORDER BY created_at
+            LIMIT 1
+        ),
+        made AS (
+            INSERT INTO icid.ped_ramp_corners (project_id, """
+        + ", ".join(WRITTEN_COLUMNS)
+        + """, created_by)
+            SELECT %s, """
+        + ", ".join(placeholder for _, placeholder in _WRITTEN)
+        + """, %s
+            WHERE NOT EXISTS (SELECT 1 FROM found)
+            RETURNING corner_id, boro, north_south_street, east_west_street
+        ),
+        corner AS (
+            SELECT found.*, true AS reused FROM found
+            UNION ALL
+            SELECT made.*, false AS reused FROM made
+        ),
+        ramp AS (
+            INSERT INTO icid.properties (project_id, kind, boro, intersection_street_1, intersection_street_2,
+                                         quadrant, facing_street, ramp_type, corner_id, notes, created_by)
+            SELECT %s, 'ped_ramp', corner.boro, corner.north_south_street, corner.east_west_street,
+                   %s::icid.quadrant, %s::icid.facing_street, %s::icid.ramp_type, corner.corner_id, %s, %s
+            FROM corner
+            RETURNING id, corner_id
+        ),
+        label AS (
+            INSERT INTO icid.ped_ramp_attributes (property_id, ramp_id_label)
+            SELECT ramp.id, %s FROM ramp WHERE %s::text IS NOT NULL
+        )
+        SELECT ramp.corner_id, ramp.id AS property_id, corner.reused AS corner_reused
+        FROM ramp
+        JOIN corner ON corner.corner_id = ramp.corner_id;"""
+    )
+    params = (
+        project_id, data["boro"], data["north_south_street"], data["east_west_street"], data["corner_direction"],
+        project_id, *_written_values(data), created_by_uuid,
+        project_id, data["quadrant"], data["facing_street"], data["ramp_type"], data.get("notes"), created_by_uuid,
+        data.get("ramp_id_label"), data.get("ramp_id_label"),
+    )
+    rows = run_query(sql, params)
     return rows[0] if rows else None
