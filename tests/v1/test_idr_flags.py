@@ -99,7 +99,7 @@ def flag_row(flag_id: UUID = FLAG_ID, **overrides: Any) -> dict[str, Any]:
         "intersection_street_2": None, "quadrant": None, "facing_street": None, "pay_item_id": SF_ITEM,
         "pay_item_ref": "4.13 AAS", "budget_code": "HW0001Q-CONS", "pay_item_description": "4\" SIDEWALK",
         "unit": "SF", "quantity_sf": Decimal("25"), "amount": Decimal("25"), "state": "attributed",
-        "override": None, "in_task_order": True, "claimed_by_idr_id": None, "claimed_by_idr_number": None,
+        "override": None, "on_imported_site": True, "claimed_by_idr_id": None, "claimed_by_idr_number": None,
         "is_constructed": False, "constructed_on": None, "deleted_at": None, **overrides,
     }
 
@@ -420,13 +420,14 @@ class TestService:
 
 
 class TestQueries:
-    def test_the_live_list_reads_the_task_order_and_the_overrides(self):
+    def test_the_live_list_reads_the_imported_sites_and_the_overrides(self):
         with patch(IDR_FLAGS, return_value=[]) as run:
             list_idr_flags(IDR_ID, claimed_only=False)
         sql = " ".join(run.call_args.args[0].split())
-        assert "(tp.property_id IS NOT NULL OR a.action = 'include')" in sql
+        assert "(rs.property_id IS NOT NULL OR a.action = 'include')" in sql
+        assert "LEFT JOIN icid.idr_report_sites rs ON rs.idr_id = i.idr_id AND rs.property_id = p.id" in " ".join(sql.split())
+        assert "task_order" not in sql  # the task order no longer sets the scope (Slice U)
         assert "f.deleted_at IS NULL AND pg.deleted_at IS NULL AND pir.deleted_at IS NULL AND p.deleted_at IS NULL" in sql
-        assert "LEFT JOIN icid.task_orders t ON t.id = i.task_order_id AND t.deleted_at IS NULL" in sql
         assert "WHEN a.action = 'exclude' THEN 'excluded'" in sql
         assert run.call_args.args[1] == (IDR_ID,)
 
@@ -486,6 +487,6 @@ class TestQueries:
     def test_every_table_is_in_the_icid_schema(self):
         with patch(IDR_FLAGS, return_value=[]) as run:
             list_idr_flags(IDR_ID, claimed_only=False)
-        for table in ("flags", "pirs", "properties", "pir_pages", "idr_flag_attributions", "task_orders",
-                      "task_order_properties", "contract_items", "idrs"):
+        for table in ("flags", "pirs", "properties", "pir_pages", "idr_flag_attributions", "idr_report_sites",
+                      "contract_items", "idrs"):
             assert f"icid.{table} " in run.call_args.args[0]

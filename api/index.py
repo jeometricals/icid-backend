@@ -76,6 +76,7 @@ def include_routers(app: FastAPI):
     from api.v1.field_edits import router as field_edits_router
     from api.v1.idr_flags import router as idr_flags_router
     from api.v1.idr_segments import router as idr_segments_router
+    from api.v1.idr_report_sites import router as idr_report_sites_router
     from api.v1.idrs import router as idrs_router
     from api.v1.attachments import router as attachments_router
     from api.v1.contract_items import router as contract_items_router
@@ -135,6 +136,7 @@ def include_routers(app: FastAPI):
     app.include_router(field_edits_router)
     app.include_router(idr_flags_router)
     app.include_router(idr_segments_router)
+    app.include_router(idr_report_sites_router)
     app.include_router(idr_construction_reports_router)
     app.include_router(attachments_router)
     app.include_router(contract_items_router)

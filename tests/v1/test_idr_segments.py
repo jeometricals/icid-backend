@@ -69,7 +69,7 @@ def segment_row(segment_id: UUID = SEGMENT_ID, **overrides: Any) -> dict[str, An
         "intersection_street_1": None, "intersection_street_2": None, "quadrant": None, "facing_street": None,
         "pay_item_id": CURB_ITEM, "pay_item_ref": "4.08 AA", "budget_code": "HW-200(S)",
         "pay_item_description": "Concrete Curb (18\" Deep)", "unit": "LF", "amount": Decimal("20.00"),
-        "state": "attributed", "override": None, "in_task_order": True, "claimed_by_idr_id": None,
+        "state": "attributed", "override": None, "on_imported_site": True, "claimed_by_idr_id": None,
         "claimed_by_idr_number": None, "constructed_on": None, "deleted_at": None, **overrides,
     }
 
@@ -117,7 +117,8 @@ class TestTheView:
                                       "budget_code": "HW-200(S)", "description": "Concrete Curb (18\" Deep)",
                                       "unit": "LF", "amount": 25.5, "segment_count": 2}]
         assert data["segments"][0]["display_address"] == "156 22nd ST"
-        assert "tp.property_id IS NOT NULL OR a.action = 'include'" in run.call_args.args[0]
+        assert "rs.property_id IS NOT NULL OR a.action = 'include'" in run.call_args.args[0]
+        assert "task_order" not in run.call_args.args[0]
 
     def test_a_segment_without_a_pay_item_in_lf_is_unmapped(self, admin_client):
         rows = [segment_row(pay_item_id=None, pay_item_ref=None, budget_code=None, unit=None, amount=None)]
