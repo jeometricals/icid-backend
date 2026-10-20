@@ -893,7 +893,15 @@ Any change must follow these.
     and `fill_tif_form(tif, corner, ramp, photos, layout, signature_png)` take plain dicts and bytes and return PDFs that
     stay fillable (DOT refuses scanned or flattened forms: appearances generated, `NeedAppearances` set). A cut-through
     pair takes slot 1 (page 10), other ramps the next free slot (pages 8/9, then 12/13); more ramps start another copy
-    of the whole form, so a 3-ramp corner is two PDFs. Each slot has six photo boxes, by photo number, the caption in a
+    with the corner page, so a 3-ramp corner is two PDFs.
+    Each copy is trimmed after filling (Slice T3, `DotForm.keep_pages`), still fillable: DOT's instruction pages 1-6 are
+    dropped; it keeps the corner page, each used slot's page of its ramp type, and a slot's photo log only when it has
+    photos (pages = 1 + slots used + slots with photos), and the AcroForm is pruned to fields with a widget on a kept
+    page. Only measured ramps print (`is_measured`: any `*_pct` / `*_in` attribute set); unmeasured ones are left out
+    before slots are assigned, so they take no slot and their photos neither print nor count in `photos_left_out`, and
+    a 3-ramp corner is two PDFs only when all three are measured. A cut-through pair prints (page 10) when either side
+    is measured, the other side's fields blank. A corner with no measured ramp is one copy of the corner page alone.
+    Section 4 and the number of ramps on the corner page still count every ramp. DOT's "1 of 8" footers stay. Each slot has six photo boxes, by photo number, the caption in a
     band at the box's foot; the rest are counted in `photos_left_out`. Photos are shrunk to 1600 px JPEG q80. The TIF's
     `/Sig` field is never set: the RE's signature PNG is drawn over it, not a cryptographic signature ("re-sign in
     Acrobat if DOT requires one"). DOT's internal-use block and the ramp-location diagram are never filled; each module
