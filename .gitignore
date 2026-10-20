@@ -22,3 +22,6 @@ venv/
 # ...and the DDC cylinder data sheet scripts/merge_conc_cyl_template.py adds to the template
 !templates/conc_cyl_source.xlsx
 .pytest_cache/
+
+# Claude Code agent worktrees (each its own checkout)
+.claude/worktrees/
