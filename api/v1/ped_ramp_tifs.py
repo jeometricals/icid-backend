@@ -20,6 +20,7 @@ from api.schemas.ped_ramp_inspection import DownloadOut, DownloadResponse
 from api.schemas.ped_ramp_tif import TifApprove, TifListResponse, TifOut, TifResponse, TifUpdate
 from api.services.auth import current_admin, current_user, inspection_member, no_demo_property_writes, tif_member
 from api.services.ped_ramp_exports import PedRampExportError, signed_download, store_tif, tif_download_name
+from api.services.ped_ramp_photos import remove_photo_file
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_tif
 from api.v1._shared import (
     INSPECTION_APPROVED,
@@ -152,7 +153,7 @@ def approve_tif_record(
 @router.delete("/{tif_id}", status_code=204, response_class=Response)
 def delete_tif_record(found: dict = Depends(tif_member), admin: UserOut = Depends(current_admin)) -> Response:
     """
-    Delete a TIF for good, draft or approved, with its photos' rows; not once its inspection is approved. Admins only.
+    Delete a TIF for good, draft or approved, with its photos (their rows in the statement, then their files, best-effort); not once its inspection is approved. Admins only.
     Takes the TIF (loaded by tif_member) and the signed-in admin.
     Returns 204; raises 403 for a user who isn't an admin, 404 for an unknown TIF, 409 for an approved inspection's and 500 if it can't be deleted.
     """
@@ -163,8 +164,8 @@ def delete_tif_record(found: dict = Depends(tif_member), admin: UserOut = Depend
         raise HTTPException(status_code=500, detail="Failed to delete TIF")
     if result["id"] is None:
         raise HTTPException(status_code=409, detail=INSPECTION_APPROVED)
-    if result["photo_paths"]:
-        logger.info("TIF %s deleted; its photo files stay in Storage: %s", found["id"], result["photo_paths"])
+    for path in result["photo_paths"]:
+        remove_photo_file(path)
     logger.info("TIF deleted: tif_id=%s admin=%s at=%s", found["id"], admin.uuid, datetime.now(timezone.utc).isoformat())
     return Response(status_code=204)
 

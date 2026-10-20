@@ -26,6 +26,7 @@ from api.queries.ped_ramp_corners import get_corner
 from api.queries.ped_ramp_tifs import list_inspection_tifs
 from api.services.dot_inspection_pdf import fill_inspection_forms
 from api.services.dot_tif_pdf import fill_tif_form
+from api.services.ped_ramp_photos import inspection_photo_bytes, tif_photo_bytes
 from api.services.signatures import fetch_signature_file
 from api.storage.client import create_signed_url, upload_file
 
@@ -83,15 +84,16 @@ def _signature(path: Optional[str]) -> Optional[bytes]:
 
 def fill_tif(tif: dict[str, Any], corner: dict[str, Any], ramps: list[dict[str, Any]]) -> bytes:
     """
-    Fill DOT's TIF for one TIF, with its RE's signature once approved.
+    Fill DOT's TIF for one TIF, with its photos, its site layout and, once approved, its RE's signature.
     Takes the TIF dict, its corner and the corner's ramps (as list_corner_ramps returns them).
     Returns the PDF's bytes; raises PedRampExportError when its ramp isn't among the corner's or the form can't be filled.
     """
     ramp = next((row for row in ramps if str(row["property_id"]) == str(tif["property_id"])), None)
     if ramp is None:
         raise PedRampExportError("The TIF's ramp is no longer at its corner")
+    photos, layout = tif_photo_bytes(tif["id"])
     try:
-        return fill_tif_form(tif, corner, ramp, [], None, _signature(tif.get("signer_signature_path")))
+        return fill_tif_form(tif, corner, ramp, photos, layout, _signature(tif.get("signer_signature_path")))
     except Exception as exc:
         logger.error("Could not fill the DOT TIF for %s: %s", tif["id"], exc)
         raise PedRampExportError("Could not fill the DOT TIF") from exc
@@ -148,8 +150,7 @@ def store_inspection_package(inspection: dict[str, Any]) -> str:
     tifs = list_inspection_tifs(inspection["id"])
     if corner is None or ramps is None or tifs is None:
         raise PedRampExportError("Could not read the inspection to fill its DOT forms")
-    # Photos join the forms once they can be uploaded (S4)
-    data, kind = dot_package(corner, ramps, tifs, {})
+    data, kind = dot_package(corner, ramps, tifs, inspection_photo_bytes(inspection["id"]))
     return _store(f"inspections/{inspection['id']}/{uuid4().hex}.{kind}", data, kind)
 
 
