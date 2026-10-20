@@ -50,20 +50,20 @@ def _project_segment(idr: dict[str, Any], segment_id: UUID) -> dict[str, Any]:
 
 def _in_default_scope(idr: dict[str, Any], segment_id: UUID) -> bool:
     """
-    Whether the IDR holds a segment by default (it is on one of its task order's properties).
+    Whether the IDR holds a segment by default (it is on one of the sites its reports imported).
     Takes the IDR dict and the segment's uuid.
     Returns True or False; raises 500 when it can't be told.
     """
     in_scope = segment_in_default_scope(idr["idr_id"], segment_id)
     if in_scope is None:
-        raise HTTPException(status_code=500, detail="Failed to read the IDR's task order")
+        raise HTTPException(status_code=500, detail="Failed to read the IDR's imported sites")
     return in_scope
 
 
 @router.get("/{idr_id}/attributed-segments", response_model=IdrSegmentsResponse)
 def get_idr_segments(idr_id: UUID) -> IdrSegmentsResponse:
     """
-    List the curb segments an IDR covers and what they come to per pay item. Before approval it is live: the live segments on its task order's properties and those included by an override, each attributed, excluded or claimed by another IDR, rolled up from the attributed ones. Once approved it is frozen: the segments it claimed, and the rollup it wrote at approval. For anyone who can read the IDR.
+    List the curb segments an IDR covers and what they come to per pay item. Before approval it is live: the live segments on the sites its reports imported and those included by an override, each attributed, excluded or claimed by another IDR, rolled up from the attributed ones. Once approved it is frozen: the segments it claimed, and the rollup it wrote at approval. For anyone who can read the IDR.
     Takes the IDR uuid as a path parameter.
     Returns an IdrSegmentsResponse; raises 404 for an unknown IDR and 500 when the segments can't be read.
     """
@@ -74,7 +74,7 @@ def get_idr_segments(idr_id: UUID) -> IdrSegmentsResponse:
 def exclude_idr_segment(segment_id: UUID, idr: dict = Depends(attribution_editor),
                         user: UserOut = Depends(current_user)) -> IdrSegmentsResponse:
     """
-    Leave a segment out of an IDR: one on its task order's properties is excluded by an override; one it had included is dropped back out. Excluding one already out changes nothing. Who may: as for flags.
+    Leave a segment out of an IDR: one on the sites its reports imported is excluded by an override; one it had included is dropped back out. Excluding one already out changes nothing. Who may: as for flags.
     Takes the segment uuid as a path parameter, the IDR (loaded and checked as for flags) and the signed-in user.
     Returns the IDR's segments (IdrSegmentsResponse); raises 403, 404 and 409 as the flag routes do, 404 (no such segment in its project) and 409 (another IDR claimed it).
     """
@@ -92,7 +92,7 @@ def exclude_idr_segment(segment_id: UUID, idr: dict = Depends(attribution_editor
 def include_idr_segment(segment_id: UUID, idr: dict = Depends(attribution_editor),
                         user: UserOut = Depends(current_user)) -> IdrSegmentsResponse:
     """
-    Put a segment back into an IDR: one on its task order's properties loses its exclusion; one from elsewhere in its project is included by an override. Including one already in changes nothing. Who may: as for flags.
+    Put a segment back into an IDR: one on the sites its reports imported loses its exclusion; one from elsewhere in its project is included by an override. Including one already in changes nothing. Who may: as for flags.
     Takes the segment uuid as a path parameter, the IDR (loaded and checked as for flags) and the signed-in user.
     Returns the IDR's segments (IdrSegmentsResponse); raises 403, 404 and 409 as the flag routes do, 404 (no such segment in its project), 400 (a deleted segment, or one on a deleted page, PIR or property) and 409 (another IDR claimed it).
     """

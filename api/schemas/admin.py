@@ -91,6 +91,7 @@ class UserReferences(BaseModel):
     ped_ramp_inspections: int
     ped_ramp_tifs: int
     ped_ramp_photos: int
+    idr_report_sites: int
 
 
 class UserHasHistory(BaseModel):

@@ -40,7 +40,7 @@ class IdrSegment(BaseModel):
     amount: Optional[float] = None
     state: FlagState
     override: Optional[Literal["exclude", "include"]] = None
-    in_task_order: bool
+    on_imported_site: bool
     claimed_by_idr_id: Optional[UUID] = None
     claimed_by_idr_number: Optional[str] = None
     constructed_on: Optional[date] = None

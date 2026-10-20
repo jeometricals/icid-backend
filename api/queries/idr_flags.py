@@ -2,8 +2,8 @@
 SQL for which flags an IDR covers: its attribution (icid.idr_flag_attributions, the overrides) and its claims
 (flags.claimed_by_idr_id, set when it is approved).
 
-An IDR's flags by default are the live flags on its task order's properties (none without a task order); an
-override excludes one of those or includes one from elsewhere in its project. Approval claims them: the statement
+An IDR's flags by default are the live flags on the sites its reports imported (icid.idr_report_sites, Slice U; none
+without one); an override excludes one of those or includes one from elsewhere in its project. Approval claims them: the statement
 that approves the IDR marks them constructed, and the one that unlocks or deletes it releases them, as data-modifying
 CTEs built here (there are no multi-statement transactions).
 """
@@ -27,7 +27,7 @@ _FLAG_COLUMNS = f"""
             CASE WHEN ci.contract_item_id IS NULL THEN NULL ELSE {FLAG_UNIT} END AS unit,
             {FLAG_QUANTITY} AS quantity_sf,
             CASE WHEN ci.contract_item_id IS NULL THEN NULL ELSE {FLAG_AMOUNT} END AS amount,
-            a.action AS override, (tp.property_id IS NOT NULL) AS in_task_order,
+            a.action AS override, (rs.property_id IS NOT NULL) AS on_imported_site,
             f.claimed_by_idr_id, claimer.idr_number AS claimed_by_idr_number, f.is_constructed, f.constructed_on,
             f.deleted_at,
             CASE
@@ -44,15 +44,14 @@ _FROM = f"""
         JOIN icid.flags f ON f.pir_id = pir.id
         LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id
         LEFT JOIN icid.idr_flag_attributions a ON a.idr_id = i.idr_id AND a.flag_id = f.id
-        LEFT JOIN icid.task_orders t ON t.id = i.task_order_id AND t.deleted_at IS NULL
-        LEFT JOIN icid.task_order_properties tp ON tp.task_order_id = t.id AND tp.property_id = p.id
+        LEFT JOIN icid.idr_report_sites rs ON rs.idr_id = i.idr_id AND rs.property_id = p.id
         LEFT JOIN icid.contract_items ci ON ci.contract_item_id = f.pay_item_id
         LEFT JOIN icid.idrs claimer ON claimer.idr_id = f.claimed_by_idr_id{QUANTITY_LATERALS}"""
 # A flag drawn now: it, its page, its PIR and its property are live
 _LIVE = "f.deleted_at IS NULL AND pg.deleted_at IS NULL AND pir.deleted_at IS NULL AND p.deleted_at IS NULL"
-# Which of an IDR's project's flags it lists: before approval, the live ones on its task order's properties or
-# included; once approved, those it claimed (whatever has happened to them since)
-_IN_SCOPE = f"({_LIVE} AND (tp.property_id IS NOT NULL OR a.action = 'include'))"
+# Which of an IDR's project's flags it lists: before approval, the live ones on the sites its reports imported
+# (icid.idr_report_sites, Slice U) or included; once approved, those it claimed (whatever has happened to them since)
+_IN_SCOPE = f"({_LIVE} AND (rs.property_id IS NOT NULL OR a.action = 'include'))"
 _CLAIMED = "f.claimed_by_idr_id = i.idr_id"
 # How an IDR's flags are listed: by site, then page, then the order they were drawn in
 _ORDER = """
@@ -73,7 +72,7 @@ IN_FLIGHT_FLAG_IDS = (
 
 def list_idr_flags(idr_id: UUID, claimed_only: bool) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch the flags an IDR lists: before approval, the live flags in its scope (on its task order's properties, or included by an override), each with its state; once approved, the flags it claimed.
+    Fetch the flags an IDR lists: before approval, the live flags in its scope (on the sites its reports imported, or included by an override), each with its state; once approved, the flags it claimed.
     Takes the IDR's uuid and whether to list only the flags it claimed (an approved IDR).
     Returns the flag dicts (see _FLAG_COLUMNS) by site, page and drawing order; [] for an unknown IDR; None on failure.
     """
@@ -87,19 +86,17 @@ def list_idr_flags(idr_id: UUID, claimed_only: bool) -> Optional[list[dict[str, 
 
 def in_default_scope(idr_id: UUID, flag_id: UUID) -> Optional[bool]:
     """
-    Whether a flag is on one of the properties of an IDR's task order, so the IDR holds it without an override.
+    Whether a flag is on one of the sites an IDR's reports imported, so the IDR holds it without an override.
     Takes the IDR's and the flag's uuids.
-    Returns True or False (False for an IDR without a live task order), or None on failure.
+    Returns True or False, or None on failure.
     """
     sql = """
         SELECT EXISTS (
             SELECT 1
-            FROM icid.idrs i
-            JOIN icid.task_orders t ON t.id = i.task_order_id AND t.deleted_at IS NULL
-            JOIN icid.task_order_properties tp ON tp.task_order_id = t.id
-            JOIN icid.pirs pir ON pir.property_id = tp.property_id
+            FROM icid.idr_report_sites rs
+            JOIN icid.pirs pir ON pir.property_id = rs.property_id
             JOIN icid.flags f ON f.pir_id = pir.id
-            WHERE i.idr_id = %s AND f.id = %s
+            WHERE rs.idr_id = %s AND f.id = %s
         ) AS in_scope;
     """
     rows = run_query(sql, (idr_id, flag_id))

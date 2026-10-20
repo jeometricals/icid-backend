@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 052 (and 050b, the pedramp buckets) is in the live database (041 was skipped). A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 052 (and 050b, the pedramp buckets) is in the live database (041 was skipped); 053 (Slice U) must be run before Slice U's code is deployed. A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `dot-forms.md`: DOT's fillable forms, field by field. `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. `dot_ped_ramp_inspection_v1.6.pdf` and `dot_tif_v1.9.pdf` are DOT's fillable forms as published, filled by the `dot_*_pdf.py` services. |
@@ -176,8 +176,8 @@ Any change must follow these.
       orders; PIRs they digitized, signed as built or deleted; flags they created or deleted; PIR pages they
       replaced or deleted; non-assessable areas, features, segments and match lines they created or deleted; IDR flag
       and segment attributions they set; ped ramp corners they added or deleted; ped ramp inspections they started,
-      signed, approved or returned, TIFs they drafted or signed, and ped ramp photos they uploaded. Any of those is a
-      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (41 in `schema.sql`,
+      signed, approved or returned, TIFs they drafted or signed, ped ramp photos they uploaded, and sites they imported into reports. Any of those is a
+      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (42 in `schema.sql`,
       `users.deleted_by` the one not counted; the `deleted_by` of a property, a task order, a PIR, a flag, a PIR
       page, an area, a feature or a segment, an attribution's `set_by` and a PIR's
       `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
@@ -1193,9 +1193,12 @@ Any change must follow these.
   - **Who:** `writable_pir` (members and admins, not demo users) and `refuse_deleted_pir_for_member`.
 - **IDR flags** (R1f, migration 037; `api/v1/idr_flags.py`, `api/services/idr_flags.py`, `api/queries/idr_flags.py`,
   `api/schemas/idr_flag.py`): an IDR's pay items for sidewalk work come from the PIR flags it covers, as a live rollup.
-  - **Scope.** An IDR may name a task order (`idrs.task_order_id`, set on create or through the header; a live one of
-    its project). By default it covers the live flags on that task order's properties (a live flag on a live page of
-    a live PIR of a live property); without a task order, none. **Overrides** (`icid.idr_flag_attributions`, one per
+  - **Scope (Slice U).** By default an IDR covers the live flags on the sites its reports imported
+    (`icid.idr_report_sites`; a live flag on a live page of a live PIR of a live property); without an imported site,
+    none, and an approval then claims none. The task order (`idrs.task_order_id`, set on create or through the header)
+    no longer sets the scope; it is kept. Approved IDRs list what they claimed, untouched; migration 053 imported each
+    approved IDR's claimed sites into its first report, so unlocking and approving one again claims them again.
+    **Overrides** (`icid.idr_flag_attributions`, one per
     IDR and flag) change that: `exclude` leaves a default flag out, `include` brings one in from elsewhere in the
     project. Including a default flag, or excluding an included one, just drops the override. Overrides survive
     returns, unlocks and deletes.
@@ -1234,10 +1237,28 @@ Any change must follow these.
     (`_with_flag_lines` in `api/services/export.py`), live for a draft, frozen for an approved IDR.
   - Flag responses carry `claimed_by_idr_id`, `claimed_by_idr_number` and `constructed_on`; IDR responses carry
     `task_order_id`.
+- **Report sites** (Slice U2, migration 053; `api/v1/idr_report_sites.py`, `api/queries/idr_report_sites.py`,
+  `api/schemas/idr_report_site.py`): the sites a report imports, `icid.idr_report_sites`, each a live property of the
+  IDR's project (sidewalk or ped ramp) with the work done there (`work_type`: `excavation`, `concrete`,
+  `pavement_restoration`, `other` with `work_type_other`, required, trimmed, at most 200). A site is imported once per
+  IDR (409 `Already in {report} on this IDR` with `existing_report_id`); the same site can be in IDRs of other days. A
+  composite foreign key to `(idr_reports.report_id, idr_id)` keeps a row's IDR its report's; it goes with its report and
+  its IDR.
+  - **What they do:** an IDR's flags and curb segments are those on its imported sites (see "IDR flags", Scope), claimed
+    at approval. The report's description is written from them by the frontend; the backend stores no text for them.
+  - **Which reports:** GEN (an auto-generated one too), SWCB, AC, CONC_MIX and CONC_CYL (400 for a DSP); the UI offers
+    importing on SWCB for the pilot.
+  - **Who:** as for an IDR's flags (`attribution_editor`): its inspector on a draft, the stage's reviewer in review, an
+    admin either way; never a demo user (the routes sit under `/v1/idrs`, behind `demo_idr_fence`), never once it is
+    submitted and not yet accepted, approved or deleted. Reading is for anyone who can read the IDR.
+  - **No counting twice:** an import is 409 when a report of the IDR (not an auto-generated General) holds by hand a pay
+    item the site's live, unclaimed flags or measured curb segments would fill (`site_pay_item_keys`), naming the item
+    and the report. A report save already refuses the reverse (`refuse_flag_filled_pay_items`).
+  - `added_by` names a user, so `count_user_references` counts it.
 - **Curb billing** (migrations 044 and 045; `api/v1/idr_segments.py`, `api/services/idr_segments.py`,
   `api/queries/idr_segments.py`, `api/schemas/idr_segment.py`): an IDR's curb segments are attributed, claimed and
   billed exactly as its flags are (see "IDR flags"), side by side with them.
-  - **Scope and overrides.** By default the live segments on its task order's properties; `icid.idr_segment_attributions`
+  - **Scope and overrides.** By default the live segments on the sites its reports imported (Slice U); `icid.idr_segment_attributions`
     excludes one or includes one from elsewhere in the project. `GET /v1/idrs/{id}/attributed-segments`, and `POST
     .../{segment_id}/exclude` and `/include`, for the same people as the flag routes (`attribution_editor`, shared).
   - **Measured in LF.** A segment's amount is its `length_ft` when its pay item's unit is LF (`SEGMENT_AMOUNT`); a
