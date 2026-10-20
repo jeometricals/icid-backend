@@ -42,9 +42,14 @@ class TaskOrderBase(BaseModel):
 
 
 class TaskOrderListItem(TaskOrderBase):
-    """A task order in a project's list: how many of its bundled properties aren't deleted, not the properties."""
+    """
+    A task order in a project's list: how many of its bundled properties aren't deleted, in all and of each kind
+    (sidewalks, ped ramps), not the properties.
+    """
 
     property_count: int
+    sidewalk_count: int = 0
+    ped_ramp_count: int = 0
 
 
 class TaskOrderDetail(TaskOrderBase):

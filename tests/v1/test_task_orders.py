@@ -126,6 +126,15 @@ class TestListTaskOrders:
         assert "(%s OR t.deleted_at IS NULL)" in sql and "ORDER BY t.task_order_number;" in sql
         assert params == ("HWS0023", False)
 
+    def test_each_counts_its_sidewalks_and_ped_ramps(self, admin_client):
+        row = {**TASK_ORDER_ROW, "property_count": 3, "sidewalk_count": 1, "ped_ramp_count": 2}
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(TASKS, return_value=[row]) as run:
+            data = admin_client.get(LIST_URL).json()["data"][0]
+        assert (data["sidewalk_count"], data["ped_ramp_count"]) == (1, 2)
+        one_line = flat(run.call_args.args[0])
+        assert "AND p.deleted_at IS NULL AND p.kind = 'sidewalk') AS sidewalk_count" in one_line
+        assert "AND p.deleted_at IS NULL AND p.kind = 'ped_ramp') AS ped_ramp_count" in one_line
+
     def test_an_admin_can_ask_for_the_deleted_ones_too(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(TASKS, return_value=[]) as run:
             admin_client.get(LIST_URL, params={"include_deleted": "true"})

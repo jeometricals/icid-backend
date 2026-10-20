@@ -4,7 +4,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
-from api.queries.ped_ramp_corners import create_corner, get_corner, list_corners, soft_delete_corner, update_corner
+from api.queries.ped_ramp_corners import (
+    create_corner,
+    create_pedramp_site,
+    get_corner,
+    list_corners,
+    soft_delete_corner,
+    update_corner,
+)
 from api.schemas.auth import UserOut
 from api.schemas.ped_ramp import (
     CORNER_REQUIRED,
@@ -15,6 +22,9 @@ from api.schemas.ped_ramp import (
     CornerUpdate,
     InspectionReport,
     InspectionReportResponse,
+    PedrampSiteCreate,
+    PedrampSiteOut,
+    PedrampSiteResponse,
 )
 from api.services.auth import (
     corner_member,
@@ -38,6 +48,8 @@ router = APIRouter(prefix="/v1/ped-ramp-corners", tags=["Ped ramp corners"], dep
 CORNER_DELETED = "Corner is deleted"
 # The fields a null clears on an edit: all but the required ones
 _CLEARABLE = set(CornerUpdate.model_fields) - set(CORNER_REQUIRED)
+# A corner's fields its ramps copy: an edit of one rewrites its live ramps
+_RAMP_LOCATION = ("boro", "north_south_street", "east_west_street")
 
 
 def _writable_corner(found: dict = Depends(corner_member), user: UserOut = Depends(no_demo_property_writes)) -> dict:
@@ -109,6 +121,29 @@ def create_project_corner(project_id: str, body: CornerCreate, user: UserOut = D
     return _response(row, "Corner created")
 
 
+@project_router.post(
+    "/{project_id}/pedramp-sites",
+    response_model=PedrampSiteResponse,
+    status_code=201,
+    dependencies=[Depends(no_demo_property_writes)],
+)
+def create_project_pedramp_site(
+    project_id: str, body: PedrampSiteCreate, user: UserOut = Depends(project_member)
+) -> PedrampSiteResponse:
+    """
+    Add a ped ramp site, its corner and the ramp at it, in one statement, created by the signed-in user. A live corner of the project at the same borough, streets (any case) and direction is reused as it stands (the corner fields sent are then ignored). For a user on the project, in any role, or an admin; not a demo user.
+    Takes the project id as a path parameter, the corner's fields (borough, two streets and direction required) and the ramp's (quadrant, facing_street, ramp_type, optional ramp_id_label and notes) in the body, and the user.
+    Returns 201 with a PedrampSiteResponse ({corner_id, property_id, corner_reused}); raises 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for a missing, unknown or over-long value and 500 if it can't be saved.
+    """
+    row = create_pedramp_site(project_id, user.uuid, body.model_dump())
+
+    if row is None:
+        raise HTTPException(status_code=500, detail="Failed to save ped ramp site")
+
+    message = "Ramp added at an existing corner" if row["corner_reused"] else "Corner and ramp created"
+    return PedrampSiteResponse(status="success", message=message, data=PedrampSiteOut.model_validate(row))
+
+
 @router.get("/{corner_id}", response_model=CornerResponse)
 def get_corner_record(found: dict = Depends(corner_member)) -> CornerResponse:
     """
@@ -127,7 +162,7 @@ def update_corner_record(
     user: UserOut = Depends(current_user),
 ) -> CornerResponse:
     """
-    Change some of a corner, merged over it and checked whole as a new one. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out keeps its value; a null clears it, but for the borough and the two streets, where it counts as left out.
+    Change some of a corner, merged over it and checked whole as a new one; a new borough or street is written onto its live ramps too. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out keeps its value; a null clears it, but for the borough and the two streets, where it counts as left out.
     Takes the corner's id as a path parameter, the fields to change in the body, the corner (loaded by _writable_corner) and the user.
     Returns a CornerResponse with the corner as it now is; raises 400 when nothing is sent or a user who isn't an admin edits a deleted corner, 403 for a demo user or a user who isn't on its project, 404 for an unknown corner and 422 for an unknown or over-long value.
     """
@@ -139,6 +174,10 @@ def update_corner_record(
 
     if row is None:
         raise HTTPException(status_code=404, detail="Corner not found")
+
+    if any(row[field] != found[field] for field in _RAMP_LOCATION):
+        # The statement's own read saw its ramps before it rewrote their streets
+        row = get_corner(corner_id) or row
 
     return _response(row, "Corner updated")
 

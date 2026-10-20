@@ -47,7 +47,7 @@ auth routes:
   `/properties`, `/task-orders`; `/v1/contract_items/`
 - **Sites:** `/v1/properties/{id}` (with `/admin/soft-delete`, `/admin/undelete`, `/pir`, `/pirs`,
   `/construction-report`, `/ped-ramp-attributes`); `/v1/ped-ramp-corners/{id}` (with `/inspection-report` and its
-  `.pdf`; a project's under `/v1/projects/{id}/ped-ramp-corners`); `/v1/task-orders/{id}` (with its admin routes, `/properties/{property_id}`,
+  `.pdf`; a project's under `/v1/projects/{id}/ped-ramp-corners`, and a corner with a ramp at once under `/pedramp-sites`); `/v1/task-orders/{id}` (with its admin routes, `/properties/{property_id}`,
   `/progress-rollup`)
 - **PIRs and drawings:** `/v1/pirs/{id}` (with its admin routes, `/image/upload-request`, `/image/complete`, `/pages`,
   `/flags`, `/features`, `/segments`, `/match-lines`, `/import`, and the deprecated R1d routes); `/v1/pir-pages/{id}`
@@ -831,7 +831,15 @@ Any change must follow these.
     a sidewalk can't have one, 422). Section 4, the corner's ramp types, is read off its ramps. `dot_corner_id` is the
     form's CORNER ID, apart from `corner_number` (CORNER №). Writes follow Properties: members and admins, not demo users
     (`no_demo_property_writes`), a deleted corner the admin's; DELETE is an admin's soft delete, and there is no
-    un-delete route. `corner_member` checks a corner by id.
+    un-delete route. `corner_member` checks a corner by id. **A corner's borough and streets are its ramps'**: PATCH
+    writes them onto its live ramps in the same statement (`intersection_street_1` the N-S street, `_2` the E-W), and
+    the route reads the corner again when they changed.
+  - **A ped ramp site** (Slice R; `POST /v1/projects/{id}/pedramp-sites`, `create_pedramp_site`): the UI's one unit, a
+    corner and a ramp at it, added in one statement. A live corner of the project at the same borough, N-S and E-W
+    street (any case) and `corner_direction` is reused as it stands (the corner fields sent are ignored;
+    `corner_reused: true`), else one is added; the ramp takes the corner's borough and streets, and its `ramp_id_label`
+    goes into an attributes row of its own. `corner_direction` is required here only (an API rule: the column stays
+    nullable). Who: as for creating a corner.
   - **A ramp's attributes** (`icid.ped_ramp_attributes`, keyed by property) are its section 5. PUT writes them whole;
     a field of another ramp type than the property's is a 422 (`COMMON_FIELDS`, `TYPE_FIELDS`). A cut-through's two
     ramps are two sites, each with its own row, the shared length and clearance kept on both.
@@ -861,7 +869,9 @@ Any change must follow these.
       them, and the daily cleanup with them). A demo user on another project still gets 404 first.
     - **A soft-deleted task order is the admin's**: anyone else gets 400 `Task order is deleted` on PATCH and
       unbundle, and bundling into one is 400 for everyone, so nobody changes what an un-delete would restore.
-  - **Two shapes:** `TaskOrderListItem` (the list, with `property_count`) and `TaskOrderDetail` (every other route,
+  - **Either kind bundles** (sidewalks and ped ramps, mixed in one task order); nothing filters by kind.
+  - **Two shapes:** `TaskOrderListItem` (the list, with `property_count`, and `sidewalk_count` and `ped_ramp_count`
+    for its kind badges) and `TaskOrderDetail` (every other route,
     its `properties` read in the same statement, `jsonb_agg(to_jsonb(p))`).
   - **Bundling** (`POST .../properties/{property_id}`) adds a row to `task_order_properties`, with `added_by`
     the signed-in user (any project member, not necessarily an admin). The property must be of the task order's project and neither may be soft-deleted (400); the
@@ -1336,6 +1346,9 @@ Not rules — current state, documented so nobody mistakes these for the intende
   uses the column only as a manual figure when there are none (R1h.4). Rename it in a cosmetic slice (the column,
   the title-block route's field and the editor's label).
 - CORS is `allow_origins=["*"]`. Tighten before production.
+- **Two simultaneous ped ramp site adds can make two copies of a corner**: nothing unique backs the reuse lookup of
+  `create_pedramp_site`. Fine for the pilot (single user). The fix, post-pilot, is a migration: a partial unique index
+  on `(project_id, boro, lower(north_south_street), lower(east_west_street), corner_direction) WHERE deleted_at IS NULL`.
 - `POST /v1/auth/login` has no rate limiting, and neither has `POST /v1/users/me/password`, which checks a
   password too. A password change or reset leaves the tokens already issued valid until they expire. Both are
   Phase 2.

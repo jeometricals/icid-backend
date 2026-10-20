@@ -10,12 +10,20 @@ from api.queries.properties import PROPERTY_ORDER
 _TASK_ORDER_COLUMNS = """
             t.id, t.project_id, t.task_order_number, t.issued_date, t.estimate_notes,
             t.created_at, t.updated_at, t.created_by, t.deleted_at, t.deleted_by"""
-# How many of its bundled properties aren't deleted
+# How many of its bundled properties aren't deleted, in all and of each kind
 _PROPERTY_COUNT = """,
             (SELECT count(*)::int
              FROM icid.task_order_properties tp
              JOIN icid.properties p ON p.id = tp.property_id
-             WHERE tp.task_order_id = t.id AND p.deleted_at IS NULL) AS property_count"""
+             WHERE tp.task_order_id = t.id AND p.deleted_at IS NULL) AS property_count,
+            (SELECT count(*)::int
+             FROM icid.task_order_properties tp
+             JOIN icid.properties p ON p.id = tp.property_id
+             WHERE tp.task_order_id = t.id AND p.deleted_at IS NULL AND p.kind = 'sidewalk') AS sidewalk_count,
+            (SELECT count(*)::int
+             FROM icid.task_order_properties tp
+             JOIN icid.properties p ON p.id = tp.property_id
+             WHERE tp.task_order_id = t.id AND p.deleted_at IS NULL AND p.kind = 'ped_ramp') AS ped_ramp_count"""
 # Its bundled properties that aren't deleted, each as a row of icid.properties, ordered as a project's list is
 _BUNDLED_PROPERTIES = """,
             COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY """ + PROPERTY_ORDER + """)
@@ -28,9 +36,9 @@ _DETAIL_COLUMNS = _TASK_ORDER_COLUMNS + _BUNDLED_PROPERTIES
 
 def list_task_orders(project_id: str, include_deleted: bool = False) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch a project's task orders, the soft-deleted ones only when asked for, each with its count of live bundled properties.
+    Fetch a project's task orders, the soft-deleted ones only when asked for, each with its count of live bundled properties, in all and of each kind.
     Takes the project id and whether to include soft-deleted task orders.
-    Returns the task order dicts (with property_count) ordered by number, or None on failure.
+    Returns the task order dicts (with property_count, sidewalk_count and ped_ramp_count) ordered by number, or None on failure.
     """
     sql = (
         "\n        SELECT"

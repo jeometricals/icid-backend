@@ -171,6 +171,65 @@ class CornerListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# A ped ramp site: a corner and one of its ramps, added together (Slice R)
+# ---------------------------------------------------------------------------------------------------------------------
+
+# The fields a site's corner must have: a corner's, and its direction, which finds a live corner to reuse
+SITE_CORNER_REQUIRED = CORNER_REQUIRED + ("corner_direction",)
+# The ramp's text fields and the longest each may be; blank is none
+SITE_RAMP_TEXT = {"ramp_id_label": 50, "notes": 2000}
+
+
+class PedrampSiteCreate(CornerFields):
+    """
+    A ped ramp site being added: the corner's fields (its borough, two streets and direction required) and the ramp's.
+    The ramp takes its borough and streets from its corner: street_1 is the north-south street, street_2 the east-west.
+    """
+
+    quadrant: Quadrant
+    facing_street: FacingStreet
+    ramp_type: RampType
+    ramp_id_label: Optional[str] = None
+    notes: Optional[str] = None
+
+    @field_validator(*SITE_RAMP_TEXT, mode="before")
+    @classmethod
+    def _ramp_text(cls, value: Any, info: Any) -> Any:
+        """
+        Trim a ramp's text field, blank to None, refusing one over its limit.
+        Takes the value and the field's info.
+        Returns the cleaned value; raises ValueError when too long.
+        """
+        return _clean_text({info.field_name: value}, {info.field_name: SITE_RAMP_TEXT[info.field_name]})[info.field_name]
+
+    @model_validator(mode="after")
+    def _required(self) -> "PedrampSiteCreate":
+        """
+        Refuse a site whose corner lacks its borough, either street or its direction, left out, null or blank.
+        Takes the validated site.
+        Returns it; raises ValueError naming the first one missing.
+        """
+        for name in SITE_CORNER_REQUIRED:
+            if getattr(self, name) is None:
+                raise ValueError(f"{name} is required")
+        return self
+
+
+class PedrampSiteOut(BaseModel):
+    """A ped ramp site as added: its corner's id and its ramp's (the property's), and whether the corner was a live one reused."""
+
+    corner_id: UUID
+    property_id: UUID
+    corner_reused: bool
+
+
+class PedrampSiteResponse(BaseModel):
+    status: str
+    message: str
+    data: PedrampSiteOut
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # A ramp's attributes
 # ---------------------------------------------------------------------------------------------------------------------
 

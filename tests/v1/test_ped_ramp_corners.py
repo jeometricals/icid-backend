@@ -98,6 +98,70 @@ class TestListAndCreate:
         run.assert_not_called()
 
 
+SITES_URL = "/v1/projects/HWS0023/pedramp-sites"
+SITE_BODY = {**BODY, "corner_direction": "SW", "inspected_by": "RG", "quadrant": "SW", "facing_street": "street_2",
+             "ramp_type": "CUT_THROUGH", "ramp_id_label": " CT-A ", "notes": "  "}
+SITE_ROW = {"corner_id": CORNER_ID, "property_id": RAMP_ID, "corner_reused": False}
+
+
+class TestPedrampSites:
+    def test_a_member_adds_a_corner_and_its_ramp_in_one_statement(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=[[PROJECT_ROW], ON_PROJECT]),              patch(CORNERS, return_value=[SITE_ROW]) as run:
+            response = inspector.post(SITES_URL, json=SITE_BODY)
+        assert response.status_code == 201
+        assert response.json()["data"] == {"corner_id": str(CORNER_ID), "property_id": str(RAMP_ID),
+                                           "corner_reused": False}
+        assert response.json()["message"] == "Corner and ramp created"
+        assert run.call_count == 1
+        sql, params = run.call_args.args
+        one_line = " ".join(sql.split())
+        assert "lower(north_south_street) = lower(%s) AND lower(east_west_street) = lower(%s)" in one_line
+        assert "AND corner_direction = %s" in one_line and "WHERE NOT EXISTS (SELECT 1 FROM found)" in one_line
+        assert "INSERT INTO icid.properties" in sql and "corner.north_south_street, corner.east_west_street" in sql
+        assert "INSERT INTO icid.ped_ramp_attributes (property_id, ramp_id_label)" in sql
+        assert sql.count("%s") == len(params)
+        # the reuse lookup, then the ramp's own values: its label trimmed, blank notes none, the user who added it
+        assert params[:5] == ("HWS0023", "Queens", "Main St", "1st Ave", "SW")
+        assert params[-7:] == ("SW", "street_2", "CUT_THROUGH", None, INSPECTOR_ROW["uuid"], "CT-A", "CT-A")
+        assert "RG" in params
+
+    def test_a_reused_corner_says_so(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]),              patch(CORNERS, return_value=[{**SITE_ROW, "corner_reused": True}]):
+            response = admin_client.post(SITES_URL, json={**SITE_BODY, "ramp_id_label": None})
+        assert response.status_code == 201 and response.json()["data"]["corner_reused"] is True
+        assert response.json()["message"] == "Ramp added at an existing corner"
+
+    def test_the_corner_needs_its_direction_and_location_and_the_ramp_its_fields(self, admin_client):
+        for missing in ("boro", "north_south_street", "east_west_street", "corner_direction", "quadrant",
+                        "facing_street", "ramp_type"):
+            body = {key: value for key, value in SITE_BODY.items() if key != missing}
+            with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CORNERS) as run:
+                assert admin_client.post(SITES_URL, json=body).status_code == 422, missing
+            run.assert_not_called()
+
+    def test_unknown_values_and_long_text_are_422(self, admin_client):
+        for extra in ({"quadrant": "N"}, {"ramp_type": "DIAGONAL"}, {"ramp_id_label": "x" * 51},
+                      {"notes": "x" * 2001}, {"block": "1"}):
+            with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CORNERS) as run:
+                assert admin_client.post(SITES_URL, json={**SITE_BODY, **extra}).status_code == 422, extra
+            run.assert_not_called()
+
+    def test_a_demo_user_cant_add_one(self, demo_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CORNERS) as run:
+            assert demo_client.post("/v1/projects/DEMO01/pedramp-sites", json=SITE_BODY).status_code == 403
+        run.assert_not_called()
+
+    def test_a_user_off_the_project_is_403(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=[[PROJECT_ROW], []]),              patch(CORNERS) as run:
+            assert inspector.post(SITES_URL, json=SITE_BODY).status_code == 403
+        run.assert_not_called()
+
+    def test_a_failed_statement_is_500(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CORNERS, return_value=None):
+            response = admin_client.post(SITES_URL, json=SITE_BODY)
+        assert (response.status_code, response.json()) == (500, {"detail": "Failed to save ped ramp site"})
+
+
 class TestOneCorner:
     def test_a_member_reads_a_corner(self):
         with signed_in(INSPECTOR_ROW) as inspector, patch(CORNERS, return_value=[CORNER_ROW]), \
@@ -118,6 +182,22 @@ class TestOneCorner:
         assert "UPDATE icid.ped_ramp_corners" in sql and params[-1] == CORNER_ID
         # a null on a required field keeps it; the rest are written as merged
         assert "RG" in params and "Main St" in params and date(2026, 10, 19) in params and "SW" in params
+
+    def test_an_edit_writes_the_corners_location_onto_its_live_ramps(self, admin_client):
+        with patch(CORNERS, side_effect=[[CORNER_ROW], [CORNER_ROW]]) as run:
+            admin_client.patch(URL, json={"inspected_by": "RG"})
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "UPDATE icid.properties p SET boro = c.boro, intersection_street_1 = c.north_south_street" in one_line
+        assert "WHERE p.corner_id = c.corner_id AND p.deleted_at IS NULL" in one_line
+        assert run.call_count == 2  # the location didn't change, so the corner isn't read again
+
+    def test_a_new_street_rereads_the_corner_for_its_ramps(self, admin_client):
+        moved = {**CORNER_ROW, "north_south_street": "38 St"}
+        reread = {**moved, "ramps": [{**RAMP, "intersection_street_1": "38 St"}]}
+        with patch(CORNERS, side_effect=[[CORNER_ROW], [moved], [reread]]) as run:
+            response = admin_client.patch(URL, json={"north_south_street": "38 St"})
+        assert response.status_code == 200 and run.call_count == 3
+        assert response.json()["data"]["ramps"][0]["display_address"].startswith("38 St & 1st Ave")
 
     def test_a_null_clears_an_optional_field(self, admin_client):
         with patch(CORNERS, side_effect=[[CORNER_ROW], [CORNER_ROW]]) as run:
