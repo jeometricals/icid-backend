@@ -39,6 +39,14 @@ def field_values(pdf: bytes) -> dict[str, Any]:
     return {name: field.get("/V") for name, field in (PdfReader(io.BytesIO(pdf)).get_fields() or {}).items()}
 
 
+def page_count(pdf: bytes) -> int:
+    """
+    Count a PDF's pages.
+    Takes the PDF; returns the count.
+    """
+    return len(PdfReader(io.BytesIO(pdf)).pages)
+
+
 def widgets(pdf: bytes, name: str) -> list[tuple[int, Any]]:
     """
     Find a field's widgets.

@@ -61,8 +61,8 @@ options and states.
 
 ## Inspection form
 
-Pages 1-6 are DOT's instructions; the fields are on pages 7-14. Every copy keeps all 14 pages: a ramp-type page no ramp
-uses stays blank.
+Pages 1-6 are DOT's instructions; the fields are on pages 7-14. A filled copy keeps only the pages it uses (see "What's
+in the DOT PDF" below); the table names the template's pages.
 
 | Page | What | Filled from |
 |---|---|---|
@@ -100,8 +100,8 @@ The corner's `comments` has no field on the form and isn't printed.
 
 `RAMP_ID` is the ramp's `ramp_id_label` (else its attributes'). `STREET_NAME_1` / `STREET_NAME_2` (slot 2:
 `STREET_NAME_1_2` / `STREET_NAME_2_2`), the diagram's street labels, are the ramp's `intersection_street_1` / `_2`;
-slot 1's pair is one field on pages 8, 9 and 10, so all three show them. A ramp without attributes gets its ID and street
-labels only.
+slot 1's pair is one field on pages 8, 9 and 10 (a copy keeps only one of them). A ramp without measurements is not
+printed (see "What's in the DOT PDF").
 
 Every type: `PONDING` ← `is_there_ponding`, `RAMP_MAX_CURB_REVEAL` ← `maximum_curb_reveal_at_ramp_in`,
 `DWS_LENGTH_24_MIN` ← `dws_length_min_24_inch`, `DWS_FULL_WIDTH` ← `dws_full_ramp_width`,
@@ -118,7 +118,7 @@ Every type: `PONDING` ← `is_there_ponding`, `RAMP_MAX_CURB_REVEAL` ← `maximu
 ### Slots and copies
 
 A copy of the form has two ramp slots: slot 1 (pages 8, 9 or 10) and slot 2 (pages 12 or 13; there is no cut-through
-page for slot 2). The ramps are taken in the order given:
+page for slot 2). Only measured ramps take a slot (below). They are taken in the order given:
 
 1. Cut-throughs are paired in order. A pair (or a last, unpaired cut-through, which fills `CT_*_1` only) takes a copy's
    slot 1, so a corner with a cut-through pair has it first.
@@ -127,9 +127,35 @@ page for slot 2). The ramps are taken in the order given:
    its own copy's slot 1.
 
 `fill_inspection_forms` returns one PDF per copy (`InspectionPdfs.files`): a 3-ramp corner downloads as two DOT PDFs,
-zipped together. A corner without ramps is one copy with page 7 only filled. Examples: one ramp, one copy (page 8 or 9);
-perpendicular + parallel, one copy (pages 8 and 13); three perpendicular, two copies; a cut-through pair + a
+zipped together. A corner without measured ramps is one copy of page 7 alone. Examples: one ramp, one copy (page 8 or
+9); perpendicular + parallel, one copy (pages 8 and 13); three perpendicular, two copies; a cut-through pair + a
 perpendicular, one copy (pages 10 and 12); two cut-through pairs, two copies.
+
+### What's in the DOT PDF
+
+Each copy is trimmed after it is filled (`DotForm.keep_pages`), and stays fillable: the pages it doesn't use are removed
+and the AcroForm is pruned to the fields with a widget on a kept page (a field's kids on removed pages dropped), so no
+field points at a removed page.
+
+1. **DOT's instructions (pages 1-6) are never included.** A copy starts at the corner page (page 7), always kept.
+2. **A used slot keeps the page of its ramp's type only:** slot 1 page 8 (perpendicular), 9 (parallel) or 10 (a
+   cut-through pair); slot 2 page 12 or 13. The other type pages, and an unused slot's pages, are dropped.
+3. **Only measured ramps print.** A ramp is measured when any of its attributes' `*_pct` or `*_in` columns holds a
+   value (`maximum_curb_reveal_at_ramp_in` counts; yes / no answers, choices, the label and comments don't;
+   `is_measured`). Unmeasured ramps are left out **before** slots are given out, so the slots stay compact: a 3-ramp
+   corner with one unmeasured ramp is one copy (the two measured ramps in slots 1 and 2); three measured ramps are still
+   two copies. A ramp that has only photos is not printed, nor are its photos. Section 4's ramp types and the ramp count
+   on page 7 still cover every ramp of the corner.
+4. **A cut-through pair** is paired as before, from all the corner's cut-throughs in order, and takes slot 1 (page 10)
+   when either of its ramps is measured. The unmeasured side's `CT_*_2` (or `_1`) fields print blank, its Ramp ID and
+   its answers included, and its comments and photos are left out; the pair's shared length and clearance come from the
+   measured side. A pair with neither side measured is left out.
+5. **A slot's photo log** (page 11 or 14) is kept only when its printed ramps have at least one photo.
+6. **Pages in a copy** = 1 + the slots used + the used slots with photos: 1 to 5. One measured ramp without photos is 2
+   pages, with photos 3; two measured ramps, one with photos, 4.
+
+DOT's printed footers ("1 of 8") are DOT's artwork and stay as they are. `photos_left_out` counts only the photos of a
+printed slot past its six boxes; the photos of an unmeasured ramp are not counted.
 
 ### Photos
 
@@ -188,7 +214,8 @@ Everything under **FOR INTERNAL USE ONLY** is DOT's: `APPROVED`, `DENIED`, `RESU
 
 ## Size and time
 
-pypdf writes the template without its object streams, so an empty filled copy is about 2.05 MB (DOT's file is 1.7
-MB); each photo adds about 170-300 KB. A copy with twelve photos is about 4 MB, so the files should go to Storage and be
-handed out by signed URL, not returned in a function's response (Vercel refuses a response body over 4.5 MB). A 3-ramp
-corner with twelve 4000 x 3000 photos fills in about 1.9 s on a developer machine (the photos' shrinking is most of it).
+pypdf writes the template without its object streams, so a filled copy is about 2.05 MB however few pages it keeps (the
+fonts are shared by every page; DOT's file is 1.7 MB); each photo adds about 170-300 KB. A copy with twelve photos is
+about 4 MB, so the files should go to Storage and be handed out by signed URL, not returned in a function's response
+(Vercel refuses a response body over 4.5 MB). A 3-ramp corner with twelve 4000 x 3000 photos fills in about 1.2-1.5 s on
+a developer machine (the photos' shrinking is most of it; the trim adds little).

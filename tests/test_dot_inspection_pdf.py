@@ -27,10 +27,19 @@ from api.services.dot_inspection_pdf import (
     TEMPLATE,
     TRAFFIC_CONTROL_VALUES,
     fill_inspection_forms,
+    is_measured,
     plan_copies,
 )
 from api.services.dot_pdf_fill import DotForm, format_number, prepare_image
-from tests.dot_pdf_helpers import busy_jpeg, field_values, flattened_text, jpeg, page_image_xobjects, widgets
+from tests.dot_pdf_helpers import (
+    busy_jpeg,
+    field_values,
+    flattened_text,
+    jpeg,
+    page_count,
+    page_image_xobjects,
+    widgets,
+)
 
 CORNER: dict[str, Any] = {
     "corner_id": "8f0c0d3e-0000-0000-0000-000000000001", "project_id": "HWS0023",
@@ -161,24 +170,67 @@ def test_mixed_ramp_types_tick_several_boxes(filled: bytes) -> None:
 
 
 def test_stays_fillable(filled: bytes) -> None:
-    """The AcroForm and every field survive, with no field made read-only and nothing flattened."""
+    """The kept pages (corner, page 10, page 12) keep their widgets and fields, none read-only, nothing flattened."""
     template = PdfReader(io.BytesIO(TEMPLATE))
     reader = PdfReader(io.BytesIO(filled))
     acro_form = reader.trailer["/Root"]["/AcroForm"]
-    assert len(reader.pages) == 14
+    assert len(reader.pages) == 3
     assert bool(acro_form["/NeedAppearances"]) is True
-    assert set(reader.get_fields()) == set(template.get_fields())
+    assert set(reader.get_fields()) == _field_names_on(template, (7, 10, 12))
     assert all(not int(field.get("/Ff", 0)) & 1 for field in reader.get_fields().values())
     annotations = sum(len(page.annotations or []) for page in reader.pages)
-    assert annotations == sum(len(page.annotations or []) for page in template.pages)
+    assert annotations == sum(len(template.pages[number - 1].annotations or []) for number in (7, 10, 12))
+
+
+def _field_names_on(reader: PdfReader, page_numbers: tuple[int, ...]) -> set[str]:
+    """List the names of the fields with a widget on the given pages (1 first)."""
+    names = set()
+    for number in page_numbers:
+        for ref in reader.pages[number - 1].annotations or []:
+            widget = ref.get_object()
+            if widget.get("/Subtype") == "/Widget":
+                names.add(str((widget if "/T" in widget else widget["/Parent"].get_object())["/T"]))
+    return names
+
+
+def test_trimmed_acro_form_has_no_dangling_fields(filled: bytes) -> None:
+    """Every field left in the AcroForm (each of its kids) has its widget on a page of the file, and that widget's
+    /P is a kept page; the removed pages' fields are gone."""
+    reader = PdfReader(io.BytesIO(filled))
+    on_pages = {ref.idnum for page in reader.pages for ref in page.annotations or []}
+    kept_pages = {page.indirect_reference.idnum for page in reader.pages}
+
+    def widgets_of(ref: Any) -> list[Any]:
+        field = ref.get_object()
+        return [w for kid in field["/Kids"] for w in widgets_of(kid)] if "/Kids" in field else [ref]
+
+    fields = reader.trailer["/Root"]["/AcroForm"]["/Fields"]
+    assert fields
+    for ref in fields:
+        for widget in widgets_of(ref):
+            assert widget.idnum in on_pages
+            page = widget.get_object().raw_get("/P") if "/P" in widget.get_object() else None
+            if page is not None:
+                assert page.idnum in kept_pages
+    names = set(reader.get_fields())
+    for gone in ("RAMP_ID_1", "PAR_RAMP_ID_1", "PAR_RAMP_ID_2", "Photo_1-1", "Photo_2-1"):
+        assert gone not in names
+    assert {"CT_RAMP_ID_1", "RAMP_ID_2", "INSPECTED_BY"} <= names
+
+
+def test_trimmed_pages_render_and_start_with_the_corner(filled: bytes) -> None:
+    """PDFium opens every kept page; the first is the corner page (section 1), not DOT's instructions."""
+    assert "1. INS" in flattened_text(filled, 1)
+    for number in (2, 3):
+        assert flattened_text(filled, number).strip()
 
 
 def test_printed_text_shows(filled: bytes) -> None:
     """The fields' appearances print the values: dropdowns their display text."""
-    corner_page = flattened_text(filled, 7)
+    corner_page = flattened_text(filled, 1)
     for text in ("Jane Inspector", "10/8/26", "DDC Managed DOT Ped Ramp Contract", "The Bronx", "Signal with APS"):
         assert text in corner_page
-    ramp_page = flattened_text(filled, 12)
+    ramp_page = flattened_text(filled, 3)
     assert "8.3" in ramp_page and "Cast in Place (surface applied)" in ramp_page
 
 
@@ -252,9 +304,9 @@ def test_slot_three_ramps_two_files() -> None:
     assert len(result.files) == 2
     first, second = (field_values(pdf) for pdf in result.files)
     assert (first["RAMP_ID_1"], first["RAMP_ID_2"]) == ("R1", "R2")
-    assert second["RAMP_ID_1"] == "R3" and second.get("RAMP_ID_2") is None
+    assert second["RAMP_ID_1"] == "R3" and "RAMP_ID_2" not in second
     assert second["INSPECTED_BY"] == "Jane Inspector"
-    assert len(PdfReader(io.BytesIO(result.files[1])).pages) == 14
+    assert [page_count(pdf) for pdf in result.files] == [3, 2]
 
 
 def test_slot_cut_through_pair_goes_first() -> None:
@@ -265,7 +317,7 @@ def test_slot_cut_through_pair_goes_first() -> None:
     values = field_values(result.files[0])
     assert len(result.files) == 1
     assert values["CT_RAMP_ID_1"] == "CT-A" and values["CT_RAMP_ID_2"] == "CT-B"
-    assert values["RAMP_ID_2"] == "R1" and values.get("RAMP_ID_1") is None
+    assert values["RAMP_ID_2"] == "R1" and "RAMP_ID_1" not in values
 
 
 def test_slot_two_cut_through_pairs_two_files() -> None:
@@ -283,15 +335,18 @@ def test_slot_lone_cut_through() -> None:
     values = field_values(result.files[0])
     assert values["CT_RAMP_ID_1"] == "CT-A" and values.get("CT_RAMP_ID_2") is None
     assert values["CT_RAMP_COMMENTS_1"] == "A side"
+    assert page_count(result.files[0]) == 2
 
 
 def test_no_ramps_and_no_attributes() -> None:
-    """A corner without ramps fills its corner page; a ramp without attributes gets its ID and street names only."""
+    """A corner without ramps is one copy of its corner page; so is one whose only ramp has no attributes."""
     assert plan_copies([]) == [[]]
-    assert len(fill_inspection_forms(CORNER, [], {}).files) == 1
-    values = field_values(fill_inspection_forms(CORNER, [ramp("p1", "PERPENDICULAR", None, label="R9")], {}).files[0])
-    assert values["RAMP_ID_1"] == "R9" and values["STREET_NAME_2"] == "W 42 St"
-    assert values.get("PONDING_1") is None
+    files = fill_inspection_forms(CORNER, [], {}).files
+    assert len(files) == 1 and page_count(files[0]) == 1
+    files = fill_inspection_forms(CORNER, [ramp("p1", "PERPENDICULAR", None, label="R9")], {}).files
+    assert len(files) == 1 and page_count(files[0]) == 1
+    values = field_values(files[0])
+    assert "RAMP_ID_1" not in values and values["NUM_OF_RAMPS"] == "3"
 
 
 def test_photos_placed_and_left_out() -> None:
@@ -309,7 +364,7 @@ def test_photos_placed_and_left_out() -> None:
     for box in range(1, 7):
         [(page, widget)] = widgets(pdf, f"Photo_1-{box}")
         [image] = page_image_xobjects(widget)
-        assert page == 11
+        assert page == 3
         assert (int(image["/Width"]), int(image["/Height"])) == sizes[box]
         assert widget["/MK"].raw_get("/I").idnum == widget["/AP"].raw_get("/N").idnum
         assert "/BG" not in widget["/MK"]
@@ -317,9 +372,10 @@ def test_photos_placed_and_left_out() -> None:
     assert len(duplicated) == 2 and all(page_image_xobjects(widget) for _, widget in duplicated)
     assert widgets(pdf, "Photo_2-3")[0][1]["/AP"]["/N"].get_object().get("/Resources") is None or \
         "/XObject" not in widgets(pdf, "Photo_2-3")[0][1]["/AP"]["/N"].get_object().get("/Resources", {})
-    photo_page = flattened_text(pdf, 11)
+    photo_page = flattened_text(pdf, 3)
     assert "Photo 1: view 1" in photo_page and "Photo 6: view 6" in photo_page and "Photo 7" not in photo_page
-    assert "Photo 9" in flattened_text(pdf, 14) and "Photo 10: second" in flattened_text(pdf, 14)
+    assert "Photo 9" in flattened_text(pdf, 5) and "Photo 10: second" in flattened_text(pdf, 5)
+    assert page_count(pdf) == 5
 
 
 def test_cut_through_pair_shares_slot_one_photos() -> None:
@@ -327,7 +383,7 @@ def test_cut_through_pair_shares_slot_one_photos() -> None:
     photos = {"c1": [(3, "a3", jpeg(100, 80)), (1, "a1", jpeg(100, 80))], "c2": [(2, "b2", jpeg(100, 80))]}
     ramps = [ramp("c1", "CUT_THROUGH", CUT_THROUGH), ramp("c2", "CUT_THROUGH", CUT_THROUGH, "CT-B")]
     result = fill_inspection_forms(CORNER, ramps, photos)
-    text = flattened_text(result.files[0], 11)
+    text = flattened_text(result.files[0], 3)
     assert text.index("Photo 1: a1") < text.index("Photo 2: b2") < text.index("Photo 3: a3")
     assert result.photos_left_out == 0
 
@@ -336,7 +392,7 @@ def test_caption_is_cut_to_the_box() -> None:
     """A long caption is cut with an ellipsis inside the box's width."""
     photos = {"p1": [(1, "word " * 80, jpeg(100, 80))]}
     result = fill_inspection_forms(CORNER, [ramp("p1", "PERPENDICULAR", PERPENDICULAR)], photos)
-    text = flattened_text(result.files[0], 11)
+    text = flattened_text(result.files[0], 3)
     assert "Photo 1: word" in text and "..." in text
 
 
@@ -365,3 +421,99 @@ def test_three_ramp_corner_with_twelve_big_photos_is_fast() -> None:
     print(f"3-ramp corner, 12 photos 4000x3000: {elapsed:.2f} s, {[len(pdf) for pdf in result.files]} bytes")
     assert len(result.files) == 2 and result.photos_left_out == 0
     assert elapsed < 5.0
+
+
+# ---------------------------------------------------------------------------
+# T3: each copy trimmed to the corner page, its slots' ramp-type pages and their photo pages
+# ---------------------------------------------------------------------------
+
+UNMEASURED = {"ramp_id_label": "U1", "is_there_ponding": True, "dws_color": "red", "comments": "Not measured",
+              "construction": "new_install", "ramp_running_slope_pct": None}
+
+
+def test_is_measured() -> None:
+    """A *_pct or *_in value makes a ramp measured; yes / no answers, choices, the label and comments don't."""
+    assert not is_measured(ramp("u", "PERPENDICULAR", UNMEASURED))
+    assert not is_measured(ramp("u", "PERPENDICULAR", None))
+    assert is_measured(ramp("m", "PERPENDICULAR", {"maximum_curb_reveal_at_ramp_in": Decimal("0.25")}))
+    assert is_measured(ramp("m", "PARALLEL", {"left_ramp_running_slope_pct": Decimal("0")}))
+
+
+@pytest.mark.parametrize(("ramps", "photo_ids", "pages"), [
+    ([("p1", "PERPENDICULAR")], [], [2]),
+    ([("p1", "PERPENDICULAR")], ["p1"], [3]),
+    ([("p1", "PERPENDICULAR"), ("p2", "PARALLEL")], ["p2"], [4]),
+    ([("p1", "PERPENDICULAR"), ("p2", "PARALLEL")], ["p1", "p2"], [5]),
+    ([("p1", "PERPENDICULAR"), ("p2", "PERPENDICULAR"), ("p3", "PARALLEL")], ["p3"], [3, 3]),
+])
+def test_page_count_is_corner_slots_and_photo_pages(ramps: list[tuple[str, str]], photo_ids: list[str],
+                                                    pages: list[int]) -> None:
+    """A copy is 1 + its used slots + its used slots with photos."""
+    attributes = {"PERPENDICULAR": PERPENDICULAR, "PARALLEL": PARALLEL}
+    photos = {pid: [(1, "x", jpeg(60, 40))] for pid in photo_ids}
+    result = fill_inspection_forms(CORNER, [ramp(pid, kind, attributes[kind]) for pid, kind in ramps], photos)
+    assert [page_count(pdf) for pdf in result.files] == pages
+
+
+def test_unmeasured_ramp_with_photos_is_not_printed() -> None:
+    """An unmeasured ramp takes no slot and its photos don't print (nor count as left out): the corner page alone."""
+    photos = {"u1": [(n, "x", jpeg(60, 40)) for n in range(1, 9)]}
+    result = fill_inspection_forms(CORNER, [ramp("u1", "PERPENDICULAR", UNMEASURED)], photos)
+    assert len(result.files) == 1 and page_count(result.files[0]) == 1
+    assert result.photos_left_out == 0
+    values = field_values(result.files[0])
+    assert not any(name.startswith(("RAMP_ID", "Photo_")) for name in values)
+    assert values["RAMP_TYPE"] == "/PERPENDICULAR"  # section 4 still lists every ramp of the corner
+
+
+def test_unmeasured_ramp_gives_up_its_slot() -> None:
+    """Three ramps, the first unmeasured: one copy, the two measured ramps in slots 1 and 2."""
+    ramps = [ramp("u1", "PERPENDICULAR", UNMEASURED), ramp("p1", "PERPENDICULAR", PERPENDICULAR),
+             ramp("q1", "PARALLEL", PARALLEL)]
+    result = fill_inspection_forms(CORNER, ramps, {"u1": [(1, "x", jpeg(60, 40))]})
+    assert len(result.files) == 1 and page_count(result.files[0]) == 3
+    values = field_values(result.files[0])
+    assert values["RAMP_ID_1"] == "R1" and values["PAR_RAMP_ID_2"] == "P1"
+    assert "Photo_1-1" not in values and "Photo_2-1" not in values
+
+
+def test_three_measured_ramps_still_two_copies() -> None:
+    """Three measured ramps need two copies; the second is the corner and slot 1."""
+    ramps = [ramp(f"p{i}", "PERPENDICULAR", dict(PERPENDICULAR, ramp_id_label=f"R{i}")) for i in (1, 2, 3)]
+    result = fill_inspection_forms(CORNER, ramps, {})
+    assert [page_count(pdf) for pdf in result.files] == [3, 2]
+    assert "1. INS" in flattened_text(result.files[1], 1)
+
+
+def test_cut_through_pair_with_one_side_measured() -> None:
+    """A pair prints when either side is measured: page 10 kept, the unmeasured side's CT_*_2 fields blank (its
+    label, answers and photos too); a pair with neither side measured is left out."""
+    side_b = ramp("c2", "CUT_THROUGH", dict(UNMEASURED, ramp_id_label="CT-B", comments="B side"))
+    photos = {"c2": [(1, "b", jpeg(60, 40))]}
+    result = fill_inspection_forms(CORNER, [ramp("c1", "CUT_THROUGH", CUT_THROUGH), side_b], photos)
+    pdf = result.files[0]
+    assert len(result.files) == 1 and page_count(pdf) == 2
+    values = field_values(pdf)
+    assert values["CT_RAMP_ID_1"] == "CT-A" and values["CT_RAMP_LENGTH_1"] == "120"
+    assert values["CT_RAMP_COMMENTS_1"] == "A side"
+    side_b_values = {name: value for name, value in values.items() if name.startswith("CT_") and name.endswith("_2")}
+    # " " is DOT's own default for a dropdown left untouched
+    assert side_b_values and all(value in (None, "", " ", "/Off") for value in side_b_values.values())
+    neither = [ramp("c1", "CUT_THROUGH", UNMEASURED), ramp("c2", "CUT_THROUGH", UNMEASURED)]
+    assert [page_count(f) for f in fill_inspection_forms(CORNER, neither, {}).files] == [1]
+
+
+@pytest.mark.parametrize(("slot_1", "slot_2", "kept", "gone"), [
+    ("PERPENDICULAR", "PARALLEL", ("RAMP_ID_1", "PAR_RAMP_ID_2"), ("PAR_RAMP_ID_1", "CT_RAMP_ID_1", "RAMP_ID_2")),
+    ("PARALLEL", "PERPENDICULAR", ("PAR_RAMP_ID_1", "RAMP_ID_2"), ("RAMP_ID_1", "CT_RAMP_ID_1", "PAR_RAMP_ID_2")),
+    ("PARALLEL", "PARALLEL", ("PAR_RAMP_ID_1", "PAR_RAMP_ID_2"), ("RAMP_ID_1", "RAMP_ID_2", "CT_RAMP_ID_1")),
+])
+def test_mixed_types_keep_the_matching_variant_page(slot_1: str, slot_2: str, kept: tuple[str, ...],
+                                                    gone: tuple[str, ...]) -> None:
+    """Each slot keeps only the page of its ramp's type."""
+    attributes = {"PERPENDICULAR": PERPENDICULAR, "PARALLEL": PARALLEL}
+    result = fill_inspection_forms(CORNER, [ramp("a", slot_1, attributes[slot_1]),
+                                            ramp("b", slot_2, attributes[slot_2])], {})
+    names = set(field_values(result.files[0]))
+    assert page_count(result.files[0]) == 3
+    assert set(kept) <= names and not set(gone) & names

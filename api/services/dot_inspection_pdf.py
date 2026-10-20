@@ -5,8 +5,11 @@ ped ramp corner and its ramps, left fillable. The field map is data here; `dot_p
 The form's fields are on pages 7 to 14: the corner (sections 1-4) on page 7; ramp slot 1 on page 8 (perpendicular),
 9 (parallel) or 10 (a cut-through's two ramps) with its photos on page 11; ramp slot 2 on page 12 (perpendicular) or
 13 (parallel) with its photos on page 14. A cut-through pair takes slot 1, so it goes first; the other ramps take the
-next free slot in order. A corner with more ramps than one copy holds fills further copies of the whole form, each
-with the corner page. Every copy keeps all 14 pages; a type page no ramp uses stays blank.
+next free slot in order. A corner with more ramps than one copy holds fills further copies, each with the corner page.
+
+Only measured ramps print (a value in a `*_pct` or `*_in` column); a cut-through pair prints when either side is. Each
+copy is trimmed to what it uses, still fillable: the corner page, each used slot's page of its ramp type, and a used
+slot's photo page when it has photos. DOT's instruction pages (1-6) are never included.
 """
 
 import logging
@@ -29,6 +32,13 @@ logger = logging.getLogger(__name__)
 TEMPLATE_NAME = "dot_ped_ramp_inspection_v1.6.pdf"
 TEMPLATE = load_template(TEMPLATE_NAME)
 PHOTOS_PER_SLOT = 6
+# The template's pages a copy may keep (0 first): the corner, each slot's page by ramp type, each slot's photo log
+CORNER_PAGE = 6
+RAMP_TYPE_PAGES = {
+    1: {"PERPENDICULAR": 7, "PARALLEL": 8, "CUT_THROUGH": 9},
+    2: {"PERPENDICULAR": 11, "PARALLEL": 12},
+}
+PHOTO_PAGES = {1: 10, 2: 13}
 CAPTION_BAND_PT = 9.0
 
 # ICID's choice values to the form's export values
@@ -208,15 +218,25 @@ class _Slot:
     ramps: list[dict[str, Any]]
 
 
+def is_measured(ramp: dict[str, Any]) -> bool:
+    """
+    Tell whether a ramp was measured: any of its attributes' `*_pct` or `*_in` columns holds a value.
+    Takes the ramp ({..., attributes}); returns True or False.
+    """
+    attributes = ramp.get("attributes") or {}
+    return any(value is not None for column, value in attributes.items() if column.endswith(("_pct", "_in")))
+
+
 def plan_copies(ramps: list[dict[str, Any]]) -> list[list[_Slot]]:
     """
-    Share a corner's ramps out over copies of the form: cut-throughs paired in order, each pair (or a lone one) in a
-    copy's slot 1; the rest in order into the next free slot. Takes the ramps; returns each copy's slots (one copy
-    with none for a corner without ramps).
+    Share a corner's measured ramps out over copies of the form: cut-throughs paired in order (a pair kept when either
+    side is measured), each pair (or a lone one) in a copy's slot 1; the rest in order into the next free slot.
+    Takes the ramps; returns each copy's slots (one copy with none when no ramp is measured).
     """
     cut_throughs = [ramp for ramp in ramps if ramp["ramp_type"] == "CUT_THROUGH"]
-    others = [ramp for ramp in ramps if ramp["ramp_type"] != "CUT_THROUGH"]
+    others = [ramp for ramp in ramps if ramp["ramp_type"] != "CUT_THROUGH" and is_measured(ramp)]
     pairs = [cut_throughs[i:i + 2] for i in range(0, len(cut_throughs), 2)]
+    pairs = [pair for pair in pairs if any(is_measured(ramp) for ramp in pair)]
     copies: list[list[_Slot]] = []
     while pairs or others:
         if pairs:
@@ -276,8 +296,8 @@ def _ramp_label(ramp: dict[str, Any]) -> Optional[str]:
 
 def _fill_slot(form: DotForm, slot: _Slot) -> None:
     """
-    Fill a slot's ramp page: each ramp's section 5 (a cut-through pair's two as _1 and _2), its Ramp ID and the
-    diagram's street labels. Takes the form and the slot.
+    Fill a slot's ramp page: each measured ramp's section 5 (a cut-through pair's two as _1 and _2; an unmeasured
+    side left blank), its Ramp ID and the diagram's street labels. Takes the form and the slot.
     """
     prefix, fields, _ = RAMP_PAGES[slot.ramp_type]
     first = slot.ramps[0]
@@ -285,13 +305,15 @@ def _fill_slot(form: DotForm, slot: _Slot) -> None:
                                     (first["intersection_street_1"], first["intersection_street_2"])):
         form.text(street_field, street)
     for index, ramp in enumerate(slot.ramps):
+        if not is_measured(ramp):
+            continue
         suffix = f"_{index + 1}" if slot.ramp_type == "CUT_THROUGH" else f"_{slot.number}"
         form.text(f"{prefix}RAMP_ID{suffix}", _ramp_label(ramp))
         attributes = ramp.get("attributes") or {}
         for field, column, kind in fields:
             _fill_value(form, f"{prefix}{field}{suffix}", attributes.get(column), kind)
     if slot.ramp_type == "CUT_THROUGH":
-        _fill_cut_through_pair(form, slot.ramps)
+        _fill_cut_through_pair(form, [ramp for ramp in slot.ramps if is_measured(ramp)])
 
 
 def _fill_cut_through_pair(form: DotForm, ramps: list[dict[str, Any]]) -> None:
@@ -311,13 +333,21 @@ def _fill_cut_through_pair(form: DotForm, ramps: list[dict[str, Any]]) -> None:
             f"{_ramp_label(ramp) or f'Ramp {i + 1}'}: {text}" for i, (ramp, text) in enumerate(comments)))
 
 
-def _fill_photos(form: DotForm, slot: _Slot, photos: dict[str, list[tuple[int, Optional[str], bytes]]]) -> int:
+def _slot_photos(slot: _Slot, photos: dict[str, list[tuple[int, Optional[str], bytes]]]
+                 ) -> list[tuple[int, Optional[str], bytes]]:
     """
-    Put a slot's photos (its ramps' together, by photo number) into its six boxes, each captioned "Photo N:
-    caption". Takes the form, the slot and the photos by property id; returns how many didn't fit.
+    Gather a slot's photos: its measured ramps' together (an unmeasured side of a cut-through pair prints none).
+    Takes the slot and the photos by property id; returns them by photo number.
     """
-    taken = sorted((photo for ramp in slot.ramps for photo in photos.get(str(ramp["property_id"]), [])),
-                   key=lambda photo: photo[0])
+    return sorted((photo for ramp in slot.ramps if is_measured(ramp)
+                   for photo in photos.get(str(ramp["property_id"]), [])), key=lambda photo: photo[0])
+
+
+def _fill_photos(form: DotForm, slot: _Slot, taken: list[tuple[int, Optional[str], bytes]]) -> int:
+    """
+    Put a slot's photos into its six boxes, each captioned "Photo N: caption".
+    Takes the form, the slot and its photos by number; returns how many didn't fit.
+    """
     for box, (number, caption, data) in enumerate(taken[:PHOTOS_PER_SLOT], start=1):
         field = f"Photo_{slot.number}-{box}"
         form.image(field, prepare_image(data), CAPTION_BAND_PT)
@@ -328,18 +358,25 @@ def _fill_photos(form: DotForm, slot: _Slot, photos: dict[str, list[tuple[int, O
 def fill_inspection_forms(corner: dict[str, Any], ramps: list[dict[str, Any]],
                           photos: dict[str, list[tuple[int, Optional[str], bytes]]]) -> InspectionPdfs:
     """
-    Fill DOT's inspection form for a corner, as many copies as its ramps need, each left fillable.
-    Takes the corner's row, its ramps ({property_id, ramp_type, ..., attributes}) in order and each ramp's photos
-    by str(property_id) as (photo_number, caption, bytes); returns the PDFs and the count of photos left out.
+    Fill DOT's inspection form for a corner, as many copies as its measured ramps need, each trimmed to the pages it
+    uses and left fillable. Takes the corner's row, its ramps ({property_id, ramp_type, ..., attributes}) in order and
+    each ramp's photos by str(property_id) as (photo_number, caption, bytes); returns the PDFs and the count of a
+    printed slot's photos past its six boxes.
     """
     files: list[bytes] = []
     left_out = 0
     for slots in plan_copies(ramps):
         form = DotForm(TEMPLATE)
         _fill_corner(form, corner, ramps)
+        pages = [CORNER_PAGE]
         for slot in slots:
             _fill_slot(form, slot)
-            left_out += _fill_photos(form, slot, photos)
+            pages.append(RAMP_TYPE_PAGES[slot.number][slot.ramp_type])
+            taken = _slot_photos(slot, photos)
+            if taken:
+                left_out += _fill_photos(form, slot, taken)
+                pages.append(PHOTO_PAGES[slot.number])
+        form.keep_pages(pages)
         files.append(form.output())
     if left_out:
         logger.info("DOT inspection form: %d photo(s) beyond six a slot left out", left_out)
