@@ -47,3 +47,7 @@ PIR_IMAGE_RENDER_DPI: int = int(os.getenv("PIR_IMAGE_RENDER_DPI", "150"))
 # A PIR upload's caps: how many pages, and how big a page may render (megapixels at PIR_IMAGE_RENDER_DPI)
 PIR_UPLOAD_MAX_PAGES: int = int(os.getenv("PIR_UPLOAD_MAX_PAGES", "15"))
 PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE: float = float(os.getenv("PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE", "25"))
+
+# Ped ramp photos: an inspection's or a TIF's photos live in this private bucket, shown through signed URLs
+PEDRAMP_PHOTO_BUCKET_NAME: str = os.getenv("PEDRAMP_PHOTO_BUCKET_NAME", "pedramp-photos")
+PEDRAMP_PHOTO_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_PHOTO_URL_EXPIRY_SECONDS", "3600"))

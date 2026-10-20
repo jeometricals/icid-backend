@@ -46,6 +46,8 @@ start without the two required ones.
 | `PIR_IMAGE_RENDER_DPI` | no | `150` | Resolution a PIR PDF's pages are rendered to PNG at |
 | `PIR_UPLOAD_MAX_PAGES` | no | `15` | Most pages a PIR upload may have |
 | `PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE` | no | `25` | Largest page, in megapixels at the render resolution |
+| `PEDRAMP_PHOTO_BUCKET_NAME` | no | `pedramp-photos` | Bucket for ped ramp inspections' and TIFs' photos (10 MB a photo; the bucket enforces the same) |
+| `PEDRAMP_PHOTO_URL_EXPIRY_SECONDS` | no | `3600` | Lifetime of a ped ramp photo's signed URL |
 | `CRON_SECRET` | for the daily cleanup | | What Vercel Cron sends as its bearer token; without it the scheduled demo cleanup is refused |
 
 The two Supabase settings are only checked when Storage is first used, so everything that doesn't touch attachments,
