@@ -29,6 +29,7 @@ from api.queries.pirs import get_pir
 from api.queries.ped_ramp_corners import get_corner
 from api.queries.ped_ramp_inspections import get_inspection
 from api.queries.ped_ramp_tifs import get_tif
+from api.queries.ped_ramp_photos import get_photo, get_photo_tif
 from api.queries.projects import get_project_by_id, get_user_roles_on_project, is_user_on_project
 from api.queries.properties import get_property
 from api.queries.segments import get_segment
@@ -518,3 +519,21 @@ def demo_project_fence(request: Request, user: UserOut = Depends(current_user)) 
     project_id = request.path_params.get("project_id") or request.query_params.get("project_id")
     if user.is_demo and project_id is not None and not is_user_on_project(user.uuid, project_id):
         raise HTTPException(status_code=404, detail="Project not found")
+
+
+def photo_tif_member(tif_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for a TIF's photo routes: the signed-in user must be assigned to its corner's project (in any role), or be an admin.
+    Takes the tif_id path parameter and the current user.
+    Returns the TIF's status, ramp, project and inspection status (get_photo_tif); raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_photo_tif(tif_id), user, "TIF not found")
+
+
+def ped_ramp_photo_member(photo_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes on one ped ramp photo: the signed-in user must be assigned to its project (in any role), or be an admin.
+    Takes the photo_id path parameter and the current user.
+    Returns the photo dict, with its TIF's and inspection's statuses; raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_photo(photo_id), user, "Photo not found")

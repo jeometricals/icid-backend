@@ -52,3 +52,7 @@ PIR_UPLOAD_MAX_MEGAPIXELS_PER_PAGE: float = float(os.getenv("PIR_UPLOAD_MAX_MEGA
 # kept in this private bucket and handed out as signed download URLs
 PEDRAMP_EXPORT_BUCKET_NAME: str = os.getenv("PEDRAMP_EXPORT_BUCKET_NAME", "pedramp-exports")
 PEDRAMP_EXPORT_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_EXPORT_URL_EXPIRY_SECONDS", "600"))
+
+# Ped ramp photos: an inspection's or a TIF's photos live in this private bucket, shown through signed URLs
+PEDRAMP_PHOTO_BUCKET_NAME: str = os.getenv("PEDRAMP_PHOTO_BUCKET_NAME", "pedramp-photos")
+PEDRAMP_PHOTO_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_PHOTO_URL_EXPIRY_SECONDS", "3600"))
