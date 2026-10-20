@@ -35,6 +35,9 @@ pypdfium2==4.30.0
 # accelerators, no system packages). Its tests read the text back with pypdfium2.
 reportlab==4.2.5
 
+# Ped ramp DOT forms: NYC DOT's fillable PDFs (inspection, TIF) are filled and kept fillable (BSD; pure Python)
+pypdf==6.21.1
+
 # IDR export: the signed date prints as the day it was in New York; time-zone data where the system has none
 tzdata==2026.4
 
