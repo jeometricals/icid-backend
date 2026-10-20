@@ -227,6 +227,30 @@ CREATE TABLE icid.idr_reports (
 
 CREATE INDEX idx_idr_reports_idr ON icid.idr_reports(idr_id);
 CREATE INDEX idx_idr_reports_parent ON icid.idr_reports(parent_report_id) WHERE parent_report_id IS NOT NULL;
+-- At most one Daily Site Patrol per IDR (migrations/053); and the pair a report site's foreign key points at
+CREATE UNIQUE INDEX uq_idr_reports_one_dsp_per_idr ON icid.idr_reports (idr_id) WHERE report_type = 'DSP';
+CREATE UNIQUE INDEX uq_idr_reports_report_idr ON icid.idr_reports (report_id, idr_id);
+
+------------------------------------------------------------
+-- IDR REPORT SITES (the sites a report imports and the work done at each; once per IDR; the IDR's flags and curb
+-- segments are claimed from them; migrations/053)
+------------------------------------------------------------
+CREATE TABLE icid.idr_report_sites (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    report_id        UUID NOT NULL,
+    idr_id           UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    property_id      UUID NOT NULL REFERENCES icid.properties(id),
+    work_type        TEXT NOT NULL CHECK (work_type IN ('excavation', 'concrete', 'pavement_restoration', 'other')),
+    work_type_other  TEXT,
+    added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    added_by         UUID NOT NULL REFERENCES icid.users(uuid),
+    CONSTRAINT fk_idr_report_sites_report FOREIGN KEY (report_id, idr_id)
+        REFERENCES icid.idr_reports (report_id, idr_id) ON DELETE CASCADE,
+    CONSTRAINT chk_idr_report_sites_other CHECK (work_type <> 'other' OR work_type_other IS NOT NULL),
+    CONSTRAINT uq_idr_report_sites_idr_property UNIQUE (idr_id, property_id)
+);
+CREATE INDEX idx_idr_report_sites_report ON icid.idr_report_sites (report_id);
+CREATE INDEX idx_idr_report_sites_property ON icid.idr_report_sites (property_id);
 
 -- At most one non-addendum General per IDR (migrations/005_one_general_per_idr.sql).
 CREATE UNIQUE INDEX uq_idr_reports_one_gen_per_idr
