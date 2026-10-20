@@ -571,8 +571,15 @@ Any change must follow these.
   `DSP report: <field>: <problem>`; it is stored trimmed. The save route reads the report's type first (one more
   statement). A new DSP is `{}`, as every report is; answers may stay blank, and submit doesn't check them. A DSP has
   no pay items and is in `NON_CONTRIBUTING_TYPES`: it doesn't count toward, or feed, the auto-General.
-- **DSP on the export.** A `DSP` report prints on DSP Fr, one sheet per report (`export_dsp.py`), among the main
-  reports in page order (after its parent, when it has one, as an addendum).
+  - **An addendum, one per IDR** (U1). `POST .../reports` takes a DSP only as the addendum of a main General, SWCB,
+    AC, Conc Mix or Conc Cyl of the IDR (`DSP_PARENT_TYPES` in `api/schemas/idr_report.py`), else 400 `A Daily Site
+    Patrol is added to a General, SWCB, AC, Conc Mix or Conc Cyl report, as its addendum`. A second is 409 `This IDR
+    already has a Daily Site Patrol` with `existing_report_id`: the route looks first (`get_dsp_report_id`), and
+    `create_idr_report` turns the unique violation of `uq_idr_reports_one_dsp_per_idr` (migration 053) into the same
+    409 (`DspTakenError`). A parent must be a main report, so a Conc Mix or Conc Cyl filed as an addendum (as the
+    frontend files them) can't take one. DSPs made before U1 as main reports stay as they are.
+- **DSP on the export.** A `DSP` report prints on DSP Fr, one sheet per report (`export_dsp.py`), after its parent,
+  as an addendum (a main DSP made before U1 prints among the main reports in page order).
   - **What is written:** the project details, the work date (`AK8:AQ8` merged, its slashes cleared) and its day
     shaded, the I.R. No., Sheet No. and "of" (numbered as any page), the time of patrol, an X in each row's YES / NO /
     N/A box and its details (7 pt, two lines, then "continued in ICID"), and Field Order Issued?'s Y or N box, the

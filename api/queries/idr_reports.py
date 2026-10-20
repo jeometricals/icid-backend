@@ -1,6 +1,7 @@
 from typing import Any, Optional
 from uuid import UUID
 
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
 from api.db.runner import run_query
@@ -97,7 +98,7 @@ def create_idr_report(
     """
     Insert a new report into an IDR with empty report_data, unless it would be the IDR's second General.
     Takes the IDR uuid, the report type, the addendum flag and the parent report uuid (or None).
-    Returns a one-row list with the new report, an empty list if the IDR already has a General, or None on failure.
+    Returns a one-row list with the new report, an empty list if the IDR already has a General, or None on failure; raises DspTakenError when it would be the IDR's second Daily Site Patrol.
     """
     sql = f"""
         INSERT INTO icid.idr_reports (idr_id, report_type, is_addendum, parent_report_id)
@@ -105,7 +106,34 @@ def create_idr_report(
         ON CONFLICT (idr_id) WHERE report_type = 'GEN' AND is_addendum = false DO NOTHING
         RETURNING {IDR_REPORT_COLUMNS};
     """
-    return run_query(sql, (idr_id, report_type, is_addendum, parent_report_id))
+    try:
+        return run_query(sql, (idr_id, report_type, is_addendum, parent_report_id))
+    except UniqueViolation as exc:
+        # uq_idr_reports_one_dsp_per_idr (migration 053): another DSP went in after the route's own check
+        if report_type == "DSP":
+            raise DspTakenError() from exc
+        raise
+
+
+class DspTakenError(Exception):
+    """Raised when a report insert would give an IDR a second Daily Site Patrol."""
+
+
+def get_dsp_report_id(idr_id: UUID) -> Optional[UUID]:
+    """
+    Look up the IDR's Daily Site Patrol (an IDR holds at most one).
+    Takes the IDR uuid.
+    Returns that report's uuid, or None if the IDR has no DSP.
+    """
+    sql = """
+        SELECT report_id
+        FROM icid.idr_reports
+        WHERE idr_id = %s AND report_type = 'DSP'
+        ORDER BY created_at, report_id
+        LIMIT 1;
+    """
+    rows = run_query(sql, (idr_id,))
+    return rows[0]["report_id"] if rows else None
 
 
 def get_general_report_id(idr_id: UUID) -> Optional[UUID]:
