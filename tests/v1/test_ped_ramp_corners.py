@@ -106,13 +106,14 @@ SITE_ROW = {"corner_id": CORNER_ID, "property_id": RAMP_ID, "corner_reused": Fal
 
 class TestPedrampSites:
     def test_a_member_adds_a_corner_and_its_ramp_in_one_statement(self):
-        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=[[PROJECT_ROW], ON_PROJECT]),              patch(CORNERS, return_value=[SITE_ROW]) as run:
+        # the corner it would reuse is looked up first (none here), then the one statement
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=[[PROJECT_ROW], ON_PROJECT]),              patch(CORNERS, side_effect=[[], [SITE_ROW]]) as run:
             response = inspector.post(SITES_URL, json=SITE_BODY)
         assert response.status_code == 201
         assert response.json()["data"] == {"corner_id": str(CORNER_ID), "property_id": str(RAMP_ID),
                                            "corner_reused": False}
         assert response.json()["message"] == "Corner and ramp created"
-        assert run.call_count == 1
+        assert run.call_count == 2
         sql, params = run.call_args.args
         one_line = " ".join(sql.split())
         assert "lower(north_south_street) = lower(%s) AND lower(east_west_street) = lower(%s)" in one_line

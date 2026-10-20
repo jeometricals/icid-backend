@@ -165,6 +165,29 @@ def get_live_corner_of_project(corner_id: UUID, project_id: str) -> Optional[dic
     return rows[0] if rows else None
 
 
+# The live corner a ped ramp site reuses: of the project, at the borough, the two streets (any case) and the direction,
+# the oldest when there are several. Takes (project_id, boro, north_south_street, east_west_street, corner_direction)
+_SAME_CORNER = """
+            FROM icid.ped_ramp_corners
+            WHERE project_id = %s AND deleted_at IS NULL AND boro = %s::icid.boro
+              AND lower(north_south_street) = lower(%s) AND lower(east_west_street) = lower(%s)
+              AND corner_direction = %s
+            ORDER BY created_at
+            LIMIT 1"""
+
+
+def find_live_corner(project_id: str, boro: str, north_south_street: str, east_west_street: str,
+                     corner_direction: str) -> Optional[dict[str, Any]]:
+    """
+    Find the live corner a ped ramp site at this place would reuse, as create_pedramp_site finds it.
+    Takes the project id, the borough, the two streets and the corner direction.
+    Returns {corner_id}, or None when there is none.
+    """
+    rows = run_query("\n        SELECT corner_id" + _SAME_CORNER + ";",
+                     (project_id, boro, north_south_street, east_west_street, corner_direction))
+    return rows[0] if rows else None
+
+
 def create_pedramp_site(project_id: str, created_by_uuid: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
     Add a ped ramp site in one statement: a live corner of the project at the same borough, streets (any case) and direction is reused, else one is added; then the ramp, a ped ramp property at it (its borough and streets the corner's), and an attributes row holding its label when one is given.
@@ -174,13 +197,9 @@ def create_pedramp_site(project_id: str, created_by_uuid: UUID, data: dict[str, 
     sql = (
         """
         WITH found AS (
-            SELECT corner_id, boro, north_south_street, east_west_street
-            FROM icid.ped_ramp_corners
-            WHERE project_id = %s AND deleted_at IS NULL AND boro = %s::icid.boro
-              AND lower(north_south_street) = lower(%s) AND lower(east_west_street) = lower(%s)
-              AND corner_direction = %s
-            ORDER BY created_at
-            LIMIT 1
+            SELECT corner_id, boro, north_south_street, east_west_street"""
+        + _SAME_CORNER
+        + """
         ),
         made AS (
             INSERT INTO icid.ped_ramp_corners (project_id, """

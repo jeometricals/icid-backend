@@ -48,6 +48,16 @@ def no_match_lines():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_ped_ramp_inspections():
+    """
+    Patch the ped ramp inspection statements for the whole session (Pedramp Phase 3), so the corner and ramp writes that now check their corner's inspection (the lock) find none unless a test patches api.queries.ped_ramp_inspections.run_query itself.
+    Yields the mock of the statements.
+    """
+    with patch("api.queries.ped_ramp_inspections.run_query", return_value=[]) as run:
+        yield run
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_idr_segments():
     """
     Patch the IDR-segment statements for the whole session (curb billing), as no_idr_flags does for flags: no IDR covers any segment unless a test patches api.queries.idr_segments.run_query itself, and an approved IDR's frozen segment rollup is empty.

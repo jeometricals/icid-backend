@@ -7,6 +7,7 @@ from fastapi.responses import Response
 from api.queries.ped_ramp_corners import (
     create_corner,
     create_pedramp_site,
+    find_live_corner,
     get_corner,
     list_corners,
     soft_delete_corner,
@@ -35,7 +36,7 @@ from api.services.auth import (
     project_member,
 )
 from api.services.ped_ramp_report import file_name, inspection_report, render_pdf
-from api.v1._shared import changes_sent, refuse_deleted_for_member, validated
+from api.v1._shared import changes_sent, refuse_deleted_for_member, refuse_locked_corner, validated
 
 # A second router under /v1/projects, for a project's corners. A demo user reaches only their own project.
 project_router = APIRouter(
@@ -133,9 +134,13 @@ def create_project_pedramp_site(
     """
     Add a ped ramp site, its corner and the ramp at it, in one statement, created by the signed-in user. A live corner of the project at the same borough, streets (any case) and direction is reused as it stands (the corner fields sent are then ignored). For a user on the project, in any role, or an admin; not a demo user.
     Takes the project id as a path parameter, the corner's fields (borough, two streets and direction required) and the ramp's (quadrant, facing_street, ramp_type, optional ramp_id_label and notes) in the body, and the user.
-    Returns 201 with a PedrampSiteResponse ({corner_id, property_id, corner_reused}); raises 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for a missing, unknown or over-long value and 500 if it can't be saved.
+    Returns 201 with a PedrampSiteResponse ({corner_id, property_id, corner_reused}); raises 403 for a demo user, a user who isn't on the project or a corner to reuse whose inspection is submitted and a user who isn't its RE, 404 for an unknown project, 409 for a corner to reuse whose inspection is approved, 422 for a missing, unknown or over-long value and 500 if it can't be saved.
     """
-    row = create_pedramp_site(project_id, user.uuid, body.model_dump())
+    values = body.model_dump()
+    reused = find_live_corner(project_id, values["boro"], values["north_south_street"], values["east_west_street"],
+                              values["corner_direction"])
+    refuse_locked_corner(reused["corner_id"] if reused else None, project_id, user)
+    row = create_pedramp_site(project_id, user.uuid, values)
 
     if row is None:
         raise HTTPException(status_code=500, detail="Failed to save ped ramp site")
@@ -164,9 +169,10 @@ def update_corner_record(
     """
     Change some of a corner, merged over it and checked whole as a new one; a new borough or street is written onto its live ramps too. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out keeps its value; a null clears it, but for the borough and the two streets, where it counts as left out.
     Takes the corner's id as a path parameter, the fields to change in the body, the corner (loaded by _writable_corner) and the user.
-    Returns a CornerResponse with the corner as it now is; raises 400 when nothing is sent or a user who isn't an admin edits a deleted corner, 403 for a demo user or a user who isn't on its project, 404 for an unknown corner and 422 for an unknown or over-long value.
+    Returns a CornerResponse with the corner as it now is; raises 400 when nothing is sent or a user who isn't an admin edits a deleted corner, 403 for a demo user, a user who isn't on its project or a corner whose inspection is submitted and a user who isn't its RE, 404 for an unknown corner, 409 for a corner whose inspection is approved and 422 for an unknown or over-long value.
     """
     refuse_deleted_for_member(found, user, CORNER_DELETED)
+    refuse_locked_corner(found["corner_id"], found["project_id"], user)
     changes = changes_sent(body, _CLEARABLE)
     merged = {**{field: found.get(field) for field in CornerCreate.model_fields}, **changes}
     record = validated(CornerCreate, merged)
@@ -187,11 +193,12 @@ def delete_corner(found: dict = Depends(corner_member), admin: UserOut = Depends
     """
     Soft-delete a corner: it is marked deleted, with when and by whom, and kept; it leaves the project's list, and its ramps keep it as their corner. Admins only. Deleting a corner that is already deleted succeeds and changes nothing.
     Takes the corner (loaded by corner_member from the corner_id path parameter) and the signed-in admin.
-    Returns a CornerResponse with the deleted corner; raises 403 for a user who isn't an admin and 404 for an unknown corner.
+    Returns a CornerResponse with the deleted corner; raises 403 for a user who isn't an admin, 404 for an unknown corner and 409 for a corner whose inspection is approved.
     """
     if found["deleted_at"] is not None:
         return _response(found, "Corner was already deleted")
 
+    refuse_locked_corner(found["corner_id"], found["project_id"], admin)
     row = soft_delete_corner(found["corner_id"], admin.uuid)
 
     if row is None:

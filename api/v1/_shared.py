@@ -2,7 +2,8 @@
 What more than one router needs: reading the date and discipline filters, reading a text field off a request body,
 checking a new password, shaping the rows of an IDR list, keeping soft-deleted rows (and their children) for
 admins, the gate on a PIR's writes, and what the writes of a PIR's drawings share (the pay-item check, merging
-and checking a PATCH), and refusing pay items entered by hand that an IDR's flags fill.
+and checking a PATCH), refusing pay items entered by hand that an IDR's flags fill, and the lock a ped ramp
+corner's inspection puts on the corner and its ramps.
 Not a router itself.
 """
 
@@ -17,6 +18,8 @@ from pydantic import BaseModel, ValidationError
 from api.schemas.auth import UserOut
 from api.queries.contract_items import get_project_pay_item
 from api.schemas.idr import IdrListItem
+from api.queries.ped_ramp_inspections import get_corner_inspection
+from api.queries.projects import get_user_roles_on_project
 from api.queries.properties import get_property
 from api.services.auth import MAX_PASSWORD_BYTES, no_demo_pir_writes, pir_member
 from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
@@ -80,6 +83,29 @@ def refuse_deleted_for_member(row: dict[str, Any], user: UserOut, detail: str) -
     """
     if row["deleted_at"] is not None and user.role != "admin":
         raise HTTPException(status_code=400, detail=detail)
+
+
+# What the lock of a corner's inspection says (Pedramp Phase 3): approved is frozen for everyone; submitted, only the
+# RE (a user holding 're' on the project) or an admin edits
+INSPECTION_APPROVED = "Inspection is approved — no further edits"
+INSPECTION_SUBMITTED = "Inspection is submitted — only the RE can edit"
+
+
+def refuse_locked_corner(corner_id: Optional[UUID], project_id: str, user: UserOut) -> None:
+    """
+    Keep a corner, and its ramps, as its inspection's status allows: anyone who may write edits a draft (or a corner without an inspection); only the RE or an admin a submitted one; nobody an approved one.
+    Takes the corner's id (None for a ramp at no corner, which nothing locks), its project's id and the signed-in user.
+    Returns nothing; raises 409 for an approved inspection and 403 for a submitted one and a user who isn't its RE.
+    """
+    if corner_id is None:
+        return
+    inspection = get_corner_inspection(corner_id)
+    if inspection is None or inspection["status"] == "draft":
+        return
+    if inspection["status"] == "approved":
+        raise HTTPException(status_code=409, detail=INSPECTION_APPROVED)
+    if user.role != "admin" and "re" not in get_user_roles_on_project(user.uuid, project_id):
+        raise HTTPException(status_code=403, detail=INSPECTION_SUBMITTED)
 
 
 # What a member who isn't an admin is told when they change something under a soft-deleted row

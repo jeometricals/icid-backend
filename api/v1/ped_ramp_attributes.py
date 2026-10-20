@@ -15,7 +15,7 @@ from api.schemas.ped_ramp import (
 )
 from api.services.auth import current_user, no_demo_property_writes, property_member
 from api.services.ped_ramp_ada import ada_warnings
-from api.v1._shared import PROPERTY_DELETED, refuse_deleted_for_member
+from api.v1._shared import PROPERTY_DELETED, refuse_deleted_for_member, refuse_locked_corner
 
 # A second router under /v1/properties, for a ped ramp's attributes
 property_router = APIRouter(prefix="/v1/properties", tags=["Ped ramp attributes"], dependencies=[Depends(current_user)])
@@ -39,9 +39,10 @@ def _writable_ramp(found: dict = Depends(property_member), user: UserOut = Depen
     """
     FastAPI dependency for the writes to a ped ramp's attributes: the signed-in user must be on its project (or an admin), and not a demo user; only an admin changes a soft-deleted ramp's.
     Takes the property (loaded and checked by property_member, so 404 and 403 come first) and the user (refused when a demo user).
-    Returns the property dict; raises 400 for a sidewalk or a deleted ramp of a user who isn't an admin, and 403 for a demo user.
+    Returns the property dict; raises 400 for a sidewalk or a deleted ramp of a user who isn't an admin, 403 for a demo user or a ramp whose corner's inspection is submitted and a user who isn't its RE, and 409 for one whose inspection is approved.
     """
     refuse_deleted_for_member(found, user, PROPERTY_DELETED)
+    refuse_locked_corner(found.get("corner_id"), found["project_id"], user)
     return _ramp(found)
 
 
