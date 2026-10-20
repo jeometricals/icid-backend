@@ -224,6 +224,19 @@ def _on_state(widget: DictionaryObject) -> Optional[str]:
     return states[0] if states else None
 
 
+def _prune_field(ref: Any, on_kept_pages: set[int]) -> bool:
+    """
+    Cut a field's kids down to those with a widget on a kept page, in place.
+    Takes the field's reference and the kept pages' annotation object numbers; returns whether anything of it is left.
+    """
+    field = ref.get_object()
+    if "/Kids" not in field:
+        return ref.idnum in on_kept_pages
+    kids = ArrayObject(kid for kid in field["/Kids"] if _prune_field(kid, on_kept_pages))
+    field[NameObject("/Kids")] = kids
+    return bool(kids)
+
+
 class DotForm:
     """One copy of a DOT template being filled; `output()` gives the filled PDF's bytes."""
 
@@ -237,6 +250,7 @@ class DotForm:
         self._text_by_page: dict[int, dict[str, str]] = {}
         self._choice_values: dict[str, str] = {}
         self._overlays: dict[int, list[Callable[[Canvas], None]]] = {}
+        self._kept_pages: Optional[list[int]] = None
 
     def _field(self, name: str) -> _Field:
         """
@@ -384,6 +398,27 @@ class DotForm:
         """
         self._overlays.setdefault(page_index, []).append(painter)
 
+    def keep_pages(self, page_indexes: Iterable[int]) -> None:
+        """
+        Keep only these pages at output (in the template's order), dropping the rest and their fields.
+        Takes the pages' indexes (0 first); returns nothing.
+        """
+        self._kept_pages = sorted(set(page_indexes))
+
+    def _drop_pages(self) -> None:
+        """
+        Remove every page not kept, then prune the AcroForm to the fields with a widget on a kept page (a field's kids
+        on removed pages dropped), so no field points at a removed page. Takes nothing; returns nothing.
+        """
+        kept = set(self._kept_pages or [])
+        for page_index in reversed(range(len(self.writer.pages))):
+            if page_index not in kept:
+                self.writer.remove_page(page_index)
+        on_kept_pages = {ref.idnum for page in self.writer.pages for ref in page.annotations or []}
+        acro_form = self.writer._root_object["/AcroForm"]
+        acro_form[NameObject("/Fields")] = ArrayObject(
+            ref for ref in acro_form["/Fields"] if _prune_field(ref, on_kept_pages))
+
     def output(self) -> bytes:
         """
         Write the values and appearances, merge the drawings and save; the form stays fillable.
@@ -404,6 +439,8 @@ class DotForm:
                 painter(canvas)
             canvas.save()
             page.merge_page(PdfReader(io.BytesIO(buffer.getvalue())).pages[0])
+        if self._kept_pages is not None:
+            self._drop_pages()
         out = io.BytesIO()
         self.writer.write(out)
         return out.getvalue()

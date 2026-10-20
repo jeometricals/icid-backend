@@ -91,9 +91,15 @@ class TestPackage:
         data, kind = dot_package(CORNER, [one, two], [tif(one), tif(two, "draft")], {})
         assert kind == "zip" and members(data) == ["inspection.pdf", "tif_CT-A.pdf"]
 
-    def test_a_corner_of_three_ramps_is_two_copies(self):
-        data, kind = dot_package(CORNER, [ramp(1), ramp(2, "PARALLEL"), ramp(3)], [], {})
+    def test_a_corner_of_three_measured_ramps_is_two_copies(self):
+        measured = [{**ramp(number, ramp_type), "attributes": {"ramp_width_in": 48}}
+                    for number, ramp_type in ((1, "PERPENDICULAR"), (2, "PARALLEL"), (3, "PERPENDICULAR"))]
+        data, kind = dot_package(CORNER, measured, [], {})
         assert kind == "zip" and members(data) == ["inspection_1.pdf", "inspection_2.pdf"]
+
+    def test_unmeasured_ramps_take_no_copy(self):
+        data, kind = dot_package(CORNER, [ramp(1), ramp(2, "PARALLEL"), ramp(3)], [], {})
+        assert kind == "pdf" and data.startswith(b"%PDF")
 
     def test_a_tifs_photos_and_layout_are_filled_into_it(self, photos):
         one = ramp(1, label="R1")
