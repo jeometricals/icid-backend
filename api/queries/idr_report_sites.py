@@ -9,14 +9,20 @@ from uuid import UUID
 
 from api.db.runner import run_query
 
-# A site as every function here returns it (rs), with its property's fields
-_SITE_COLUMNS = """
+# A user's name as the lists show it: first and last, whichever is on file
+_NAME = "NULLIF(concat_ws(' ', {u}.first_name, {u}.last_name), '')"
+# A site as every function here returns it (rs), with its property's fields and the names of who added it and who
+# last changed its work (V2)
+_SITE_COLUMNS = f"""
             rs.id, rs.report_id, rs.idr_id, rs.property_id, rs.work_type, rs.work_type_other, rs.added_at, rs.added_by,
+            rs.updated_at, rs.updated_by, {_NAME.format(u="ua")} AS added_by_name, {_NAME.format(u="uu")} AS updated_by_name,
             p.kind::text AS kind, p.boro::text AS boro, p.address, p.block, p.lot, p.intersection_street_1,
             p.intersection_street_2, p.quadrant::text AS quadrant, p.facing_street::text AS facing_street,
             p.ramp_type::text AS ramp_type, p.community_board, p.deleted_at AS property_deleted_at"""
 _FROM = """
-        JOIN icid.properties p ON p.id = rs.property_id"""
+        JOIN icid.properties p ON p.id = rs.property_id
+        LEFT JOIN icid.users ua ON ua.uuid = rs.added_by
+        LEFT JOIN icid.users uu ON uu.uuid = rs.updated_by"""
 
 
 def _read(where: str, params: tuple[Any, ...], order: str = "") -> Optional[list[dict[str, Any]]]:
@@ -89,23 +95,31 @@ def add_report_site(report_id: UUID, idr_id: UUID, property_id: UUID, work_type:
 
 
 def update_report_site(report_id: UUID, site_id: UUID, work_type: str,
-                       work_type_other: Optional[str]) -> Optional[dict[str, Any]]:
+                       work_type_other: Optional[str], updated_by: UUID) -> Optional[dict[str, Any]]:
     """
-    Change the work done at an imported site.
-    Takes the report's and the site's uuids, the work type and its text for 'other' (None otherwise).
+    Change the work done at an imported site; when it does change, stamp updated_at and updated_by (V2).
+    Takes the report's and the site's uuids, the work type, its text for 'other' (None otherwise) and the user changing it.
     Returns the updated site dict with its property, or None when the report has no such site.
     """
     sql = (
         """
-        WITH rs AS (
-            UPDATE icid.idr_report_sites
-            SET work_type = %s, work_type_other = %s
-            WHERE report_id = %s AND id = %s
-            RETURNING *
+        WITH changed AS (
+            SELECT s.id, (s.work_type, s.work_type_other) IS DISTINCT FROM (%s::text, %s::text) AS is_changed
+            FROM icid.idr_report_sites s
+            WHERE s.report_id = %s AND s.id = %s
+        ),
+        rs AS (
+            UPDATE icid.idr_report_sites s
+            SET work_type = %s, work_type_other = %s,
+                updated_at = CASE WHEN c.is_changed THEN now() ELSE s.updated_at END,
+                updated_by = CASE WHEN c.is_changed THEN %s::uuid ELSE s.updated_by END
+            FROM changed c
+            WHERE s.id = c.id
+            RETURNING s.*
         )
         SELECT""" + _SITE_COLUMNS + "\n        FROM rs" + _FROM + ";"
     )
-    rows = run_query(sql, (work_type, work_type_other, report_id, site_id))
+    rows = run_query(sql, (work_type, work_type_other, report_id, site_id, work_type, work_type_other, updated_by))
     return rows[0] if rows else None
 
 
@@ -143,3 +157,24 @@ def site_pay_item_keys(property_id: UUID) -> Optional[list[dict[str, Any]]]:
         WHERE pir.property_id = %s AND pir.deleted_at IS NULL AND pg.deleted_at IS NULL AND s.deleted_at IS NULL
           AND s.claimed_by_idr_id IS NULL AND s.length_ft IS NOT NULL;"""
     return run_query(sql, (property_id, property_id))
+
+
+def property_work_history(property_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    List every time a property was imported into a report (V2), across every IDR that still exists, deleted and
+    returned ones included: the work, the IDR's number, work date, status and deleted_at, its return reason and its
+    inspector's name.
+    Takes the property's uuid.
+    Returns the rows by work date, newest first, then the newest import; None on failure.
+    """
+    sql = """
+        SELECT rs.id, rs.idr_id, rs.report_id, r.report_type, rs.work_type, rs.work_type_other, rs.added_at,
+               i.idr_number, i.report_date, i.status, i.deleted_at, i.return_reason, i.reporter_uuid,
+               NULLIF(concat_ws(' ', u.first_name, u.last_name), '') AS reporter_name
+        FROM icid.idr_report_sites rs
+        JOIN icid.idrs i ON i.idr_id = rs.idr_id
+        JOIN icid.idr_reports r ON r.report_id = rs.report_id
+        LEFT JOIN icid.users u ON u.uuid = i.reporter_uuid
+        WHERE rs.property_id = %s
+        ORDER BY i.report_date DESC, rs.added_at DESC, rs.id;"""
+    return run_query(sql, (property_id,))

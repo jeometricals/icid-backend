@@ -147,7 +147,14 @@ class TestChangeAndRemove:
              patch(SITES, return_value=[{**SIDEWALK_SITE, "work_type": "other", "work_type_other": "Tree pit"}]) as run:
             response = admin_client.patch(f"{URL}/{SITE_ID}", json={"work_type": "other", "work_type_other": " Tree pit "})
         assert response.status_code == 200 and response.json()["data"]["work_type_other"] == "Tree pit"
-        assert run.call_args.args[1] == ("other", "Tree pit", REPORT_ID, SITE_ID)
+        sql, params = run.call_args.args
+        assert params == ("other", "Tree pit", REPORT_ID, SITE_ID, "other", "Tree pit", ADMIN_ID)
+        one_line = " ".join(sql.split())
+        # who and when only when the work changes
+        assert "(s.work_type, s.work_type_other) IS DISTINCT FROM (%s::text, %s::text) AS is_changed" in one_line
+        assert "updated_at = CASE WHEN c.is_changed THEN now() ELSE s.updated_at END" in one_line
+        assert "updated_by = CASE WHEN c.is_changed THEN %s::uuid ELSE s.updated_by END" in one_line
+        assert "LEFT JOIN icid.users uu ON uu.uuid = rs.updated_by" in one_line
 
     def test_a_site_is_removed_and_an_unknown_one_is_404(self, admin_client):
         with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]), \

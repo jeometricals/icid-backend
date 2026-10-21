@@ -35,6 +35,7 @@ def include_routers(app: FastAPI):
     from api.v1.assessment_summary import project_router as assessment_summary_router
     from api.v1.properties import project_router as project_properties_router
     from api.v1.properties import router as properties_router
+    from api.v1.property_work import router as property_work_router
     from api.v1.ped_ramp_attributes import property_router as property_ped_ramp_attributes_router
     from api.v1.ped_ramp_corners import project_router as project_ped_ramp_corners_router
     from api.v1.ped_ramp_corners import router as ped_ramp_corners_router
@@ -95,6 +96,7 @@ def include_routers(app: FastAPI):
     app.include_router(assessment_summary_router)
     app.include_router(project_properties_router)
     app.include_router(properties_router)
+    app.include_router(property_work_router)
     app.include_router(property_ped_ramp_attributes_router)
     app.include_router(project_ped_ramp_corners_router)
     app.include_router(ped_ramp_corners_router)
