@@ -336,7 +336,7 @@ def count_user_references(uuid: UUID) -> Optional[dict[str, int]]:
     """
     Count the rows that name a user, each of which stops the user's row being deleted for good.
     Takes the user's uuid.
-    Returns {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs, flags, pir_pages, non_assessable_areas, features, segments, idr_flag_attributions, idr_segment_attributions, match_lines, ped_ramp_corners, ped_ramp_inspections, ped_ramp_tifs, ped_ramp_photos, idr_report_sites}: the IDRs they reported, reviewed, deleted or unlocked, their project roles, the audit rows and field edits they made, the attachments they uploaded, the properties and task orders they created or deleted, the properties they bundled into task orders, the PIRs they digitized, signed as built or deleted, the flags they created or deleted, the PIR pages they replaced or deleted, the non-assessable areas, features and segments they created or deleted, the IDR flag and segment attributions they set, the match lines they drew or deleted, the ped ramp corners they added or deleted, the ped ramp inspections they started, signed, approved, returned or unlocked, the TIFs they drafted or signed, the photos they uploaded, and the sites they imported into reports; or None on failure.
+    Returns {idrs, project_users, audit, field_edits, attachments, properties, task_orders, task_order_properties, pirs, flags, pir_pages, non_assessable_areas, features, segments, idr_flag_attributions, idr_segment_attributions, match_lines, ped_ramp_corners, ped_ramp_inspections, ped_ramp_tifs, ped_ramp_photos, idr_report_sites, idr_report_site_pay_items}: the IDRs they reported, reviewed, deleted or unlocked, their project roles, the audit rows and field edits they made, the attachments they uploaded, the properties and task orders they created or deleted, the properties they bundled into task orders, the PIRs they digitized, signed as built or deleted, the flags they created or deleted, the PIR pages they replaced or deleted, the non-assessable areas, features and segments they created or deleted, the IDR flag and segment attributions they set, the match lines they drew or deleted, the ped ramp corners they added or deleted, the ped ramp inspections they started, signed, approved, returned or unlocked, the TIFs they drafted or signed, the photos they uploaded, the sites they imported into reports or last changed the work at, and the pay items they entered on sites; or None on failure.
     """
     sql = """
         SELECT
@@ -367,9 +367,10 @@ def count_user_references(uuid: UUID) -> Optional[dict[str, int]]:
             (SELECT count(*) FROM icid.ped_ramp_tifs rt
              WHERE %s IN (rt.signed_by_uuid, rt.created_by)) AS ped_ramp_tifs,
             (SELECT count(*) FROM icid.ped_ramp_photos rp WHERE rp.uploaded_by = %s) AS ped_ramp_photos,
-            (SELECT count(*) FROM icid.idr_report_sites irs WHERE irs.added_by = %s) AS idr_report_sites;
+            (SELECT count(*) FROM icid.idr_report_sites irs WHERE %s IN (irs.added_by, irs.updated_by)) AS idr_report_sites,
+            (SELECT count(*) FROM icid.idr_report_site_pay_items sp WHERE sp.added_by = %s) AS idr_report_site_pay_items;
     """
-    rows = run_query(sql, (uuid,) * 22)
+    rows = run_query(sql, (uuid,) * 23)
     return rows[0] if rows else None
 
 

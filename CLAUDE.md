@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`, `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py`, `ped_ramp_listing.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`, `corner_router`, `inspection_router`, `tif_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, the lock a ped ramp corner's inspection puts on it (`refuse_locked_corner`), and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `idr_report_sites.py`, `idr_report_site_pay_items.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`, `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py`, `ped_ramp_listing.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`, `corner_router`, `inspection_router`, `tif_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, the lock a ped ramp corner's inspection puts on it (`refuse_locked_corner`), and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. `idr_flags.py` is which flags an IDR covers: its overrides and the claim and release CTEs the IDR statements carry; `idr_segments.py` the same for curb segments, with their quantity CTE. `progress.py` is the progress rollup's one statement: a project's flags and curb segments by property, pay item and state. `construction_report.py` reads a Construction Report's property, title block, IDR, flags and drawings; `assessment_summary.py` a project's claimed flags for the Assessment Summary. `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py` and `ped_ramp_listing.py` are the ped ramp inspection's. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -58,7 +58,8 @@ auth routes:
   `/v1/segments/{id}`, `/v1/match-lines/{id}`
 - **IDRs:** `/v1/idrs/` and `/{idr_id}` (header, reports, submit, export, attachments); the review queue and moves
   (`/queue`, accept / approve at both stages, `/return`); reviewer edits (`/field`, pay items, trucks); the admin
-  moves (`/admin/unlock`, `/delete`, `/undelete`, `/permanent`); `/attributed-flags`; `/attributed-segments`; `/construction-reports`
+  moves (`/admin/unlock`, `/delete`, `/undelete`, `/permanent`); `/attributed-flags`; `/attributed-segments`; `/construction-reports`; a report's
+  `/sites` and their `/pay-items`; `/pay-item-sources`
 
 ## 3. Modularity rules
 
@@ -176,8 +177,8 @@ Any change must follow these.
       orders; PIRs they digitized, signed as built or deleted; flags they created or deleted; PIR pages they
       replaced or deleted; non-assessable areas, features, segments and match lines they created or deleted; IDR flag
       and segment attributions they set; ped ramp corners they added or deleted; ped ramp inspections they started,
-      signed, approved or returned, TIFs they drafted or signed, ped ramp photos they uploaded, and sites they imported into reports. Any of those is a
-      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (42 in `schema.sql`,
+      signed, approved or returned, TIFs they drafted or signed, ped ramp photos they uploaded, sites they imported into reports or last changed the work at, and pay items they entered on sites. Any of those is a
+      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (44 in `schema.sql`,
       `users.deleted_by` the one not counted; the `deleted_by` of a property, a task order, a PIR, a flag, a PIR
       page, an area, a feature or a segment, an attribution's `set_by` and a PIR's
       `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
@@ -267,7 +268,10 @@ Any change must follow these.
       copies, and the one foreign key to a contract item, `flags.pay_item_id`, is `ON DELETE SET NULL`: a flag
       mapped to a deleted item keeps its geometry and quantity and loses only its mapping. A deleted item leaves
       the picker; reports that used it, and their quantities, are unchanged. There is no undo for a delete or a
-      clear.
+      clear. **But an item entered on an imported site can't be deleted** (Slice V1): `site_pay_items.contract_item_id`
+      has no delete action, so the delete, and the clear for any such item, is 409 naming the IDRs
+      (`idrs: [{idr_id, idr_number, report_date, item_no, budget_code}]`; checked first, and a foreign-key violation
+      meanwhile is the same 409). Remove it from those sites first.
     - **CSV import** is two routes taking the same upload (multipart field `file`): `import/preview` shows
       what would happen and `import/commit` does it. Commit reads and checks the file itself, so what is
       written is what was uploaded to it, not what an earlier preview saw.
@@ -696,9 +700,10 @@ Any change must follow these.
   - **`scripts/backfill_quantities.py`** does the same for the IDRs approved before this existed: for every
     approved IDR that isn't deleted, it replaces the IDR's rows with what its reports give now
     (`replace_quantities`, one statement per IDR). Safe to run again. Run it once after migration 025.
-  - **Three sources** (`quantities.source`, migrations 037 and 044): `manual`, the rows below, read off the reports;
-    `from_flags`, one row per pay item from the flags the IDR claimed (see "IDR flags"); and `from_segments`, one row
-    per pay item from the curb segments it claimed, in LF (see "Curb billing"). The backfill replaces only an IDR's
+  - **Four sources** (`quantities.source`, migrations 037, 044 and 054): `manual`, the rows below, read off the reports;
+    `from_flags`, one row per pay item from the flags the IDR claimed (see "IDR flags"); `from_segments`, one row
+    per pay item from the curb segments it claimed, in LF (see "Curb billing"); and `from_sites`, one row per report and
+    pay item from the pay items entered on its sites (see "Report sites"). The backfill replaces only an IDR's
     manual rows.
   - **What is read:** every item of every General, SWCB and AC report's `payItems`, as `report_data` holds it
     (so after any reviewer's edit). A Conc Mix and a Conc Cyl have no pay items. **An auto-generated General is
@@ -1262,6 +1267,27 @@ Any change must follow these.
     item the site's live, unclaimed flags or measured curb segments would fill (`site_pay_item_keys`), naming the item
     and the report. A report save already refuses the reverse (`refuse_flag_filled_pay_items`).
   - `added_by` names a user, so `count_user_references` counts it.
+  - **Site pay items** (Slice V1, migration 054; `api/v1/idr_report_site_pay_items.py`, `api/queries/idr_report_site_pay_items.py`,
+    `api/schemas/idr_report_site_pay_item.py`, `api/services/pay_item_sources.py`; **needs migrations 054 and 055 run
+    first**): pay items an inspector enters by hand on an imported site, `icid.idr_report_site_pay_items` (a contract
+    item of the IDR's project, matched in the INSERT, else 400; a quantity above 0, else 422; a note, 2000). Routes
+    under `.../sites/{site_id}/pay-items` (GET, POST, PATCH `{quantity?, note?}` with a null note clearing it, DELETE),
+    for the same people as the sites (`attribution_editor`). They go with their site.
+    - **Billed at approval:** approve-stage2 (and an un-delete back to approved) writes one `from_sites` quantity row per
+      report and pay item, the site's report's type as `report_type`, the contract item's unit in short form
+      (`SITE_UNIT`), in its statement (`insert_site_quantities_cte`); unlock and delete remove them with the rest.
+    - **No check against the site's flags or segments:** they add to them. But a report can't hold by hand a pay item
+      a site holds: `refuse_flag_filled_pay_items` also refuses it (400 naming the item and the sites,
+      `site_entry_conflicts`). A site pay item entered when a report already holds the item isn't refused; the report's
+      next save is.
+    - **By source:** `GET /v1/idrs/{idr_id}/pay-item-sources?report_id=` sums each pay item (matched by item number and
+      budget code) over flags, segments (live, or frozen once approved), site pay items and reports' own (every General,
+      SWCB and AC but an auto-General; `report_id`'s only when given), with the sites and reports behind each. Display
+      only: the SWCB page's Pay Items table.
+    - **Export:** an SWCB's site pay items print on its Conc Fr after its own, summed per pay item under an "Imported
+      Sites" heading row (`_with_site_lines` in `api/services/export.py`). They carry no id: no redlines, and a reviewer's
+      change to one isn't a field edit and doesn't count toward attestation.
+    - `added_by` names a user, so `count_user_references` counts it.
 - **Curb billing** (migrations 044 and 045; `api/v1/idr_segments.py`, `api/services/idr_segments.py`,
   `api/queries/idr_segments.py`, `api/schemas/idr_segment.py`): an IDR's curb segments are attributed, claimed and
   billed exactly as its flags are (see "IDR flags"), side by side with them.

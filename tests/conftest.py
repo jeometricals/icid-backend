@@ -48,6 +48,16 @@ def no_match_lines():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_site_pay_items():
+    """
+    Patch the site pay-item statements for the whole session (Slice V1), so the report saves, the export and the pay-item deletes that now read an IDR's site pay items find none unless a test patches api.queries.idr_report_site_pay_items.run_query itself.
+    Yields the mock of the statements.
+    """
+    with patch("api.queries.idr_report_site_pay_items.run_query", return_value=[]) as run:
+        yield run
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_ped_ramp_inspections():
     """
     Patch the ped ramp inspection statements for the whole session (Pedramp Phase 3), so the corner and ramp writes that now check their corner's inspection (the lock) find none unless a test patches api.queries.ped_ramp_inspections.run_query itself.

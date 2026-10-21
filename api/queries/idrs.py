@@ -13,6 +13,7 @@ from api.queries.idr_segments import (
     reclaim_segment_ids_sql,
     release_segments_cte,
 )
+from api.queries.idr_report_site_pay_items import insert_site_quantities_cte
 from api.queries.idr_reports import REPORT_DATA_WITH_IDS
 from api.queries.quantities import (
     delete_quantities_cte,
@@ -505,14 +506,14 @@ def approve_stage2(
     flag_ids: Optional[list[UUID]] = None, segment_ids: Optional[list[UUID]] = None,
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, clear any return, claim its attributed flags and curb segments (constructed on its report date; one another IDR claimed meanwhile is left out), and write its quantities to icid.quantities in place of any it had: its reports' pay items (manual), the claimed flags summed per pay item (from_flags) and the claimed segments' lengths (from_segments). The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place. All of it is one statement: an IDR that isn't approved claims nothing and gets no quantities, and a quantity that can't be written stops the approval.
+    Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, clear any return, claim its attributed flags and curb segments (constructed on its report date; one another IDR claimed meanwhile is left out), and write its quantities to icid.quantities in place of any it had: its reports' pay items (manual), the claimed flags summed per pay item (from_flags), the claimed segments' lengths (from_segments) and the pay items entered on its sites (from_sites). The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place. All of it is one statement: an IDR that isn't approved claims nothing and gets no quantities, and a quantity that can't be written stops the approval.
     Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, whether they must already be the IDR's RE reviewer (False for an admin), the IDR's quantity rows from its reports (empty when it has no pay items), and the uuids of its attributed flags and segments (none when None).
     Returns a one-row list with the IDR, flags_claimed and segments_claimed (how many of each it claimed), an empty list if it isn't in Stage 2 review under that reviewer, or None on failure.
     """
     assignments = ("re_reviewer_uuid = %s, re_signature_path = %s, re_signed_at = now(), "
                    "return_reason = NULL, returned_from = NULL")
     also = (f"{replace_quantities_ctes('moved')},{claim_flags_cte('moved')},{insert_flag_quantities_cte('moved')},"
-            f"{claim_segments_cte('moved')},{insert_segment_quantities_cte('moved')}")
+            f"{claim_segments_cte('moved')},{insert_segment_quantities_cte('moved')},{insert_site_quantities_cte('moved')}")
     return _move_idr(idr_id, actor_uuid, "approve_stage2", "stage2_review", "approved", assignments,
                      (actor_uuid, signature_path), reviewer_column="re_reviewer_uuid" if as_reviewer else None,
                      also=also, also_values=(quantity_rows_json(quantity_rows), list(flag_ids or []),
@@ -580,7 +581,7 @@ def undelete_idr(
     idr_id: UUID, actor_uuid: UUID, quantity_rows: list[dict[str, Any]]
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Bring a soft-deleted IDR back in one statement: give it the status it had when it was deleted, clear deleted_at and deleted_by, and log it in icid.idr_audit as admin_undelete. The status is read off the IDR's latest admin_delete row in icid.idr_audit, which the delete wrote; an IDR with no such row comes back as a draft. One that comes back approved gets its quantity rows written in the same statement, as an approval writes them, and claims again the flags and curb segments its delete released (as that row's note lists them; one another IDR claimed meanwhile is left out: the route refuses first).
+    Bring a soft-deleted IDR back in one statement: give it the status it had when it was deleted, clear deleted_at and deleted_by, and log it in icid.idr_audit as admin_undelete. The status is read off the IDR's latest admin_delete row in icid.idr_audit, which the delete wrote; an IDR with no such row comes back as a draft. One that comes back approved gets its quantity rows written in the same statement, as an approval writes them (its sites' pay items included), and claims again the flags and curb segments its delete released (as that row's note lists them; one another IDR claimed meanwhile is left out: the route refuses first).
     Takes the IDR uuid, the admin's uuid and the IDR's quantity rows as its reports give them now (used only when it comes back approved).
     Returns a one-row list with the IDR, status_on_record (False when it came back as a draft for want of a record), flags_claimed and segments_claimed, an empty list if it isn't deleted, or None on failure; raises IdrSlotTakenError when another IDR holds its day or its number.
     """
@@ -611,7 +612,7 @@ def undelete_idr(
         ),{replace_quantities_ctes("approved")},{claim_flags_cte("approved", reclaim_ids_sql("target"))},{
             insert_flag_quantities_cte("approved")},{
             claim_segments_cte("approved", reclaim_segment_ids_sql("target"))},{
-            insert_segment_quantities_cte("approved")}
+            insert_segment_quantities_cte("approved")},{insert_site_quantities_cte("approved")}
         SELECT {IDR_COLUMNS},
             (SELECT status_before IS NOT NULL FROM target) AS status_on_record,
             (SELECT count(*) FROM claimed_flags) AS flags_claimed,

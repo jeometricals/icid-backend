@@ -51,7 +51,7 @@ NO_REFERENCES = {"idrs": 0, "project_users": 0, "audit": 0, "field_edits": 0, "a
                  "flags": 0, "pir_pages": 0, "non_assessable_areas": 0, "features": 0, "segments": 0,
                  "idr_flag_attributions": 0, "idr_segment_attributions": 0, "match_lines": 0,
                  "ped_ramp_corners": 0, "ped_ramp_inspections": 0, "ped_ramp_tifs": 0, "ped_ramp_photos": 0,
-                 "idr_report_sites": 0}
+                 "idr_report_sites": 0, "idr_report_site_pay_items": 0}
 INSPECTOR_ROW = {**ADMIN_USER_ROW, "role": None}
 FORBIDDEN = (403, {"detail": "Admin access required"})
 
@@ -275,12 +275,12 @@ class TestPermanentDeleteUser:
         {**NO_REFERENCES, "idr_flag_attributions": 2}, {**NO_REFERENCES, "idr_segment_attributions": 1},
         {**NO_REFERENCES, "match_lines": 2}, {**NO_REFERENCES, "ped_ramp_corners": 1},
         {**NO_REFERENCES, "ped_ramp_inspections": 1}, {**NO_REFERENCES, "ped_ramp_tifs": 2},
-        {**NO_REFERENCES, "ped_ramp_photos": 3}, {**NO_REFERENCES, "idr_report_sites": 2},
+        {**NO_REFERENCES, "ped_ramp_photos": 3}, {**NO_REFERENCES, "idr_report_sites": 2}, {**NO_REFERENCES, "idr_report_site_pay_items": 3},
         {"idrs": 4, "project_users": 2, "audit": 9, "field_edits": 3, "attachments": 1, "properties": 1,
          "task_orders": 2, "task_order_properties": 5, "pirs": 1, "flags": 3, "pir_pages": 1,
          "non_assessable_areas": 1, "features": 2, "segments": 1, "idr_flag_attributions": 1,
          "idr_segment_attributions": 1, "match_lines": 1, "ped_ramp_corners": 2, "ped_ramp_inspections": 1,
-         "ped_ramp_tifs": 1, "ped_ramp_photos": 4, "idr_report_sites": 1},
+         "ped_ramp_tifs": 1, "ped_ramp_photos": 4, "idr_report_sites": 1, "idr_report_site_pay_items": 2},
     ])
     def test_a_user_with_history_is_409_with_what_names_them(self, admin_client, references):
         with patch(QUERY, side_effect=[[DELETED_ROW], [references]]) as run, \
@@ -317,15 +317,17 @@ class TestPermanentDeleteUser:
                           "icid.ped_ramp_inspections ri WHERE %s IN (ri.inspector_uuid, ri.re_uuid, ri.returned_by, ri.created_by, ri.last_unlocked_by)",
                           "icid.ped_ramp_tifs rt WHERE %s IN (rt.signed_by_uuid, rt.created_by)",
                           "icid.ped_ramp_photos rp WHERE rp.uploaded_by = %s",
-                          "icid.idr_report_sites irs WHERE irs.added_by = %s"):
+                          "icid.idr_report_sites irs WHERE %s IN (irs.added_by, irs.updated_by)",
+                          "icid.idr_report_site_pay_items sp WHERE sp.added_by = %s"):
             assert reference in one_line
-        assert params == (UUID(USER_ID),) * 22
+        assert params == (UUID(USER_ID),) * 23
         # schema.sql has no foreign key to users that the count leaves out
         schema = ROOT.joinpath("schema.sql").read_text(encoding="utf-8")
-        # the forty-one counted (each table's last_unlocked_by and the report sites' added_by too) (the properties', task orders', bundles', PIRs', flags', PIR pages', non-assessable
+        # the forty-three counted (each table's last_unlocked_by, the report sites' added_by and updated_by and the site pay
+        # items' added_by too) (the properties', task orders', bundles', PIRs', flags', PIR pages', non-assessable
         # areas', features', segments', IDR flag and segment attributions', match lines', ped ramp corners',
         # inspections', TIFs' and photos' among them), and users.deleted_by
-        assert schema.count("REFERENCES icid.users(uuid)") == 42
+        assert schema.count("REFERENCES icid.users(uuid)") == 44
 
     def test_a_user_who_isnt_soft_deleted_is_404(self, admin_client):
         with patch(QUERY, side_effect=[[USER_ROW]]) as run, patch("api.services.attachments.remove_files") as remove:

@@ -1,8 +1,10 @@
+from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from psycopg.errors import ForeignKeyViolation
 
 from api.queries.contract_items import (
     clear_project_pay_items, create_project_pay_item, delete_project_pay_item, get_project_pay_item,
@@ -22,6 +24,7 @@ PROJECT_ID = "HWS0023"
 URL = f"/v1/admin/projects/{PROJECT_ID}/pay-items"
 PROJECTS = "api.queries.projects.run_query"
 ITEMS = "api.queries.contract_items.run_query"
+SITE_PAY_ITEMS = "api.queries.idr_report_site_pay_items.run_query"
 CRON_SECRET = "cron-secret-for-tests-only"
 CRON = {"Authorization": f"Bearer {CRON_SECRET}"}
 
@@ -405,6 +408,27 @@ class TestDeletePayItem:
             response = admin_client.delete(ITEM_URL)
         assert response.status_code == 404 and response.json() == {"detail": "Pay item not found"}
 
+    def test_an_item_entered_on_imported_sites_is_409_naming_the_idrs(self, admin_client, project):
+        uses = [{"idr_id": UUID(OTHER_ID), "idr_number": "IDR-005", "report_date": date(2026, 10, 20),
+                 "item_no": "6.70 AB", "budget_code": "HW-200(S)"},
+                {"idr_id": UUID(ITEM_ID), "idr_number": None, "report_date": date(2026, 10, 21),
+                 "item_no": "6.70 AB", "budget_code": "HW-200(S)"}]
+        with patch(SITE_PAY_ITEMS, return_value=uses) as sites, patch(ITEMS) as run:
+            response = admin_client.delete(ITEM_URL)
+        assert response.status_code == 409
+        assert response.json()["detail"] == ("This pay item is entered on imported sites of IDRs IDR-005, a draft of "
+                                             "10/21/26: remove it there first")
+        assert [idr["idr_number"] for idr in response.json()["idrs"]] == ["IDR-005", None]
+        assert sites.call_args.args[1] == (PROJECT_ID, UUID(ITEM_ID), UUID(ITEM_ID))
+        run.assert_not_called()
+
+    def test_an_item_entered_on_a_site_meanwhile_is_409(self, admin_client, project):
+        use = {"idr_id": UUID(OTHER_ID), "idr_number": "IDR-005", "report_date": date(2026, 10, 20),
+               "item_no": "6.70 AB", "budget_code": "HW-200(S)"}
+        with patch(SITE_PAY_ITEMS, side_effect=[[], [use]]), patch(ITEMS, side_effect=ForeignKeyViolation()):
+            response = admin_client.delete(ITEM_URL)
+        assert response.status_code == 409 and response.json()["idrs"][0]["idr_number"] == "IDR-005"
+
     def test_an_unknown_project_is_404(self, admin_client, no_project):
         with patch(ITEMS) as run:
             response = admin_client.delete(ITEM_URL)
@@ -435,6 +459,16 @@ class TestClearPayItems:
         assert "DELETE FROM icid.contract_items ci" in sql and "WHERE ci.project_id = %s" in sql
         assert "contract_item_id = %s" not in sql and "SELECT count(*) AS deleted_count FROM gone;" in sql
         assert params == (PROJECT_ID,) and run.call_count == 1
+
+    def test_items_entered_on_imported_sites_are_409_and_none_is_deleted(self, admin_client, project):
+        use = {"idr_id": UUID(OTHER_ID), "idr_number": "IDR-005", "report_date": date(2026, 10, 20),
+               "item_no": "6.70 AB", "budget_code": "HW-200(S)"}
+        with patch(SITE_PAY_ITEMS, return_value=[use]) as sites, patch(ITEMS) as run:
+            response = admin_client.delete(URL)
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Pay items are entered on imported sites of IDR IDR-005: remove them there first"
+        assert sites.call_args.args[1] == (PROJECT_ID, None, None)
+        run.assert_not_called()
 
     def test_a_project_without_items_deletes_none(self, admin_client, project):
         with patch(ITEMS, return_value=[{"deleted_count": 0}]):

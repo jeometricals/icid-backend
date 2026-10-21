@@ -1,8 +1,9 @@
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+from psycopg.errors import ForeignKeyViolation
 
 from api.queries.contract_items import (
     bulk_upsert_pay_items,
@@ -14,6 +15,7 @@ from api.queries.contract_items import (
     list_project_pay_items,
     update_project_pay_item,
 )
+from api.queries.idr_report_site_pay_items import pay_item_site_uses
 from api.queries.projects import get_project_by_id
 from api.schemas.pay_item import (
     PayItemClearResponse,
@@ -180,25 +182,59 @@ def update_pay_item(project_id: str, pay_item_uuid: UUID, body: PayItemUpdate) -
     return PayItemResponse(data=PayItemOut.model_validate(row))
 
 
-@router.delete("/{pay_item_uuid}", status_code=204)
-def delete_pay_item(project_id: str, pay_item_uuid: UUID) -> None:
+def _in_use(project_id: str, pay_item_uuid: Optional[UUID] = None) -> Optional[JSONResponse]:
     """
-    Delete one pay item of a project. Admins only. Reports that already use the item keep their copy of it.
+    Refuse deleting pay items entered on imported sites (Slice V1): those rows name the item, and deleting it would lose them.
+    Takes the project id and the pay item's uuid (None for every item of the project).
+    Returns a 409 JSONResponse naming the IDRs (idrs: idr_id, idr_number, report_date, item_no, budget_code), or None when no site holds them; raises 500 when that can't be read.
+    """
+    uses = pay_item_site_uses(project_id, pay_item_uuid)
+    if uses is None:
+        raise HTTPException(status_code=500, detail="Failed to check the pay items' use")
+    if not uses:
+        return None
+    names = sorted({use["idr_number"] or f"a draft of {use['report_date']:%m/%d/%y}" for use in uses})
+    return JSONResponse(status_code=409, content={
+        "detail": f"{'This pay item is' if pay_item_uuid else 'Pay items are'} entered on imported sites of "
+                  f"IDR{'s' if len(names) > 1 else ''} {', '.join(names)}: remove {'it' if pay_item_uuid else 'them'} there first",
+        "idrs": [{"idr_id": str(use["idr_id"]), "idr_number": use["idr_number"], "report_date": use["report_date"].isoformat(),
+                  "item_no": use["item_no"], "budget_code": use["budget_code"]} for use in uses],
+    })
+
+
+@router.delete("/{pay_item_uuid}", status_code=204, response_model=None, responses={409: {"description": "The pay item is entered on imported sites"}})
+def delete_pay_item(project_id: str, pay_item_uuid: UUID) -> Optional[JSONResponse]:
+    """
+    Delete one pay item of a project. Admins only. Reports that already use the item keep their copy of it; one entered on an imported site can't be deleted.
     Takes the project id and the pay item's uuid as path parameters.
-    Returns nothing (204); raises 403 for a user who isn't an admin and 404 for an unknown project or an item the project doesn't have.
+    Returns nothing (204); raises 403 for a user who isn't an admin, 404 for an unknown project or an item the project doesn't have, and 409 naming the IDRs whose sites hold it.
     """
-    if not delete_project_pay_item(project_id, pay_item_uuid):
+    refused = _in_use(project_id, pay_item_uuid)
+    if refused is not None:
+        return refused
+    try:
+        deleted = delete_project_pay_item(project_id, pay_item_uuid)
+    except ForeignKeyViolation:  # entered on a site meanwhile
+        return _in_use(project_id, pay_item_uuid) or JSONResponse(status_code=409, content={"detail": "Pay item is in use"})
+    if not deleted:
         raise HTTPException(status_code=404, detail="Pay item not found")
+    return None
 
 
-@router.delete("", response_model=PayItemClearResponse)
-def clear_pay_items(project_id: str) -> PayItemClearResponse:
+@router.delete("", response_model=PayItemClearResponse, responses={409: {"description": "Pay items are entered on imported sites"}})
+def clear_pay_items(project_id: str) -> PayItemClearResponse | JSONResponse:
     """
-    Delete every pay item of a project. Admins only. Reports that already use the items keep their copies of them.
+    Delete every pay item of a project. Admins only. Reports that already use the items keep their copies of them; while any is entered on an imported site, nothing is deleted.
     Takes the project id as a path parameter.
-    Returns a PayItemClearResponse with how many were deleted; raises 403 for a user who isn't an admin, 404 for an unknown project and 500 if the count doesn't come back.
+    Returns a PayItemClearResponse with how many were deleted; raises 403 for a user who isn't an admin, 404 for an unknown project, 409 naming the IDRs whose sites hold any, and 500 if the count doesn't come back.
     """
-    deleted_count = clear_project_pay_items(project_id)
+    refused = _in_use(project_id)
+    if refused is not None:
+        return refused
+    try:
+        deleted_count = clear_project_pay_items(project_id)
+    except ForeignKeyViolation:
+        return _in_use(project_id) or JSONResponse(status_code=409, content={"detail": "Pay items are in use"})
 
     if deleted_count is None:
         raise HTTPException(status_code=500, detail="Failed to clear pay items")

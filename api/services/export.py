@@ -20,6 +20,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from api.core.config import EXPORT_BUCKET_NAME, EXPORT_URL_EXPIRY_SECONDS
+from api.queries.idr_report_site_pay_items import idr_site_pay_items
 from api.queries.idr_reports import get_general_report, list_non_general_main_reports, list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
@@ -29,6 +30,7 @@ from api.services import export_ac, export_attachments, export_conc_cyl, export_
 from api.services.auto_general import build_auto_general_data, contributing_reports
 from api.services.idr_flags import EXPORT_HEADING, IdrFlagError, export_lines
 from api.services.idr_segments import IdrSegmentError, export_segment_lines
+from api.services.pay_item_sources import site_export_lines
 from api.services import export_general
 from api.services.export_common import (
     REPORT_CONT, REPORT_CONT_RE_SIGNATURE, REPORT_CONT_SIGNATURE, SignatureImage, SignatureLayout, allocate_copies,
@@ -132,6 +134,30 @@ def _with_flag_lines(general_data: dict[str, Any], idr: dict[str, Any]) -> dict[
     lines = (flag_lines or [{"description": EXPORT_HEADING}]) + segment_lines
     own = general_data.get("payItems")
     return {**general_data, "payItems": (own if isinstance(own, list) else []) + lines}
+
+
+def _with_site_lines(reports: list[dict[str, Any]], idr_id: UUID) -> list[dict[str, Any]]:
+    """
+    Add the pay items entered on each SWCB's imported sites to its pay items, after its own, under an "Imported Sites"
+    heading row (pay_item_sources.site_export_lines), summed per pay item. They carry no id, so no redline touches them.
+    Takes the IDR's reports and its uuid.
+    Returns the reports, an SWCB with site pay items getting a copy of its report_data with the lines added; raises
+    ExportDataError when the site pay items can't be read.
+    """
+    if not any(r["report_type"] == "SWCB" for r in reports):
+        return reports
+    site_items = idr_site_pay_items(idr_id)
+    if site_items is None:
+        raise ExportDataError("Failed to load the IDR's site pay items")
+    out = []
+    for report in reports:
+        lines = site_export_lines(site_items, report["report_id"]) if report["report_type"] == "SWCB" else []
+        if lines:
+            data = report.get("report_data") or {}
+            own = data.get("payItems")
+            report = {**report, "report_data": {**data, "payItems": (own if isinstance(own, list) else []) + lines}}
+        out.append(report)
+    return out
 
 
 def _load_reports(idr_id: UUID) -> list[dict[str, Any]]:
@@ -431,7 +457,7 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     inspector = _inspector_name(get_user_by_id(idr["reporter_uuid"]))
     general_data, page_number, general_edited_as = _general_for_export(idr_id)
     general_data = _with_flag_lines(general_data, idr)
-    reports = _load_reports(idr_id)
+    reports = _with_site_lines(_load_reports(idr_id), idr_id)
     swcbs, conc_mixes, acs = _swcb_reports(reports), _conc_mix_reports(reports), _ac_reports(reports)
     conc_cyls, dsps = _conc_cyl_reports(reports), _dsp_reports(reports)
     general_id = next((r["report_id"] for r in reports if r["report_type"] == "GEN" and not r["is_addendum"]), None)
