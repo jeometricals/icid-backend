@@ -17,8 +17,8 @@ from api.services import export, export_dsp
 from api.services.export_common import DRAFT_MARKER
 from api.services.xlsx_template import WorkbookTemplate
 from tests.v1.test_exports import (
-    APPROVED_IDR, APPROVED_ON, DRAFT_IDR, GENERAL, PROJECT, RE_USER, RE_UUID, SIGNED_IDR, SUBMITTED_IDR, export_bytes,
-    signature_png, signatures_on, stamped, swcb_row, visible_sheets,
+    APPROVED_IDR, APPROVED_ON, DRAFT_IDR, GENERAL, PROJECT, RE_USER, RE_UUID, SIGNED_IDR, SUBMITTED_IDR, attachment,
+    export_bytes, image_bytes, signature_png, signatures_on, stamped, swcb_row, visible_sheets,
 )
 
 CONTRACTOR = "Benny Bowers Contracting Co."
@@ -211,6 +211,14 @@ class TestDspExport:
         swcb, other = swcb_row(1, 2), swcb_row(2, 4)
         content = export_bytes(reports=[swcb, dsp_row(1, 3, parent=swcb["report_id"]), other])
         assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "DSP Fr", "Conc Fr 2", "Conc Bk 2"]
+
+    def test_its_attachments_follow_dsp_fr_before_the_next_report(self):
+        dsp = dsp_row(1, 3)
+        rows = [attachment(1, dsp["report_id"]), attachment(2, dsp["report_id"])]
+        content = export_bytes(reports=[swcb_row(1, 2), dsp, swcb_row(2, 4)], attachments=rows,
+                               files={r["storage_path"]: image_bytes("JPEG") for r in rows})
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "DSP Fr", "Attachments 1",
+                                           "Attachments 2", "Conc Fr 2", "Conc Bk 2"]
 
     def test_every_dsp_report_gets_a_sheet_of_its_own_numbered_as_a_page(self):
         content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 3},
