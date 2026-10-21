@@ -48,9 +48,8 @@ from api.schemas.idr import (
 )
 from api.schemas.dsp_report import DspReportError, check_dsp_report
 from api.schemas.idr_report import (
-    DSP_PARENT_MESSAGE,
-    DSP_PARENT_TYPES,
     DSP_TAKEN_MESSAGE,
+    DSP_TOP_LEVEL_MESSAGE,
     IdrReport,
     IdrReportConflict,
     IdrReportCreate,
@@ -172,9 +171,9 @@ def _report_conflict(detail: str, existing_report_id: UUID) -> JSONResponse:
 )
 def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, JSONResponse]:
     """
-    Add an empty report of the given type to a draft IDR, optionally as an addendum to one of its main reports; a DSP only as the addendum of a DSP_PARENT_TYPES main report, one per IDR.
+    Add an empty report of the given type to a draft IDR, optionally as an addendum to one of its main reports; a DSP only as a top-level report, one per IDR.
     Takes the IDR uuid as a path parameter and an IdrReportCreate body.
-    Returns an IdrReportResponse; raises 404 (no IDR), 409 (not draft, or a second General or DSP, with existing_report_id) and 400 (bad parent).
+    Returns an IdrReportResponse; raises 404 (no IDR), 409 (not draft, or a second General or DSP, with existing_report_id) and 400 (bad parent, or a DSP as an addendum).
     """
     idr = get_idr_by_id(idr_id)
 
@@ -186,8 +185,8 @@ def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, 
 
     is_dsp = body.report_type == ReportType.DSP
 
-    if is_dsp and (not body.is_addendum or body.parent_report_id is None):
-        raise HTTPException(status_code=400, detail=DSP_PARENT_MESSAGE)
+    if is_dsp and (body.is_addendum or body.parent_report_id is not None):
+        raise HTTPException(status_code=400, detail=DSP_TOP_LEVEL_MESSAGE)
 
     if body.parent_report_id is not None:
         if not body.is_addendum:
@@ -197,9 +196,6 @@ def add_report(idr_id: UUID, body: IdrReportCreate) -> Union[IdrReportResponse, 
 
         if parent is None:
             raise HTTPException(status_code=400, detail="Parent report not found in this IDR")
-
-        if is_dsp and (parent["is_addendum"] or parent["report_type"] not in DSP_PARENT_TYPES):
-            raise HTTPException(status_code=400, detail=DSP_PARENT_MESSAGE)
 
         if parent["is_addendum"]:
             raise HTTPException(status_code=400, detail="An addendum's parent must be a main report, not another addendum")

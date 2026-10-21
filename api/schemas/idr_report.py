@@ -33,7 +33,7 @@ class ReportType(StrEnum):
 
 
 # Types that are addendums by nature. A frontend hint only; the backend does not
-# derive is_addendum from it. DSP is absent: it is always an addendum, but of its own kind (DSP_PARENT_TYPES).
+# derive is_addendum from it. DSP is absent: it is a top-level report, one per IDR.
 ADDENDUM_TYPES = frozenset({
     ReportType.SKETCH,
     ReportType.CONT,
@@ -44,17 +44,8 @@ ADDENDUM_TYPES = frozenset({
 })
 
 
-# The main reports a Daily Site Patrol can be added to, as its addendum (one DSP per IDR)
-DSP_PARENT_TYPES = frozenset({
-    ReportType.GEN,
-    ReportType.SWCB,
-    ReportType.AC,
-    ReportType.CONC_MIX,
-    ReportType.CONC_CYL,
-})
-
-# Why a DSP was refused for its parent: not an addendum, no parent, or a parent of another type or itself an addendum
-DSP_PARENT_MESSAGE = "A Daily Site Patrol is added to a General, SWCB, AC, Conc Mix or Conc Cyl report, as its addendum"
+# Why a DSP sent as an addendum, or naming a parent, was refused
+DSP_TOP_LEVEL_MESSAGE = "A Daily Site Patrol is a top-level report, not an addendum"
 
 # Why a second DSP was refused
 DSP_TAKEN_MESSAGE = "This IDR already has a Daily Site Patrol"

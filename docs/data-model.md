@@ -867,11 +867,11 @@ on every save (`PUT /v1/idrs/{idr_id}/reports/{report_id}`); a refusal is a 400 
 (`DSP report: mptChecklist[3].answer: Input should be 'yes', 'no' or 'na'`). A new DSP is created `{}` like any
 report, so the form's first save writes it whole. No migration: `report_type` is plain text.
 
-**An addendum, one per IDR** (U1). A DSP is added only as the addendum of a main General, SWCB, AC, Conc Mix or Conc
-Cyl report of the same IDR (`DSP_PARENT_TYPES`), else 400 `A Daily Site Patrol is added to a General, SWCB, AC, Conc
-Mix or Conc Cyl report, as its addendum`; a second is 409 `This IDR already has a Daily Site Patrol` with
+**Top-level, one per IDR** (V4, reversing U1's addendum). A DSP is added only as a main report, else 400 `A Daily
+Site Patrol is a top-level report, not an addendum`; a second is 409 `This IDR already has a Daily Site Patrol` with
 `existing_report_id`. The route checks first, and `uq_idr_reports_one_dsp_per_idr` (migration 053, partial on
-`(idr_id) WHERE report_type = 'DSP'`) backs it. DSPs made before U1 as main reports are left as they are.
+`(idr_id) WHERE report_type = 'DSP'`) backs it. DSPs filed as addenda under U1 are left as they are (and print after
+their parent).
 
 ```json
 {"timeOfPatrol": "14:30",

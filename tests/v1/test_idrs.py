@@ -554,15 +554,13 @@ class TestAddReport:
         assert response.status_code == 500
 
 
-MOCK_SWCB_PARENT_ROW = {**MOCK_GEN_REPORT_ROW, "report_type": "SWCB", "report_data": {}}
-MOCK_NEW_DSP_ROW = {**MOCK_NEW_SWR_ROW, "report_type": "DSP", "is_addendum": True,
-                    "parent_report_id": UUID(GEN_REPORT_ID)}
+MOCK_NEW_DSP_ROW = {**MOCK_NEW_SWR_ROW, "report_type": "DSP", "is_addendum": False, "parent_report_id": None}
 EXISTING_DSP_ID = "0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e"
-DSP_PARENT_400 = "A Daily Site Patrol is added to a General, SWCB, AC, Conc Mix or Conc Cyl report, as its addendum"
+DSP_TOP_LEVEL_400 = "A Daily Site Patrol is a top-level report, not an addendum"
 DSP_TAKEN_409 = {"detail": "This IDR already has a Daily Site Patrol", "existing_report_id": EXISTING_DSP_ID}
 
 
-def dsp_add_body(parent_report_id=GEN_REPORT_ID, is_addendum=True) -> dict:
+def dsp_add_body(parent_report_id=None, is_addendum=False) -> dict:
     """
     Build a POST /reports body adding a Daily Site Patrol.
     Takes the parent report id (None for none) and the addendum flag.
@@ -572,86 +570,65 @@ def dsp_add_body(parent_report_id=GEN_REPORT_ID, is_addendum=True) -> dict:
 
 
 class TestAddDsp:
-    """A Daily Site Patrol is only ever the addendum of a General, SWCB, AC, Conc Mix or Conc Cyl, one per IDR."""
+    """A Daily Site Patrol is a top-level report, one per IDR."""
 
     url = f"/v1/idrs/{IDR_ID}/reports"
 
-    @pytest.mark.parametrize("parent_type", ["GEN", "SWCB", "AC", "CONC_MIX", "CONC_CYL"])
-    def test_added_to_each_parent_type(self, admin_client, parent_type):
-        parent = {**MOCK_SWCB_PARENT_ROW, "report_type": parent_type}
-        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([parent], [], [MOCK_NEW_DSP_ROW])) as mocks:
+    def test_added_as_a_top_level_report(self, admin_client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([], [MOCK_NEW_DSP_ROW])) as mocks:
             response = admin_client.post(self.url, json=dsp_add_body())
         assert response.status_code == 201
         report = response.json()["data"]
-        assert (report["report_type"], report["is_addendum"], report["parent_report_id"]) == ("DSP", True, GEN_REPORT_ID)
-        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "DSP", True, UUID(GEN_REPORT_ID))
+        assert (report["report_type"], report["is_addendum"], report["parent_report_id"]) == ("DSP", False, None)
+        assert mocks["idr_reports"].call_args.args[1] == (UUID(IDR_ID), "DSP", False, None)
+
+    def test_the_type_alone_is_enough(self, admin_client):
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([], [MOCK_NEW_DSP_ROW])):
+            response = admin_client.post(self.url, json={"report_type": "DSP"})
+        assert response.status_code == 201
 
     def test_looks_for_an_existing_dsp_before_inserting(self, admin_client):
-        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([MOCK_SWCB_PARENT_ROW], [], [MOCK_NEW_DSP_ROW])) as mocks:
+        with patched(idrs=DRAFT_IDR_THEN_TOUCH, idr_reports=([], [MOCK_NEW_DSP_ROW])) as mocks:
             admin_client.post(self.url, json=dsp_add_body())
-        lookup_sql, lookup_params = mocks["idr_reports"].call_args_list[1].args
+        lookup_sql, lookup_params = mocks["idr_reports"].call_args_list[0].args
         assert "FROM icid.idr_reports" in lookup_sql and "report_type = 'DSP'" in lookup_sql
         assert lookup_params == (UUID(IDR_ID),)
 
-    def test_a_main_dsp_is_400(self, admin_client):
+    def test_as_an_addendum_is_400(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW]) as mocks:
-            response = admin_client.post(self.url, json={"report_type": "DSP"})
+            response = admin_client.post(self.url, json=dsp_add_body(parent_report_id=GEN_REPORT_ID, is_addendum=True))
         assert response.status_code == 400
-        assert response.json()["detail"] == DSP_PARENT_400
+        assert response.json()["detail"] == DSP_TOP_LEVEL_400
         mocks["idr_reports"].assert_not_called()
 
     def test_an_addendum_without_a_parent_is_400(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW]) as mocks:
-            response = admin_client.post(self.url, json=dsp_add_body(parent_report_id=None))
+            response = admin_client.post(self.url, json=dsp_add_body(is_addendum=True))
         assert response.status_code == 400
-        assert response.json()["detail"] == DSP_PARENT_400
+        assert response.json()["detail"] == DSP_TOP_LEVEL_400
         mocks["idr_reports"].assert_not_called()
 
     def test_a_parent_without_the_addendum_flag_is_400(self, admin_client):
         with patched(idrs=[MOCK_IDR_ROW]) as mocks:
-            response = admin_client.post(self.url, json=dsp_add_body(is_addendum=False))
+            response = admin_client.post(self.url, json=dsp_add_body(parent_report_id=GEN_REPORT_ID))
         assert response.status_code == 400
-        assert response.json()["detail"] == DSP_PARENT_400
+        assert response.json()["detail"] == DSP_TOP_LEVEL_400
         mocks["idr_reports"].assert_not_called()
-
-    @pytest.mark.parametrize("parent_type", ["SWR", "DSP", "SKETCH", "OFF"])
-    def test_a_parent_of_another_type_is_400(self, admin_client, parent_type):
-        parent = {**MOCK_SWCB_PARENT_ROW, "report_type": parent_type}
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[parent]) as mocks:
-            response = admin_client.post(self.url, json=dsp_add_body())
-        assert response.status_code == 400
-        assert response.json()["detail"] == DSP_PARENT_400
-        assert mocks["idr_reports"].call_count == 1  # the parent lookup only
-
-    def test_a_parent_that_is_itself_an_addendum_is_400(self, admin_client):
-        parent = {**MOCK_SWCB_PARENT_ROW, "report_type": "CONC_MIX", "is_addendum": True}
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[parent]) as mocks:
-            response = admin_client.post(self.url, json=dsp_add_body())
-        assert response.status_code == 400
-        assert response.json()["detail"] == DSP_PARENT_400
-        assert mocks["idr_reports"].call_count == 1
-
-    def test_a_parent_in_another_idr_is_400(self, admin_client):
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=[]) as mocks:
-            response = admin_client.post(self.url, json=dsp_add_body())
-        assert response.status_code == 400
-        assert response.json()["detail"] == "Parent report not found in this IDR"
-        assert mocks["idr_reports"].call_count == 1
 
     def test_a_second_dsp_is_409_with_the_existing_one(self, admin_client):
         found = [{"report_id": UUID(EXISTING_DSP_ID)}]
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([MOCK_SWCB_PARENT_ROW], found)) as mocks:
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=(found,)) as mocks:
             response = admin_client.post(self.url, json=dsp_add_body())
         assert response.status_code == 409
         assert response.json() == DSP_TAKEN_409
-        assert mocks["idr_reports"].call_count == 2  # no insert
+        assert mocks["idr_reports"].call_count == 1  # no insert
         assert mocks["idrs"].call_count == 1  # no touch
         mocks["regen"].assert_not_called()
 
     def test_the_unique_index_racing_past_the_check_is_the_same_409(self, admin_client):
         found = [{"report_id": UUID(EXISTING_DSP_ID)}]
         race = UniqueViolation('duplicate key value violates unique constraint "uq_idr_reports_one_dsp_per_idr"')
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([MOCK_SWCB_PARENT_ROW], [], race, found)) as mocks:
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([], race, found)) as mocks:
             response = admin_client.post(self.url, json=dsp_add_body())
         assert response.status_code == 409
         assert response.json() == DSP_TAKEN_409
@@ -660,7 +637,7 @@ class TestAddDsp:
 
     def test_the_race_without_a_dsp_to_name_is_500(self, admin_client):
         race = UniqueViolation("duplicate key")
-        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([MOCK_SWCB_PARENT_ROW], [], race, [])):
+        with patched(idrs=[MOCK_IDR_ROW], idr_reports=([], race, [])):
             response = admin_client.post(self.url, json=dsp_add_body())
         assert response.status_code == 500
 
