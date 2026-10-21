@@ -244,6 +244,8 @@ CREATE TABLE icid.idr_report_sites (
     work_type_other  TEXT,
     added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     added_by         UUID NOT NULL REFERENCES icid.users(uuid),
+    updated_at       TIMESTAMPTZ,
+    updated_by       UUID REFERENCES icid.users(uuid),
     CONSTRAINT fk_idr_report_sites_report FOREIGN KEY (report_id, idr_id)
         REFERENCES icid.idr_reports (report_id, idr_id) ON DELETE CASCADE,
     CONSTRAINT chk_idr_report_sites_other CHECK (work_type <> 'other' OR work_type_other IS NOT NULL),
@@ -251,6 +253,23 @@ CREATE TABLE icid.idr_report_sites (
 );
 CREATE INDEX idx_idr_report_sites_report ON icid.idr_report_sites (report_id);
 CREATE INDEX idx_idr_report_sites_property ON icid.idr_report_sites (property_id);
+-- updated_at / updated_by: the last change to the work, set by the site PATCH (migrations/055)
+
+------------------------------------------------------------
+-- IDR REPORT SITE PAY ITEMS (pay items entered by hand on an imported site; billed at approval as 'from_sites'
+-- quantity rows; migrations/054)
+------------------------------------------------------------
+CREATE TABLE icid.idr_report_site_pay_items (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    report_site_id   UUID NOT NULL REFERENCES icid.idr_report_sites(id) ON DELETE CASCADE,
+    contract_item_id UUID NOT NULL REFERENCES icid.contract_items(contract_item_id),
+    quantity         NUMERIC NOT NULL CHECK (quantity > 0),
+    note             TEXT CHECK (note IS NULL OR char_length(note) <= 2000),
+    added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    added_by         UUID NOT NULL REFERENCES icid.users(uuid)
+);
+CREATE INDEX idx_idr_report_site_pay_items_site ON icid.idr_report_site_pay_items (report_site_id);
+CREATE INDEX idx_idr_report_site_pay_items_item ON icid.idr_report_site_pay_items (contract_item_id);
 
 -- At most one non-addendum General per IDR (migrations/005_one_general_per_idr.sql).
 CREATE UNIQUE INDEX uq_idr_reports_one_gen_per_idr
@@ -297,7 +316,7 @@ CREATE TABLE icid.quantities (
     unit           TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     -- manual: a report's pay item; from_flags: the IDR's attributed flags rolled up per pay item (migrations/037)
-    source         TEXT NOT NULL DEFAULT 'manual' CONSTRAINT chk_quantities_source CHECK (source IN ('manual', 'from_flags', 'from_segments'))
+    source         TEXT NOT NULL DEFAULT 'manual' CONSTRAINT chk_quantities_source CHECK (source IN ('manual', 'from_flags', 'from_segments', 'from_sites'))
 );
 
 CREATE INDEX idx_quantities_project_date ON icid.quantities(project_id, report_date);
@@ -981,14 +1000,15 @@ CREATE TABLE icid.report_attachments (
     uploaded_by      UUID NOT NULL REFERENCES icid.users(uuid),
     uploaded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     attachment_name         TEXT    NOT NULL,
-    attachment_description  TEXT    NOT NULL,
+    attachment_description  TEXT,
     is_uploaded             BOOLEAN NOT NULL DEFAULT false,
     CONSTRAINT chk_report_attachments_size
         CHECK (file_size_bytes > 0 AND file_size_bytes <= 10485760),
     CONSTRAINT chk_report_attachments_name
         CHECK (btrim(attachment_name) <> '' AND char_length(attachment_name) <= 200),
     CONSTRAINT chk_report_attachments_description
-        CHECK (btrim(attachment_description) <> '' AND char_length(attachment_description) <= 2000)
+        CHECK (attachment_description IS NULL
+            OR (btrim(attachment_description) <> '' AND char_length(attachment_description) <= 2000))
 );
 
 CREATE INDEX idx_report_attachments_report_id ON icid.report_attachments(report_id);
