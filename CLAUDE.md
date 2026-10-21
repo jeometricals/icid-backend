@@ -46,7 +46,7 @@ auth routes:
 - **Projects:** `/v1/projects/` and `/{project_id}`, `/roles` (admin), `/quantities`, `/progress-rollup`, `/assessment-summary` (with `.xlsx` and `/tailored.xlsx`),
   `/properties`, `/task-orders`; `/v1/contract_items/`
 - **Sites:** `/v1/properties/{id}` (with `/admin/soft-delete`, `/admin/undelete`, `/pir`, `/pirs`,
-  `/construction-report`, `/ped-ramp-attributes`, `/work-history`); `/v1/ped-ramp-corners/{id}` (with `/inspection-report` and its
+  `/construction-report`, `/ped-ramp-attributes`, `/work-history`, `/pay-item-summary`); `/v1/ped-ramp-corners/{id}` (with `/inspection-report` and its
   `.pdf`, and `/inspection` with `/start`; a project's under `/v1/projects/{id}/ped-ramp-corners`, and a corner with a ramp at once under `/pedramp-sites`); `/v1/ped-ramp-inspections/{id}` (with `/submit`, `/return`,
   `/approve`, `/dot-pdf`, `/tifs`, `/ramps/{property_id}/tif`, `/photos`); `/v1/ped-ramp-tifs/{id}` (with `/approve`, `/dot-pdf`,
   `/photos`); `/v1/ped-ramp-photos/{id}`; a project's listing under `/v1/projects/{id}/ped-ramp-inspections` (with `/bulk-download`); `/v1/task-orders/{id}` (with its admin routes, `/properties/{property_id}`,
@@ -1275,6 +1275,13 @@ Any change must follow these.
     IDR's number (none before acceptance), work date, status, `deleted_at`, `return_reason` and inspector's name.
     Deleted and returned IDRs and other inspectors' drafts are listed; a permanently deleted IDR's rows are gone. For
     the project's members (`property_member`).
+  - **A property's pay items reported** (V5; `GET /v1/properties/{property_id}/pay-item-summary`, `api/v1/property_work.py`,
+    `api/queries/property_pay_items.py`, `api/services/property_pay_items.py`): read-only, the PIR workspace's "Pay
+    Items Reported". Per contract item, the total of what IDRs that aren't deleted report on the property: its flags and
+    curb segments (an approved IDR's claimed ones, as they are now; an open IDR's attributed ones, `PROPERTY_FLAG_LINES`
+    and `PROPERTY_SEGMENT_LINES`) and the pay items entered on it as a site, with each IDR's part (number, work date,
+    status, inspector, quantity), newest first. A flag or segment two open IDRs cover is under each but counted once in
+    the total. For the project's members.
   - **Site pay items** (Slice V1, migration 054; `api/v1/idr_report_site_pay_items.py`, `api/queries/idr_report_site_pay_items.py`,
     `api/schemas/idr_report_site_pay_item.py`, `api/services/pay_item_sources.py`; **needs migrations 054 and 055 run
     first**): pay items an inspector enters by hand on an imported site, `icid.idr_report_site_pay_items` (a contract
