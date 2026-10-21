@@ -19,12 +19,20 @@ TrafficControl = Literal["signal", "signal_aps", "stop_yield", "none"]
 CornerType = Literal["intersection_corner", "island_median", "mid_block", "top_of_t"]
 CornerDirection = Literal["SW", "NW", "NE", "SE", "N", "S", "E", "W"]
 ContractType = Literal["simple", "complex"]
-CurbMaterial = Literal["steel_faced", "concrete", "concrete_and_gutter", "granite", "bluestone", "cobblestone", "other"]
+# Entity, curb material, DWS colour and DWS material are DOT's lists as migration 048 set their CHECKs (one-way);
+# tests/v1/test_ped_ramp_choices.py holds every Literal here to its column's CHECK in schema.sql
+CurbMaterial = Literal["steel_faced", "concrete", "concrete_and_gutter", "granite", "bluestone", "other"]
 SidewalkMaterial = Literal["concrete", "pigmented_concrete", "bluestone", "cobblestone", "other"]
-Entity = Literal["dob", "other"]
+Entity = Literal[
+    "ddc_city_agency_capital", "ddc_landmark_ped_ramp", "ddc_dot_ped_ramp", "ddc_prior_notice", "ddc_ta_ped_ramp",
+    "dep", "dob", "dpr", "edc", "mta", "nysdot", "sca", "other",
+]
 DwsAligned = Literal["yes", "no", "na"]
-DwsColor = Literal["red", "white", "yellow", "other"]
-DwsMaterial = Literal["preformed_plastic", "cast_in_place_plastic", "cast_iron", "stone", "other"]
+DwsColor = Literal["red", "white", "dark_on_light", "light_on_dark", "other"]
+DwsMaterial = Literal[
+    "preformed_plastic_embedded", "preformed_plastic_surface_applied", "cast_in_place_surface_applied", "cast_iron",
+    "stone", "concrete_tile",
+]
 Construction = Literal["existing_ramp", "ramp_removed", "new_install", "upgrade"]
 ActionTaken = Literal["ada_compliant_constructed", "max_extent_feasible", "ada_compliant_exists", "ramp_removed", "other"]
 
@@ -435,13 +443,19 @@ FIELD_LABELS = {
 }
 # The choices as the form words them
 CHOICE_LABELS = {
-    "dob": "DOB", "other": "Other", "signal": "Signal", "signal_aps": "Signal with APS", "stop_yield": "Stop / yield",
+    "ddc_city_agency_capital": "DDC City Agency Sponsored Capital Project",
+    "ddc_landmark_ped_ramp": "DDC Landmark Ped Ramp Contract", "ddc_dot_ped_ramp": "DDC Managed DOT Ped Ramp Contract",
+    "ddc_prior_notice": "DDC Prior Notice Contract", "ddc_ta_ped_ramp": "DDC TA Ped Ramp Contract", "dep": "DEP",
+    "dob": "DOB", "dpr": "DPR", "edc": "EDC", "mta": "MTA", "nysdot": "NYSDOT", "sca": "SCA", "other": "Other", "signal": "Signal", "signal_aps": "Signal with APS", "stop_yield": "Stop / yield",
     "none": "None", "intersection_corner": "Intersection corner", "island_median": "Island / median",
     "mid_block": "Mid-block", "top_of_t": "Top of \"T\"", "simple": "Simple", "complex": "Complex",
     "steel_faced": "Steel faced", "concrete": "Concrete", "concrete_and_gutter": "Concrete and gutter",
     "granite": "Granite", "bluestone": "Bluestone", "cobblestone": "Cobblestone",
     "pigmented_concrete": "Pigmented concrete", "yes": "Yes", "no": "No", "na": "N/A", "red": "Red", "white": "White",
-    "yellow": "Yellow", "preformed_plastic": "Preformed plastic", "cast_in_place_plastic": "Cast-in-place plastic",
+    "dark_on_light": "Dark on light", "light_on_dark": "Light on dark",
+    "preformed_plastic_embedded": "Preformed plastic (embedded)",
+    "preformed_plastic_surface_applied": "Preformed plastic (surface applied)",
+    "cast_in_place_surface_applied": "Cast in place (surface applied)", "concrete_tile": "Concrete tile",
     "cast_iron": "Cast iron", "stone": "Stone", "existing_ramp": "Existing ramp", "ramp_removed": "Ramp removed",
     "new_install": "New install", "upgrade": "Upgrade", "ada_compliant_constructed": "ADA compliant ramp constructed",
     "max_extent_feasible": "Constructed to the maximum extent feasible",

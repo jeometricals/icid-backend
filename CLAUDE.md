@@ -911,6 +911,9 @@ Any change must follow these.
       `light_on_dark` `other`; DWS material is `preformed_plastic_embedded` `preformed_plastic_surface_applied`
       `cast_in_place_surface_applied` `cast_iron` `stone` `concrete_tile`. A value dropped can't come back without a
       data migration. `ped_ramp_attributes.ramp_location_code` (the DOT diagram's 0-22) exists and nothing sets it.
+      The API's `Literal`s in `api/schemas/ped_ramp.py` lagged 048 until Slice V (a 048 value was a 422);
+      `tests/v1/test_ped_ramp_choices.py` now holds every corner and ramp `Literal` to its column's CHECK in
+      `schema.sql`, so a list changed in one place and not the other fails the suite.
   - **DOT's fillable PDFs** (Pedramp Phase 3 S2; `docs/dot-forms.md`): `fill_inspection_forms(corner, ramps, photos)`
     and `fill_tif_form(tif, corner, ramp, photos, layout, signature_png)` take plain dicts and bytes and return PDFs that
     stay fillable (DOT refuses scanned or flattened forms: appearances generated, `NeedAppearances` set). A cut-through
