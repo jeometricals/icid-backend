@@ -1,5 +1,6 @@
 """
-A pay item entered by hand on an imported site (Slice V1): a contract item of the IDR's project, a quantity and a note.
+A pay item entered by hand on an imported site (Slice V1): a contract item of the IDR's project, a quantity and a note;
+or an override of what the site's flags and curb segments come to for the pay item (overrides_auto, Slice X.1).
 Also the IDR's pay-item sources: each pay item's total from its flags, curb segments, sites and reports.
 """
 
@@ -31,13 +32,28 @@ def _note(value: Any) -> Any:
 
 
 class SitePayItemCreate(BaseModel):
-    """A pay item being entered on a site: the contract item, its quantity (above 0) and an optional note."""
+    """
+    A pay item being entered on a site: the contract item, its quantity (above 0) and an optional note; or, with
+    overrides_auto, the quantity (0 or more) that replaces what the site's flags and curb segments come to for it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     contract_item_id: UUID
-    quantity: Decimal = Field(gt=0, lt=MAX_QUANTITY, allow_inf_nan=False)
+    quantity: Decimal = Field(ge=0, lt=MAX_QUANTITY, allow_inf_nan=False)
     note: Optional[str] = None
+    overrides_auto: bool = False
+
+    @model_validator(mode="after")
+    def _above_zero(self) -> "SitePayItemCreate":
+        """
+        Refuse a quantity of 0 on a pay item that isn't an override.
+        Takes the parsed body.
+        Returns it; raises ValueError for 0 without overrides_auto.
+        """
+        if not self.overrides_auto and self.quantity <= 0:
+            raise ValueError("quantity must be above 0")
+        return self
 
     @field_validator("note", mode="before")
     @classmethod
@@ -51,11 +67,11 @@ class SitePayItemCreate(BaseModel):
 
 
 class SitePayItemUpdate(BaseModel):
-    """A site pay item changed: its quantity, its note (null clears it), or both; at least one."""
+    """A site pay item changed: its quantity (0 only on an override; the route checks), its note (null clears it), or both; at least one."""
 
     model_config = ConfigDict(extra="forbid")
 
-    quantity: Optional[Decimal] = Field(default=None, gt=0, lt=MAX_QUANTITY, allow_inf_nan=False)
+    quantity: Optional[Decimal] = Field(default=None, ge=0, lt=MAX_QUANTITY, allow_inf_nan=False)
     note: Optional[str] = None
 
     @field_validator("note", mode="before")
@@ -94,6 +110,7 @@ class SitePayItemOut(BaseModel):
     note: Optional[str] = None
     added_at: datetime
     added_by: UUID
+    overrides_auto: bool = False
     pay_item_ref: str
     budget_code: str
     description: str
@@ -106,10 +123,23 @@ class SitePayItemResponse(BaseModel):
     data: SitePayItemOut
 
 
+class OverrideAuditOut(BaseModel):
+    """The latest override change on a site's pay item (Slice X.1): its action, its words, when and by whom."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    contract_item_id: UUID
+    action: str
+    text: Optional[str] = None
+    at: datetime
+    actor_name: Optional[str] = None
+
+
 class SitePayItemListResponse(BaseModel):
     status: str
     message: str
     data: list[SitePayItemOut]
+    audit: list[OverrideAuditOut] = []
 
 
 class SourceLine(BaseModel):
@@ -120,6 +150,7 @@ class SourceLine(BaseModel):
     site_id: Optional[UUID] = None
     property_id: Optional[UUID] = None
     label: Optional[str] = None
+    overrides_auto: Optional[bool] = None
 
 
 class PayItemSources(BaseModel):

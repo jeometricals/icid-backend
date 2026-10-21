@@ -42,13 +42,14 @@ def _counted(segment: dict[str, Any]) -> bool:
 
 def _rollup(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Sum the segments that count per pay item, in LF, rounded to 2 decimal places (halves up), as approval sums them.
+    Sum the segments that count per pay item, in LF, rounded to 2 decimal places (halves up), as approval sums them; a
+    segment whose site overrides its pay item (overridden) adds nothing, the override billing instead.
     Takes the segment rows.
     Returns one line per pay item (pay_item_id, pay_item_ref, budget_code, description, unit, amount, segment_count), by item number then budget code.
     """
     lines: dict[UUID, dict[str, Any]] = {}
     for segment in segments:
-        if not _counted(segment) or segment["amount"] is None:
+        if not _counted(segment) or segment["amount"] is None or segment.get("overridden"):
             continue
         line = lines.setdefault(segment["pay_item_id"], {
             "pay_item_id": segment["pay_item_id"], "pay_item_ref": segment["pay_item_ref"],

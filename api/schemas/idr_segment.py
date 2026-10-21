@@ -45,6 +45,7 @@ class IdrSegment(BaseModel):
     claimed_by_idr_number: Optional[str] = None
     constructed_on: Optional[date] = None
     deleted_at: Optional[datetime] = None
+    overridden: bool = False
 
     @computed_field
     @property

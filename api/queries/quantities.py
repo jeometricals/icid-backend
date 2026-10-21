@@ -21,6 +21,7 @@ from psycopg.types.json import Jsonb
 
 from api.db.runner import run_query
 from api.queries.flags import FLAG_AMOUNT, FLAG_UNIT, QUANTITY_LATERALS
+from api.queries.idr_report_site_pay_items import overridden_sql
 
 # What one quantity row carries besides its IDR, as the statement reads it out of the JSON it is handed
 QUANTITY_FIELDS = """
@@ -81,7 +82,7 @@ def replace_quantities_ctes(idrs: str, manual_only: bool = False) -> str:
 
 def insert_flag_quantities_cte(idrs: str, claimed: str = "claimed_flags") -> str:
     """
-    Write the CTE that inserts an IDR's from_flags quantity rows: the flags it just claimed, summed per pay item in each pay item's unit (FLAG_AMOUNT) and rounded to 2 decimal places, as report type PIR_FLAGS. A flag without a pay item, or one whose unit a flag can't measure, adds nothing.
+    Write the CTE that inserts an IDR's from_flags quantity rows: the flags it just claimed, summed per pay item in each pay item's unit (FLAG_AMOUNT) and rounded to 2 decimal places, as report type PIR_FLAGS. A flag without a pay item, one whose unit a flag can't measure, or one whose site overrides its pay item in the IDR (the override bills instead) adds nothing.
     Takes the names of two CTEs defined earlier in the statement (written here, never from a request): the one holding the IDR (idr_id, project_id, report_date, reporter_uuid) and the one listing the flags it claimed (id).
     Returns the CTE (flag_quantities), to append to the statement's WITH list; no parameters.
     """
@@ -95,8 +96,9 @@ def insert_flag_quantities_cte(idrs: str, claimed: str = "claimed_flags") -> str
                    ci.description, round(sum({FLAG_AMOUNT}), 2), {FLAG_UNIT}, 'from_flags'
             FROM {idrs} i
             JOIN icid.flags f ON f.id IN (SELECT id FROM {claimed})
+            JOIN icid.pirs fpir ON fpir.id = f.pir_id
             JOIN icid.contract_items ci ON ci.contract_item_id = f.pay_item_id{QUANTITY_LATERALS}
-            WHERE {FLAG_AMOUNT} IS NOT NULL
+            WHERE {FLAG_AMOUNT} IS NOT NULL AND NOT {overridden_sql("i.idr_id", "fpir.property_id", "f.pay_item_id")}
             GROUP BY i.project_id, i.idr_id, i.report_date, i.reporter_uuid, ci.contract_item_id
             RETURNING quantity_id
         )"""

@@ -54,13 +54,14 @@ def _counted(flag: dict[str, Any]) -> bool:
 
 def _rollup(flags: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Sum the flags that count per pay item, in its unit, rounded to 2 decimal places (halves up), as approval sums them.
+    Sum the flags that count per pay item, in its unit, rounded to 2 decimal places (halves up), as approval sums them;
+    a flag whose site overrides its pay item (overridden) adds nothing, the override billing instead.
     Takes the flag rows.
     Returns one line per pay item (pay_item_id, pay_item_ref, budget_code, description, unit, amount, flag_count), by item number then budget code.
     """
     lines: dict[UUID, dict[str, Any]] = {}
     for flag in flags:
-        if not _counted(flag) or flag["amount"] is None:
+        if not _counted(flag) or flag["amount"] is None or flag.get("overridden"):
             continue
         line = lines.setdefault(flag["pay_item_id"], {
             "pay_item_id": flag["pay_item_id"], "pay_item_ref": flag["pay_item_ref"],

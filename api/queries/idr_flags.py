@@ -14,10 +14,15 @@ from uuid import UUID
 
 from api.db.runner import run_query
 from api.queries.flags import FLAG_AMOUNT, FLAG_QUANTITY, FLAG_UNIT, QUANTITY_LATERALS
+from api.queries.idr_report_site_pay_items import overridden_sql
+
+# A flag whose site overrides its pay item in the IDR (Slice X.1): it still counts as the IDR's and is claimed, but adds
+# nothing to the IDR's pay items (the override bills instead)
+_OVERRIDDEN = overridden_sql("i.idr_id", "p.id", "f.pay_item_id")
 
 # A flag as an IDR lists it: where it is (its property, and its page), what it is mapped to, how much it comes to
-# in square feet and in its pay item's unit, and whose it is (state: attributed, excluded, claimed by this IDR, or
-# claimed by another)
+# in square feet and in its pay item's unit, whose it is (state: attributed, excluded, claimed by this IDR, or
+# claimed by another) and whether its site overrides its pay item (overridden)
 _FLAG_COLUMNS = f"""
             f.id AS flag_id, f.pir_id, f.pir_page_id, pg.page_number, f.display_order, f.shape, f.surveyed_thickness,
             p.id AS property_id, p.kind::text AS property_kind, p.boro::text AS boro, p.block, p.lot, p.address,
@@ -29,7 +34,7 @@ _FLAG_COLUMNS = f"""
             CASE WHEN ci.contract_item_id IS NULL THEN NULL ELSE {FLAG_AMOUNT} END AS amount,
             a.action AS override, (rs.property_id IS NOT NULL) AS on_imported_site,
             f.claimed_by_idr_id, claimer.idr_number AS claimed_by_idr_number, f.is_constructed, f.constructed_on,
-            f.deleted_at,
+            f.deleted_at, {_OVERRIDDEN} AS overridden,
             CASE
                 WHEN f.claimed_by_idr_id = i.idr_id THEN 'claimed'
                 WHEN f.claimed_by_idr_id IS NOT NULL THEN 'claimed_elsewhere'
@@ -71,12 +76,13 @@ IN_FLIGHT_FLAG_IDS = (
 # An IDR is open (its flags in flight) from draft until approved
 _OPEN = "i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
 # One property's flags by IDR (Slice V5), a row per IDR and flag: those an approved IDR claimed, and those an open IDR
-# has attributed to it (in its scope, not excluded, unclaimed); deleted IDRs left out. Each with its contract item and
-# its amount in that item's unit. A subquery, its one parameter the property's id (a property's pay-item summary).
+# has attributed to it (in its scope, not excluded, unclaimed); deleted IDRs left out, and flags their IDR's site
+# overrides (the override is among the site lines). Each with its contract item and its amount in that item's unit. A
+# subquery, its one parameter the property's id (a property's pay-item summary).
 PROPERTY_FLAG_LINES = (
     "\n        SELECT i.idr_id, 'flags' AS source, f.id AS element_id, ci.contract_item_id, ci.item_no, ci.budget_code,"
     + f" ci.description, {FLAG_UNIT} AS unit, {FLAG_AMOUNT} AS amount" + _FROM
-    + "\n        WHERE p.id = %s AND i.deleted_at IS NULL AND ci.contract_item_id IS NOT NULL"
+    + f"\n        WHERE p.id = %s AND i.deleted_at IS NULL AND ci.contract_item_id IS NOT NULL AND NOT {_OVERRIDDEN}"
     + f"\n          AND ((i.status = 'approved' AND {_CLAIMED})"
     + f" OR ({_OPEN} AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND f.claimed_by_idr_id IS NULL))"
 )

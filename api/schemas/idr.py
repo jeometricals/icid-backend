@@ -65,7 +65,7 @@ class IdrResponse(BaseModel):
     One IDR. A move that claims or releases flags also says how many: flags_claimed (approval, or an un-delete back to
     approved), flags_dropped (attributed flags another IDR claimed first, left out of the approval) and
     flags_released (unlock, admin delete); and the same for its curb segments (segments_claimed, segments_dropped,
-    segments_released).
+    segments_released). An approval also says how many site overrides it dropped (overrides_dropped, Slice X.1).
     """
 
     status: str
@@ -77,6 +77,7 @@ class IdrResponse(BaseModel):
     segments_claimed: Optional[int] = None
     segments_dropped: Optional[int] = None
     segments_released: Optional[int] = None
+    overrides_dropped: Optional[int] = None
 
 
 class IdrListItem(Idr):

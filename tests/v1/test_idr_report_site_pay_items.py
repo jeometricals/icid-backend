@@ -36,22 +36,44 @@ URL = f"/v1/idrs/{IDR_ID}/reports/{REPORT_ID}/sites/{SITE_ID}/pay-items"
 SOURCES = f"/v1/idrs/{IDR_ID}/pay-item-sources"
 PAY_ITEM = {"id": ITEM_ID, "report_site_id": SITE_ID, "contract_item_id": CONTRACT_ITEM_ID, "quantity": Decimal("12.5"),
             "note": "MTP", "added_at": NOW, "added_by": ADMIN_ID, "pay_item_ref": "6.70 AB", "budget_code": "HW-200(S)",
-            "description": "Maintenance and protection of traffic", "unit": "LS"}
+            "description": "Maintenance and protection of traffic", "unit": "LS", "overrides_auto": False}
 IDR_ITEM = {**PAY_ITEM, "report_id": REPORT_ID, "property_id": PROPERTY_ID, "kind": "sidewalk",
             "address": "138-22 227 Street", "intersection_street_1": None, "intersection_street_2": None,
             "quadrant": None, "facing_street": None}
 IN_REVIEW = {**DRAFT_IDR, "status": "stage1_review", "stage1_reviewer_uuid": ADMIN_ID}
 
 
+def pay_db(rows: list, audit: list = (), written: list = None):
+    """
+    Stand in for the site pay items' run_query, answering each statement by what it is.
+    Takes the site's pay items (what a list reads), the override audit rows and what a write returns (rows when None).
+    Returns the side_effect function.
+    """
+    def answer(sql: str, params: tuple) -> list:
+        """Answer one statement: the audit read, the site's list, or a write."""
+        if "FROM icid.idr_audit a" in sql:
+            return list(audit)
+        if sql.lstrip().startswith("SELECT"):
+            return list(rows)
+        return list(rows if written is None else written)
+    return answer
+
+
+def writes(run) -> list:
+    """The (sql, params) of the statements a mocked run_query ran that weren't plain reads."""
+    return [call.args for call in run.call_args_list if not call.args[0].lstrip().startswith("SELECT")]
+
+
 class TestList:
     def test_a_site_lists_its_pay_items(self, admin_client):
         with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]), \
-             patch(SITES, return_value=[SIDEWALK_SITE]), patch(PAY, return_value=[PAY_ITEM]) as run:
+             patch(SITES, return_value=[SIDEWALK_SITE]), patch(PAY, side_effect=pay_db([PAY_ITEM])) as run:
             response = admin_client.get(URL)
         assert response.status_code == 200
         item = response.json()["data"][0]
         assert item["pay_item_ref"] == "6.70 AB" and item["quantity"] == 12.5 and item["note"] == "MTP"
-        sql, params = run.call_args.args
+        assert item["overrides_auto"] is False and response.json()["audit"] == []
+        sql, params = run.call_args_list[0].args
         assert "JOIN icid.idr_report_sites rs ON rs.id = sp.report_site_id" in sql and params == (REPORT_ID, SITE_ID)
 
     def test_a_site_that_isnt_the_reports_is_404(self, admin_client):
@@ -73,7 +95,9 @@ class TestAdd:
         sql, params = run.call_args.args
         assert "INSERT INTO icid.idr_report_site_pay_items" in sql
         assert "JOIN icid.contract_items ci ON ci.project_id = i.project_id" in sql
-        assert params == (Decimal("12.5"), "MTP", REPORTER["uuid"], REPORT_ID, SITE_ID, CONTRACT_ITEM_ID)
+        # an ordinary pay item: not an override, nothing logged
+        assert params == (Decimal("12.5"), "MTP", REPORTER["uuid"], False, REPORT_ID, SITE_ID, CONTRACT_ITEM_ID,
+                          REPORTER["uuid"], "site_override_set", None, None)
 
     def test_a_contract_item_of_another_project_is_400(self, admin_client):
         with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]), \
@@ -111,19 +135,22 @@ class TestAdd:
 class TestUpdate:
     def test_the_quantity_and_note_change(self, admin_client):
         with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]), \
-             patch(SITES, return_value=[SIDEWALK_SITE]), patch(PAY, return_value=[{**PAY_ITEM, "quantity": 4}]) as run:
+             patch(SITES, return_value=[SIDEWALK_SITE]), \
+             patch(PAY, side_effect=pay_db([PAY_ITEM], written=[{**PAY_ITEM, "quantity": 4}])) as run:
             response = admin_client.patch(f"{URL}/{ITEM_ID}", json={"quantity": 4})
         assert response.status_code == 200 and response.json()["data"]["quantity"] == 4
-        sql, params = run.call_args.args
+        [(sql, params)] = writes(run)
         assert "SET quantity = COALESCE(%s, sp.quantity)" in sql
-        # the note wasn't sent, so it is kept
-        assert params == (Decimal(4), False, None, REPORT_ID, SITE_ID, ITEM_ID)
+        # the note wasn't sent, so it is kept; not an override, so nothing is logged
+        assert params == (Decimal(4), False, None, REPORT_ID, SITE_ID, ITEM_ID, ADMIN_ID, "site_override_change", None,
+                          None)
 
     def test_a_null_note_clears_it(self, admin_client):
         with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]), \
-             patch(SITES, return_value=[SIDEWALK_SITE]), patch(PAY, return_value=[{**PAY_ITEM, "note": None}]) as run:
+             patch(SITES, return_value=[SIDEWALK_SITE]), \
+             patch(PAY, side_effect=pay_db([PAY_ITEM], written=[{**PAY_ITEM, "note": None}])) as run:
             admin_client.patch(f"{URL}/{ITEM_ID}", json={"note": None})
-        assert run.call_args.args[1] == (None, True, None, REPORT_ID, SITE_ID, ITEM_ID)
+        assert writes(run)[0][1][:6] == (None, True, None, REPORT_ID, SITE_ID, ITEM_ID)
 
     def test_an_empty_body_or_a_null_quantity_is_422(self, admin_client):
         for body in ({}, {"quantity": None}):
@@ -147,9 +174,12 @@ class TestUpdate:
 class TestRemove:
     def test_a_pay_item_is_removed(self, admin_client):
         with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]), \
-             patch(SITES, return_value=[SIDEWALK_SITE]), patch(PAY, return_value=[{"id": ITEM_ID}]) as run:
+             patch(SITES, return_value=[SIDEWALK_SITE]), \
+             patch(PAY, side_effect=pay_db([PAY_ITEM], written=[{"id": ITEM_ID}])) as run:
             assert admin_client.delete(f"{URL}/{ITEM_ID}").status_code == 204
-        assert "DELETE FROM icid.idr_report_site_pay_items" in run.call_args.args[0]
+        [(sql, params)] = writes(run)
+        assert "DELETE FROM icid.idr_report_site_pay_items" in sql
+        assert params == (REPORT_ID, SITE_ID, ITEM_ID, ADMIN_ID, "site_override_reset", None, None)
 
     def test_an_unknown_pay_item_is_404(self, admin_client):
         with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]), \
@@ -190,9 +220,10 @@ class TestPayItemSources:
             (100.0, 0.0, 5.0, 20.0, 125.0)
         assert sidewalk["unit"] == "SF"
         assert sidewalk["site_lines"] == [{"amount": 5.0, "report_id": str(REPORT_ID), "site_id": str(SITE_ID),
-                                           "property_id": str(PROPERTY_ID), "label": "138-22 227 Street"}]
+                                           "property_id": str(PROPERTY_ID), "label": "138-22 227 Street",
+                                           "overrides_auto": False}]
         assert sidewalk["manual_lines"] == [{"amount": 20.0, "report_id": str(REPORT_ID), "site_id": None,
-                                             "property_id": None, "label": None}]
+                                             "property_id": None, "label": None, "overrides_auto": None}]
         assert items["4.08 AA"]["total"] == 30.5 and items["4.08 AA"]["segments"] == 30.5
         assert items["6.70 AB"]["total"] == 12.5 and items["6.70 AB"]["sites"] == 12.5
 

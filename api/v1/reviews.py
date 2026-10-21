@@ -243,7 +243,7 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
     """
     Approve an IDR for good, signed by the signed-in user: copy their signature to the IDR, then mark it approved and stamp the signature. In the same statement its attributed flags are claimed (constructed on its report date; one another IDR claimed meanwhile is left out and counted in flags_dropped) and its quantities written to icid.quantities: its reports' pay items, and its claimed flags per pay item. Only the RE who accepted it at Stage 2 (or an admin) can, and only once they have approved, revised or added every pay item of its reports at this stage (its flags' lines need no attesting).
     Takes the IDR uuid as a path parameter and the signed-in RE; no body.
-    Returns an IdrResponse with flags_claimed and flags_dropped; raises 403 (not an RE on the project, or not its RE reviewer), 404 (no IDR), 409 (not in Stage 2 review), 400 with the untouched pay items (untouched) when any is left, 400 (the user has no signature), 500 (the IDR's reports couldn't be read) and 502 (the signature couldn't be copied).
+    Returns an IdrResponse with flags_claimed and flags_dropped (and overrides_dropped: site overrides billed nothing, as this approval claimed none of their flags or curb segments, each logged as site_override_dropped); raises 403 (not an RE on the project, or not its RE reviewer), 404 (no IDR), 409 (not in Stage 2 review), 400 with the untouched pay items (untouched) when any is left, 400 (the user has no signature), 500 (the IDR's reports couldn't be read) and 502 (the signature couldn't be copied).
     """
     idr = _load_idr(idr_id)
 
@@ -295,13 +295,19 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
     dropped = len(flag_ids) - claimed
     segments_claimed = rows[0].get("segments_claimed", 0)
     segments_dropped = len(segment_ids) - segments_claimed
+    overrides_dropped = rows[0].get("overrides_dropped", 0)
     left_out = [_flags(count, noun) for count, noun in ((dropped, "flag"), (segments_dropped, "segment")) if count]
     if left_out:
         many = dropped + segments_dropped > 1
         response.message = (f"IDR approved; {' and '.join(left_out)} already claimed by another IDR "
                             f"{'were' if many else 'was'} left out")
+    if overrides_dropped:
+        many = overrides_dropped > 1
+        response.message += (f"; {_flags(overrides_dropped, 'site override')} {'were' if many else 'was'} dropped, "
+                             f"{'their' if many else 'its'} flags or curb segments already claimed")
     response.flags_claimed, response.flags_dropped = claimed, dropped
     response.segments_claimed, response.segments_dropped = segments_claimed, segments_dropped
+    response.overrides_dropped = overrides_dropped
     return response
 
 

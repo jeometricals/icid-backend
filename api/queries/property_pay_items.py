@@ -9,11 +9,11 @@ from uuid import UUID
 
 from api.db.runner import run_query
 from api.queries.idr_flags import PROPERTY_FLAG_LINES
-from api.queries.idr_report_site_pay_items import SITE_UNIT
+from api.queries.idr_report_site_pay_items import OVERRIDE_DROPPED_SQL, SITE_UNIT
 from api.queries.idr_segments import PROPERTY_SEGMENT_LINES
 
-# The pay items entered on a property as an imported site, a row per IDR and pay item entered; deleted IDRs left out.
-# Its one parameter the property's id.
+# The pay items entered on a property as an imported site, a row per IDR and pay item entered; deleted IDRs left out,
+# and overrides an approved IDR dropped. Its one parameter the property's id.
 _SITE_LINES = f"""
         SELECT rs.idr_id, 'sites' AS source, sp.id AS element_id, ci.contract_item_id, ci.item_no, ci.budget_code,
                ci.description, {SITE_UNIT} AS unit, sp.quantity AS amount
@@ -21,7 +21,7 @@ _SITE_LINES = f"""
         JOIN icid.idr_report_sites rs ON rs.id = sp.report_site_id
         JOIN icid.idrs i ON i.idr_id = rs.idr_id
         JOIN icid.contract_items ci ON ci.contract_item_id = sp.contract_item_id
-        WHERE rs.property_id = %s AND i.deleted_at IS NULL"""
+        WHERE rs.property_id = %s AND i.deleted_at IS NULL AND NOT """ + OVERRIDE_DROPPED_SQL
 
 
 def property_pay_item_lines(property_id: UUID) -> Optional[list[dict[str, Any]]]:
