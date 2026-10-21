@@ -27,11 +27,11 @@ def insert_attachment(
     storage_path: str,
     uploaded_by: UUID,
     attachment_name: str,
-    attachment_description: str,
+    attachment_description: Optional[str],
 ) -> Optional[list[dict[str, Any]]]:
     """
     Insert one attachment's metadata row as pending (is_uploaded false), before its file reaches Storage.
-    Takes the pre-generated attachment uuid (it is part of storage_path), the report uuid, the file details, the uploader's uuid and the name and description.
+    Takes the pre-generated attachment uuid (it is part of storage_path), the report uuid, the file details, the uploader's uuid and the name and description (None for none).
     Returns a one-row list with the inserted attachment, or None on failure.
     """
     sql = f"""
@@ -121,11 +121,11 @@ def update_attachment_metadata_row(
     report_id: UUID,
     attachment_id: UUID,
     attachment_name: str,
-    attachment_description: str,
+    attachment_description: Optional[str],
 ) -> Optional[list[dict[str, Any]]]:
     """
     Replace one attachment's name and description, only if it belongs to the given report.
-    Takes the report uuid, the attachment uuid and the new name and description.
+    Takes the report uuid, the attachment uuid and the new name and description (None clears it).
     Returns a one-row list with the updated attachment, an empty list if there was none, or None on failure.
     """
     sql = f"""

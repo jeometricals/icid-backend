@@ -305,8 +305,6 @@ class TestUploadRequest:
         ("attachment_name", "", "attachment_name must not be blank"),
         ("attachment_name", "   ", "attachment_name must not be blank"),
         ("attachment_name", "n" * 201, "attachment_name must be at most 200 characters"),
-        ("attachment_description", "", "attachment_description must not be blank"),
-        ("attachment_description", "\n\t", "attachment_description must not be blank"),
         ("attachment_description", "d" * 2001, "attachment_description must be at most 2000 characters"),
     ])
     def test_invalid_name_or_description_returns_400(self, admin_client, bucket, field, value, detail):
@@ -316,6 +314,18 @@ class TestUploadRequest:
         assert response.json()["detail"] == detail
         bucket.create_signed_upload_url.assert_not_called()
         mocks["attachments"].assert_not_called()
+
+    @pytest.mark.parametrize("description", ["", "\n\t", None, "absent"])
+    def test_a_blank_or_missing_description_is_stored_as_none(self, admin_client, description):
+        body = {**REQUEST_BODY, "attachment_description": description}
+        if description == "absent":
+            del body["attachment_description"]
+        pending = {**MOCK_PENDING_ROW, "attachment_description": None}
+        with patched(**upload_ok(attachments=[pending])) as mocks:
+            response = admin_client.post(UPLOAD_REQUEST, json=body)
+        assert response.status_code == 201
+        assert response.json()["data"]["attachment_description"] is None
+        assert mocks["attachments"].call_args.args[1][7:] == ("North wall", None)
 
     def test_name_and_description_at_limit_are_accepted(self, admin_client):
         body = {**REQUEST_BODY, "attachment_name": "n" * 200, "attachment_description": "d" * 2000}
@@ -399,7 +409,8 @@ class TestUploadRequest:
         assert response.json()["detail"] == "Failed to save attachment"
         bucket.remove.assert_not_called()
 
-    @pytest.mark.parametrize("missing", sorted(REQUEST_BODY))
+    # The description is optional: leaving it out is tested above, as stored None
+    @pytest.mark.parametrize("missing", sorted(set(REQUEST_BODY) - {"attachment_description"}))
     def test_missing_field_returns_422(self, admin_client, missing):
         body = {k: v for k, v in REQUEST_BODY.items() if k != missing}
         with patched(**upload_ok()) as mocks:
@@ -506,6 +517,23 @@ class TestUpdateAttachmentMetadata:
         for field in ("file_name", "file_type", "file_size_bytes"):
             assert data[field] == MOCK_ATTACHMENT_ROW[field]
 
+    @pytest.mark.parametrize("description", ["", "  ", None])
+    def test_clearing_the_description_writes_none(self, admin_client, description):
+        updated = {**MOCK_ATTACHMENT_ROW, "attachment_description": None}
+        body = {"attachment_name": "North wall", "attachment_description": description}
+        with patched(**on_report(([MOCK_ATTACHMENT_ROW], [updated]))) as mocks:
+            response = admin_client.put(ONE, json=body)
+        assert response.status_code == 200
+        assert response.json()["data"]["attachment_description"] is None
+        assert mocks["attachments"].call_args.args[1] == ("North wall", None, UUID(REPORT_ID), UUID(ATTACHMENT_ID))
+
+    def test_an_absent_description_clears_it(self, admin_client):
+        updated = {**MOCK_ATTACHMENT_ROW, "attachment_description": None}
+        with patched(**on_report(([MOCK_ATTACHMENT_ROW], [updated]))) as mocks:
+            response = admin_client.put(ONE, json={"attachment_name": "North wall"})
+        assert response.status_code == 200
+        assert mocks["attachments"].call_args.args[1][1] is None
+
     def test_works_on_a_pending_attachment(self, admin_client):
         with patched(**on_report(([MOCK_PENDING_ROW], [MOCK_PENDING_ROW]))):
             assert admin_client.put(ONE, json=METADATA_BODY).status_code == 200
@@ -518,7 +546,6 @@ class TestUpdateAttachmentMetadata:
     @pytest.mark.parametrize("field, value", [
         ("attachment_name", " "),
         ("attachment_name", "n" * 201),
-        ("attachment_description", ""),
         ("attachment_description", "d" * 2001),
     ])
     def test_invalid_name_or_description_returns_400_without_update(self, admin_client, field, value):
@@ -556,7 +583,7 @@ class TestUpdateAttachmentMetadata:
             assert admin_client.put(ONE, json=METADATA_BODY).status_code == 404
         mocks["attachments"].assert_not_called()
 
-    @pytest.mark.parametrize("missing", sorted(METADATA_BODY))
+    @pytest.mark.parametrize("missing", sorted(set(METADATA_BODY) - {"attachment_description"}))
     def test_missing_field_returns_422(self, admin_client, missing):
         body = {k: v for k, v in METADATA_BODY.items() if k != missing}
         with patched(**on_report([MOCK_ATTACHMENT_ROW])):

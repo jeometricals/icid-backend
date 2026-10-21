@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -12,7 +13,7 @@ class Attachment(BaseModel):
     uploaded_by: UUID
     uploaded_at: datetime
     attachment_name: str
-    attachment_description: str
+    attachment_description: Optional[str]
 
 
 class AttachmentResponse(BaseModel):
@@ -32,7 +33,7 @@ class UploadRequestBody(BaseModel):
     file_type: str
     file_size_bytes: int
     attachment_name: str
-    attachment_description: str
+    attachment_description: Optional[str] = None
 
 
 class UploadCompleteBody(BaseModel):
@@ -41,7 +42,7 @@ class UploadCompleteBody(BaseModel):
 
 class UpdateAttachmentMetadataBody(BaseModel):
     attachment_name: str
-    attachment_description: str
+    attachment_description: Optional[str] = None
 
 
 class UploadRequest(Attachment):

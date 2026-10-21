@@ -79,7 +79,7 @@ class UnsupportedFileTypeError(AttachmentError):
 
 
 class InvalidAttachmentMetadataError(AttachmentError):
-    """attachment_name or attachment_description is blank or too long."""
+    """attachment_name is blank or too long, or attachment_description is too long."""
 
 
 class InvalidUserError(AttachmentError):
@@ -169,14 +169,16 @@ def validate_upload(report: dict[str, Any], file_type: str, size: int) -> None:
         )
 
 
-def validate_attachment_metadata(attachment_name: str, attachment_description: str) -> tuple[str, str]:
+def validate_attachment_metadata(
+    attachment_name: str, attachment_description: Optional[str]
+) -> tuple[str, Optional[str]]:
     """
-    Check an attachment's name and description against the table's CHECK constraints.
+    Check an attachment's name and optional description against the table's CHECK constraints.
     Takes the name and description as sent; surrounding whitespace is trimmed.
-    Returns the trimmed (name, description); raises InvalidAttachmentMetadataError if either is blank or too long.
+    Returns the trimmed (name, description), a blank or missing description as None; raises InvalidAttachmentMetadataError for a blank or too-long name or a too-long description.
     """
     name = attachment_name.strip()
-    description = attachment_description.strip()
+    description = (attachment_description or "").strip() or None
 
     if not name:
         raise InvalidAttachmentMetadataError("attachment_name must not be blank")
@@ -184,10 +186,7 @@ def validate_attachment_metadata(attachment_name: str, attachment_description: s
     if len(name) > MAX_ATTACHMENT_NAME_LENGTH:
         raise InvalidAttachmentMetadataError("attachment_name must be at most 200 characters")
 
-    if not description:
-        raise InvalidAttachmentMetadataError("attachment_description must not be blank")
-
-    if len(description) > MAX_ATTACHMENT_DESCRIPTION_LENGTH:
+    if description is not None and len(description) > MAX_ATTACHMENT_DESCRIPTION_LENGTH:
         raise InvalidAttachmentMetadataError("attachment_description must be at most 2000 characters")
 
     return name, description
@@ -200,7 +199,7 @@ def upload_request(
     file_type: str,
     file_size_bytes: int,
     attachment_name: str,
-    attachment_description: str,
+    attachment_description: Optional[str],
 ) -> Optional[dict[str, Any]]:
     """
     Start a two-step upload: validate the file details, sign an upload URL for a new Storage path, and record the attachment as pending.
@@ -265,7 +264,7 @@ def update_attachment_metadata(
     report_id: UUID,
     attachment_id: UUID,
     attachment_name: str,
-    attachment_description: str,
+    attachment_description: Optional[str],
 ) -> Optional[list[dict[str, Any]]]:
     """
     Replace an attachment's name and description; the file and its details are left alone.

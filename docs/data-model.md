@@ -714,7 +714,7 @@ Supabase Storage bucket `report-attachments`, which only the backend can reach (
 | `uploaded_by` | UUID NOT NULL | FK → `users.uuid` |
 | `uploaded_at` | TIMESTAMPTZ NOT NULL | Default `now()`: set when the upload is requested and the row created, not when the file lands. The table has no `created_at`/`updated_at`. |
 | `attachment_name` | TEXT NOT NULL | The inspector's display name for the file. CHECK `chk_report_attachments_name`: not blank, at most 200 characters |
-| `attachment_description` | TEXT NOT NULL | CHECK `chk_report_attachments_description`: not blank, at most 2000 characters |
+| `attachment_description` | TEXT | Optional (migration 054). CHECK `chk_report_attachments_description`: NULL, or not blank and at most 2000 characters; the API stores a blank or missing one as NULL |
 | `is_uploaded` | BOOLEAN NOT NULL | Default `false`. `false` while pending; `true` once the client reports the file is in Storage |
 
 Index: `idx_report_attachments_report_id (report_id)`.
