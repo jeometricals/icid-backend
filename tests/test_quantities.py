@@ -331,7 +331,9 @@ class TestFlagQuantities:
         assert "'PIR_FLAGS', ci.item_no, ci.budget_code, ci.description, round(sum(" in sql
         assert "'from_flags' FROM moved i JOIN icid.flags f ON f.id IN (SELECT id FROM claimed_flags)" in sql
         assert "JOIN icid.contract_items ci ON ci.contract_item_id = f.pay_item_id" in sql
-        assert "END) IS NOT NULL GROUP BY i.project_id, i.idr_id, i.report_date, i.reporter_uuid, ci.contract_item_id" in sql
+        # a flag whose site overrides its pay item in the IDR adds nothing (Slice X.1)
+        assert "END) IS NOT NULL AND NOT EXISTS ( SELECT 1 FROM icid.idr_report_site_pay_items osp" in sql
+        assert "GROUP BY i.project_id, i.idr_id, i.report_date, i.reporter_uuid, ci.contract_item_id" in sql
         assert sql.endswith("RETURNING quantity_id )")
 
     def test_it_can_read_another_ctes_claims(self):
