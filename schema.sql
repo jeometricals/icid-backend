@@ -263,13 +263,19 @@ CREATE TABLE icid.idr_report_site_pay_items (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     report_site_id   UUID NOT NULL REFERENCES icid.idr_report_sites(id) ON DELETE CASCADE,
     contract_item_id UUID NOT NULL REFERENCES icid.contract_items(contract_item_id),
-    quantity         NUMERIC NOT NULL CHECK (quantity > 0),
+    quantity         NUMERIC NOT NULL,
     note             TEXT CHECK (note IS NULL OR char_length(note) <= 2000),
     added_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    added_by         UUID NOT NULL REFERENCES icid.users(uuid)
+    added_by         UUID NOT NULL REFERENCES icid.users(uuid),
+    -- Slice X.1 (migration 056): the quantity replaces what the site's flags and curb segments come to for the pay item
+    overrides_auto   BOOLEAN NOT NULL DEFAULT false,
+    CONSTRAINT idr_report_site_pay_items_quantity_check CHECK (quantity > 0 OR (overrides_auto AND quantity >= 0))
 );
 CREATE INDEX idx_idr_report_site_pay_items_site ON icid.idr_report_site_pay_items (report_site_id);
 CREATE INDEX idx_idr_report_site_pay_items_item ON icid.idr_report_site_pay_items (contract_item_id);
+-- One override per site and pay item
+CREATE UNIQUE INDEX uq_idr_report_site_pay_items_one_override
+    ON icid.idr_report_site_pay_items (report_site_id, contract_item_id) WHERE overrides_auto;
 
 -- At most one non-addendum General per IDR (migrations/005_one_general_per_idr.sql).
 CREATE UNIQUE INDEX uq_idr_reports_one_gen_per_idr
