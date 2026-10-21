@@ -137,15 +137,16 @@ def import_site(
 
 @router.patch("/{idr_id}/reports/{report_id}/sites/{site_id}", response_model=ReportSiteResponse)
 def update_site(
-    report_id: UUID, site_id: UUID, body: ReportSiteUpdate, idr: dict = Depends(attribution_editor)
+    report_id: UUID, site_id: UUID, body: ReportSiteUpdate, idr: dict = Depends(attribution_editor),
+    user: UserOut = Depends(current_user),
 ) -> ReportSiteResponse:
     """
-    Change the work done at an imported site (its type, and its text for 'other'). Who may: as for importing.
-    Takes the report's and the site's uuids as path parameters, the work in the body and the IDR (loaded and checked by attribution_editor).
+    Change the work done at an imported site (its type, and its text for 'other'); a real change records who and when (updated_by, updated_at). Who may: as for importing.
+    Takes the report's and the site's uuids as path parameters, the work in the body, the IDR (loaded and checked by attribution_editor) and the user.
     Returns a ReportSiteResponse; raises 403 or 409 as attribution_editor does, 404 for a report or site that isn't the IDR's and 422 for 'other' work without its text.
     """
     report_of(idr["idr_id"], report_id)
-    row = update_report_site(report_id, site_id, body.work_type, body.work_type_other)
+    row = update_report_site(report_id, site_id, body.work_type, body.work_type_other, user.uuid)
     if row is None:
         raise HTTPException(status_code=404, detail=SITE_NOT_FOUND)
     return _site_response(row, "Site updated")

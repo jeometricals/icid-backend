@@ -87,6 +87,10 @@ class ReportSiteOut(BaseModel):
     work_type_other: Optional[str] = None
     added_at: datetime
     added_by: UUID
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[UUID] = None
+    added_by_name: Optional[str] = None
+    updated_by_name: Optional[str] = None
     kind: Literal["sidewalk", "ped_ramp"]
     boro: str
     address: Optional[str] = None
