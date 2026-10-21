@@ -9,6 +9,8 @@ IDR exports too, with "DRAFT - Not for Submission" across the top of every page 
 IDR's pages carry the inspector's signature (the copy the IDR kept at submit), wherever a page has a signature line.
 An approved IDR's carry the Resident Engineer's signature beside it (the copy kept at final approval), captioned with
 the approver's name. The inspector's is dated with the IDR's work date; the RE's caption carries the day the RE approved.
+Each report's imported sites bring their sheets (a sidewalk's PIR, a ped ramp corner's inspection; export_site_sheets)
+after its attachments.
 """
 
 import logging
@@ -26,7 +28,9 @@ from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
 from api.queries.users import get_user_by_id
-from api.services import export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_dsp, export_swcb
+from api.services import (
+    export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_dsp, export_site_sheets, export_swcb,
+)
 from api.services.auto_general import build_auto_general_data, contributing_reports
 from api.services.idr_flags import EXPORT_HEADING, IdrFlagError, export_lines
 from api.services.idr_segments import IdrSegmentError, export_segment_lines
@@ -437,7 +441,9 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     DSP Fr sheet, among the main reports in page order (after its parent when it has one); an SWCB's Conc Bk ticks its "See attached" box when it has one, an AC Bk
     its "Attached Pages" box when its report has attachments or continues on Report Cont. Pay items past a front
     page's table continue on copies of it, right after it. A report's extra sheets are numbered after it and counted
-    in OF. Each report's attachments follow its last page, one unnumbered page each. A draft IDR's pages are each
+    in OF. Each report's attachments follow its last page, one unnumbered page each, then its imported sites' sheets
+    the same way (each live page of a sidewalk's PIR; a ped ramp corner's approved DOT inspection form, else ICID's
+    inspection report of the corner, once per export; see export_site_sheets). A draft IDR's pages are each
     marked "DRAFT - Not for Submission"; from submission on they carry the inspector's signature wherever a page has
     a signature line, and an approved IDR's carry the Resident Engineer's beside it (the inspector's dated with the work date, the RE's with the approval date).
     What reviewers edited prints with its redlines, at any status: the replaced value struck, the reviewer's in blue
@@ -534,20 +540,23 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
                                report_data=conc_cyl["report_data"], sheets=names,
                                redlines=redlines.for_report(conc_cyl.get("report_id")))
 
-    # Attachments print after their report's last page; a report that isn't printed (SWR, HC, ...) has its
-    # attachments at the end, followed by the page counting photos past the cap
+    # Attachments, then the imported sites' sheets, print after their report's last page; a report that isn't printed
+    # (SWR, HC, ...) has them at the end, followed by the page counting photos past the cap
     segments = _segments(groups, conc_mixes + conc_cyls + dsp_addendums,
                          sheets.conc_mixes + sheets.conc_cyls + [dsp_pages[id(dsp)] for dsp in dsp_addendums])
     printed = [report_id for report_id, _ in segments if report_id is not None]
     unprinted = [r["report_id"] for r in reports if r.get("report_id") is not None and r["report_id"] not in printed]
     attachments = _load_attachments(reports)
-    # Each AC Bk's "Attached Pages" box: ticked when its own AC report has attachment pages or continues on Report Cont
+    site_pages = export_site_sheets.site_pages(idr_id, printed + unprinted)
+    # Each AC Bk's "Attached Pages" box: ticked when its own AC report has attachment or site pages or continues on
+    # Report Cont
     for report, back, ac_pages in ac_backs:
-        if attachments.get(report["report_id"]) or REPORT_CONT in ac_pages:
+        if attachments.get(report["report_id"]) or site_pages.get(report["report_id"]) or REPORT_CONT in ac_pages:
             export_ac.mark_attachments(workbook, back)
     attachment_pages, closing = export_attachments.render(
         workbook, idr, project, inspector,
-        [(report_id, attachments[report_id]) for report_id in printed + unprinted if report_id in attachments])
+        [(report_id, attachments.get(report_id, [])) for report_id in printed + unprinted
+         if report_id in attachments or report_id in site_pages], site_pages)
     pages = [page for report_id, pages in segments for page in pages + attachment_pages.get(report_id, [])]
     pages += [page for report_id in unprinted for page in attachment_pages.get(report_id, [])] + closing
 
