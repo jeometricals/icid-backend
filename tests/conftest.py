@@ -58,6 +58,16 @@ def no_site_pay_items():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_site_sheets():
+    """
+    Patch the read of an IDR's imported sites for its export for the whole session (W5), so the export finds no site sheets to print unless a test patches api.services.export_site_sheets.idr_site_sheets itself.
+    Yields the mock of the read.
+    """
+    with patch("api.services.export_site_sheets.idr_site_sheets", return_value=[]) as read:
+        yield read
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_ped_ramp_inspections():
     """
     Patch the ped ramp inspection statements for the whole session (Pedramp Phase 3), so the corner and ramp writes that now check their corner's inspection (the lock) find none unless a test patches api.queries.ped_ramp_inspections.run_query itself.

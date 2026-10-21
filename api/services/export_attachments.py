@@ -5,6 +5,7 @@ Each attachment gets a page of its own under the continuation header: its name a
 then, for a photo, the photo fitted to the photo frame (B25:AI58 of the sketch grid). A PDF can't be drawn on a page,
 so its page shows a "no preview" box over the frame and names the file; a photo that can't be fetched or read gets the
 same page, its box saying so. At most MAX_PHOTOS photos print per export; any past that are counted on one closing page.
+A report's other pictures (its imported sites' sheets, export_site_sheets) print the same way, after its attachments.
 
 Photos are fetched from Storage on a few threads at once, then shrunk (and HEIC / WebP converted) with Pillow so the
 workbook stays a reasonable size.
@@ -116,6 +117,15 @@ class Photo:
     extension: str
     width: int
     height: int
+
+
+@dataclass
+class PicturePage:
+    """A page that isn't an upload but prints like a photo: its title, description and picture (a site's sheet)."""
+
+    title: str
+    description: Optional[str]
+    photo: Photo
 
 
 def prepare_photo(data: bytes) -> Photo:
@@ -253,13 +263,16 @@ def more_attachments_note(count: int) -> str:
 
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], inspector: Optional[str],
-           attachments: list[tuple[UUID, list[dict[str, Any]]]]) -> tuple[dict[UUID, list[str]], list[str]]:
+           attachments: list[tuple[UUID, list[dict[str, Any]]]],
+           pictures: Optional[dict[UUID, list[PicturePage]]] = None) -> tuple[dict[UUID, list[str]], list[str]]:
     """
     Print the IDR's attachments, one page each, numbered Attachments 1, 2, ... in the order given: photos fitted to
-    the frame, PDFs as a "no preview" box naming the file, unavailable photos as a box naming the file, and, when
-    more than MAX_PHOTOS photos arrived, a closing page counting the ones left out.
-    Takes the workbook, the IDR row, the project row, the inspector's name and each report's uploaded attachments,
-    reports in print order (each report's in upload order).
+    the frame, PDFs as a "no preview" box naming the file, unavailable photos as a box naming the file, each report's
+    other pictures after its attachments (never counted against MAX_PHOTOS), and, when more than MAX_PHOTOS photos
+    arrived, a closing page counting the ones left out.
+    Takes the workbook, the IDR row, the project row, the inspector's name, each report's uploaded attachments,
+    reports in print order (each report's in upload order; a report with only pictures listed with none), and each
+    report's other pictures by report id.
     Returns ({report id: its attachment pages, in order}, the closing page as a one-item list, or empty); each page
     is set to print on one Letter page, and the caller places and shows them.
     """
@@ -284,6 +297,12 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
                 _stamp_placeholder(workbook, sheet, PDF_NOTE, attachment["file_name"])
             else:
                 _stamp_placeholder(workbook, sheet, UNAVAILABLE_NOTE, attachment["file_name"])
+            workbook.fit_to_letter_page(sheet)
+            pages.setdefault(report_id, []).append(sheet)
+        for picture in (pictures or {}).get(report_id, []):
+            number += 1
+            sheet = _new_page(workbook, number, idr, project, inspector, picture.title, picture.description)
+            _place_photo(workbook, sheet, picture.photo, picture.title)
             workbook.fit_to_letter_page(sheet)
             pages.setdefault(report_id, []).append(sheet)
 

@@ -178,3 +178,37 @@ def property_work_history(property_id: UUID) -> Optional[list[dict[str, Any]]]:
         WHERE rs.property_id = %s
         ORDER BY i.report_date DESC, rs.added_at DESC, rs.id;"""
     return run_query(sql, (property_id,))
+
+
+def idr_site_sheets(idr_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    List what an IDR's imported sites bring into its export (W5): each site's report and property, a sidewalk's live
+    PIR's live pages (pir_pages: [{page_number, image_path}] by page, [] for none), and a ped ramp's live corner with
+    the DOT forms its latest approved inspection filed (dot_pdf_path, NULL for none). Sites of deleted properties are
+    left out.
+    Takes the IDR's uuid.
+    Returns the rows in the order the sites were added, or None on failure.
+    """
+    sql = """
+        SELECT rs.id, rs.report_id, rs.property_id, p.kind::text AS kind, p.boro::text AS boro, p.address, p.block,
+               p.lot, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
+               p.facing_street::text AS facing_street, c.corner_id, c.north_south_street, c.east_west_street,
+               c.corner_direction,
+               COALESCE((
+                   SELECT jsonb_agg(jsonb_build_object('page_number', pg.page_number, 'image_path', pg.image_path)
+                                    ORDER BY pg.page_number)
+                   FROM icid.pirs pir
+                   JOIN icid.pir_pages pg ON pg.pir_id = pir.id
+                   WHERE pir.property_id = p.id AND pir.deleted_at IS NULL AND pg.deleted_at IS NULL
+               ), '[]'::jsonb) AS pir_pages,
+               (SELECT i.dot_pdf_path
+                FROM icid.ped_ramp_inspections i
+                WHERE i.corner_id = c.corner_id AND i.status = 'approved' AND i.dot_pdf_path IS NOT NULL
+                ORDER BY i.re_signed_at DESC
+                LIMIT 1) AS dot_pdf_path
+        FROM icid.idr_report_sites rs
+        JOIN icid.properties p ON p.id = rs.property_id
+        LEFT JOIN icid.ped_ramp_corners c ON c.corner_id = p.corner_id AND c.deleted_at IS NULL
+        WHERE rs.idr_id = %s AND p.deleted_at IS NULL
+        ORDER BY rs.added_at, rs.id;"""
+    return run_query(sql, (idr_id,))
