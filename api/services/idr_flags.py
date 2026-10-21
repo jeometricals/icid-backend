@@ -156,13 +156,22 @@ def manual_entry_message(item_no: str, budget_code: str) -> str:
             "remove it from the report, or exclude its flags from the IDR")
 
 
+def flag_rollup(idr: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    An IDR's flag rollup per pay item: live before approval, the frozen from_flags rows after.
+    Takes the IDR dict.
+    Returns the lines (pay_item_ref, budget_code, description, unit, amount); raises IdrFlagError when they can't be read.
+    """
+    return _pay_items(idr, [] if is_frozen(idr) else _flags(idr))
+
+
 def export_lines(idr: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Lay an IDR's flag rollup out as pay items for the export: a "PIR Flags" heading row, then one row per pay item (item number, budget code, amount, unit, description).
     Takes the IDR dict.
     Returns the rows, as a report's payItems are; empty when the rollup is; raises IdrFlagError when it can't be read.
     """
-    lines = _pay_items(idr, [] if is_frozen(idr) else _flags(idr))
+    lines = flag_rollup(idr)
     if not lines:
         return []
     return [{"description": EXPORT_HEADING}] + [

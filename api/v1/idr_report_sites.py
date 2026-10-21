@@ -35,7 +35,7 @@ NOT_ON_PROJECT = "That site isn't a live site of this IDR's project"
 SITE_NOT_FOUND = "Site not found on this report"
 
 
-def _report(idr_id: UUID, report_id: UUID) -> dict[str, Any]:
+def report_of(idr_id: UUID, report_id: UUID) -> dict[str, Any]:
     """
     Fetch the report a sites route acts on, only if it is the IDR's.
     Takes the IDR's and the report's uuids.
@@ -97,7 +97,7 @@ def list_sites(idr_id: UUID, report_id: UUID) -> ReportSiteListResponse:
     Returns a ReportSiteListResponse; raises 404 for an unknown IDR or a report that isn't its, and 500 if they can't be read.
     """
     load_idr(idr_id)
-    _report(idr_id, report_id)
+    report_of(idr_id, report_id)
     rows = list_report_sites(report_id)
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to fetch the report's sites")
@@ -115,7 +115,7 @@ def import_site(
     Takes the report's uuid as a path parameter (the IDR's through attribution_editor), the property and work in the body, the IDR (loaded and checked by attribution_editor) and the user.
     Returns 201 with a ReportSiteResponse; raises 400 for a report that takes no sites (a DSP) or a site that isn't a live one of the project, 403 or 409 as attribution_editor does, 404 for a report that isn't the IDR's, 409 with existing_report_id when the IDR already imported the site, 409 when a report of the IDR holds by hand a pay item the site's flags or segments fill, and 422 for 'other' work without its text.
     """
-    report = _report(idr["idr_id"], report_id)
+    report = report_of(idr["idr_id"], report_id)
     if report["report_type"] not in SITE_REPORT_TYPES:
         raise HTTPException(status_code=400, detail=NOT_HERE)
     existing = find_idr_site(idr["idr_id"], body.property_id)
@@ -144,7 +144,7 @@ def update_site(
     Takes the report's and the site's uuids as path parameters, the work in the body and the IDR (loaded and checked by attribution_editor).
     Returns a ReportSiteResponse; raises 403 or 409 as attribution_editor does, 404 for a report or site that isn't the IDR's and 422 for 'other' work without its text.
     """
-    _report(idr["idr_id"], report_id)
+    report_of(idr["idr_id"], report_id)
     row = update_report_site(report_id, site_id, body.work_type, body.work_type_other)
     if row is None:
         raise HTTPException(status_code=404, detail=SITE_NOT_FOUND)
@@ -158,7 +158,7 @@ def remove_site(report_id: UUID, site_id: UUID, idr: dict = Depends(attribution_
     Takes the report's and the site's uuids as path parameters and the IDR (loaded and checked by attribution_editor).
     Returns 204; raises 403 or 409 as attribution_editor does, 404 for a report or site that isn't the IDR's and 500 if it can't be removed.
     """
-    _report(idr["idr_id"], report_id)
+    report_of(idr["idr_id"], report_id)
     rows = delete_report_site(report_id, site_id)
     if rows is None:
         raise HTTPException(status_code=500, detail="Failed to remove the site")

@@ -135,13 +135,22 @@ def manual_segment_conflicts(idr: dict[str, Any], pay_items: Any) -> list[str]:
     return conflicts
 
 
+def segment_rollup(idr: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    An IDR's curb segment rollup per pay item: live before approval, the frozen from_segments rows after.
+    Takes the IDR dict.
+    Returns the lines (pay_item_ref, budget_code, description, unit, amount); raises IdrSegmentError when they can't be read.
+    """
+    return segment_pay_items(idr, [] if is_frozen(idr) else _segments(idr))
+
+
 def export_segment_lines(idr: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Lay an IDR's segment rollup out as pay items for the export, one row per pay item (item number, budget code, amount, unit, description), to print under the "PIR Flags" heading with the flags' lines.
     Takes the IDR dict.
     Returns the rows, as a report's payItems are; empty when the rollup is; raises IdrSegmentError when it can't be read.
     """
-    lines = segment_pay_items(idr, [] if is_frozen(idr) else _segments(idr))
+    lines = segment_rollup(idr)
     return [
         {"itemNo": line["pay_item_ref"], "budgetCode": line["budget_code"],
          "payQuantity": f"{Decimal(line['amount']).quantize(CENT, rounding=ROUND_HALF_UP):f}", "unit": line["unit"],

@@ -7,8 +7,10 @@ An IDR's rows change with the IDR, never on their own: there are no multi-statem
 the inserts ride along in the statement that approves, unlocks or deletes it, as data-modifying CTEs. The CTEs here
 are the one source of them; replace_quantities runs them on their own, for an IDR that is already approved.
 
-A row's source is 'manual' (a pay item of one of the IDR's reports, handed over as JSON) or 'from_flags' (the flags
-the IDR claimed at approval, summed per pay item in the statement itself; migration 037).
+A row's source is 'manual' (a pay item of one of the IDR's reports, handed over as JSON), 'from_flags' (the flags
+the IDR claimed at approval, summed per pay item in the statement itself; migration 037), 'from_segments' (its curb
+segments, likewise; 044) or 'from_sites' (the pay items entered on its sites, per report and pay item;
+idr_report_site_pay_items.insert_site_quantities_cte, 054).
 """
 
 from datetime import date
