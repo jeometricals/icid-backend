@@ -13,12 +13,17 @@ from uuid import UUID
 
 from api.db.runner import run_query
 from api.queries.flags import FLAG_UNIT
+from api.queries.idr_report_site_pay_items import overridden_sql
+
+# A segment whose site overrides its pay item in the IDR (Slice X.1), as idr_flags has it for flags
+_OVERRIDDEN = overridden_sql("i.idr_id", "p.id", "s.pay_item_id")
 
 # A segment's quantity in its pay item's unit (ci, its contract item): its length for a pay item in LF; NULL for any
 # other unit, or while its page has no scale
 SEGMENT_AMOUNT = f"(CASE WHEN {FLAG_UNIT} = 'LF' THEN s.length_ft END)"
 # A segment as an IDR lists it: where it is (its property, and its page), what it is mapped to, its length and what it
-# comes to in its pay item's unit, and whose it is (state: attributed, excluded, claimed by this IDR, or by another)
+# comes to in its pay item's unit, whose it is (state: attributed, excluded, claimed by this IDR, or by another) and
+# whether its site overrides its pay item (overridden)
 _SEGMENT_COLUMNS = f"""
             s.segment_id, pg.pir_id, s.pir_page_id, pg.page_number, s.segment_type, s.length_ft, s.note,
             p.id AS property_id, p.kind::text AS property_kind, p.boro::text AS boro, p.block, p.lot, p.address,
@@ -29,6 +34,7 @@ _SEGMENT_COLUMNS = f"""
             CASE WHEN ci.contract_item_id IS NULL THEN NULL ELSE {SEGMENT_AMOUNT} END AS amount,
             a.action AS override, (rs.property_id IS NOT NULL) AS on_imported_site,
             s.claimed_by_idr_id, claimer.idr_number AS claimed_by_idr_number, s.constructed_on, s.deleted_at,
+            {_OVERRIDDEN} AS overridden,
             CASE
                 WHEN s.claimed_by_idr_id = i.idr_id THEN 'claimed'
                 WHEN s.claimed_by_idr_id IS NOT NULL THEN 'claimed_elsewhere'
@@ -65,12 +71,12 @@ IN_FLIGHT_SEGMENT_IDS = (
     + " AND i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
     + f"\n          AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND s.claimed_by_idr_id IS NULL"
 )
-# One property's curb segments by IDR (Slice V5), as idr_flags.PROPERTY_FLAG_LINES lists its flags. A subquery, its one
-# parameter the property's id.
+# One property's curb segments by IDR (Slice V5), as idr_flags.PROPERTY_FLAG_LINES lists its flags (overridden ones left
+# out). A subquery, its one parameter the property's id.
 PROPERTY_SEGMENT_LINES = (
     "\n        SELECT i.idr_id, 'segments' AS source, s.segment_id AS element_id, ci.contract_item_id, ci.item_no,"
     + f" ci.budget_code, ci.description, {FLAG_UNIT} AS unit, {SEGMENT_AMOUNT} AS amount" + _FROM
-    + "\n        WHERE p.id = %s AND i.deleted_at IS NULL AND ci.contract_item_id IS NOT NULL"
+    + f"\n        WHERE p.id = %s AND i.deleted_at IS NULL AND ci.contract_item_id IS NOT NULL AND NOT {_OVERRIDDEN}"
     + f"\n          AND ((i.status = 'approved' AND {_CLAIMED})"
     + "\n               OR (i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
     + f" AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND s.claimed_by_idr_id IS NULL))"
@@ -260,7 +266,7 @@ def reclaim_segment_ids_sql(target: str) -> str:
 
 def insert_segment_quantities_cte(idrs: str, claimed: str = "claimed_segments") -> str:
     """
-    Write the CTE that inserts an IDR's from_segments quantity rows: the segments it just claimed, their lengths summed per pay item in LF and rounded to 2 decimal places, as report type PIR_SEGMENTS. A segment without a pay item, with one in another unit, or without a length (no page scale) adds nothing.
+    Write the CTE that inserts an IDR's from_segments quantity rows: the segments it just claimed, their lengths summed per pay item in LF and rounded to 2 decimal places, as report type PIR_SEGMENTS. A segment without a pay item, with one in another unit, without a length (no page scale), or whose site overrides its pay item in the IDR (the override bills instead) adds nothing.
     Takes the names of two CTEs defined earlier in the statement (written here, never from a request): the one holding the IDR (idr_id, project_id, report_date, reporter_uuid) and the one listing the segments it claimed (segment_id).
     Returns the CTE (segment_quantities), to append to the statement's WITH list; no parameters.
     """
@@ -274,8 +280,10 @@ def insert_segment_quantities_cte(idrs: str, claimed: str = "claimed_segments") 
                    ci.description, round(sum({SEGMENT_AMOUNT}), 2), 'LF', 'from_segments'
             FROM {idrs} i
             JOIN icid.segments s ON s.segment_id IN (SELECT segment_id FROM {claimed})
+            JOIN icid.pir_pages pg ON pg.pir_page_id = s.pir_page_id
+            JOIN icid.pirs pir ON pir.id = pg.pir_id
             JOIN icid.contract_items ci ON ci.contract_item_id = s.pay_item_id
-            WHERE {SEGMENT_AMOUNT} IS NOT NULL
+            WHERE {SEGMENT_AMOUNT} IS NOT NULL AND NOT {overridden_sql("i.idr_id", "pir.property_id", "s.pay_item_id")}
             GROUP BY i.project_id, i.idr_id, i.report_date, i.reporter_uuid, ci.contract_item_id
             RETURNING quantity_id
         )"""

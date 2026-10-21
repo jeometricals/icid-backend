@@ -50,6 +50,7 @@ class IdrFlag(BaseModel):
     is_constructed: bool
     constructed_on: Optional[date] = None
     deleted_at: Optional[datetime] = None
+    overridden: bool = False
 
     @computed_field
     @property

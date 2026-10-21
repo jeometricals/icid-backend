@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 055 (and 050b, the pedramp buckets) is in the live database (041 was skipped). A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 055 (and 050b, the pedramp buckets) is in the live database (041 was skipped); 056 (Slice X.1's overrides) must run before the X.1 code is deployed. A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `dot-forms.md`: DOT's fillable forms, field by field. `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. `dot_ped_ramp_inspection_v1.6.pdf` and `dot_tif_v1.9.pdf` are DOT's fillable forms as published, filled by the `dot_*_pdf.py` services. |
@@ -1312,6 +1312,30 @@ Any change must follow these.
       Sites" heading row (`_with_site_lines` in `api/services/export.py`). They carry no id: no redlines, and a reviewer's
       change to one isn't a field edit and doesn't count toward attestation.
     - `added_by` names a user, so `count_user_references` counts it.
+  - **Overrides** (Slice X.1, migration 056): a site pay item with `overrides_auto` replaces what the site's flags and
+    curb segments come to for its pay item in the IDR, higher or lower (0 allowed on an override only, the CHECK
+    `quantity > 0 OR (overrides_auto AND quantity >= 0)`; one per site and pay item, `uq_..._one_override`, else 409).
+    POST `{contract_item_id, quantity, overrides_auto: true}` sets one (400 when none of the site's flags or segments
+    fill that pay item: `site_auto_amount`), PATCH changes its quantity, DELETE resets the pay item to its automatic
+    quantity (the UI's "Auto Calculate").
+    - **The drawings still count, and add nothing.** Flag and segment rows carry `overridden` (`overridden_sql`); the
+      rollups (`flag_rollup`, `segment_rollup`, so the export's "PIR Flags" lines and pay-item-sources) and "Pay Items
+      Reported" (`PROPERTY_FLAG_LINES`, `PROPERTY_SEGMENT_LINES`) leave them out, and the override is a site line
+      (`site_lines[].overrides_auto`). Approval still claims them, but `insert_flag_quantities_cte` and
+      `insert_segment_quantities_cte` add nothing for them, and the override bills as a `from_sites` row.
+    - **An override bills only when its approval claims at least one of its own flags or segments**
+      (`drawings_sql` in `insert_site_quantities_cte`), so two IDRs on one site never bill it twice. Otherwise it is
+      dropped: `dropped_overrides_cte` writes a `site_override_dropped` audit row ("override dropped at approval (185 SF,
+      flags already claimed by IDR-002)"), the response counts it (`overrides_dropped`) and its message says so. A
+      dropped override stays in the table; `override_dropped` (`OVERRIDE_DROPPED_SQL`) keeps it out of the sources,
+      the export and "Pay Items Reported".
+    - **Audit:** setting, changing and resetting one write `site_override_set` / `_change` / `_reset` rows of
+      `icid.idr_audit` in the same statement, their note JSON `{site_id, contract_item_id, text}` with the words
+      ("overrode auto 180 SF → 185 SF", "reset to auto (180 SF)"; `override_text`). The site's GET returns the latest
+      per pay item under `audit`. A full IDR history screen is post-pilot.
+    - **Sketch truth vs billed.** Progress (it sums claimed flags), the Construction Report and the Assessment Summary
+      measure the flags themselves, so for an overridden pay item they differ from what the IDR billed
+      (`icid.quantities`, the Quantities route). The PIR pages on the export are the sketch as drawn.
 - **Curb billing** (migrations 044 and 045; `api/v1/idr_segments.py`, `api/services/idr_segments.py`,
   `api/queries/idr_segments.py`, `api/schemas/idr_segment.py`): an IDR's curb segments are attributed, claimed and
   billed exactly as its flags are (see "IDR flags"), side by side with them.
