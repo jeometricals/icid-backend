@@ -65,6 +65,16 @@ IN_FLIGHT_SEGMENT_IDS = (
     + " AND i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
     + f"\n          AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND s.claimed_by_idr_id IS NULL"
 )
+# One property's curb segments by IDR (Slice V5), as idr_flags.PROPERTY_FLAG_LINES lists its flags. A subquery, its one
+# parameter the property's id.
+PROPERTY_SEGMENT_LINES = (
+    "\n        SELECT i.idr_id, 'segments' AS source, s.segment_id AS element_id, ci.contract_item_id, ci.item_no,"
+    + f" ci.budget_code, ci.description, {FLAG_UNIT} AS unit, {SEGMENT_AMOUNT} AS amount" + _FROM
+    + "\n        WHERE p.id = %s AND i.deleted_at IS NULL AND ci.contract_item_id IS NOT NULL"
+    + f"\n          AND ((i.status = 'approved' AND {_CLAIMED})"
+    + "\n               OR (i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
+    + f" AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND s.claimed_by_idr_id IS NULL))"
+)
 
 
 def list_idr_segments(idr_id: UUID, claimed_only: bool) -> Optional[list[dict[str, Any]]]:

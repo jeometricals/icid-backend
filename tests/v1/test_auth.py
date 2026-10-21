@@ -597,7 +597,7 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 186
+        assert len(PROTECTED_ROUTES) == 187
         for route in (("GET", "/v1/projects/{project_id}/ped-ramp-corners"),
                       ("POST", "/v1/projects/{project_id}/ped-ramp-corners"), ("GET", "/v1/ped-ramp-corners/{corner_id}"),
                       ("POST", "/v1/projects/{project_id}/pedramp-sites"),
@@ -620,6 +620,7 @@ class TestEveryRouteNeedsSignIn:
                       ("DELETE", "/v1/idrs/{idr_id}/reports/{report_id}/sites/{site_id}/pay-items/{item_id}"),
                       ("GET", "/v1/idrs/{idr_id}/pay-item-sources"),
                       ("GET", "/v1/properties/{property_id}/work-history"),
+                      ("GET", "/v1/properties/{property_id}/pay-item-summary"),
                       ("GET", "/v1/ped-ramp-inspections/{inspection_id}/tifs"),
                       ("POST", "/v1/ped-ramp-inspections/{inspection_id}/ramps/{property_id}/tif"),
                       ("GET", "/v1/ped-ramp-tifs/{tif_id}"), ("PATCH", "/v1/ped-ramp-tifs/{tif_id}"),

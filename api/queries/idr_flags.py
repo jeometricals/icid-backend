@@ -68,6 +68,18 @@ IN_FLIGHT_FLAG_IDS = (
     + " AND i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
     + f"\n          AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND f.claimed_by_idr_id IS NULL"
 )
+# An IDR is open (its flags in flight) from draft until approved
+_OPEN = "i.status IN ('draft', 'submitted', 'stage1_review', 'stage2_review')"
+# One property's flags by IDR (Slice V5), a row per IDR and flag: those an approved IDR claimed, and those an open IDR
+# has attributed to it (in its scope, not excluded, unclaimed); deleted IDRs left out. Each with its contract item and
+# its amount in that item's unit. A subquery, its one parameter the property's id (a property's pay-item summary).
+PROPERTY_FLAG_LINES = (
+    "\n        SELECT i.idr_id, 'flags' AS source, f.id AS element_id, ci.contract_item_id, ci.item_no, ci.budget_code,"
+    + f" ci.description, {FLAG_UNIT} AS unit, {FLAG_AMOUNT} AS amount" + _FROM
+    + "\n        WHERE p.id = %s AND i.deleted_at IS NULL AND ci.contract_item_id IS NOT NULL"
+    + f"\n          AND ((i.status = 'approved' AND {_CLAIMED})"
+    + f" OR ({_OPEN} AND {_IN_SCOPE} AND a.action IS DISTINCT FROM 'exclude' AND f.claimed_by_idr_id IS NULL))"
+)
 
 
 def list_idr_flags(idr_id: UUID, claimed_only: bool) -> Optional[list[dict[str, Any]]]:
