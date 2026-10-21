@@ -2309,6 +2309,13 @@ class TestAttachmentsExport:
                                                        "width": 646, "height": 484, "format": "JPEG",
                                                        "size": (40, 30)}]
 
+    def test_a_photo_without_a_description_prints_its_title_alone(self):
+        photo = attachment(1, GENERAL_ROW["report_id"], attachment_description=None)
+        content = export_bytes(reports=[GENERAL_ROW], attachments=[photo],
+                               files={photo["storage_path"]: image_bytes("JPEG")})
+        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Attachments 1"]
+        assert [sheet[cell].value for cell in ("B21", "B22", "B23", "B24")] == ["Photo 1", None, None, None]
+
     def test_each_photo_gets_its_own_page_in_upload_order(self):
         rows = [attachment(n, SWCB_1) for n in (1, 2, 3)]
         content = export_bytes(reports=[swcb_row(1, 2)], attachments=rows,
