@@ -1303,7 +1303,7 @@ Any change must follow these.
     (`SMART_PIR_<address>`): a header (address, borough, block and lot, inspector, IDR number, work date, status), the
     flags the IDR counts there (the sketch workspace's columns, Page, #, Shape, Thickness, Pay item, Area (computed) and
     Reported, plus Derived quantity, starred when the site overrides its pay item, and a count of the site's flags that
-    aren't the IDR's), its Curb Segments table, and "Pay items for this site" (`site_pay_item_rows`: what the drawings
+    aren't the IDR's), its Curb Segments table (with X.2's Reported length, a dash when none), and "Pay items for this site" (`site_pay_item_rows`: what the drawings
     come to per pay item, an X.1 override in its place marked `edited, originally N`, a dropped override billing
     nothing, the pay items entered by hand, then a total per unit). Live before approval, the claimed drawings after
     (as `list_idr_flags` / `list_idr_segments` read them). A ped ramp corner's (`SMART_INSP_<corner>`, once per corner,

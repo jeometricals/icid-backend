@@ -157,7 +157,9 @@ SEGMENT_COLUMNS = (
     Column("Shape", "C", "C", lambda s: SEGMENT_TYPE_LABELS.get(s.get("segment_type"), s.get("segment_type"))),
     Column("Dimensions", "D", "D", _dimensions),
     Column("Pay item", "E", "E", _pay_item),
-    Column("Derived quantity", "F", "H", _derived),
+    Column("Reported", "F", "F",
+           lambda s: DASH if s.get("reported_length_ft") is None else _amount(s["reported_length_ft"], "LF")),
+    Column("Derived quantity", "G", "H", _derived),
 )
 # The site's pay items (the site page's "Pay items for this site")
 PAY_ITEM_COLUMNS = (

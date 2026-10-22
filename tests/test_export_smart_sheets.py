@@ -170,7 +170,8 @@ class TestSidewalkSheet:
 
     def test_header_flags_segments_and_pay_items(self):
         flags = [flag(1, reported_quantity=Decimal("95")), flag(2, state="excluded")]
-        content = self.export(flags=flags, segments=[segment(1)], site_items=[site_item(EXTRA_ITEM, "1")])
+        segments = [segment(1), segment(2, "12", reported_length_ft=Decimal("15"), amount=Decimal("15"))]
+        content = self.export(flags=flags, segments=segments, site_items=[site_item(EXTRA_ITEM, "1")])
         rows = rows_of(content, SMART)
         assert rows[1][0] == "SMART PIR — 120 Main St"
         assert rows[2][0] == "Queens Block 123 Lot 45"
@@ -183,9 +184,12 @@ class TestSidewalkSheet:
         assert any(row[0] == "1 more flag on this site is not this IDR's (excluded, or claimed by another IDR)."
                    for row in rows)
         segments_at = rows.index(row_starting(rows, "Curb segments"))
-        assert rows[segments_at + 1][:6] == ["Page", "Segment #", "Shape", "Dimensions", "Pay item", "Derived quantity"]
-        assert rows[segments_at + 2][:6] == [2, 1, "Concrete curb", "20.00 ft · 3 runs", "4.08 AA — Concrete curb",
-                                             "20.00 LF"]
+        assert rows[segments_at + 1][:7] == ["Page", "Segment #", "Shape", "Dimensions", "Pay item", "Reported",
+                                             "Derived quantity"]
+        assert rows[segments_at + 2][:7] == [2, 1, "Concrete curb", "20.00 ft · 3 runs", "4.08 AA — Concrete curb",
+                                             "—", "20.00 LF"]
+        assert rows[segments_at + 3][:7] == [2, 2, "Concrete curb", "12.00 ft · 3 runs", "4.08 AA — Concrete curb",
+                                             "15.00 LF", "15.00 LF"]
         items_at = rows.index(row_starting(rows, "Pay items for this site"))
         assert [rows[items_at + 1][i] for i in (0, 2, 3, 5, 7)] == ["Item", "Budget code", "Description", "Quantity",
                                                                     "Source"]
