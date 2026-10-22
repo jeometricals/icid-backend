@@ -23,7 +23,7 @@ _OVERRIDDEN = overridden_sql("i.idr_id", "p.id", "s.pay_item_id")
 SEGMENT_AMOUNT = f"(CASE WHEN {FLAG_UNIT} = 'LF' THEN s.length_ft END)"
 # A segment as an IDR lists it: where it is (its property, and its page), what it is mapped to, its length and what it
 # comes to in its pay item's unit, whose it is (state: attributed, excluded, claimed by this IDR, or by another) and
-# whether its site overrides its pay item (overridden)
+# whether its site overrides its pay item (overridden), and how many points it is drawn through
 _SEGMENT_COLUMNS = f"""
             s.segment_id, pg.pir_id, s.pir_page_id, pg.page_number, s.segment_type, s.length_ft, s.note,
             p.id AS property_id, p.kind::text AS property_kind, p.boro::text AS boro, p.block, p.lot, p.address,
@@ -35,6 +35,7 @@ _SEGMENT_COLUMNS = f"""
             a.action AS override, (rs.property_id IS NOT NULL) AS on_imported_site,
             s.claimed_by_idr_id, claimer.idr_number AS claimed_by_idr_number, s.constructed_on, s.deleted_at,
             {_OVERRIDDEN} AS overridden,
+            jsonb_array_length(s.points) AS point_count,
             CASE
                 WHEN s.claimed_by_idr_id = i.idr_id THEN 'claimed'
                 WHEN s.claimed_by_idr_id IS NOT NULL THEN 'claimed_elsewhere'

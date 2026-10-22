@@ -1,6 +1,7 @@
 """
 An IDR's imported sites on its export (W5): a sidewalk's PIR pages and a ped ramp corner's inspection, printed as
-unnumbered pages after their report's attachments (export_site_sheets, through export_attachments).
+unnumbered pages after their report's attachments (export_site_sheets, through export_attachments), each site's SMART
+sheet first (Slice X.4; its contents are tested in test_export_smart_sheets.py).
 """
 
 import io
@@ -15,7 +16,7 @@ from reportlab.lib.pagesizes import landscape, letter
 from reportlab.pdfgen.canvas import Canvas
 
 from api.queries.idr_report_sites import idr_site_sheets
-from api.services import export_site_sheets
+from api.services import export_site_sheets, export_smart_sheets
 from api.services.export import generate_idr_export
 from tests.v1.test_exports import (
     GENERAL_ROW, IDR_ID, SIGNED_IDR, SUBMITTED_IDR, attachment, image_bytes, patched_export, pictures,
@@ -25,6 +26,7 @@ from tests.v1.test_exports import (
 SWCB_1, SWCB_2 = swcb_row(1, 2)["report_id"], swcb_row(2, 3)["report_id"]
 CORNER = UUID(int=0xC0C0)
 PIR_TITLE = "PIR — 120 Main St — page {} of {}"
+SMART = "SMART_PIR_120_MAIN_ST"
 DOT_TITLE = "DOT ped ramp inspection — 3rd Ave & 38 Street NE — page {} of {}"
 ICID_TITLE = "Ped ramp inspection (ICID) — 3rd Ave & 38 Street NE — page {} of {}"
 
@@ -92,13 +94,16 @@ ICID_REPORT = pdf_bytes(PORTRAIT, PORTRAIT)  # the corner page and one ramp page
 
 @contextmanager
 def site_export(sites: Optional[list[dict]], site_files: Optional[dict[tuple[str, str], Any]] = None,
-                icid_report: Any = ICID_REPORT, **overrides):
+                icid_report: Any = ICID_REPORT, smart: Optional[dict[str, Any]] = None, **overrides):
     """
-    Patch an export's imported sites and their files on top of patched_export.
+    Patch an export's imported sites and their files on top of patched_export, and what their SMART sheets read.
     Takes the site rows (None: the read fails), {(bucket, path): bytes or an exception} for Storage (anything else is
-    missing), ICID's inspection report PDF (or an exception drawing it raises) and patched_export's overrides.
-    Yields a dict of the mocks: patched_export's, and sites, site_download and get_corner.
+    missing), ICID's inspection report PDF (or an exception drawing it raises), what the SMART sheets read
+    ({flags, segments, site_items, report, inspection}; by default no flags, segments or pay items, and no corner
+    report, so a corner gets no SMART sheet) and patched_export's overrides.
+    Yields a dict of the mocks: patched_export's, and sites, site_download, get_corner and smart_flags.
     """
+    smart = {"flags": [], "segments": [], "site_items": [], "report": None, "inspection": None, **(smart or {})}
     def download(path, bucket):
         result = (site_files or {}).get((bucket, path), FileNotFoundError(path))
         if isinstance(result, Exception):
@@ -117,8 +122,15 @@ def site_export(sites: Optional[list[dict]], site_files: Optional[dict[tuple[str
         patch.object(export_site_sheets, "get_corner", return_value={"corner_id": CORNER}) as corner,
         patch.object(export_site_sheets, "inspection_report", return_value=object()),
         patch.object(export_site_sheets, "render_pdf", side_effect=draw),
+        patch.object(export_smart_sheets, "list_idr_flags", return_value=smart["flags"]) as smart_flags,
+        patch.object(export_smart_sheets, "list_idr_segments", return_value=smart["segments"]),
+        patch.object(export_smart_sheets, "idr_site_pay_items", return_value=smart["site_items"]),
+        patch.object(export_smart_sheets, "get_corner", return_value={"corner_id": CORNER}),
+        patch.object(export_smart_sheets, "inspection_report", return_value=smart["report"]),
+        patch.object(export_smart_sheets, "get_corner_inspection", return_value=smart["inspection"]),
     ):
-        yield {**mocks, "sites": read, "site_download": site_download, "get_corner": corner}
+        yield {**mocks, "sites": read, "site_download": site_download, "get_corner": corner,
+               "smart_flags": smart_flags}
 
 
 def run(sites: Optional[list[dict]], **kwargs) -> tuple[bytes, dict]:
@@ -165,7 +177,7 @@ class TestSidewalkSites:
         content, mocks = run([sidewalk(1, SWCB_1)], site_files=PIR_FILES, attachments=[photo],
                              files={photo["storage_path"]: image_bytes("JPEG")})
         assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk",
-                                           "Attachments 1", "Attachments 2", "Attachments 3"]
+                                           "Attachments 1", SMART, "Attachments 2", "Attachments 3"]
         assert titles(content, ["Attachments 2", "Attachments 3"]) == [PIR_TITLE.format(1, 2), PIR_TITLE.format(2, 2)]
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
         assert book["Attachments 2"]["B22"].value == "Queens Block 123 Lot 45"
@@ -174,15 +186,15 @@ class TestSidewalkSites:
         assert print_order_page_numbers(content)[-2:] == [None, None]
         mocks["sites"].assert_called_once_with(IDR_ID)
 
-    def test_a_site_without_a_pir_adds_nothing(self):
+    def test_a_site_without_a_pir_adds_only_its_smart_sheet(self):
         content, _ = run([sidewalk(1, SWCB_1, pages=0)])
-        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk"]
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", SMART]
 
     def test_a_page_that_cant_be_fetched_or_read_is_left_out(self):
         files = {("pir-images", "pir/1/page-1.png"): b"not an image", **{k: v for k, v in PIR_FILES.items()
                                                                           if k[1].endswith("page-2.png")}}
         content, _ = run([sidewalk(1, SWCB_1, pages=3)], site_files=files)
-        assert visible_sheets(content)[4:] == ["Attachments 1"]
+        assert visible_sheets(content)[4:] == [SMART, "Attachments 1"]
         assert titles(content, ["Attachments 1"]) == ["PIR — 120 Main St — page 2 of 3"]
 
     def test_each_reports_sites_follow_that_report(self):
@@ -191,8 +203,8 @@ class TestSidewalkSites:
         files = {("pir-images", "pir/1/page-1.png"): image_bytes("PNG"),
                  ("pir-images", "pir/2/page-1.png"): image_bytes("PNG")}
         content, _ = run(sites, reports=reports, site_files=files, idr={**SUBMITTED_IDR, "total_pages": 3})
-        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "Attachments 1",
-                                           "Conc Fr 2", "Conc Bk 2", "Attachments 2"]
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Conc Fr", "Conc Bk", "SMART_PIR_9_ELM_ST",
+                                           "Attachments 1", "Conc Fr 2", "Conc Bk 2", SMART, "Attachments 2"]
         assert titles(content, ["Attachments 1", "Attachments 2"]) == ["PIR — 9 Elm St — page 1 of 1",
                                                                        "PIR — 120 Main St — page 1 of 1"]
 
@@ -201,7 +213,7 @@ class TestSidewalkSites:
                      "report_data": {}}
         content, _ = run([sidewalk(1, unprinted["report_id"], pages=1)], reports=[GENERAL_ROW, unprinted],
                          site_files={("pir-images", "pir/1/page-1.png"): image_bytes("PNG")})
-        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", "Attachments 1"]
+        assert visible_sheets(content) == ["Gen Fr", "Gen Bk", SMART, "Attachments 1"]
 
     def test_site_pages_carry_the_inspectors_signature(self):
         content, _ = run([sidewalk(1, SWCB_1, pages=1)], idr=SIGNED_IDR, signature=signature_png(),
