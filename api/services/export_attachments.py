@@ -16,7 +16,7 @@ import logging
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from time import monotonic
-from typing import Any, Optional
+from typing import Any, Optional, Union
 from uuid import UUID
 
 from PIL import Image, ImageOps
@@ -264,7 +264,7 @@ def more_attachments_note(count: int) -> str:
 
 def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], inspector: Optional[str],
            attachments: list[tuple[UUID, list[dict[str, Any]]]],
-           pictures: Optional[dict[UUID, list[PicturePage]]] = None) -> tuple[dict[UUID, list[str]], list[str]]:
+           pictures: Optional[dict[UUID, list[Union[str, PicturePage]]]] = None) -> tuple[dict[UUID, list[str]], list[str]]:
     """
     Print the IDR's attachments, one page each, numbered Attachments 1, 2, ... in the order given: photos fitted to
     the frame, PDFs as a "no preview" box naming the file, unavailable photos as a box naming the file, each report's
@@ -272,9 +272,10 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
     arrived, a closing page counting the ones left out.
     Takes the workbook, the IDR row, the project row, the inspector's name, each report's uploaded attachments,
     reports in print order (each report's in upload order; a report with only pictures listed with none), and each
-    report's other pictures by report id.
+    report's other pictures by report id (a sheet's name among them, a sheet made already, is listed where it falls,
+    unnumbered and as it is).
     Returns ({report id: its attachment pages, in order}, the closing page as a one-item list, or empty); each page
-    is set to print on one Letter page, and the caller places and shows them.
+    made here is set to print on one Letter page, and the caller places and shows them.
     """
     ordered = [attachment for _, rows in attachments for attachment in rows]
     photos = fetch_photos([a for a in ordered if a["file_type"] != PDF])
@@ -300,6 +301,9 @@ def render(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, A
             workbook.fit_to_letter_page(sheet)
             pages.setdefault(report_id, []).append(sheet)
         for picture in (pictures or {}).get(report_id, []):
+            if isinstance(picture, str):  # a sheet already made (a SMART sheet): it takes its place, as it is
+                pages.setdefault(report_id, []).append(picture)
+                continue
             number += 1
             sheet = _new_page(workbook, number, idr, project, inspector, picture.title, picture.description)
             _place_photo(workbook, sheet, picture.photo, picture.title)

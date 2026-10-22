@@ -22,7 +22,7 @@ _OVERRIDDEN = overridden_sql("i.idr_id", "p.id", "f.pay_item_id")
 
 # A flag as an IDR lists it: where it is (its property, and its page), what it is mapped to, how much it comes to
 # in square feet and in its pay item's unit, whose it is (state: attributed, excluded, claimed by this IDR, or
-# claimed by another) and whether its site overrides its pay item (overridden)
+# claimed by another), whether its site overrides its pay item (overridden), and its own area and reported quantity
 _FLAG_COLUMNS = f"""
             f.id AS flag_id, f.pir_id, f.pir_page_id, pg.page_number, f.display_order, f.shape, f.surveyed_thickness,
             p.id AS property_id, p.kind::text AS property_kind, p.boro::text AS boro, p.block, p.lot, p.address,
@@ -35,6 +35,7 @@ _FLAG_COLUMNS = f"""
             a.action AS override, (rs.property_id IS NOT NULL) AS on_imported_site,
             f.claimed_by_idr_id, claimer.idr_number AS claimed_by_idr_number, f.is_constructed, f.constructed_on,
             f.deleted_at, {_OVERRIDDEN} AS overridden,
+            f.computed_quantity, f.reported_quantity,
             CASE
                 WHEN f.claimed_by_idr_id = i.idr_id THEN 'claimed'
                 WHEN f.claimed_by_idr_id IS NOT NULL THEN 'claimed_elsewhere'

@@ -7,6 +7,9 @@ once per export however many of the corner's ramps are imported: the DOT forms i
 (the inspection form only; a package's TIFs stay out), else ICID's own inspection report of the corner. PDFs are
 rendered a page a picture (pir_image.render_pdf_pages), and every picture shrunk as a photo is (prepare_photo).
 
+Each site's SMART sheet (export_smart_sheets, Slice X.4) comes first, before those pages: site_pages takes a builder
+that adds it and returns its name.
+
 Everything here is best-effort: a file that can't be fetched, read or rendered is logged and left out, and the export
 goes on without it.
 """
@@ -15,7 +18,7 @@ import io
 import logging
 import re
 import zipfile
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Union
 from uuid import UUID
 
 from api.core.config import PEDRAMP_EXPORT_BUCKET_NAME, PIR_IMAGE_BUCKET_NAME
@@ -150,13 +153,16 @@ def _corner_pages(site: dict[str, Any]) -> list[PicturePage]:
             for number, photo in enumerate(photos, start=1)]
 
 
-def site_pages(idr_id: UUID, report_order: list[UUID]) -> dict[UUID, list[PicturePage]]:
+def site_pages(idr_id: UUID, report_order: list[UUID],
+               smart: Optional[Callable[[dict[str, Any]], list[str]]] = None) -> dict[UUID, list[Union[str, PicturePage]]]:
     """
     Gather the sheets each report's imported sites bring, sites in the order they were added; a corner prints once,
-    with the first report (in print order) and site that brings it.
-    Takes the IDR's uuid and its reports' ids in print order.
-    Returns {report id: its sites' PicturePages, in order}, reports without any left out; empty when the sites can't
-    be read (logged).
+    with the first report (in print order) and site that brings it. Each site's SMART sheet, when a builder is given,
+    comes before its pages.
+    Takes the IDR's uuid, its reports' ids in print order and the SMART sheet builder (a site row in, the names of the
+    sheets it added out; None for none).
+    Returns {report id: its sites' SMART sheet names and PicturePages, in order}, reports without any left out; empty
+    when the sites can't be read (logged).
     """
     rows = idr_site_sheets(idr_id)
     if rows is None:
@@ -166,7 +172,7 @@ def site_pages(idr_id: UUID, report_order: list[UUID]) -> dict[UUID, list[Pictur
     for row in rows:
         by_report.setdefault(row["report_id"], []).append(row)
     corners_done: set[UUID] = set()
-    pages: dict[UUID, list[PicturePage]] = {}
+    pages: dict[UUID, list[Union[str, PicturePage]]] = {}
     for report_id in report_order:
         for site in by_report.get(report_id, []):
             if site["kind"] == "sidewalk":
@@ -176,6 +182,7 @@ def site_pages(idr_id: UUID, report_order: list[UUID]) -> dict[UUID, list[Pictur
                 sheets = _corner_pages(site)
             else:
                 continue
-            if sheets:
-                pages.setdefault(report_id, []).extend(sheets)
+            entries = (smart(site) if smart is not None else []) + sheets
+            if entries:
+                pages.setdefault(report_id, []).extend(entries)
     return pages

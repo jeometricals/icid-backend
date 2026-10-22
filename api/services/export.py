@@ -10,7 +10,7 @@ IDR's pages carry the inspector's signature (the copy the IDR kept at submit), w
 An approved IDR's carry the Resident Engineer's signature beside it (the copy kept at final approval), captioned with
 the approver's name. The inspector's is dated with the IDR's work date; the RE's caption carries the day the RE approved.
 Each report's imported sites bring their sheets (a sidewalk's PIR, a ped ramp corner's inspection; export_site_sheets)
-after its attachments.
+after its attachments, each site's SMART sheet of tables first (export_smart_sheets).
 """
 
 import logging
@@ -29,7 +29,8 @@ from api.queries.projects import get_project_by_id, get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
 from api.queries.users import get_user_by_id
 from api.services import (
-    export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_dsp, export_site_sheets, export_swcb,
+    export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_dsp, export_site_sheets, export_smart_sheets,
+    export_swcb,
 )
 from api.services.auto_general import build_auto_general_data, contributing_reports
 from api.services.idr_flags import EXPORT_HEADING, IdrFlagError, export_lines
@@ -443,7 +444,9 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     page's table continue on copies of it, right after it. A report's extra sheets are numbered after it and counted
     in OF. Each report's attachments follow its last page, one unnumbered page each, then its imported sites' sheets
     the same way (each live page of a sidewalk's PIR; a ped ramp corner's approved DOT inspection form, else ICID's
-    inspection report of the corner, once per export; see export_site_sheets). A draft IDR's pages are each
+    inspection report of the corner, once per export; see export_site_sheets), each site's SMART sheet before them
+    (its flags, curb segments and pay items, or a corner's inspection, as tables, printed as many pages tall as they
+    take; see export_smart_sheets). A draft IDR's pages are each
     marked "DRAFT - Not for Submission"; from submission on they carry the inspector's signature wherever a page has
     a signature line, and an approved IDR's carry the Resident Engineer's beside it (the inspector's dated with the work date, the RE's with the approval date).
     What reviewers edited prints with its redlines, at any status: the replaced value struck, the reviewer's in blue
@@ -547,7 +550,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     printed = [report_id for report_id, _ in segments if report_id is not None]
     unprinted = [r["report_id"] for r in reports if r.get("report_id") is not None and r["report_id"] not in printed]
     attachments = _load_attachments(reports)
-    site_pages = export_site_sheets.site_pages(idr_id, printed + unprinted)
+    smart = export_smart_sheets.SmartSheets(workbook, idr, inspector)
+    site_pages = export_site_sheets.site_pages(idr_id, printed + unprinted, smart)
     # Each AC Bk's "Attached Pages" box: ticked when its own AC report has attachment or site pages or continues on
     # Report Cont
     for report, back, ac_pages in ac_backs:
@@ -582,7 +586,8 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     else:
         signed_at = None
     for page in pages:
-        workbook.fit_to_letter_page(page)
+        if not export_smart_sheets.is_smart_sheet(page):  # a SMART sheet prints as many pages tall as it takes
+            workbook.fit_to_letter_page(page)
         if idr["status"] == "draft":
             stamp_draft_marker(workbook, page)
         layout = _signature_layout(page)

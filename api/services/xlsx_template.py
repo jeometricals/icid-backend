@@ -157,6 +157,14 @@ class WorkbookTemplate:
         """
         return self._text(self._sheet_paths[sheet])
 
+    def sheet_names(self) -> list[str]:
+        """
+        List the workbook's sheets.
+        Takes nothing.
+        Returns their names, in tab order.
+        """
+        return list(self._sheet_order)
+
     def cell_style(self, sheet: str, coordinate: str) -> Optional[str]:
         """
         Read a cell's style index.
@@ -741,24 +749,121 @@ class WorkbookTemplate:
         self._add_part(new_part, self._parts[source_part])
         self._copy_content_type(source_part, new_part)
         self._clone_sheet_rels(source_part, new_part)
+        self._register_sheet(new_part, new_name, source)
 
+    def add_sheet(self, name: str, column_widths: dict[str, float]) -> None:
+        """
+        Add a blank sheet as the last tab, visible, with its columns the widths given and printing on US Letter.
+        Takes the new sheet's name (must not already exist) and {column letter: width in characters}.
+        Returns nothing; raises ValueError if the name is taken. set_print_layout sets how it prints.
+        """
+        if name in self._sheet_paths:
+            raise ValueError(f"a sheet named {name!r} already exists")
+        columns = "".join(f'<col min="{n}" max="{n}" width="{width:g}" customWidth="1"/>'
+                          for n, width in sorted((_column_number(letter), w) for letter, w in column_widths.items()))
+        xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+               '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+               'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+               '<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>'
+               '<sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="12.75"/>'
+               f'<cols>{columns}</cols><sheetData></sheetData>'
+               '<pageMargins left="0.5" right="0.5" top="0.5" bottom="0.5" header="0.3" footer="0.3"/>'
+               f'<pageSetup paperSize="{LETTER_PAPER}" orientation="portrait" fitToWidth="1" fitToHeight="0"/>'
+               '</worksheet>')
+        new_part = self._next_part("xl/worksheets", "sheet", "xml")
+        self._add_part(new_part, xml.encode("utf-8"))
+        self._copy_content_type(self._sheet_paths[self._sheet_order[0]], new_part)
+        self._register_sheet(new_part, name)
+
+    def set_print_layout(self, sheet: str, landscape: bool, print_area: str, row_breaks: list[int]) -> None:
+        """
+        Set an added sheet's printing: US Letter, the orientation, one page wide and as many tall as it takes, its
+        print area, and a page break after each row given.
+        Takes the sheet name, whether to print landscape, the print area (e.g. "A1:H40") and the rows to break after.
+        Returns nothing.
+        """
+        xml = self._sheet(sheet)
+        page_setup = re.search(r"<pageSetup\b[^>]*/>", xml)
+        tag = page_setup.group(0)
+        settings = {"paperSize": LETTER_PAPER, "orientation": "landscape" if landscape else "portrait",
+                    "fitToWidth": "1", "fitToHeight": "0"}
+        for setting, value in settings.items():
+            tag = _set_attribute(tag, setting, value)
+        breaks = ""
+        if row_breaks:
+            breaks = (f'<rowBreaks count="{len(row_breaks)}" manualBreakCount="{len(row_breaks)}">'
+                      + "".join(f'<brk id="{row}" max="16383" man="1"/>' for row in row_breaks) + "</rowBreaks>")
+        xml = xml[: page_setup.start()] + tag + xml[page_setup.end():]
+        xml = re.sub(r"<rowBreaks\b.*?</rowBreaks>", "", xml, flags=re.DOTALL)
+        at = xml.index(tag) + len(tag)
+        self._write(self._sheet_paths[sheet], xml[:at] + breaks + xml[at:])
+
+        index = self._sheet_order.index(sheet)
+        first, last = print_area.split(":")
+        absolute = [f"${_COLUMN.match(cell).group(0)}${_row_number(cell)}" for cell in (first, last)]
+        reference = escape(f"'{sheet.replace(chr(39), chr(39) * 2)}'!") + ":".join(absolute)
+        name = f'<definedName name="_xlnm.Print_Area" localSheetId="{index}">{reference}</definedName>'
+        workbook = re.sub(rf'<definedName name="_xlnm.Print_Area" localSheetId="{index}">.*?</definedName>', "",
+                          self._text("xl/workbook.xml"))
+        if "</definedNames>" in workbook:
+            workbook = workbook.replace("</definedNames>", name + "</definedNames>")
+        else:
+            workbook = workbook.replace("</sheets>", f"</sheets><definedNames>{name}</definedNames>")
+        self._write("xl/workbook.xml", workbook)
+
+    def table_style(self, style: Optional[str], fill_rgb: Optional[str] = None) -> str:
+        """
+        Get a copy of a cell style with a thin border on every side and, optionally, a solid fill: a table's cell.
+        Takes the style index to copy (None for the default style) and an ARGB fill colour like "FFD9D9D9" (or None).
+        Returns the new style's index.
+        """
+        def change(styles: str, start_tag: str, rest: str) -> tuple[str, str, str]:
+            side = '<{0} style="thin"><color auto="1"/></{0}>'
+            border = "<border>" + "".join(side.format(s) for s in ("left", "right", "top", "bottom")) + "<diagonal/></border>"
+            styles, border_id = self._append_style_entry(styles, "borders", border)
+            start_tag = _set_attribute(_set_attribute(start_tag, "borderId", str(border_id)), "applyBorder", "1")
+            if fill_rgb is not None:
+                fill = (f'<fill><patternFill patternType="solid"><fgColor rgb="{fill_rgb}"/><bgColor indexed="64"/>'
+                        "</patternFill></fill>")
+                styles, fill_id = self._append_style_entry(styles, "fills", fill)
+                start_tag = _set_attribute(_set_attribute(start_tag, "fillId", str(fill_id)), "applyFill", "1")
+            return styles, start_tag, rest
+
+        return self._derive_style(f"table:{fill_rgb or ''}", style, change)
+
+    def top_aligned_style(self, style: Optional[str]) -> str:
+        """
+        Get a copy of a cell style aligned to the top of its cell, keeping its other alignment settings.
+        Takes the style index to copy (None for the default style).
+        Returns the new style's index.
+        """
+        return self._alignment_style("top", style, "vertical", "top")
+
+    def _register_sheet(self, part: str, name: str, scoped_names_of: Optional[str] = None) -> None:
+        """
+        Make a worksheet part a sheet of the workbook, as the last tab: its relationship and its <sheet> entry, and, for
+        a clone, copies of its source's sheet-scoped names (print area, print titles).
+        Takes the worksheet's part name, the sheet's name and the sheet whose scoped names it copies (None for none).
+        Returns nothing.
+        """
         rels = self._text("xl/_rels/workbook.xml.rels")
         rel_id = f"rId{max(int(n) for n in re.findall(r'Id=.rId(\d+).', rels)) + 1}"
         relationship = (f'<Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
-                        f'relationships/worksheet" Target="{new_part.removeprefix("xl/")}"/>')
+                        f'relationships/worksheet" Target="{part.removeprefix("xl/")}"/>')
         self._write("xl/_rels/workbook.xml.rels", rels.replace("</Relationships>", relationship + "</Relationships>"))
 
         workbook = self._text("xl/workbook.xml")
         sheet_id = max(int(n) for n in re.findall(r'<sheet [^>]*?sheetId="(\d+)"', workbook)) + 1
-        name_attr = escape(new_name, {'"': "&quot;"})
+        name_attr = escape(name, {'"': "&quot;"})
         sheet_tag = f'<sheet name="{name_attr}" sheetId="{sheet_id}" r:id="{rel_id}"/>'
         workbook = workbook.replace("</sheets>", sheet_tag + "</sheets>")
-        workbook = workbook.replace("</definedNames>", "".join(self._cloned_names(workbook, source, new_name))
-                                    + "</definedNames>")
+        if scoped_names_of is not None:
+            workbook = workbook.replace("</definedNames>", "".join(self._cloned_names(workbook, scoped_names_of, name))
+                                        + "</definedNames>")
         self._write("xl/workbook.xml", workbook)
 
-        self._sheet_paths[new_name] = new_part
-        self._sheet_order.append(new_name)
+        self._sheet_paths[name] = part
+        self._sheet_order.append(name)
 
     def _drawing_part(self, sheet: str) -> str:
         """
