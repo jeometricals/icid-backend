@@ -1957,113 +1957,13 @@ class TestBuildAutoGeneralData:
             description = build_auto_general_data(children)["description"]
             assert description.endswith(f"\n\n{DESCRIPTION_FOOTER}")
 
-    def test_pay_items_combine_on_item_and_budget(self):
+    def test_pay_items_are_always_empty(self):
+        # Slice X.3: an auto-General is a summary cover; the pay items live on the reports themselves
         children = [
             _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "100", "4\" Conc. Sidewalk", "RM")]}),
-            _child("CONC", {"payItems": [_pay("4.21", "HWS-01", "50", "", "")]}),
+            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF")]}),
         ]
-        items = build_auto_general_data(children)["payItems"]
-        assert items == [{
-            "itemNo": "4.21",
-            "budgetCode": "HWS-01",
-            "description": "4\" Conc. Sidewalk",
-            "unit": "",
-            "payQuantity": "150.00",
-            "quantityChk": "RM",
-        }]
-
-    def test_pay_items_kept_separate_on_different_budget_code(self):
-        children = [
-            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
-            _child("CONC", {"payItems": [_pay("4.21", "HWS-02", "50")]}),
-        ]
-        items = build_auto_general_data(children)["payItems"]
-        assert [(i["itemNo"], i["budgetCode"], i["payQuantity"]) for i in items] == [
-            ("4.21", "HWS-01", "100.00"),
-            ("4.21", "HWS-02", "50.00"),
-        ]
-
-    def test_pay_quantity_always_two_decimals(self):
-        children = [
-            _child("SWR", {"payItems": [_pay("6.01", "B", "100")]}),
-            _child("CONC", {"payItems": [_pay("6.01", "B", "50.5")]}),
-        ]
-        assert build_auto_general_data(children)["payItems"][0]["payQuantity"] == "150.50"
-
-    def test_unparseable_quantity_falls_back_to_first_non_empty(self):
-        children = [
-            _child("SWR", {"payItems": [_pay("6.01", "B", "100")]}),
-            _child("CONC", {"payItems": [_pay("6.01", "B", "TBD")]}),
-        ]
-        # Any unparseable member skips summing; keeps the first non-empty raw value.
-        assert build_auto_general_data(children)["payItems"][0]["payQuantity"] == "100"
-
-    def test_unparseable_skips_blank_and_keeps_first_real_string(self):
-        children = [
-            _child("SWR", {"payItems": [_pay("6.01", "B", "")]}),
-            _child("CONC", {"payItems": [_pay("6.01", "B", "TBD")]}),
-        ]
-        assert build_auto_general_data(children)["payItems"][0]["payQuantity"] == "TBD"
-
-    def test_combined_description_and_chk_take_first_non_empty(self):
-        children = [
-            _child("SWR", {"payItems": [_pay("6.01", "B", "TBD", description="", quantity_chk="")]}),
-            _child("CONC", {"payItems": [_pay("6.01", "B", "TBD", description="Real desc", quantity_chk="CM")]}),
-        ]
-        item = build_auto_general_data(children)["payItems"][0]
-        assert item["description"] == "Real desc"
-        assert item["quantityChk"] == "CM"
-
-    def test_unit_carried_through_from_single_swcb_report(self):
-        children = [
-            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
-            _child("SWR", {"description": "x"}),
-        ]
-        assert build_auto_general_data(children)["payItems"][0]["unit"] == "SF"
-
-    def test_unit_carried_through_from_multiple_consistent_reports(self, caplog):
-        children = [
-            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
-            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF"), _pay("6.01", "B", "3", unit="TON")]}),
-        ]
-        with caplog.at_level(logging.WARNING, logger="api.services.auto_general"):
-            items = build_auto_general_data(children)["payItems"]
-        assert [(i["itemNo"], i["unit"], i["payQuantity"]) for i in items] == [
-            ("4.21", "SF", "150.00"),
-            ("6.01", "TON", "3.00"),
-        ]
-        assert caplog.records == []
-
-    def test_missing_or_empty_unit_becomes_empty_string(self):
-        children = [
-            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
-            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit=""), _pay("6.01", "B", "3", unit=None)]}),
-        ]
-        items = build_auto_general_data(children)["payItems"]
-        assert [i["unit"] for i in items] == ["", ""]
-
-    def test_unit_taken_from_first_row_that_has_one(self):
-        # An older child without a unit does not blank out a later child's unit.
-        children = [
-            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100")]}),
-            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SF")]}),
-        ]
-        assert build_auto_general_data(children)["payItems"][0]["unit"] == "SF"
-
-    def test_conflicting_units_first_wins_and_warns(self, caplog):
-        children = [
-            _child("SWCB", {"payItems": [_pay("4.21", "HWS-01", "100", unit="SF")]}),
-            _child("SWR", {"payItems": [_pay("4.21", "HWS-01", "50", unit="SY")]}),
-        ]
-        with caplog.at_level(logging.WARNING, logger="api.services.auto_general"):
-            item = build_auto_general_data(children)["payItems"][0]
-        assert item["unit"] == "SF"
-        assert item["payQuantity"] == "150.00"
-        assert len(caplog.records) == 1
-        assert "Conflicting units" in caplog.records[0].getMessage()
-
-    def test_no_pay_items_yields_empty_list(self):
-        assert build_auto_general_data([_child("SWR", {"description": "x"})])["payItems"] == []
+        assert build_auto_general_data(children)["payItems"] == []
 
     def test_report_data_holds_only_aggregated_keys(self):
         # Regeneration full-replaces report_data, so non-aggregated child keys must never leak in.
@@ -2073,16 +1973,16 @@ class TestBuildAutoGeneralData:
         ]
         assert set(build_auto_general_data(children).keys()) == {"description", "payItems"}
 
-    def test_ac_stays_out_of_the_merge(self):
-        # AC prints on its own AC Fr / AC Bk, pay items included, so neither its description nor its items repeat here
+    def test_ac_stays_out_of_the_description(self):
+        # AC prints on its own AC Fr / AC Bk, so its description doesn't repeat here
         children = [
             _child("SWCB", {"description": "Poured curb.", "payItems": [_pay("4.13", "B", "10", unit="SF")]}),
             _child("AC", {"description": "Paved the lane.", "payItems": [_pay("6.01", "B", "3", unit="TON")]}),
         ]
         data = build_auto_general_data(children)
         assert data["description"] == f"Sidewalk, Curb, Concrete Base: Poured curb.\n\n{DESCRIPTION_FOOTER}"
-        assert [item["itemNo"] for item in data["payItems"]] == ["4.13"]
-        # Only AC: just the footer, and no items
+        assert data["payItems"] == []
+        # Only AC: just the footer
         assert build_auto_general_data([_child("AC", {"payItems": [_pay("6.01", "B", "3")]})]) == {
             "description": DESCRIPTION_FOOTER, "payItems": []}
 

@@ -9,6 +9,7 @@ from api.services.export import (
     ExportError,
     ExportStorageError,
     IdrNotFoundError,
+    NothingToExportError,
     publish_idr_export,
 )
 
@@ -18,6 +19,7 @@ router = APIRouter(prefix="/v1/idrs", tags=["Export"], dependencies=[Depends(cur
 # HTTP status for each export failure (Storage failing is a bad gateway, as for attachments)
 ERROR_STATUS = {
     IdrNotFoundError: 404,
+    NothingToExportError: 400,
     ExportDataError: 500,
     ExportStorageError: 502,
 }
@@ -28,7 +30,8 @@ def export_idr(idr_id: UUID) -> ExportLink:
     """
     Export an IDR as an .xlsx file on the DDC report-forms template (a draft's pages are marked as a draft), stored
     in the exports bucket. Takes the IDR uuid as a path parameter.
-    Returns {download_url, filename}, the URL valid for 10 minutes; raises 404 (no such IDR), 500 and 502 (Storage).
+    Returns {download_url, filename}, the URL valid for 10 minutes; raises 404 (no such IDR), 400 (nothing to print: no
+    General, no report the export prints and no attachment), 500 and 502 (Storage).
     """
     try:
         published = publish_idr_export(idr_id)

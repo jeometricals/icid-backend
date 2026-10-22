@@ -460,9 +460,16 @@ Any change must follow these.
     - Items without an `id` are skipped (there are none after submit).
     - Approving an item already attested to writes nothing. Nothing is rebuilt after an approval.
   - **The auto-General:** it can't be edited. After an edit to a main report it summarises, it is rebuilt
-    (`regenerate_auto_general`) so its merged pay items and description show the reviewer's value; that
-    rebuild is a second statement, not part of the edit's. Nothing is rebuilt, or created, when the IDR has an
-    inspector's General or none.
+    (`regenerate_auto_general`) so its description shows the reviewer's value; that rebuild is a second statement,
+    not part of the edit's. Nothing is rebuilt, or created, when the IDR has an inspector's General or none.
+  - **An auto-General is a summary cover** (Slice X.3). It exists only while the IDR has 2 or more primary reports
+    (main reports that aren't a General, an addendum type or a DSP; `AUTO_GENERAL_MIN_REPORTS`), and is removed
+    below that. Its `report_data` is `{description, payItems: []}`: the description points to each report, and its
+    pay items are always empty (they live on the reports), as are its MPT / safety checklist, work force and
+    equipment. The report page shows "See individual reports" in place of those sections, and the export prints it
+    there (below). An inspector can still add a General of their own, with one primary report or more: it is an
+    ordinary, editable General and the backend never touches it. The IDR page's "Add report" dropdown starts on
+    "Choose a report type…", so a General is added only when picked.
 - **Demo mode.** `POST /v1/auth/demo` is public: it makes a throwaway user (`is_demo`, `demo-<uuid>@icid.local`,
   no password, no role, client `C00001`) and their one `project_users` row on `DEMO01` in a single statement, and
   signs them in. Since anyone can get a demo token, a demo user is kept to their own data:
@@ -637,8 +644,20 @@ Any change must follow these.
     takes that many more lines, so it can reach the back page or Report Cont.
   - **Safety Y / N:** the box the answer left keeps a struck X, the new box gets a blue X, and the editor's
     initials open the row's Remarks. AC Bk has no remarks column, so there the initials follow the X.
-  - **An auto-generated General shows the header's redlines only.** Its pay items are sums across reports and it
-    can't be edited; the edits print on the reports they were made on. So does a General composed for the export.
+  - **An auto-generated General shows the header's redlines only.** It can't be edited; the edits print on the
+    reports they were made on.
+- **The General on the export** (Slice X.3, `_general_for_export` in `api/services/export.py`): it prints only when
+  the IDR has a main General; nothing is composed for the export.
+  - **No General:** no Gen Fr / Gen Bk at all. The IDR's reports print as they are, numbered as they are; the first
+    printed page is the tab the file opens on, and the first report to need Report Cont takes it. The header (date,
+    times, temperatures, weather, I.R. No.) and its redlines print on every report's own front page, as they always
+    did. An IDR with nothing to print at all (no General, no report the export prints and no attachment) is 400
+    `This IDR has nothing to print yet: add a report first.` (`NothingToExportError`).
+  - **An auto-General** prints its description; its pay-item table opens with a "See individual reports" row (any
+    pay items it stored before Slice X.3 never print), and Gen Bk's MPT / safety checklist, work force and equipment
+    print blank with "See individual reports" in the checklist's first remarks cell and each list's first free row
+    (`summary_only` in `stamp_general`).
+  - **An inspector's General** prints as it is.
   - **Conc Mix is redlined too** (`export_conc_mix.py`), by the keys its `report_data` stores:
     `locationOfUse.curb` / `.sidewalk` / `.concreteBase` / `.structural` (true / false), `mixerType.type`
     (`readyMix` / `other`) and `mixerType.otherLabel`, `trucks[n].<field>` (`slump`, `airContent`,
@@ -706,8 +725,8 @@ Any change must follow these.
     manual rows.
   - **What is read:** every item of every General, SWCB and AC report's `payItems`, as `report_data` holds it
     (so after any reviewer's edit). A Conc Mix and a Conc Cyl have no pay items. **An auto-generated General is
-    skipped**: its items are sums of the other reports', and counting them would count those twice. An
-    inspector's own General counts.
+    skipped**: it holds none since Slice X.3, and one stored before held sums of the other reports', which would be
+    counted twice. An inspector's own General counts.
   - **The amount** is `payQuantity` parsed to a number. Spaces around it, commas between thousands (`1,200`) and
     a known unit typed after it (`125.5 SF`, logged) are tolerated; anything else, or a blank, skips the item
     with a logged warning. Nothing is guessed.
@@ -1248,7 +1267,9 @@ Any change must follow these.
     `api/v1/_shared.py`), so nothing is counted twice. Flag lines aren't report pay items, so the reviewers'
     attestation gate passes them by: the attribution panel is their check.
   - **Export.** The rollup prints after the General's own pay items under a "PIR Flags" heading row
-    (`_with_flag_lines` in `api/services/export.py`), live for a draft, frozen for an approved IDR.
+    (`_flag_lines` in `api/services/export.py`), live for a draft, frozen for an approved IDR. An IDR with no General
+    (Slice X.3) prints them after the pay items (and "Imported Sites" lines) of its first SWCB in page order, else of
+    its first AC report (`_with_flag_lines_on_a_report`); with neither they don't print, and a warning is logged.
   - Flag responses carry `claimed_by_idr_id`, `claimed_by_idr_number` and `constructed_on`; IDR responses carry
     `task_order_id`.
 - **Report sites** (Slice U2, migration 053; `api/v1/idr_report_sites.py`, `api/queries/idr_report_sites.py`,

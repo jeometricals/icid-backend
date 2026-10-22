@@ -23,7 +23,7 @@ from uuid import UUID
 
 from api.core.config import EXPORT_BUCKET_NAME, EXPORT_URL_EXPIRY_SECONDS
 from api.queries.idr_report_site_pay_items import idr_site_pay_items
-from api.queries.idr_reports import get_general_report, list_non_general_main_reports, list_reports_for_idr
+from api.queries.idr_reports import get_general_report, list_reports_for_idr
 from api.queries.idrs import get_idr_by_id
 from api.queries.projects import get_project_by_id, get_project_contractor_name
 from api.queries.report_attachments import list_uploaded_attachments_for_reports
@@ -31,7 +31,6 @@ from api.queries.users import get_user_by_id
 from api.services import (
     export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_dsp, export_site_sheets, export_swcb,
 )
-from api.services.auto_general import build_auto_general_data, contributing_reports
 from api.services.idr_flags import EXPORT_HEADING, IdrFlagError, export_lines
 from api.services.idr_segments import IdrSegmentError, export_segment_lines
 from api.services.pay_item_sources import site_export_lines
@@ -41,7 +40,7 @@ from api.services.export_common import (
     pay_item_page_count, prepare_signature, section, stamp_draft_marker, stamp_re_signature, stamp_signature,
     stamp_signature_date,
 )
-from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, stamp_general
+from api.services.export_general import GEN_FRONT, GEN_FRONT_PAY_ITEMS, SEE_INDIVIDUAL_REPORTS, stamp_general
 from api.services.export_redlines import Redlines
 from api.services.field_edits import field_edits_for
 from api.services.xlsx_template import WorkbookTemplate
@@ -68,6 +67,10 @@ class IdrNotFoundError(ExportError):
 
 class ExportDataError(ExportError):
     """The IDR's project or reports could not be loaded."""
+
+
+class NothingToExportError(ExportError):
+    """The IDR has no page to print: no General, no report the export prints and no attachment."""
 
 
 class ExportStorageError(ExportError):
@@ -102,42 +105,83 @@ def _inspector_name(user: Optional[dict[str, Any]]) -> Optional[str]:
     return name or user.get("email")
 
 
-def _general_for_export(idr_id: UUID) -> tuple[dict[str, Any], Optional[int], Optional[UUID]]:
+@dataclass
+class _General:
+    """The General the export prints: its report_data, its page number, the uuid reviewers' edits name it by (None for
+    an auto-General, which can't be edited) and whether it is auto-generated."""
+
+    data: dict[str, Any]
+    page_number: Optional[int]
+    edited_as: Optional[UUID]
+    is_auto: bool
+
+
+def _general_for_export(idr_id: UUID) -> Optional[_General]:
     """
-    Find the General to print: the IDR's own, or one composed the way the auto-General is when it has none.
+    Find the General to print: the IDR's own main General, as it is; an auto-General as a summary cover, its pay items
+    (a "See individual reports" row in their place), MPT / safety checklist, work force and equipment left blank; or
+    none, when the IDR has no General (nothing is composed for the export).
     Takes the IDR uuid.
-    Returns (its report_data, its page number or None when composed, the uuid reviewers' edits name it by); raises
-    ExportDataError if reports can't load. An auto-generated General, like a composed one, is built from the other
-    reports and can't be edited, so it has no uuid here: the edits print on the reports they were made on.
+    Returns the _General, or None.
     """
     general = get_general_report(idr_id)
-    if general is not None:
-        edited_as = None if general.get("is_auto_generated") else general.get("report_id")
-        return general["report_data"] or {}, general["page_number"], edited_as
-    reports = list_non_general_main_reports(idr_id)
-    if reports is None:
-        raise ExportDataError("Failed to load IDR reports")
-    return build_auto_general_data(contributing_reports(reports)), None, None
+    if general is None:
+        return None
+    data = general["report_data"] or {}
+    if general.get("is_auto_generated"):
+        return _General({"description": data.get("description"), "payItems": [{"description": SEE_INDIVIDUAL_REPORTS}]},
+                        general["page_number"], None, True)
+    return _General(data, general["page_number"], general.get("report_id"), False)
 
 
-def _with_flag_lines(general_data: dict[str, Any], idr: dict[str, Any]) -> dict[str, Any]:
+def _flag_lines(idr: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    Add an IDR's flag rollup, then its curb segments' (idr_segments.export_segment_lines), to the General's pay items,
-    after its own, under one "PIR Flags" heading row (see idr_flags.export_lines): live before approval, as frozen at
-    approval after. They carry no id, so no redline touches them.
-    Takes the General's report_data and the IDR row.
-    Returns the report_data with the lines added (unchanged when there are none); raises ExportDataError when the
-    IDR's flags or segments can't be read.
+    Lay out an IDR's flag rollup, then its curb segments' (idr_segments.export_segment_lines), as pay items under one
+    "PIR Flags" heading row (see idr_flags.export_lines): live before approval, as frozen at approval after. They carry
+    no id, so no redline touches them.
+    Takes the IDR row.
+    Returns the rows (empty when there are none); raises ExportDataError when the IDR's flags or segments can't be read.
     """
     try:
         flag_lines, segment_lines = export_lines(idr), export_segment_lines(idr)
     except (IdrFlagError, IdrSegmentError) as exc:
         raise ExportDataError(str(exc)) from exc
     if not flag_lines and not segment_lines:
-        return general_data
-    lines = (flag_lines or [{"description": EXPORT_HEADING}]) + segment_lines
-    own = general_data.get("payItems")
-    return {**general_data, "payItems": (own if isinstance(own, list) else []) + lines}
+        return []
+    return (flag_lines or [{"description": EXPORT_HEADING}]) + segment_lines
+
+
+def _with_lines(report_data: dict[str, Any], lines: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Add rows to a report's pay items, after its own.
+    Takes the report_data and the rows.
+    Returns a copy of the report_data with the rows added (the same dict when there are none).
+    """
+    if not lines:
+        return report_data
+    own = report_data.get("payItems")
+    return {**report_data, "payItems": (own if isinstance(own, list) else []) + lines}
+
+
+def _with_flag_lines_on_a_report(reports: list[dict[str, Any]], lines: list[dict[str, Any]],
+                                 idr_id: UUID) -> list[dict[str, Any]]:
+    """
+    Print an IDR's "PIR Flags" lines when it has no General: after the pay items (and "Imported Sites" lines) of its
+    first SWCB in page order, else of its first AC report; with neither they don't print, and that is logged.
+    Takes the IDR's reports in page order, the lines (_flag_lines) and the IDR's uuid.
+    Returns the reports, the one taking the lines as a copy with them added.
+    """
+    if not lines:
+        return reports
+    for report_type in ("SWCB", "AC"):
+        index = next((i for i, r in enumerate(reports)
+                      if r["report_type"] == report_type and not r.get("is_addendum")), None)
+        if index is not None:
+            report = reports[index]
+            report = {**report, "report_data": _with_lines(report.get("report_data") or {}, lines)}
+            return reports[:index] + [report] + reports[index + 1:]
+    logger.warning("IDR %s has PIR Flags lines but no General, SWCB or AC report to print them on", idr_id)
+    return reports
 
 
 def _with_site_lines(reports: list[dict[str, Any]], idr_id: UUID) -> list[dict[str, Any]]:
@@ -259,9 +303,10 @@ def _load_redlines(idr_id: UUID) -> Redlines:
     return Redlines(edits)
 
 
-def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], swcbs: list[dict[str, Any]],
-                     conc_mixes: list[dict[str, Any]], acs: list[dict[str, Any]], conc_cyls: list[dict[str, Any]],
-                     dsps: list[dict[str, Any]], general_redlines: Redlines, redlines: Redlines) -> _Sheets:
+def _allocate_sheets(workbook: WorkbookTemplate, general_data: Optional[dict[str, Any]],
+                     swcbs: list[dict[str, Any]], conc_mixes: list[dict[str, Any]], acs: list[dict[str, Any]],
+                     conc_cyls: list[dict[str, Any]], dsps: list[dict[str, Any]], general_redlines: Redlines,
+                     redlines: Redlines) -> _Sheets:
     """
     Provide every report its sheets before anything is stamped, cloning the blank forms as needed. Copies are numbered
     across the whole IDR per form: Gen Fr 2, ... for the General's pay-item overflow; Conc Fr 2, ... for later SWCB
@@ -270,11 +315,11 @@ def _allocate_sheets(workbook: WorkbookTemplate, general_data: dict[str, Any], s
     overflow, in page order; AC Bk 2, ... one per later AC report; Conc Cyl 2, ... one per later CONC_CYL report; DSP
     Fr 2, ... one per later DSP report. A pay item a reviewer revised takes a row per revision, so redlines can add
     overflow pages.
-    Takes the workbook, the General's report_data, the SWCB, CONC_MIX, AC, CONC_CYL and DSP reports, in page order,
-    the General's redlines and the IDR's (each report's are taken from them).
-    Returns the sheet names for each report.
+    Takes the workbook, the General's report_data (None when no General prints), the SWCB, CONC_MIX, AC, CONC_CYL and
+    DSP reports, in page order, the General's redlines and the IDR's (each report's are taken from them).
+    Returns the sheet names for each report (no General fronts without a General).
     """
-    general_fronts = allocate_copies(workbook, GEN_FRONT, pay_item_page_count(
+    general_fronts = [] if general_data is None else allocate_copies(workbook, GEN_FRONT, pay_item_page_count(
         general_data.get("payItems"), GEN_FRONT_PAY_ITEMS, general_redlines))
     swcb_sheets, fronts_used = [], 0
     for index, report in enumerate(swcbs):
@@ -435,8 +480,8 @@ def _load_re_signature(idr: dict[str, Any]) -> Optional[SignatureImage]:
 
 def generate_idr_export(idr_id: UUID) -> IdrExport:
     """
-    Build an IDR's .xlsx export from the report-forms template: the General's pages, then each SWCB report's (on Conc
-    Fr / Conc Bk and clones of them) and each AC report's (AC Fr / AC Bk and clones), in page order, each followed by
+    Build an IDR's .xlsx export from the report-forms template: the General's pages (when it has one), then each
+    SWCB report's (on Conc Fr / Conc Bk and clones of them) and each AC report's (AC Fr / AC Bk and clones), in page order, each followed by
     its CONC_MIX addendums' Conc Mix sheets and its CONC_CYL addendums' Conc Cyl sheets; each Daily Site Patrol on a
     DSP Fr sheet, among the main reports in page order (after its parent when it has one); an SWCB's Conc Bk ticks its "See attached" box when it has one, an AC Bk
     its "Attached Pages" box when its report has attachments or continues on Report Cont. Pay items past a front
@@ -448,7 +493,10 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     a signature line, and an approved IDR's carry the Resident Engineer's beside it (the inspector's dated with the work date, the RE's with the approval date).
     What reviewers edited prints with its redlines, at any status: the replaced value struck, the reviewer's in blue
     with their initials (see export_redlines); a revised pay item takes a row per revision, which can add pages.
-    The IDR's flag rollup prints with the General's pay items, under a "PIR Flags" heading row.
+    The IDR's flag rollup prints with the General's pay items, under a "PIR Flags" heading row; an IDR with no
+    General prints no General pages (Slice X.3) and puts that rollup on its first SWCB's, else its first AC's, pay
+    items.
+    An auto-General prints as a summary cover (see _general_for_export).
     Takes the IDR uuid.
     Returns an IdrExport (file name and bytes); raises IdrNotFoundError or ExportDataError.
     """
@@ -461,20 +509,25 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
         raise ExportDataError("Failed to load the IDR's project")
     project = {**project, "contractor": get_project_contractor_name(idr["project_id"])}
     inspector = _inspector_name(get_user_by_id(idr["reporter_uuid"]))
-    general_data, page_number, general_edited_as = _general_for_export(idr_id)
-    general_data = _with_flag_lines(general_data, idr)
+    general = _general_for_export(idr_id)
+    flag_lines = _flag_lines(idr)
     reports = _with_site_lines(_load_reports(idr_id), idr_id)
+    if general is not None:
+        general.data = _with_lines(general.data, flag_lines)
+    else:
+        reports = _with_flag_lines_on_a_report(reports, flag_lines, idr_id)
     swcbs, conc_mixes, acs = _swcb_reports(reports), _conc_mix_reports(reports), _ac_reports(reports)
     conc_cyls, dsps = _conc_cyl_reports(reports), _dsp_reports(reports)
     general_id = next((r["report_id"] for r in reports if r["report_type"] == "GEN" and not r["is_addendum"]), None)
     redlines = _load_redlines(idr_id)
-    general_redlines = redlines.for_report(general_edited_as)  # the header's only, unless it is the inspector's own
+    # The header's only, unless it is the inspector's own
+    general_redlines = redlines.for_report(general.edited_as if general is not None else None)
 
     workbook = WorkbookTemplate(TEMPLATE_PATH)
-    sheets = _allocate_sheets(workbook, general_data, swcbs, conc_mixes, acs, conc_cyls, dsps, general_redlines,
-                              redlines)
+    sheets = _allocate_sheets(workbook, general.data if general is not None else None, swcbs, conc_mixes, acs,
+                              conc_cyls, dsps, general_redlines, redlines)
     # Each report's sheets past its first are pages of their own: they take the numbers after it and count in OF
-    extras = [(page_number, len(sheets.general_fronts) - 1)]
+    extras = [(general.page_number, len(sheets.general_fronts) - 1)] if general is not None else []
     extras += [(r["page_number"], len(fronts) - 1) for r, (fronts, _) in zip(swcbs, sheets.swcbs)]
     extras += [(r["page_number"], len(names) - 1) for r, names in zip(conc_mixes, sheets.conc_mixes)]
     extras += [(r["page_number"], len(fronts) - 1) for r, (fronts, _) in zip(acs, sheets.acs)]
@@ -483,11 +536,14 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
         idr = {**idr, "total_pages": idr["total_pages"] + extra_pages}
 
     _stamp_contract_info(workbook, project)
-    general_pages = stamp_general(workbook, idr, project, inspector, general_data,
-                                  _page_after_clones(page_number, extras), fronts=sheets.general_fronts,
-                                  redlines=general_redlines)
-    groups = [(general_id, general_pages)]
-    report_cont_used = REPORT_CONT in general_pages
+    groups: list[tuple[Optional[UUID], list[str]]] = []
+    report_cont_used = False
+    if general is not None:
+        general_pages = stamp_general(workbook, idr, project, inspector, general.data,
+                                      _page_after_clones(general.page_number, extras), fronts=sheets.general_fronts,
+                                      redlines=general_redlines, summary_only=general.is_auto)
+        groups.append((general_id, general_pages))
+        report_cont_used = REPORT_CONT in general_pages
 
     # A DSP prints among the main reports, in page order; one with a parent follows it, as an addendum does
     dsp_pages: dict[int, list[str]] = {}
@@ -559,10 +615,12 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
          if report_id in attachments or report_id in site_pages], site_pages)
     pages = [page for report_id, pages in segments for page in pages + attachment_pages.get(report_id, [])]
     pages += [page for report_id in unprinted for page in attachment_pages.get(report_id, [])] + closing
+    if not pages:
+        raise NothingToExportError("This IDR has nothing to print yet: add a report first.")
 
     # Visible sheets print in tab order, so each page moves right after the one before it (Report Cont from near the
-    # front, Conc Mix from between SWR Bk and HC Fr, attachment pages from the end); the first, Gen Fr, is the tab the
-    # file opens on
+    # front, Conc Mix from between SWR Bk and HC Fr, attachment pages from the end); the first (Gen Fr, when a General
+    # prints) is the tab the file opens on
     for previous, page in zip(pages, pages[1:]):
         workbook.move_sheet(page, after=previous)
 

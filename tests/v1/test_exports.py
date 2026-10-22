@@ -1,4 +1,5 @@
 import io
+import logging
 import re
 import textwrap
 import zipfile
@@ -122,11 +123,11 @@ GENERAL = {
 
 @contextmanager
 def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers Contracting Co.", user=USER,
-                   general=GENERAL, main_reports=None, reports=None, attachments=None, files=None, signature=None,
+                   general=GENERAL, reports=None, attachments=None, files=None, signature=None,
                    re_signature=None, users=None, edits=None):
     """
     Patch the queries generate_idr_export reads, and Storage, so it runs without a database or a bucket.
-    Takes the IDR, project, contractor name, user, General report (or None), non-General main reports, all the
+    Takes the IDR, project, contractor name, user, General report (or None), all the
     IDR's reports (where the SWCB report is found), their uploaded attachment rows, {storage path: file bytes}
     (a path that's missing, or maps to an exception, fails its download), the inspector's signature file's bytes
     and the RE's (None, or an exception, fails that download), and {user uuid: users row} for anyone other than the
@@ -155,14 +156,13 @@ def patched_export(idr=SUBMITTED_IDR, project=PROJECT, contractor="Benny Bowers 
         patch.object(export, "get_project_contractor_name", return_value=contractor) as gc,
         patch.object(export, "get_user_by_id", side_effect=user_by_id) as gu,
         patch.object(export, "get_general_report", return_value=general) as gg,
-        patch.object(export, "list_non_general_main_reports", return_value=main_reports or []) as lm,
         patch.object(export, "list_reports_for_idr", return_value=reports or []) as lr,
         patch.object(export, "list_uploaded_attachments_for_reports", return_value=attachments or []) as la,
         patch.object(export_attachments, "download_file", side_effect=download) as df,
         patch.object(signatures, "download_file", side_effect=download_signature) as ds,
         patch.object(export, "field_edits_for", return_value=edits or []),
     ):
-        yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "main": lm, "reports": lr,
+        yield {"idr": gi, "project": gp, "contractor": gc, "user": gu, "general": gg, "reports": lr,
                "attachments": la, "download": df, "signature": ds}
 
 
@@ -376,15 +376,19 @@ class TestGeneralFrontHeader:
         assert sheet.sheet_properties.pageSetUpPr.fitToPage is True
         assert (sheet.page_setup.fitToWidth, sheet.page_setup.fitToHeight) == (1, 1)
 
-    def test_composes_a_general_when_the_idr_has_none(self):
-        children = [
-            {"report_type": "SWCB", "report_data": {"description": "Formed sidewalk."}},
-            {"report_type": "CONC_MIX", "report_data": {"description": "Addendum-type, left out."}},
-        ]
-        sheet = exported_workbook(general=None, main_reports=children)["Gen Fr"]
-        assert sheet["B22"].value == "Sidewalk, Curb, Concrete Base: Formed sidewalk."
-        assert sheet["B23"].value.startswith("See the individual reports")
-        assert sheet["AH8"].value is None and sheet["AM8"].value is None  # not one of the IDR's numbered pages
+    def test_an_idr_without_a_general_prints_no_general(self):
+        # Slice X.3: nothing is composed for the export; the IDR's own reports print, numbered as they are
+        swcb = swcb_row(1, 1, description="Formed sidewalk.")
+        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 1}, general=None, reports=[swcb])
+        assert visible_sheets(content) == ["Conc Fr", "Conc Bk"]
+        assert print_order_page_numbers(content) == [1, None]
+
+    def test_an_idr_with_nothing_to_print_is_refused(self):
+        # No General, and only a report the export doesn't print (and no attachment): there is no page at all
+        other = {"report_id": UUID(int=0x5E00), "report_type": "SWR", "is_addendum": False, "parent_report_id": None,
+                 "page_number": 1, "report_data": {}}
+        with patched_export(general=None, reports=[other]), pytest.raises(export.NothingToExportError):
+            generate_idr_export(IDR_ID)
 
     def test_unknown_idr_raises_not_found(self):
         with patched_export(idr=None), pytest.raises(export.IdrNotFoundError):
@@ -2167,14 +2171,13 @@ class TestPayItemOverflow:
         assert [book[n]["B1"].value for n in shown] == ["DRAFT - Not for Submission"] * len(shown)
         assert print_order_page_numbers(content) == [None] * len(shown)
 
-    def test_a_composed_generals_overflow_is_unnumbered_and_not_counted(self):
+    def test_without_a_general_the_first_reports_overflow_is_numbered_and_counted(self):
         swcb = swcb_row(1, 1, payItems=pay_items(13))
-        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 1}, general=None, main_reports=[swcb],
-                               reports=[swcb])
-        assert visible_sheets(content) == ["Gen Fr", "Gen Fr 2", "Gen Bk", "Conc Fr", "Conc Fr 2", "Conc Bk"]
-        assert print_order_page_numbers(content) == [None, None, None, 1, 2, None]
+        content = export_bytes(idr={**SUBMITTED_IDR, "total_pages": 1}, general=None, reports=[swcb])
+        assert visible_sheets(content) == ["Conc Fr", "Conc Fr 2", "Conc Bk"]
+        assert print_order_page_numbers(content) == [1, 2, None]
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
-        assert book["Conc Fr 2"]["AM8"].value == 2  # the SWCB's extra page counts; the composed General's don't
+        assert book["Conc Fr 2"]["AM8"].value == 2
 
     def test_render_refuses_fronts_that_dont_fit_the_items(self):
         with pytest.raises(ValueError, match="need 2 front pages, got 1"):
@@ -2716,14 +2719,11 @@ class TestAcExport:
         book = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
         assert (book["AC Fr"]["AH8"].value, book["AC Fr 2"]["AH8"].value) == (2, 3)
 
-    def test_a_composed_general_leaves_ac_out_of_its_description_and_pay_items(self):
-        swcb = swcb_row(1, 1, description="Poured curb.", payItems=[pay_item(1)])
-        ac = ac_row(page_number=2, payItems=[pay_item(2)])
-        content = export_bytes(general=None, main_reports=[swcb, ac], reports=[swcb, ac])
-        sheet = openpyxl.load_workbook(io.BytesIO(content), read_only=True)["Gen Fr"]
-        assert sheet["B22"].value == "Sidewalk, Curb, Concrete Base: Poured curb."
-        assert "Asphaltic" not in " ".join(str(sheet[f"B{row}"].value or "") for row in range(22, 35))
-        assert [sheet[f"B{row}"].value for row in (39, 40)] == ["4.01 AAS", None]
+    def test_without_a_general_the_ac_report_opens_the_file(self):
+        content = export_bytes(general=None, reports=[ac_row(1, 1)])
+        assert visible_sheets(content) == ["AC Fr", "AC Bk"]
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        assert book.active.title == "AC Fr"
 
 
 FULL_SITE_CONDITIONS = {
@@ -4592,7 +4592,7 @@ class TestHeaderRedlines:
 
     def test_a_labelled_weather_box_keeps_its_label_before_the_chain(self):
         swcb = swcb_row(1, 2, description="Pour")
-        book = redlined_book(reports=[swcb], main_reports=[swcb])
+        book = redlined_book(reports=[swcb])
         cell = book["Conc Fr"]["AD15"]
         assert [text for text, _, _ in marks(cell)] == ["AM", "Sunny", "Cloudy", "RM", "Rain", "MK"]
         assert (cell.alignment.shrink_to_fit, cell.alignment.wrap_text) == (True, False)
@@ -4684,9 +4684,10 @@ class TestPayItemRedlinesOnTheForm:
         book = redlined_book(general={**own_general(**REDLINED_DATA), "is_auto_generated": True})
         front, back = book["Gen Fr"], book["Gen Bk"]
         assert marks(front["AD17"])[0] == ("Sunny", None, True)
-        assert front["B40"].value == "4.02 AAS"  # one row an item: no revision rows
-        assert "".join(str(part) for part in front["N39"].value) == "118SF"
-        assert back["G46"].value == 6 and back["P37"].value == "X"
+        # Slice X.3: a summary cover, so the pay items and lists it stored don't print, redlined or not
+        assert front["X39"].value == "See individual reports" and front["B39"].value is None
+        assert front["B40"].value is None and front["N39"].value is None
+        assert back["G46"].value is None and back["P37"].value is None
 
     def test_an_item_and_its_revisions_stay_on_one_page(self):
         from api.services.export_redlines import Redlines
@@ -4720,7 +4721,7 @@ class TestPayItemRedlinesOnTheForm:
         ac = ac_row(1, 3, payItems=[pay_item(2, id="t", payQuantity="9")])
         edits = [redline_edit("payItems[s].payQuantity", "pay_item_revision", "55", "60", "RM", swcb["report_id"]),
                  redline_edit("payItems[t]", "pay_item_approve", "9", "9", "MK", ac["report_id"])]
-        book = redlined_book(general=GENERAL, reports=[swcb, ac], main_reports=[swcb, ac], edits=edits)
+        book = redlined_book(general=GENERAL, reports=[swcb, ac], edits=edits)
         assert marks(book["Conc Fr"]["K49"])[0] == ("55", None, True)
         assert marks(book["Conc Fr"]["K50"]) == [("60", BLUE, False), ("SF", BLUE, False)]
         assert (book["Conc Fr"]["P49"].value, marks(book["Conc Fr"]["P50"])) == (None, [("RM", BLUE, False)])
@@ -4804,7 +4805,7 @@ class TestBackPageRedlines:
     def test_a_form_without_a_remarks_column_puts_the_initials_after_the_x(self):
         ac = ac_row(1, 2, safetyChecks={"plates": "N"})
         edits = [redline_edit("safetyChecks.plates", "field_change", "Y", "N", "RM", ac["report_id"])]
-        sheet = redlined_book(general=GENERAL, reports=[ac], main_reports=[ac], edits=edits)["AC Bk"]
+        sheet = redlined_book(general=GENERAL, reports=[ac], edits=edits)["AC Bk"]
         assert marks(sheet["L43"]) == [("X", None, True)]
         assert marks(sheet["N43"]) == [("X", BLUE, False), ("RM", BLUE, False)]
 
@@ -5004,7 +5005,7 @@ class TestConcMixRedlines:
         swcb = swcb_row(1, 2, description="Pour")
         mix = {**conc_mix_row(1, swcb["report_id"], 3), "report_id": MIX_REPORT_ID, "report_data": MIX_DATA}
         other = conc_mix_row(2, swcb["report_id"], 4, trucks=1)
-        book = redlined_book(general=GENERAL, reports=[swcb, mix, other], main_reports=[swcb], edits=MIX_EDITS)
+        book = redlined_book(general=GENERAL, reports=[swcb, mix, other], edits=MIX_EDITS)
         assert marks(book["Conc Mix"]["Z28"]) == [("5", None, True), ("4.5", BLUE, False), ("RM", BLUE, False)]
         second = book["Conc Mix 2"]["Z28"].value
         assert second is None or isinstance(second, str)  # the other report's truck carries no chain
@@ -5078,7 +5079,7 @@ class TestHandwrittenHeaderCells:
     def book(self) -> openpyxl.Workbook:
         swcb, ac = swcb_row(1, 2, payItems=pay_items(13)), ac_row(1, 3)
         idr = {**SUBMITTED_IDR, "idr_number": "IR-2026-0005", "report_date": date(2026, 12, 30)}
-        return openpyxl.load_workbook(io.BytesIO(export_bytes(idr=idr, reports=[swcb, ac], main_reports=[swcb, ac])))
+        return openpyxl.load_workbook(io.BytesIO(export_bytes(idr=idr, reports=[swcb, ac])))
 
     def test_the_template_leaves_them_unmerged_with_slashes_drawn_in_the_date_line(self):
         template = openpyxl.load_workbook(TEMPLATE)
@@ -5236,7 +5237,7 @@ class TestSwcbOwnSectionRedlines:
 
     def test_the_export_gives_an_swcb_its_own_edits(self):
         swcb = swcb_row(1, 2, **SWCB_OWN_DATA)
-        book = redlined_book(general=GENERAL, reports=[swcb], main_reports=[swcb], edits=SWCB_OWN_EDITS)
+        book = redlined_book(general=GENERAL, reports=[swcb], edits=SWCB_OWN_EDITS)
         assert marks(book["Conc Fr"]["R33"]) == [("2+00", None, True), ("2+50", BLUE, False), ("RM", BLUE, False)]
 
 
@@ -5404,7 +5405,7 @@ class TestAcOwnSectionRedlines:
 
     def test_the_export_gives_an_ac_report_its_own_edits(self):
         ac = {**ac_row(1, 2, **AC_OWN_DATA), "report_id": AC_REPORT_ID}
-        book = redlined_book(general=GENERAL, reports=[ac], main_reports=[ac], edits=AC_OWN_EDITS)
+        book = redlined_book(general=GENERAL, reports=[ac], edits=AC_OWN_EDITS)
         assert marks(book["AC Fr"]["AA23"]) == CHAIN_OF_ONE("60", "62", "RM")
         assert marks(book["AC Bk"]["AG36"]) == CHAIN_OF_ONE("310", "305", "RM")
 
@@ -5732,10 +5733,10 @@ class TestFlagLinesOnTheGeneral:
             "amount": Decimal("25.004")}
 
     def test_the_rollup_follows_the_generals_own_items_under_its_heading(self):
-        from api.services.export import _with_flag_lines
+        from api.services.export import _flag_lines, _with_lines
         own = [{"itemNo": "4.02", "payQuantity": "12"}]
         with patch("api.queries.idr_flags.run_query", return_value=[self.FLAG, {**self.FLAG, "amount": Decimal("5")}]):
-            data = _with_flag_lines({"payItems": own, "description": "x"}, self.IDR)
+            data = _with_lines({"payItems": own, "description": "x"}, _flag_lines(self.IDR))
         assert data["description"] == "x"
         assert data["payItems"] == own + [
             {"description": "PIR Flags"},
@@ -5743,20 +5744,104 @@ class TestFlagLinesOnTheGeneral:
              "description": "4\" CONCRETE SIDEWALK"}]
 
     def test_an_idr_without_flag_lines_is_unchanged(self):
-        from api.services.export import _with_flag_lines
+        from api.services.export import _flag_lines, _with_lines
         general = {"payItems": [{"itemNo": "4.02"}]}
-        assert _with_flag_lines(general, self.IDR) is general  # the default patch: no flags
+        assert _flag_lines(self.IDR) == []  # the default patch: no flags
+        assert _with_lines(general, []) is general
 
     def test_an_approved_idr_prints_its_frozen_rollup(self):
-        from api.services.export import _with_flag_lines
+        from api.services.export import _flag_lines
         frozen = [{"pay_item_ref": "4.13 AAS", "budget_code": "B", "description": "Walk", "unit": "SF",
                    "amount": Decimal("90.00")}]
         with patch("api.services.idr_flags.list_flag_quantities", return_value=frozen) as quantities:
-            data = _with_flag_lines({}, {**self.IDR, "status": "approved"})
-        assert data["payItems"][1]["payQuantity"] == "90.00"
+            lines = _flag_lines({**self.IDR, "status": "approved"})
+        assert lines[1]["payQuantity"] == "90.00"
         quantities.assert_called_once_with(self.IDR["idr_id"])
 
     def test_flags_that_cant_be_read_fail_the_export(self):
-        from api.services.export import ExportDataError, _with_flag_lines
+        from api.services.export import ExportDataError, _flag_lines
         with patch("api.queries.idr_flags.run_query", return_value=None), pytest.raises(ExportDataError):
-            _with_flag_lines({}, self.IDR)
+            _flag_lines(self.IDR)
+
+
+# ---------------------------------------------------------------------------
+# Slice X.3: an auto-General prints as a summary cover; without a General, the "PIR Flags" lines go on a report
+# ---------------------------------------------------------------------------
+
+FLAG_LINES = [{"description": "PIR Flags"},
+              {"itemNo": "4.13 AAS", "budgetCode": "HW0001Q-CONS", "payQuantity": "30.00", "unit": "SF",
+               "description": "4\" CONCRETE SIDEWALK"}]
+
+
+def export_with_flag_lines(**overrides) -> bytes:
+    """
+    Run the export with the IDR's flag lines stubbed to FLAG_LINES.
+    Takes patched_export's keyword overrides.
+    Returns the .xlsx bytes.
+    """
+    with patch.object(export, "export_lines", return_value=FLAG_LINES), \
+            patch.object(export, "export_segment_lines", return_value=[]), patched_export(**overrides):
+        return generate_idr_export(IDR_ID).content
+
+
+class TestAutoGeneralOnTheExport:
+    AUTO = {"report_id": UUID(int=0x6E00), "report_type": "GEN", "page_number": 1, "is_auto_generated": True,
+            # payItems as an auto-General stored them before Slice X.3: never printed
+            "report_data": {"description": "Sidewalk, Curb, Concrete Base: Poured.\n\nSee the individual reports for "
+                                           "the details of the work performed.",
+                            "payItems": [{"itemNo": "4.01 AAS", "payQuantity": "10"}]}}
+
+    @pytest.fixture(scope="class")
+    def book(self) -> openpyxl.Workbook:
+        return openpyxl.load_workbook(io.BytesIO(export_with_flag_lines(general=self.AUTO)), read_only=True)
+
+    def test_its_description_prints(self, book):
+        assert book["Gen Fr"]["B22"].value == "Sidewalk, Curb, Concrete Base: Poured."
+
+    def test_its_pay_items_say_see_individual_reports_then_the_pir_flags(self, book):
+        sheet = book["Gen Fr"]
+        assert sheet["X39"].value == "See individual reports" and sheet["B39"].value is None
+        assert sheet["X40"].value == "PIR Flags"
+        assert sheet["B41"].value == "4.13 AAS"
+
+    def test_its_checklist_work_force_and_equipment_are_blank_with_the_note(self, book):
+        sheet = book["Gen Bk"]
+        assert (sheet["R30"].value, sheet["B52"].value, sheet["I53"].value) == ("See individual reports",) * 3
+        assert all(sheet[f"N{row}"].value is None and sheet[f"P{row}"].value is None for row in range(30, 40))
+
+    def test_an_inspectors_general_prints_its_own_lists(self):
+        general = {**GENERAL, "report_data": {**GENERAL["report_data"], "safetyChecks": {"fencing": "Y"}}}
+        sheet = exported_workbook(general=general)["Gen Bk"]
+        assert sheet["R30"].value != "See individual reports"
+        assert sheet["B52"].value != "See individual reports"
+
+
+class TestFlagLinesWithoutAGeneral:
+    def test_they_follow_the_first_swcbs_pay_items(self):
+        swcbs = [swcb_row(1, 1, payItems=[pay_item(1)]), swcb_row(2, 2)]
+        book = openpyxl.load_workbook(io.BytesIO(export_with_flag_lines(general=None, reports=swcbs)), read_only=True)
+        sheet = book["Conc Fr"]
+        assert [sheet[f"{col}{row}"].value for row, col in ((49, "B"), (50, "U"), (51, "B"))] == [
+            "4.01 AAS", "PIR Flags", "4.13 AAS"]
+        texts_2 = [str(book["Conc Fr 2"][f"{col}{row}"].value) for row in range(49, 61) for col in ("B", "U")]
+        assert "PIR Flags" not in texts_2
+
+    def test_without_an_swcb_they_go_on_the_first_ac_report(self):
+        book = openpyxl.load_workbook(io.BytesIO(export_with_flag_lines(general=None, reports=[ac_row(1, 1)])),
+                                      read_only=True)
+        assert book["AC Fr"]["U39"].value == "PIR Flags" and book["AC Fr"]["B40"].value == "4.13 AAS"
+
+    def test_with_neither_they_dont_print_and_that_is_logged(self, caplog):
+        dsp = {"report_id": UUID(int=0xD500), "report_type": "DSP", "is_addendum": False, "parent_report_id": None,
+               "page_number": 1, "report_data": {}}
+        with caplog.at_level(logging.WARNING, logger="api.services.export"):
+            content = export_with_flag_lines(general=None, reports=[dsp])
+        assert visible_sheets(content) == ["DSP Fr"]
+        assert "no General, SWCB or AC report" in caplog.text
+
+    def test_a_general_takes_them_rather_than_a_report(self):
+        swcb = swcb_row(1, 2)
+        book = openpyxl.load_workbook(io.BytesIO(export_with_flag_lines(reports=[swcb])), read_only=True)
+        assert book["Gen Fr"]["X39"].value == "PIR Flags"
+        texts = [str(book["Conc Fr"][f"{col}{row}"].value) for row in range(49, 61) for col in ("B", "U")]
+        assert "PIR Flags" not in texts
