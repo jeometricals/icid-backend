@@ -391,7 +391,8 @@ them back for an IDR that comes back approved. So it only ever holds IDRs that a
 - No unique rule: the same item and budget code can be on one IDR more than once.
 - An IDR's rows are always replaced as a set, in one statement (delete, then insert), so the copied columns never
   drift from the IDR that was approved.
-- An auto-generated General's pay items are never written: they are sums of the other reports'.
+- An auto-generated General's pay items are never written: it has none since Slice X.3 (one stored before held sums
+  of the other reports').
 
 ### properties
 
@@ -905,10 +906,8 @@ The two flags:
 - **`idr_reports.is_auto_generated`**: `true` marks a General the backend owns. Its
   `report_data` is exactly `{description, payItems}`. The description aggregates each
   contributing report under its type label and ends with a fixed footer. The pay items are
-  the contributing reports' pay items combined by `(itemNo, budgetCode)`: quantities are
-  summed to two decimals when they all parse as numbers (otherwise the first non-empty value
-  is kept), and `description`, `unit` and `quantityChk` take the first non-empty value. Two
-  different units under one key log a warning and the first wins. The backend fully
+  always `[]` (Slice X.3): the auto-General is a summary cover, and the pay items, MPT / safety
+  checklist, work force and equipment live on the reports themselves. The backend fully
   rewrites that `report_data` on every regeneration, and the frontend shows it read-only. A
   General the inspector created themselves is always `false`, and the backend never touches it.
 - **`idrs.has_dismissed_auto_general`**: set to `true` when an inspector deletes an
@@ -927,9 +926,11 @@ description of work or pay items):
 | 2 or more contributing reports, no General, dismissed | Nothing |
 | Fewer than 2 contributing reports, auto-General exists | Deletes it |
 
-AC reports count as contributing (toward the 2), but their description and pay items stay out of
-the merge (`MERGE_EXCLUDED_TYPES`): the export prints them on AC Fr / AC Bk. An auto-General already
-stored keeps its old content until the next regeneration.
+AC reports count as contributing (toward the 2), but their description stays out of the summary
+(`MERGE_EXCLUDED_TYPES`): the export prints them on AC Fr / AC Bk. An auto-General already stored
+keeps its old content until the next regeneration; its stored pay items never print (the export
+and the report page show "See individual reports" in their place). The export prints a General
+only when the IDR has one (see CLAUDE.md, "The General on the export").
 
 ## Migration history
 

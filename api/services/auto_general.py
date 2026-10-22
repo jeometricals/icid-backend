@@ -1,5 +1,4 @@
-import logging
-from typing import Any, Iterable, Optional
+from typing import Any
 from uuid import UUID
 
 from api.queries.idr_reports import (
@@ -12,8 +11,6 @@ from api.queries.idr_reports import (
 from api.queries.idrs import get_idr_by_id
 from api.schemas.idr_report import ADDENDUM_TYPES, ReportType, label_for
 
-logger = logging.getLogger(__name__)
-
 # An auto-generated General appears once an IDR holds this many contributing
 # reports; below it, an existing auto-General is removed.
 AUTO_GENERAL_MIN_REPORTS = 2
@@ -22,57 +19,14 @@ AUTO_GENERAL_MIN_REPORTS = 2
 # site's upkeep with no description of work and no pay items. They don't count toward AUTO_GENERAL_MIN_REPORTS.
 NON_CONTRIBUTING_TYPES = ADDENDUM_TYPES | {ReportType.DSP}
 
-# Contributing types whose description and pay items stay out of the auto-General: the IDR export prints them on
-# their own sheets (AC Fr carries its pay items). They still count toward AUTO_GENERAL_MIN_REPORTS.
+# Contributing types whose description stays out of the auto-General: the IDR export prints them on their own
+# sheets. They still count toward AUTO_GENERAL_MIN_REPORTS.
 MERGE_EXCLUDED_TYPES = frozenset({ReportType.AC.value})
 
 # Always closes an auto-generated description: even a full summary is only a
 # summary, so it points back to the source reports. Auto-Generals only — a
 # manual General's description is the inspector's, untouched.
 DESCRIPTION_FOOTER = "See the individual reports for the details of the work performed."
-
-
-def _first_non_empty(values: Iterable[Any]) -> Any:
-    """
-    Pick the first value that is neither None nor a blank/whitespace-only string.
-    Takes any iterable of values.
-    Returns that value as-is, or "" if none qualifies.
-    """
-    for value in values:
-        if value is None:
-            continue
-        if isinstance(value, str):
-            if value.strip():
-                return value
-        else:
-            return value
-    return ""
-
-
-def _to_float(value: Any) -> Optional[float]:
-    """
-    Parse a pay quantity to a float, tolerating numeric strings.
-    Takes any value (typically a string like "100" or "150.50").
-    Returns the float, or None if it is blank or does not parse as a number.
-    """
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def _resolve_unit(key: tuple[Any, Any], items: list[dict[str, Any]]) -> str:
-    """
-    Pick the unit for one combined pay-item group, warning when members disagree.
-    Takes the (itemNo, budgetCode) key and the group's pay items; a missing or blank unit counts as "".
-    Returns the first non-empty unit (first wins on conflict), or "" if none has one.
-    """
-    units = [item.get("unit") for item in items]
-    unit = _first_non_empty(units)
-    distinct = {u.strip() for u in units if isinstance(u, str) and u.strip()}
-    if len(distinct) > 1:
-        logger.warning("Conflicting units %s for pay item %s / %s; keeping %r", sorted(distinct), key[0], key[1], unit)
-    return unit if isinstance(unit, str) else str(unit)
 
 
 def _aggregate_description(children: list[dict[str, Any]]) -> str:
@@ -92,61 +46,19 @@ def _aggregate_description(children: list[dict[str, Any]]) -> str:
     return "\n\n".join(entries)
 
 
-def _aggregate_pay_items(children: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """
-    Combine the contributing children's pay items, grouping by (itemNo, budgetCode).
-    Takes the contributing report rows; quantities that all parse are summed and formatted to 2 decimals, otherwise the first non-empty raw value is kept.
-    Returns one pay item dict per group, in first-seen order.
-    """
-    groups: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
-    order: list[tuple[Any, Any]] = []
-
-    for child in children:
-        data = child.get("report_data") or {}
-        for item in data.get("payItems") or []:
-            if not isinstance(item, dict):
-                continue
-            key = (item.get("itemNo"), item.get("budgetCode"))
-            if key not in groups:
-                groups[key] = []
-                order.append(key)
-            groups[key].append(item)
-
-    combined: list[dict[str, Any]] = []
-    for key in order:
-        items = groups[key]
-        item_no, budget_code = key
-        quantities = [item.get("payQuantity") for item in items]
-        parsed = [_to_float(quantity) for quantity in quantities]
-
-        if parsed and all(value is not None for value in parsed):
-            pay_quantity = "{:.2f}".format(sum(parsed))
-        else:
-            pay_quantity = _first_non_empty(quantities)
-
-        combined.append({
-            "itemNo": item_no,
-            "budgetCode": budget_code,
-            "description": _first_non_empty(item.get("description") for item in items),
-            "unit": _resolve_unit(key, items),
-            "payQuantity": pay_quantity,
-            "quantityChk": _first_non_empty(item.get("quantityChk") for item in items),
-        })
-
-    return combined
-
-
 def build_auto_general_data(children: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Build the auto-General's report_data from the contributing (non-addendum, non-General) children, leaving the
-    MERGE_EXCLUDED_TYPES out of the merge (they still count toward AUTO_GENERAL_MIN_REPORTS).
+    Build the auto-General's report_data from the contributing (non-addendum, non-General) children: a summary cover
+    whose description points to each, leaving the MERGE_EXCLUDED_TYPES out (they still count). Its pay items are
+    always empty: they live on the reports themselves (Slice X.3).
     Takes the contributing report rows in creation order.
-    Returns a dict with exactly the aggregated fields (description and payItems); no other keys, since regeneration full-replaces report_data and an auto-General is read-only.
+    Returns a dict with exactly description and payItems ([]); no other keys, since regeneration full-replaces
+    report_data and an auto-General is read-only.
     """
     merged = [child for child in children if child["report_type"] not in MERGE_EXCLUDED_TYPES]
     return {
         "description": _aggregate_description(merged),
-        "payItems": _aggregate_pay_items(merged),
+        "payItems": [],
     }
 
 

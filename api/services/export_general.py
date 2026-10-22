@@ -26,6 +26,10 @@ from api.services.xlsx_template import EMU_PER_PIXEL, WorkbookTemplate
 GEN_FRONT = "Gen Fr"
 GEN_BACK = "Gen Bk"
 
+# An auto-General is a summary cover: its pay items, MPT / safety checklist, work force and equipment are the reports'
+# own, so this prints where each would (Slice X.3)
+SEE_INDIVIDUAL_REPORTS = "See individual reports"
+
 # Gen Bk's signature line is row 59 (C59:M59), its date AE59:AH59; the image also takes the blank row above
 SIGNATURE_LAYOUT = SignatureLayout(signature_cells="C58:M59", signature_cx_emu=209 * EMU_PER_PIXEL,
                                    signature_cy_emu=34 * EMU_PER_PIXEL, date_cell="AE59")
@@ -107,15 +111,33 @@ def _stamp_front_header(workbook: WorkbookTemplate, idr: dict[str, Any], project
 
 # ---- The General ------------------------------------------------------------
 
+def _stamp_summary_notes(workbook: WorkbookTemplate) -> None:
+    """
+    Write "See individual reports" where an auto-General's MPT / safety checklist, work force and equipment would
+    print: the checklist's first remarks cell and the first free row of each list.
+    Takes the workbook.
+    Returns nothing.
+    """
+    first_safety_row = min(GEN_BACK_SAFETY.rows.values())
+    workbook.set_cell(GEN_BACK, f"{GEN_BACK_SAFETY.remarks_column}{first_safety_row}", SEE_INDIVIDUAL_REPORTS)
+    workbook.set_cell(GEN_BACK, f"{GEN_BACK_WORKFORCE.label_column}{GEN_BACK_WORKFORCE.free_rows[0]}",
+                      SEE_INDIVIDUAL_REPORTS)
+    workbook.set_cell(GEN_BACK, f"{GEN_BACK_EQUIPMENT.label_column}{GEN_BACK_EQUIPMENT.free_rows[0]}",
+                      SEE_INDIVIDUAL_REPORTS)
+
+
 def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict[str, Any], inspector: Optional[str],
                   general_data: dict[str, Any], page_number: Optional[int],
-                  fronts: Optional[list[str]] = None, redlines: Redlines = NO_REDLINES) -> list[str]:
+                  fronts: Optional[list[str]] = None, redlines: Redlines = NO_REDLINES,
+                  summary_only: bool = False) -> list[str]:
     """
     Stamp the General onto Gen Fr (and copies of it for pay items past its table), Gen Bk and, for long text,
     Report Cont. What reviewers edited prints with its redlines.
     Takes the workbook, IDR row, project details (with "contractor"), inspector name, the General's report_data,
     its page number (None for a composed General), its front pages (Gen Fr, Gen Fr 2, ...; None clones them here)
-    and its redlines (none unless given; the header's only, for a General that isn't the inspector's own).
+    its redlines (none unless given; the header's only, for a General that isn't the inspector's own) and whether it
+    is an auto-General (summary_only: its MPT / safety checklist, work force and equipment print blank, with "See
+    individual reports" in their place).
     Returns the sheets to print, in order: the fronts and Gen Bk always (Gen Bk carries the certification and the
     signature lines even when nothing else is on it), then Report Cont when the text continues onto it.
     """
@@ -134,9 +156,12 @@ def stamp_general(workbook: WorkbookTemplate, idr: dict[str, Any], project: dict
     write_lines(workbook, GEN_BACK, GEN_BACK_TEXT.rows, flow.back, GEN_BACK_TEXT.column)
     workbook.set_cell(GEN_BACK, CONTINUED_BOX, CHECK_MARK if flow.past_back else None)
 
-    stamp_workforce(workbook, GEN_BACK, GEN_BACK_WORKFORCE, general_data, redlines)
-    stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, general_data, redlines)
-    stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, general_data, redlines)
+    lists = {} if summary_only else general_data
+    stamp_workforce(workbook, GEN_BACK, GEN_BACK_WORKFORCE, lists, redlines)
+    stamp_equipment(workbook, GEN_BACK, GEN_BACK_EQUIPMENT, lists, redlines)
+    stamp_safety(workbook, GEN_BACK, GEN_BACK_SAFETY, lists, redlines)
+    if summary_only:
+        _stamp_summary_notes(workbook)
 
     sheets = fronts + [GEN_BACK]
     if flow.report_cont:
