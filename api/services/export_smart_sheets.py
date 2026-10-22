@@ -47,6 +47,8 @@ PIR_WIDTHS = {"A": 7, "B": 9, "C": 16, "D": 17, "E": 36, "F": 15, "G": 13, "H": 
 # A corner's: a label and a value twice over, or a field and up to three ramps; portrait, as wide as portrait holds so
 # its longest labels don't wrap
 INSPECTION_WIDTHS = {"A": 33, "B": 22, "C": 28, "D": 22}
+# A corner's ramps side by side on a page; a corner with more prints at full size over pages, a pair to a page
+RAMPS_PER_PAGE = 2
 # The corner's fields a corner's sheet prints, two to a row: the rest of the DOT form's sections 1-3 are on its DOT
 # inspection form, and its streets, borough and direction in the sheet's title
 CORNER_FIELDS = ("contractor_name", "construction_completion_date", "curb_material", "sidewalk_material")
@@ -299,6 +301,16 @@ class _SheetWriter:
         Returns nothing.
         """
         if self.used and self.used + points > self.page_points:
+            self.breaks.append(self.row - 1)
+            self.used = 0.0
+
+    def page_break(self) -> None:
+        """
+        Start a fresh page at the next row, whatever room is left on this one.
+        Takes nothing.
+        Returns nothing.
+        """
+        if self.used:
             self.breaks.append(self.row - 1)
             self.used = 0.0
 
@@ -610,8 +622,11 @@ class SmartSheets:
         _, _, entered = self._load()
         label = f"{site['north_south_street']} & {site['east_west_street']} {site.get('corner_direction') or ''}".strip()
 
-        # One page, shrunk to fit: a corner of mixed ramp types lists some 46 measurements
-        sheet = _SheetWriter(self.workbook, self._name(INSPECTION_PREFIX, label), INSPECTION_WIDTHS, one_page=True)
+        # Up to RAMPS_PER_PAGE ramps, one page, shrunk to fit; more, at full size, each further pair of ramps starting a
+        # page of its own (a corner of mixed ramp types lists some 46 measurements, too small shrunk onto one page)
+        ramps = report.ramps
+        sheet = _SheetWriter(self.workbook, self._name(INSPECTION_PREFIX, label), INSPECTION_WIDTHS,
+                             one_page=len(ramps) <= RAMPS_PER_PAGE)
         self._header(sheet, f"SMART inspection {DASH} {label}", site.get("boro"))
         spans = self._header_spans(sheet)
 
@@ -629,25 +644,15 @@ class SmartSheets:
         sheet.section("Construction")
         sheet.pairs([(CORNER_LABELS[name], shown(name, fields.get(name))) for name in CORNER_FIELDS], spans)
 
-        ramps = report.ramps
-        sheet.section(f"Ramps at this corner ({len(ramps)})", rows_after=len(ramps) + 1)
+        sheet.section(f"Ramps at this corner ({len(ramps)})", rows_after=min(len(ramps), RAMPS_PER_PAGE) + 1)
         if not ramps:
             sheet.note("No ramps are placed at this corner yet.")
         else:
-            headings = ["Field"] + [f"Ramp {n}: {CHOICE_LABELS.get(r.ramp_type, r.ramp_type)}"
-                                    + (f" ({r.ramp_id_label})" if r.ramp_id_label else "") for n, r in enumerate(ramps, 1)]
-            letters = ["A", "B", "C", "D"][: len(ramps) + 1]
-            names = list(dict.fromkeys([f for f in COMMON_FIELDS if f != "comments"]
-                                       + [f for r in ramps for f in TYPE_FIELDS[r.ramp_type]]))
-            values = [r.attributes.model_dump() if r.attributes else {} for r in ramps]
-            warned = [{w.field for w in r.attributes.warnings} if r.attributes else set() for r in ramps]
-            columns = tuple(Column(heading, letter, letter, (lambda i: lambda row: row["cells"][i])(i))
-                            for i, (heading, letter) in enumerate(zip(headings, letters)))
-            rows = [{"cells": [FIELD_LABELS.get(name, name)] + [
-                        shown(name, value.get(name)) + ("  (ADA)" if name in bad and value.get(name) is not None else "")
-                        for value, bad in zip(values, warned)], "field": name} for name in names]
-            sheet.table(columns, rows, lambda row, column: column.first != "A"
-                        and row["field"] in warned[letters.index(column.first) - 1])
+            for start in range(0, len(ramps), RAMPS_PER_PAGE):
+                if start:
+                    sheet.page_break()
+                    sheet.section(f"Ramps at this corner, continued ({len(ramps)})")
+                self._ramp_table(sheet, list(enumerate(ramps, 1))[start: start + RAMPS_PER_PAGE])
             sheet.section("ADA advisories")
             listed = [(n, w.message) for n, r in enumerate(ramps, 1) for w in (r.attributes.warnings if r.attributes else [])]
             for n, message in listed:
@@ -660,3 +665,27 @@ class SmartSheets:
         self._pay_items(sheet, site_pay_item_rows([], [], corner_entered), CORNER_PAY_ITEM_COLUMNS)
         sheet.finish()
         return sheet.name
+
+    @staticmethod
+    def _ramp_table(sheet: _SheetWriter, numbered: list[tuple[int, Any]]) -> None:
+        """
+        Write ramps' measurements side by side, a column each after the field's: the fields their types take, a value
+        outside the ADA advisories in red with "(ADA)".
+        Takes the sheet and the ramps with their numbers on the corner (at most RAMPS_PER_PAGE).
+        Returns nothing.
+        """
+        ramps = [ramp for _, ramp in numbered]
+        headings = ["Field"] + [f"Ramp {n}: {CHOICE_LABELS.get(r.ramp_type, r.ramp_type)}"
+                                + (f" ({r.ramp_id_label})" if r.ramp_id_label else "") for n, r in numbered]
+        letters = ["A", "B", "C"][: len(ramps) + 1]
+        names = list(dict.fromkeys([f for f in COMMON_FIELDS if f != "comments"]
+                                   + [f for r in ramps for f in TYPE_FIELDS[r.ramp_type]]))
+        values = [r.attributes.model_dump() if r.attributes else {} for r in ramps]
+        warned = [{w.field for w in r.attributes.warnings} if r.attributes else set() for r in ramps]
+        columns = tuple(Column(heading, letter, letter, (lambda i: lambda row: row["cells"][i])(i))
+                        for i, (heading, letter) in enumerate(zip(headings, letters)))
+        rows = [{"cells": [FIELD_LABELS.get(name, name)] + [
+                    shown(name, value.get(name)) + ("  (ADA)" if name in bad and value.get(name) is not None else "")
+                    for value, bad in zip(values, warned)], "field": name} for name in names]
+        sheet.table(columns, rows, lambda row, column: column.first != "A"
+                    and row["field"] in warned[letters.index(column.first) - 1])

@@ -1314,8 +1314,10 @@ Any change must follow these.
     blank (`WorkbookTemplate.add_sheet`; no template tab) and set to print on Letter one page wide and as many tall
     as it takes (`set_print_layout`: 0.5" margins, its print area, landscape when its columns are wider than portrait
     holds, so a sidewalk's is landscape and a corner's portrait), a page break before a section whose title and first
-    rows wouldn't fit on the page it would start on. A corner's prints on one page, Excel shrinking it to fit
-    (`one_page`: fit to one page tall too, no breaks); a corner of mixed ramp types lists some 46 measurements. Best-effort: a site whose data can't be read gets no sheet, logged.
+    rows wouldn't fit on the page it would start on. A corner's with one or two ramps prints on one page, Excel
+    shrinking it to fit (`one_page`: fit to one page tall too, no breaks); one with more prints at full size, its ramps
+    a pair to a page (`RAMPS_PER_PAGE`): ramps 1-2 on page 1, a break, then ramp 3 (and 4) with the ADA advisories and
+    the pay items (a corner of mixed ramp types lists some 46 measurements, about 7.7 pt shrunk onto one page). Best-effort: a site whose data can't be read gets no sheet, logged.
   - **Who changed it last** (Slice V2, migration 055): the PATCH stamps `updated_at` and `updated_by` in its statement,
     only when the work type or its text changes (no trigger). Every site response carries them and the names
     `added_by_name` and `updated_by_name`; a site never changed has them NULL (the UI shows who added it).

@@ -343,6 +343,25 @@ class TestCornerSheet:
             assert attribute in setup
         assert "<rowBreaks" not in xml
 
+    def test_a_third_ramp_starts_page_2_at_full_size_with_the_advisories_and_pay_items(self):
+        report = corner_report()
+        third = report.ramps[0].model_copy(update={"property_id": UUID(int=0x9A03), "ramp_id_label": "R3"})
+        item = site_item(EXTRA_ITEM, "2", property_id=UUID(int=0x9A01))
+        content = self.export(report=report.model_copy(update={"ramps": report.ramps + [third]}), site_items=[item])
+        rows = rows_of(content, INSPECTION_SHEET)
+        headings = [row for row in rows if row[0] == "Field"]
+        assert [h[:4] for h in headings] == [["Field", "Ramp 1: Perpendicular (R1)", "Ramp 2: Perpendicular (R2)", None],
+                                             ["Field", "Ramp 3: Perpendicular (R3)", None, None]]
+        xml = sheet_xml(content, INSPECTION_SHEET)
+        setup = re.search(r"<pageSetup\b[^>]*/>", xml).group(0)
+        assert 'fitToWidth="1"' in setup and 'fitToHeight="0"' in setup
+        breaks = [int(b) for b in re.findall(r'<brk id="(\d+)"', xml)]
+        continued = rows.index(row_starting(rows, "Ramps at this corner, continued (3)")) + 1  # its row number
+        assert breaks == [continued - 2]  # after the blank row before it: page 2 opens on the blank and the title
+        assert rows.index(headings[0]) + 1 < breaks[0]
+        assert rows.index(row_starting(rows, "ADA advisories")) + 1 > breaks[0]
+        assert rows.index(row_starting(rows, "Pay items for this site")) + 1 > breaks[0]
+
     def test_a_corner_that_cant_be_read_gets_no_sheet(self):
         content, _ = run([ped_ramp(1, SWCB_1)], smart={"report": None})
         assert not any(is_smart_sheet(s) for s in visible_sheets(content))
