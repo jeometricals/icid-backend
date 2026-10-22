@@ -1286,13 +1286,15 @@ Any change must follow these.
     come to per pay item, an X.1 override in its place marked `edited, originally N`, a dropped override billing
     nothing, the pay items entered by hand, then a total per unit). Live before approval, the claimed drawings after
     (as `list_idr_flags` / `list_idr_segments` read them). A ped ramp corner's (`SMART_INSP_<corner>`, once per corner,
-    with the first report that brings it): its inspection's status and signers, the corner's sections 1-3, its ramps'
+    with the first report that brings it): its inspection's status and signers, the corner's contractor, completion
+    date, curb and sidewalk materials (the rest of DOT's sections 1-3 are on its DOT form), its ramps'
     attributes side by side (a warned value red, `(ADA)`), the ADA advisories, and the pay items entered on its ramps'
     sites. Names are capitals and underscores, cut to Excel's 31 characters, `_2`, `_3` when taken. The sheet is added
     blank (`WorkbookTemplate.add_sheet`; no template tab) and set to print on Letter one page wide and as many tall
     as it takes (`set_print_layout`: 0.5" margins, its print area, landscape when its columns are wider than portrait
     holds, so a sidewalk's is landscape and a corner's portrait), a page break before a section whose title and first
-    rows wouldn't fit on the page it would start on. Best-effort: a site whose data can't be read gets no sheet, logged.
+    rows wouldn't fit on the page it would start on. A corner's prints on one page, Excel shrinking it to fit
+    (`one_page`: fit to one page tall too, no breaks); a corner of mixed ramp types lists some 46 measurements. Best-effort: a site whose data can't be read gets no sheet, logged.
   - **Who changed it last** (Slice V2, migration 055): the PATCH stamps `updated_at` and `updated_by` in its statement,
     only when the work type or its text changes (no trigger). Every site response carries them and the names
     `added_by_name` and `updated_by_name`; a site never changed has them NULL (the UI shows who added it).

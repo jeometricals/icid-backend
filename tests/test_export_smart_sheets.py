@@ -13,9 +13,11 @@ from uuid import UUID
 import openpyxl
 import pytest
 
-from api.schemas.ped_ramp import AdaWarning, CornerOut, InspectionRamp, InspectionReport, RampAttributesOut
+from api.schemas.ped_ramp import (
+    CORNER_LABELS, AdaWarning, CornerOut, InspectionRamp, InspectionReport, RampAttributesOut,
+)
 from api.services.export import TEMPLATE_PATH
-from api.services.export_smart_sheets import is_smart_sheet, sheet_name, site_pay_item_rows
+from api.services.export_smart_sheets import CORNER_FIELDS, is_smart_sheet, sheet_name, site_pay_item_rows
 from api.services.xlsx_template import WorkbookTemplate
 from tests.test_export_site_sheets import CORNER, PIR_FILES, SMART, SWCB_1, ped_ramp, run, sidewalk
 from tests.v1.test_exports import APPROVED_IDR, DRAFT_IDR, IDR_ID, visible_sheets
@@ -308,6 +310,15 @@ class TestCornerSheet:
         assert slope[1:3] == ["9.5%  (ADA)", "7%"]
         assert any(row[0] == "Ramp 1: Ramp running slope 9.5% is over 8.3%" for row in rows)
 
+    def test_of_the_dot_forms_sections_1_to_3_only_the_construction_fields_print(self):
+        rows = rows_of(self.export(), INSPECTION_SHEET)
+        construction = rows.index(row_starting(rows, "Construction"))
+        assert rows[construction + 1][:4] == ["Contractor name", "Benny Bowers", "Construction completion date", None]
+        assert rows[construction + 2][0] == "Curb material" and rows[construction + 2][2] == "Sidewalk material"
+        cut = [label for name, label in CORNER_LABELS.items() if name not in CORNER_FIELDS]
+        assert [label for label in cut if any(label in row for row in rows)] == []
+        assert not any(isinstance(row[0], str) and row[0][:2] in ("1.", "2.", "3.") for row in rows if row)
+
     def test_without_an_inspection_says_so(self):
         rows = rows_of(self.export(), INSPECTION_SHEET)
         assert any(row[0] == "No inspection of this corner yet." for row in rows)
@@ -321,10 +332,12 @@ class TestCornerSheet:
         assert rows[items_at + 2][:4] == ["6.59 P (SE0944)", "Pedestrian ramp", None, "2.00 EA"]
         assert rows[items_at + 3][0] == "Total" and len(rows) == items_at + 4
 
-    def test_portrait_letter_a_page_wide(self):
-        setup = re.search(r"<pageSetup\b[^>]*/>", sheet_xml(self.export(), INSPECTION_SHEET)).group(0)
-        for attribute in ('paperSize="1"', 'orientation="portrait"', 'fitToWidth="1"', 'fitToHeight="0"'):
+    def test_portrait_letter_on_one_page(self):
+        xml = sheet_xml(self.export(), INSPECTION_SHEET)
+        setup = re.search(r"<pageSetup\b[^>]*/>", xml).group(0)
+        for attribute in ('paperSize="1"', 'orientation="portrait"', 'fitToWidth="1"', 'fitToHeight="1"'):
             assert attribute in setup
+        assert "<rowBreaks" not in xml
 
     def test_a_corner_that_cant_be_read_gets_no_sheet(self):
         content, _ = run([ped_ramp(1, SWCB_1)], smart={"report": None})

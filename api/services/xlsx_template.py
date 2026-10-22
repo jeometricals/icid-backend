@@ -775,18 +775,20 @@ class WorkbookTemplate:
         self._copy_content_type(self._sheet_paths[self._sheet_order[0]], new_part)
         self._register_sheet(new_part, name)
 
-    def set_print_layout(self, sheet: str, landscape: bool, print_area: str, row_breaks: list[int]) -> None:
+    def set_print_layout(self, sheet: str, landscape: bool, print_area: str, row_breaks: list[int],
+                         one_page: bool = False) -> None:
         """
-        Set an added sheet's printing: US Letter, the orientation, one page wide and as many tall as it takes, its
-        print area, and a page break after each row given.
-        Takes the sheet name, whether to print landscape, the print area (e.g. "A1:H40") and the rows to break after.
+        Set an added sheet's printing: US Letter, the orientation, one page wide and as many tall as it takes (or one
+        page tall too, Excel shrinking it to fit), its print area, and a page break after each row given.
+        Takes the sheet name, whether to print landscape, the print area (e.g. "A1:H40"), the rows to break after and
+        whether to fit it on one page.
         Returns nothing.
         """
         xml = self._sheet(sheet)
         page_setup = re.search(r"<pageSetup\b[^>]*/>", xml)
         tag = page_setup.group(0)
         settings = {"paperSize": LETTER_PAPER, "orientation": "landscape" if landscape else "portrait",
-                    "fitToWidth": "1", "fitToHeight": "0"}
+                    "fitToWidth": "1", "fitToHeight": "1" if one_page else "0"}
         for setting, value in settings.items():
             tag = _set_attribute(tag, setting, value)
         breaks = ""

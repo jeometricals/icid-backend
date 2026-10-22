@@ -31,7 +31,7 @@ from api.schemas.ped_ramp import CHOICE_LABELS, COMMON_FIELDS, CORNER_LABELS, FI
 from api.schemas.property import display_address_of
 from api.services.export_common import ir_number, short_date, signed_date
 from api.services.idr_flags import is_frozen
-from api.services.ped_ramp_report import CORNER_SECTIONS, inspection_report, shown
+from api.services.ped_ramp_report import inspection_report, shown
 from api.services.quantities import canonical_unit
 from api.services.xlsx_template import CellValue, WorkbookTemplate
 
@@ -44,8 +44,12 @@ CENT = Decimal("0.01")
 
 # A sidewalk's sheet: eight columns, the flag table's (its widest) one each; landscape
 PIR_WIDTHS = {"A": 7, "B": 9, "C": 16, "D": 17, "E": 36, "F": 15, "G": 13, "H": 17}
-# A corner's: a label and a value twice over, or a field and up to three ramps; portrait
-INSPECTION_WIDTHS = {"A": 30, "B": 22, "C": 24, "D": 22}
+# A corner's: a label and a value twice over, or a field and up to three ramps; portrait, as wide as portrait holds so
+# its longest labels don't wrap
+INSPECTION_WIDTHS = {"A": 33, "B": 22, "C": 28, "D": 22}
+# The corner's fields a corner's sheet prints, two to a row: the rest of the DOT form's sections 1-3 are on its DOT
+# inspection form, and its streets, borough and direction in the sheet's title
+CORNER_FIELDS = ("contractor_name", "construction_completion_date", "curb_material", "sidewalk_material")
 # Wider than this many characters prints landscape; narrower, portrait (Letter's 7.5" across at fit width)
 PORTRAIT_MAX_CHARS = 105
 # How much a Letter page holds down, in points, inside 0.5" margins: 10" portrait, 7.5" landscape
@@ -209,13 +213,14 @@ def _lines(value: CellValue, width: float) -> int:
 class _SheetWriter:
     """Lays a SMART sheet out a row at a time: titles, label-and-value lines, tables and notes, and its page breaks."""
 
-    def __init__(self, workbook: WorkbookTemplate, name: str, widths: dict[str, float]) -> None:
+    def __init__(self, workbook: WorkbookTemplate, name: str, widths: dict[str, float], one_page: bool = False) -> None:
         """
         Add the sheet and ready its styles.
-        Takes the workbook, the sheet's name and its column widths.
+        Takes the workbook, the sheet's name, its column widths and whether it prints on one page (shrunk to fit, no
+        page breaks).
         Returns nothing.
         """
-        self.workbook, self.name, self.widths = workbook, name, widths
+        self.workbook, self.name, self.widths, self.one_page = workbook, name, widths, one_page
         self.last_column = max(widths, key=lambda letter: (len(letter), letter))
         self.landscape = sum(widths.values()) > PORTRAIT_MAX_CHARS
         # Fit to one page wide shrinks the sheet when it is wider than the page, and so lets more rows on a page
@@ -361,12 +366,13 @@ class _SheetWriter:
 
     def finish(self) -> None:
         """
-        Set how the sheet prints: Letter, its orientation, a page wide, its print area and its page breaks.
+        Set how the sheet prints: Letter, its orientation, a page wide, its print area and its page breaks (or one page,
+        without them).
         Takes nothing (a draft's marker is stamped by the export, as on every page).
         Returns nothing.
         """
         self.workbook.set_print_layout(self.name, self.landscape, f"A1:{self.last_column}{max(self.row - 1, 1)}",
-                                       self.breaks)
+                                       [] if self.one_page else self.breaks, self.one_page)
 
 
 def _counted(row: dict[str, Any]) -> bool:
@@ -590,8 +596,8 @@ class SmartSheets:
 
     def _corner(self, site: dict[str, Any]) -> str:
         """
-        Add a ped ramp corner's sheet: header, its inspection, the corner's fields, its ramps' measurements and ADA
-        warnings, and the pay items entered on its ramps' sites.
+        Add a ped ramp corner's sheet: header, its inspection, the corner's CORNER_FIELDS, its ramps' measurements and
+        ADA warnings, and the pay items entered on its ramps' sites.
         Takes the site row (a ped ramp, its corner_id set).
         Returns the sheet's name; raises RuntimeError when the corner can't be read.
         """
@@ -602,7 +608,8 @@ class SmartSheets:
         _, _, entered = self._load()
         label = f"{site['north_south_street']} & {site['east_west_street']} {site.get('corner_direction') or ''}".strip()
 
-        sheet = _SheetWriter(self.workbook, self._name(INSPECTION_PREFIX, label), INSPECTION_WIDTHS)
+        # One page, shrunk to fit: a corner of mixed ramp types lists some 46 measurements
+        sheet = _SheetWriter(self.workbook, self._name(INSPECTION_PREFIX, label), INSPECTION_WIDTHS, one_page=True)
         self._header(sheet, f"SMART inspection {DASH} {label}", site.get("boro"))
         spans = self._header_spans(sheet)
 
@@ -617,9 +624,8 @@ class SmartSheets:
                          ("Approved", short_date(signed_date(approved)) if approved else None)], spans)
 
         fields = report.corner.model_dump()
-        for title, names in CORNER_SECTIONS:
-            sheet.section(title)
-            sheet.pairs([(CORNER_LABELS[name], shown(name, fields.get(name))) for name in names], spans)
+        sheet.section("Construction")
+        sheet.pairs([(CORNER_LABELS[name], shown(name, fields.get(name))) for name in CORNER_FIELDS], spans)
 
         ramps = report.ramps
         sheet.section(f"Ramps at this corner ({len(ramps)})", rows_after=len(ramps) + 1)
