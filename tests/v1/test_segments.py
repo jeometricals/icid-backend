@@ -45,7 +45,9 @@ PAGE_ROW = {"pir_page_id": PAGE_ID, "pir_id": PIR_ID, "property_id": PROPERTY_ID
             "pir_deleted_at": None, "property_deleted_at": None}
 POINTS = [{"x": 0.0, "y": 0.0}, {"x": 30.0, "y": 40.0}]
 SEGMENT_ROW = {"segment_id": SEGMENT_ID, "pir_page_id": PAGE_ID, "segment_type": "curb_concrete", "points": POINTS,
-               "length_ft": Decimal("3.33"), "pay_item_id": None, "note": "north side", "created_at": CREATED,
+               "length_ft": Decimal("3.33"), "reported_length_ft": None, "length_delta_reason": None,
+               "effective_length_ft": Decimal("3.33"), "is_overridden": False,
+               "pay_item_id": None, "note": "north side", "created_at": CREATED,
                "updated_at": CREATED, "created_by": ADMIN_ID, "deleted_at": None, "deleted_by": None,
                "pir_id": PIR_ID, "property_id": PROPERTY_ID, "project_id": "HWS0023", "page_deleted_at": None,
                "pir_deleted_at": None, "property_deleted_at": None}
@@ -124,7 +126,8 @@ class TestCreateSegment:
         assert response.status_code == 201 and response.json()["message"] == "Segment created"
         assert response.json()["data"]["length_ft"] == 3.33
         sql = one_line(run.call_args.args[0])
-        assert "INSERT INTO icid.segments (segment_type, points, pay_item_id, note, length_ft, pir_page_id, created_by)" in sql
+        assert ("INSERT INTO icid.segments (segment_type, points, pay_item_id, note, reported_length_ft, "
+                "length_delta_reason, length_ft, pir_page_id, created_by)") in sql
         assert ("FROM jsonb_array_elements(x.points) WITH ORDINALITY AS a(pt, n) "
                 "JOIN jsonb_array_elements(x.points) WITH ORDINALITY AS b(pt, n) ON b.n = a.n + 1") in sql
         assert "sqrt(power((b.pt->>'x')::numeric - (a.pt->>'x')::numeric, 2)" in sql
@@ -134,7 +137,8 @@ class TestCreateSegment:
         params = run.call_args.args[1]
         assert params[0] == ADMIN_ID
         assert params[1] == "curb_concrete" and params[2].obj == POINTS and params[3] is None
-        assert params[4] == "north side" and params[5] == PAGE_ID and params[6:] == (None, None)
+        assert params[4] == "north side" and params[5] is None and params[6] is None
+        assert params[7] == PAGE_ID and params[8:] == (None, None)
 
     def test_a_member_creates_a_segment_as_its_creator(self):
         with member() as client, patch(PAGES, return_value=[PAGE_ROW]), patch(PROJECTS, return_value=ON_PROJECT), \
@@ -148,7 +152,7 @@ class TestCreateSegment:
                 patch(SEGMENTS, return_value=[{**SEGMENT_ROW, "pay_item_id": PAY_ITEM_ID}]) as run:
             response = admin_client.post(SEGMENTS_URL, json={**BODY, "pay_item_id": str(PAY_ITEM_ID)})
         assert response.status_code == 201
-        assert run.call_args.args[1][3] == PAY_ITEM_ID and run.call_args.args[1][6:] == (PAY_ITEM_ID, PAY_ITEM_ID)
+        assert run.call_args.args[1][3] == PAY_ITEM_ID and run.call_args.args[1][8:] == (PAY_ITEM_ID, PAY_ITEM_ID)
 
     def test_a_pay_item_of_another_project_is_400(self, admin_client):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[]), patch(SEGMENTS) as run:
@@ -252,8 +256,9 @@ class TestUpdateSegment:
         assert "WHERE seg.segment_id = %s AND page.pir_page_id = seg.pir_page_id" in sql
         params = run.call_args.args[1]
         assert params[0] == "curb_concrete" and params[1].obj == new_points and params[3] == "north side"
-        assert params[4].obj == new_points and params[5].obj == new_points  # the new points, for the length
-        assert params[6] == SEGMENT_ID and params[7:] == (None, None)
+        assert params[4] is None and params[5] is None  # no reported length
+        assert params[6].obj == new_points and params[7].obj == new_points  # the new points, for the length
+        assert params[8] == SEGMENT_ID and params[9:] == (None, None)
 
     def test_nothing_sent_is_400(self, admin_client):
         with patch(SEGMENTS, return_value=[SEGMENT_ROW]) as run:

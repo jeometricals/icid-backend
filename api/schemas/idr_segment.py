@@ -11,8 +11,8 @@ from api.schemas.property import display_address_of
 class IdrSegment(BaseModel):
     """
     A curb segment as an IDR lists it: where it is (its site and page), its kind and length (feet; None while its page
-    has no scale), its pay item and what it comes to in that unit (amount: its length for a pay item in LF; None
-    without a pay item or a length), its state, the override that put it there, and who claimed it.
+    has no scale) and reported length (None for none), its pay item and what it comes to in that unit (amount: the
+    reported length, else the drawn one, for a pay item in LF; None without a pay item or a length), its state, the override that put it there, and who claimed it.
     """
 
     segment_id: UUID
@@ -21,6 +21,7 @@ class IdrSegment(BaseModel):
     page_number: int
     segment_type: str
     length_ft: Optional[float] = None
+    reported_length_ft: Optional[float] = None
     note: Optional[str] = None
     property_id: UUID
     property_kind: str
