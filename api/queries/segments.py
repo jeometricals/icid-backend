@@ -19,14 +19,23 @@ def segment_length_sql(points: str, scale: str) -> str:
         )"""
 
 
-# A segment as every function here returns it: its own columns (its claim among them), and its page's PIR, property, project and deleted
-# states (what the routes check before a write). Read from a row source named s.
-_SEGMENT_COLUMNS = """
-            s.segment_id, s.pir_page_id, s.segment_type, s.points, s.length_ft, s.pay_item_id, s.note,
+# A segment's length as it counts (Slice X.2): its reported length, or else its drawn one. Read from a row source
+# named s
+EFFECTIVE_LENGTH = "COALESCE(s.reported_length_ft, s.length_ft)"
+# A segment as every function here returns it: its own columns (its claim among them), its effective length and
+# whether it is overridden, and its page's PIR, property, project and deleted states (what the routes check before a
+# write). Read from a row source named s.
+_SEGMENT_COLUMNS = f"""
+            s.segment_id, s.pir_page_id, s.segment_type, s.points, s.length_ft, s.reported_length_ft,
+            s.length_delta_reason, {EFFECTIVE_LENGTH} AS effective_length_ft,
+            (s.reported_length_ft IS NOT NULL) AS is_overridden, s.pay_item_id, s.note,
             s.claimed_by_idr_id, s.constructed_on, s.created_at, s.updated_at, s.created_by, s.deleted_at, s.deleted_by,""" + PARENT_COLUMNS
 _FROM = page_parents("s")
 # The columns a write sets from the request, in the order their values are passed, each with its type
-_WRITABLE_TYPES = {"segment_type": "text", "points": "jsonb", "pay_item_id": "uuid", "note": "text"}
+_WRITABLE_TYPES = {
+    "segment_type": "text", "points": "jsonb", "pay_item_id": "uuid", "note": "text",
+    "reported_length_ft": "numeric", "length_delta_reason": "text",
+}
 # What the PIR import writes, as this module does
 WRITABLE_TYPES = _WRITABLE_TYPES
 _WRITABLE = tuple(_WRITABLE_TYPES)

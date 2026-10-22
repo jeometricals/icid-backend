@@ -14,18 +14,20 @@ from uuid import UUID
 from api.db.runner import run_query
 from api.queries.flags import FLAG_UNIT
 from api.queries.idr_report_site_pay_items import overridden_sql
+from api.queries.segments import EFFECTIVE_LENGTH
 
 # A segment whose site overrides its pay item in the IDR (Slice X.1), as idr_flags has it for flags
 _OVERRIDDEN = overridden_sql("i.idr_id", "p.id", "s.pay_item_id")
 
-# A segment's quantity in its pay item's unit (ci, its contract item): its length for a pay item in LF; NULL for any
-# other unit, or while its page has no scale
-SEGMENT_AMOUNT = f"(CASE WHEN {FLAG_UNIT} = 'LF' THEN s.length_ft END)"
+# A segment's quantity in its pay item's unit (ci, its contract item): for a pay item in LF, its reported length
+# when it has one (Slice X.2), else its drawn one; NULL for any other unit, or with neither
+SEGMENT_AMOUNT = f"(CASE WHEN {FLAG_UNIT} = 'LF' THEN {EFFECTIVE_LENGTH} END)"
 # A segment as an IDR lists it: where it is (its property, and its page), what it is mapped to, its length and what it
 # comes to in its pay item's unit, whose it is (state: attributed, excluded, claimed by this IDR, or by another) and
 # whether its site overrides its pay item (overridden), and how many points it is drawn through
 _SEGMENT_COLUMNS = f"""
-            s.segment_id, pg.pir_id, s.pir_page_id, pg.page_number, s.segment_type, s.length_ft, s.note,
+            s.segment_id, pg.pir_id, s.pir_page_id, pg.page_number, s.segment_type, s.length_ft, s.reported_length_ft,
+            s.note,
             p.id AS property_id, p.kind::text AS property_kind, p.boro::text AS boro, p.block, p.lot, p.address,
             p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
             p.facing_street::text AS facing_street,
@@ -267,7 +269,7 @@ def reclaim_segment_ids_sql(target: str) -> str:
 
 def insert_segment_quantities_cte(idrs: str, claimed: str = "claimed_segments") -> str:
     """
-    Write the CTE that inserts an IDR's from_segments quantity rows: the segments it just claimed, their lengths summed per pay item in LF and rounded to 2 decimal places, as report type PIR_SEGMENTS. A segment without a pay item, with one in another unit, without a length (no page scale), or whose site overrides its pay item in the IDR (the override bills instead) adds nothing.
+    Write the CTE that inserts an IDR's from_segments quantity rows: the segments it just claimed, their lengths (a reported length over the drawn one) summed per pay item in LF and rounded to 2 decimal places, as report type PIR_SEGMENTS. A segment without a pay item, with one in another unit, without a length (no page scale and none reported), or whose site overrides its pay item in the IDR (the override bills instead) adds nothing.
     Takes the names of two CTEs defined earlier in the statement (written here, never from a request): the one holding the IDR (idr_id, project_id, report_date, reporter_uuid) and the one listing the segments it claimed (segment_id).
     Returns the CTE (segment_quantities), to append to the statement's WITH list; no parameters.
     """

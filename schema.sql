@@ -912,6 +912,10 @@ CREATE TABLE icid.segments (
         'other')),
     CONSTRAINT chk_segments_points CHECK (jsonb_typeof(points) = 'array'),
     CONSTRAINT chk_segments_length CHECK (length_ft IS NULL OR length_ft >= 0),
+    -- A reported length overrides the drawn one for billing (migration 057); NULL means none
+    reported_length_ft  NUMERIC,
+    length_delta_reason TEXT,
+    CONSTRAINT chk_segments_reported_length CHECK (reported_length_ft IS NULL OR reported_length_ft >= 0),
     -- Claimed by an approved IDR, and constructed on its report date (migration 044); cleared when it is unlocked or deleted
     claimed_by_idr_id UUID REFERENCES icid.idrs(idr_id),
     constructed_on    DATE,

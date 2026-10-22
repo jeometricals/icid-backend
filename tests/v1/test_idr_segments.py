@@ -193,7 +193,7 @@ class TestOverrides:
 
 class TestStatements:
     def test_a_segment_is_measured_by_its_length_in_lf_only(self):
-        assert "= 'LF' THEN s.length_ft END" in SEGMENT_AMOUNT
+        assert "= 'LF' THEN COALESCE(s.reported_length_ft, s.length_ft) END" in SEGMENT_AMOUNT
 
     def test_approval_claims_unclaimed_segments_on_the_report_date(self):
         cte = " ".join(claim_segments_cte("moved").split())

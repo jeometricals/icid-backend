@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 055 (and 050b, the pedramp buckets) is in the live database (041 was skipped); 056 (Slice X.1's overrides) must run before the X.1 code is deployed. A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 055 (and 050b, the pedramp buckets) is in the live database (041 was skipped); 056 (Slice X.1's overrides) must run before the X.1 code is deployed, and 057 (Slice X.2's reported segment lengths) before the X.2 code is. A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `dot-forms.md`: DOT's fillable forms, field by field. `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. `dot_ped_ramp_inspection_v1.6.pdf` and `dot_tif_v1.9.pdf` are DOT's fillable forms as published, filled by the `dot_*_pdf.py` services. |
@@ -1372,16 +1372,30 @@ Any change must follow these.
       per pay item under `audit`. A full IDR history screen is post-pilot.
     - **Sketch truth vs billed.** Progress (it sums claimed flags), the Construction Report and the Assessment Summary
       measure the flags themselves, so for an overridden pay item they differ from what the IDR billed
-      (`icid.quantities`, the Quantities route). The PIR pages on the export are the sketch as drawn.
+      (`icid.quantities`, the Quantities route). The PIR pages on the export are the sketch as drawn. Likewise a curb
+      segment's reported length (Slice X.2, below) is what bills, while the Construction Report's CC= keeps the drawn
+      `length_ft` (it is computed from the points).
 - **Curb billing** (migrations 044 and 045; `api/v1/idr_segments.py`, `api/services/idr_segments.py`,
   `api/queries/idr_segments.py`, `api/schemas/idr_segment.py`): an IDR's curb segments are attributed, claimed and
   billed exactly as its flags are (see "IDR flags"), side by side with them.
   - **Scope and overrides.** By default the live segments on the sites its reports imported (Slice U); `icid.idr_segment_attributions`
     excludes one or includes one from elsewhere in the project. `GET /v1/idrs/{id}/attributed-segments`, and `POST
     .../{segment_id}/exclude` and `/include`, for the same people as the flag routes (`attribution_editor`, shared).
-  - **Measured in LF.** A segment's amount is its `length_ft` when its pay item's unit is LF (`SEGMENT_AMOUNT`); a
-    segment without a pay item, with one in another unit, or without a length (no page scale) is unmapped. Nothing
-    refuses another unit on a segment's pay item.
+  - **Measured in LF.** A segment's amount is its length when its pay item's unit is LF (`SEGMENT_AMOUNT`); a
+    segment without a pay item, with one in another unit, or without a length (no page scale and none reported) is
+    unmapped. Nothing refuses another unit on a segment's pay item.
+  - **Reported length** (Slice X.2, migration 057; 057 must run before the X.2 code is deployed): a segment's
+    `reported_length_ft` (0 or more; NULL for none, CHECK `chk_segments_reported_length`) and `length_delta_reason`,
+    set through the segment's POST and PATCH, as a flag's `reported_quantity` and `quantity_delta_reason`: a PATCH
+    null on `reported_length_ft` reverts to the drawn length and clears the reason. Responses carry
+    `effective_length_ft` (the reported length, else the drawn one) and `is_overridden`. Its length counts everywhere
+    as `EFFECTIVE_LENGTH` (`api/queries/segments.py`) through `SEGMENT_AMOUNT`: the IDR's rollup and the export's
+    "PIR Flags" lines, approval's `from_segments` rows, pay-item-sources, Progress, "Pay Items Reported", a site's
+    automatic amount (`site_auto_amount`, so an X.1 override's "overrode auto N" words) and the import's
+    `site_pay_item_keys`. The drawn `length_ft` stays, and is what the Construction Report's CC= prints. **A site's
+    override wins**: when a site overrides the pay item (X.1), its segments add nothing whatever length they report,
+    and the override bills instead. No audit row, as for a flag's reported quantity. The Smart PIR import takes the two
+    fields on a segment too.
   - **Approval claims them** in the same statement as the flags (`claim_segments_cte`, `segments.claimed_by_idr_id` and
     `constructed_on`, CHECK `chk_segments_claim_consistent`) and writes one `from_segments` row per pay item, report
     type `PIR_SEGMENTS` (`insert_segment_quantities_cte`). Unlock and delete release them (`release_segments_cte`); a

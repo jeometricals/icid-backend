@@ -30,8 +30,9 @@ page_router = APIRouter(prefix="/v1/pir-pages", tags=["Segments"], dependencies=
 pir_router = APIRouter(prefix="/v1/pirs", tags=["Segments"], dependencies=[Depends(current_user)])
 router = APIRouter(prefix="/v1/segments", tags=["Segments"], dependencies=[Depends(current_user)])
 
-# The fields a PATCH can clear with a null; for any other, a null counts as not sent
-CLEARABLE = {"pay_item_id", "note"}
+# The fields a PATCH can clear with a null; for any other, a null counts as not sent. A null reported_length_ft
+# reverts to the drawn length
+CLEARABLE = {"pay_item_id", "note", "reported_length_ft", "length_delta_reason"}
 
 
 def _segment_writer_on_page(found: dict = Depends(pir_page_member), user: UserOut = Depends(no_demo_pir_writes)) -> dict:
@@ -133,7 +134,7 @@ def update_segment_record(
     segment_id: UUID, body: SegmentUpdate, found: dict = Depends(_writable_segment), user: UserOut = Depends(current_user)
 ) -> SegmentResponse:
     """
-    Change some of a segment. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted segment, or one on a soft-deleted page, PIR or property. The body is merged over the stored segment and the whole is checked as a new segment is; its length is worked out again. A null clears pay_item_id or note; on anything else it counts as not sent.
+    Change some of a segment. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted segment, or one on a soft-deleted page, PIR or property. The body is merged over the stored segment and the whole is checked as a new segment is; its length is worked out again. A null clears pay_item_id, note or length_delta_reason; on reported_length_ft it reverts to the drawn length and clears length_delta_reason; on anything else it counts as not sent.
     Takes the segment's id as a path parameter, the fields to change in the body, the segment (loaded by _writable_segment) and the user.
     Returns a SegmentResponse with the segment as it now is; raises 400 when nothing is sent, the segment or something above it is deleted (a user who isn't an admin) or the pay item is another project's, 403 for a demo user or a user who isn't on its project, 404 for an unknown segment and 422 when the merged segment breaks a rule.
     """
@@ -141,6 +142,8 @@ def update_segment_record(
     refuse_deleted_chain(found, user, PAGE_PARENTS)
 
     changes = changes_sent(body, CLEARABLE)
+    if "reported_length_ft" in changes and changes["reported_length_ft"] is None:
+        changes["length_delta_reason"] = None  # back to the drawn length: no override left to explain
     merged = validated(SegmentCreate, {**{field: found[field] for field in SegmentCreate.model_fields}, **changes})
     check_pay_item(found["project_id"], merged.pay_item_id)
 
