@@ -106,7 +106,7 @@ class TestImport:
         assert response.status_code == 409
         assert response.json()["detail"].startswith("Pay item 4.13 AAS (HW-200(S)) is entered by hand on Asphaltic Concrete (page 3)")
         assert all("INSERT" not in call.args[0] for call in run.call_args_list)
-        assert "f.claimed_by_idr_id IS NULL" in run.call_args.args[0] and "s.length_ft IS NOT NULL" in run.call_args.args[0]
+        assert "f.claimed_by_idr_id IS NULL" in run.call_args.args[0] and "COALESCE(s.reported_length_ft, s.length_ft) IS NOT NULL" in run.call_args.args[0]
 
     def test_an_auto_general_holding_the_item_is_no_clash(self, admin_client):
         auto = report("GEN", OTHER_REPORT_ID, [{"itemNo": "4.13 AAS", "budgetCode": "HW-200(S)"}], is_auto_generated=True)

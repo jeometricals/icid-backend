@@ -155,7 +155,7 @@ def site_pay_item_keys(property_id: UUID) -> Optional[list[dict[str, Any]]]:
         JOIN icid.segments s ON s.pir_page_id = pg.pir_page_id
         JOIN icid.contract_items ci ON ci.contract_item_id = s.pay_item_id
         WHERE pir.property_id = %s AND pir.deleted_at IS NULL AND pg.deleted_at IS NULL AND s.deleted_at IS NULL
-          AND s.claimed_by_idr_id IS NULL AND s.length_ft IS NOT NULL;"""
+          AND s.claimed_by_idr_id IS NULL AND COALESCE(s.reported_length_ft, s.length_ft) IS NOT NULL;"""
     return run_query(sql, (property_id, property_id))
 
 
