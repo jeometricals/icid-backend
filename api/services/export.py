@@ -180,7 +180,10 @@ def _with_flag_lines_on_a_report(reports: list[dict[str, Any]], lines: list[dict
             report = reports[index]
             report = {**report, "report_data": _with_lines(report.get("report_data") or {}, lines)}
             return reports[:index] + [report] + reports[index + 1:]
-    logger.warning("IDR %s has PIR Flags lines but no General, SWCB or AC report to print them on", idr_id)
+    skipped = [line for line in lines if "payQuantity" in line]
+    logger.warning("IDR %s has PIR Flags lines but no General, SWCB or AC report to print them on: %d pay item "
+                   "row(s) not printed (%s)", idr_id, len(skipped),
+                   ", ".join(f"{line.get('itemNo')} {line.get('payQuantity')} {line.get('unit')}" for line in skipped))
     return reports
 
 

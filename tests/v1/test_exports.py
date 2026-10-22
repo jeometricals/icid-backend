@@ -5838,6 +5838,7 @@ class TestFlagLinesWithoutAGeneral:
             content = export_with_flag_lines(general=None, reports=[dsp])
         assert visible_sheets(content) == ["DSP Fr"]
         assert "no General, SWCB or AC report" in caplog.text
+        assert "1 pay item row(s) not printed (4.13 AAS 30.00 SF)" in caplog.text
 
     def test_a_general_takes_them_rather_than_a_report(self):
         swcb = swcb_row(1, 2)

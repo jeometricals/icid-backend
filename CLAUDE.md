@@ -1269,7 +1269,7 @@ Any change must follow these.
   - **Export.** The rollup prints after the General's own pay items under a "PIR Flags" heading row
     (`_flag_lines` in `api/services/export.py`), live for a draft, frozen for an approved IDR. An IDR with no General
     (Slice X.3) prints them after the pay items (and "Imported Sites" lines) of its first SWCB in page order, else of
-    its first AC report (`_with_flag_lines_on_a_report`); with neither they don't print, and a warning is logged.
+    its first AC report (`_with_flag_lines_on_a_report`); with neither they don't print, and a warning is logged naming the IDR, how many pay item rows were skipped and each one's item, quantity and unit.
   - Flag responses carry `claimed_by_idr_id`, `claimed_by_idr_number` and `constructed_on`; IDR responses carry
     `task_order_id`.
 - **Report sites** (Slice U2, migration 053; `api/v1/idr_report_sites.py`, `api/queries/idr_report_sites.py`,
