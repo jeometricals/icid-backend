@@ -17,7 +17,6 @@ from pydantic import BaseModel, ValidationError
 
 from api.schemas.auth import UserOut
 from api.queries.contract_items import get_project_pay_item
-from api.queries.idr_report_site_pay_items import idr_site_pay_items
 from api.schemas.idr import IdrListItem
 from api.queries.ped_ramp_inspections import get_corner_inspection
 from api.queries.projects import get_user_roles_on_project
@@ -26,7 +25,6 @@ from api.services.auth import MAX_PASSWORD_BYTES, no_demo_pir_writes, pir_member
 from api.services.disciplines import disciplines_for_report_types, report_types_for_discipline
 from api.services.idr_flags import IdrFlagError, manual_entry_conflicts
 from api.services.idr_segments import IdrSegmentError, manual_segment_conflicts
-from api.services.pay_item_sources import site_entry_conflicts
 
 # The shortest password sign-in takes
 MIN_PASSWORD_LENGTH = 6
@@ -266,18 +264,13 @@ def idr_list_items(rows: list[dict[str, Any]]) -> list[IdrListItem]:
 
 def refuse_flag_filled_pay_items(idr: dict[str, Any], pay_items: Any) -> None:
     """
-    Refuse pay items entered by hand that the IDR's flags or curb segments already fill (a contract item attributed by flag or segment), or that are entered on its imported sites.
+    Refuse pay items entered by hand that the IDR's flags or curb segments already fill (a contract item attributed by flag or segment). One entered on its imported sites is allowed: the two bill side by side.
     Takes the IDR dict and the report's payItems as sent.
-    Returns nothing; raises 400 naming the first such item (and, for a site's, the sites), or 500 when the IDR's flags, segments or site pay items can't be read.
+    Returns nothing; raises 400 naming the first such item, or 500 when the IDR's flags or segments can't be read.
     """
     try:
         conflicts = manual_entry_conflicts(idr, pay_items) or manual_segment_conflicts(idr, pay_items)
     except (IdrFlagError, IdrSegmentError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    if not conflicts and isinstance(pay_items, list) and pay_items:
-        site_items = idr_site_pay_items(idr["idr_id"])
-        if site_items is None:
-            raise HTTPException(status_code=500, detail="Failed to read the IDR's site pay items")
-        conflicts = site_entry_conflicts(site_items, pay_items)
     if conflicts:
         raise HTTPException(status_code=400, detail=conflicts[0])

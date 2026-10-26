@@ -240,15 +240,13 @@ class TestPayItemSources:
 
 
 class TestHandEntryCheck:
-    def test_saving_a_report_with_a_pay_item_a_site_holds_is_400_naming_the_sites(self, admin_client):
+    def test_a_report_can_hold_by_hand_a_pay_item_a_site_holds(self, admin_client):
         body = {"payItems": [{"itemNo": "6.70 AB", "budgetCode": "HW-200(S)", "payQuantity": "1"}]}
-        with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]) as reports, \
-             patch(PAY, return_value=[IDR_ITEM]):
+        with patch(IDRS, return_value=[DRAFT_IDR]), patch(REPORTS, return_value=[report()]) as reports,              patch(PAY, return_value=[IDR_ITEM]) as site_items:
             response = admin_client.put(f"/v1/idrs/{IDR_ID}/reports/{REPORT_ID}", json=body)
-        assert response.status_code == 400
-        assert response.json()["detail"] == ("Pay item 6.70 AB (HW-200(S)) is entered on this IDR's imported site "
-                                             "138-22 227 Street; remove it from the report, or from those sites")
-        assert all("UPDATE" not in call.args[0] for call in reports.call_args_list)
+        assert response.status_code == 200, response.text
+        assert any("UPDATE" in call.args[0] for call in reports.call_args_list)
+        site_items.assert_not_called()
 
 
 class TestBilling:

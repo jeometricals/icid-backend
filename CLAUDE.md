@@ -1342,10 +1342,10 @@ Any change must follow these.
     - **Billed at approval:** approve-stage2 (and an un-delete back to approved) writes one `from_sites` quantity row per
       report and pay item, the site's report's type as `report_type`, the contract item's unit in short form
       (`SITE_UNIT`), in its statement (`insert_site_quantities_cte`); unlock and delete remove them with the rest.
-    - **No check against the site's flags or segments:** they add to them. But a report can't hold by hand a pay item
-      a site holds: `refuse_flag_filled_pay_items` also refuses it (400 naming the item and the sites,
-      `site_entry_conflicts`). A site pay item entered when a report already holds the item isn't refused; the report's
-      next save is.
+    - **No check against the site's flags or segments:** they add to them. **A report can hold by hand a pay item a
+      site holds** (its "Cross-site extras", for work outside the sites): both are listed, and both bill, the report's
+      as a `manual` row and the site's as a `from_sites` row. Only flag- and segment-filled pay items are refused on a
+      report (`refuse_flag_filled_pay_items`).
     - **By source:** `GET /v1/idrs/{idr_id}/pay-item-sources?report_id=` sums each pay item (matched by item number and
       budget code) over flags, segments (live, or frozen once approved), site pay items and reports' own (every General,
       SWCB and AC but an auto-General; `report_id`'s only when given), with the sites and reports behind each. Display
