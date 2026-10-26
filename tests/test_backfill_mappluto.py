@@ -19,16 +19,17 @@ SITE_2 = {**SITE_1, "id": UUID("9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e60"), "address
           "lot": "52"}
 
 
-def mappluto(*fronts: object) -> list[MagicMock]:
+def mappluto(*fronts: object, address: str = "313 38 STREET") -> list[MagicMock]:
     """
     Build MapPLUTO's answers, one per call: a lot's LotFront, or None for no lot.
-    Takes the frontages in call order.
+    Takes the frontages in call order and the lots' address.
     Returns the mock responses.
     """
     answers = []
     for front in fronts:
         response = MagicMock()
-        features = [] if front is None else [{"attributes": {"LotFront": front, "Version": "26v2"}}]
+        features = [] if front is None else [{"attributes": {"LotFront": front, "Version": "26v2",
+                                                             "Address": address}}]
         response.json.return_value = {"features": features}
         answers.append(response)
     return answers
@@ -39,8 +40,10 @@ def test_a_dry_run_fetches_and_writes_nothing(capsys):
         assert main(commit=False) == 0
     assert run.call_count == 1  # the list only
     out = capsys.readouterr().out
-    assert "HWS0023 313 38 Street (BBL 3007000062): 16.67 ft (mappluto_26v2); page 1 has no width" in out
-    assert "350 Main St (BBL 3375020052): no usable frontage in MapPLUTO" in out
+    assert ("HWS0023 313 38 Street (BBL 3007000062): 16.67 ft (mappluto_26v2, 313 38 STREET); page 1 has no width"
+            in out)
+    assert "CHECK" not in out
+    assert "350 Main St (BBL 3375020052): no such lot in MapPLUTO" in out
     assert "dry run complete: 1 with a frontage, 1 without" in out
 
 
@@ -65,3 +68,12 @@ def test_mappluto_down_fails_that_site_and_carries_on(capsys):
 def test_a_list_that_cant_be_read_is_1(capsys):
     with patch(PROPS, return_value=None):
         assert main(commit=True) == 1
+
+
+def test_a_lot_whose_mapPLUTO_address_has_another_house_number_is_flagged(capsys):
+    site = {**SITE_1, "address": "300 Main St, Brooklyn", "block": "1234", "lot": "51"}
+    with patch(PROPS, return_value=[site]), patch(GET, side_effect=mappluto(28.83, address="296 MAIN STREET")):
+        assert main(commit=False) == 0
+    out = capsys.readouterr().out
+    assert "28.83 ft (mappluto_26v2, 296 MAIN STREET); page 1 has no width  CHECK: MapPLUTO's lot is 296 MAIN STREET" in out
+    assert "1 to check (MapPLUTO's address has another house number)" in out

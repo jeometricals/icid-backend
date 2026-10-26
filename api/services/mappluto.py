@@ -71,7 +71,8 @@ def _query(lot_bbl: str) -> list[dict[str, Any]]:
     Takes the BBL.
     Returns the features' attributes (none, or one); raises MapPlutoUnavailable when the call fails.
     """
-    params = {"where": f"BBL={lot_bbl}", "outFields": "BBL,LotFront,Version", "returnGeometry": "false", "f": "json"}
+    params = {"where": f"BBL={lot_bbl}", "outFields": "BBL,LotFront,Version,Address", "returnGeometry": "false",
+              "f": "json"}
     try:
         response = httpx.get(MAPPLUTO_QUERY_URL, params=params, timeout=MAPPLUTO_TIMEOUT_SECONDS)
         response.raise_for_status()
@@ -84,12 +85,13 @@ def _query(lot_bbl: str) -> list[dict[str, Any]]:
     return [feature.get("attributes") or {} for feature in body["features"]]
 
 
-def fetch_frontage_by_bbl(boro: str, block: str, lot: str) -> Optional[tuple[Decimal, str]]:
+def lookup_lot(boro: str, block: str, lot: str) -> Optional[dict[str, Any]]:
     """
-    Look a lot's tax-map frontage up in MapPLUTO.
+    Look a lot up in MapPLUTO: its frontage, source label and address, the frontage None when it is suspect (0 or
+    less, 1000 or more, not a number) and the source None for a version not in DCP's form (both logged).
     Takes the borough spelled out, and the block and lot as stored.
-    Returns (the frontage in feet to the cent, its source label), or None when MapPLUTO has no such lot or its record
-    is suspect (logged); raises MapPlutoUnavailable when MapPLUTO can't be asked.
+    Returns {frontage_ft, source, address}, or None when MapPLUTO has no such lot (logged); raises MapPlutoUnavailable
+    when MapPLUTO can't be asked.
     """
     lot_bbl = bbl(boro, block, lot)
     features = _query(lot_bbl)
@@ -103,14 +105,26 @@ def fetch_frontage_by_bbl(boro: str, block: str, lot: str) -> Optional[tuple[Dec
         frontage = Decimal(str(attributes.get("LotFront"))).quantize(CENT, rounding=ROUND_HALF_UP)
     except InvalidOperation:
         frontage = None
-    if frontage is not None and not frontage.is_finite():
+    if frontage is not None and not (frontage.is_finite() and MIN_FRONTAGE < frontage < MAX_FRONTAGE):
         frontage = None
     source = source_label(attributes.get("Version"))
-    if frontage is None or not MIN_FRONTAGE < frontage < MAX_FRONTAGE or source is None:
+    if frontage is None or source is None:
         logger.warning("MapPLUTO's record for lot %s is suspect: LotFront=%r Version=%r", lot_bbl,
                        attributes.get("LotFront"), attributes.get("Version"))
+    return {"frontage_ft": frontage, "source": source, "address": (attributes.get("Address") or "").strip() or None}
+
+
+def fetch_frontage_by_bbl(boro: str, block: str, lot: str) -> Optional[tuple[Decimal, str]]:
+    """
+    Look a lot's tax-map frontage up in MapPLUTO.
+    Takes the borough spelled out, and the block and lot as stored.
+    Returns (the frontage in feet to the cent, its source label), or None when MapPLUTO has no such lot or its record
+    is suspect (logged); raises MapPlutoUnavailable when MapPLUTO can't be asked.
+    """
+    found = lookup_lot(boro, block, lot)
+    if found is None or found["frontage_ft"] is None or found["source"] is None:
         return None
-    return frontage, source
+    return found["frontage_ft"], found["source"]
 
 
 def cache_frontage(property_id: UUID, boro: str, block: Optional[str], lot: Optional[str]) -> None:

@@ -10,6 +10,7 @@ from api.services.mappluto import (
     bbl,
     cache_frontage,
     fetch_frontage_by_bbl,
+    lookup_lot,
     source_display,
     source_label,
 )
@@ -151,3 +152,17 @@ class TestCacheFrontage:
         with patch(GET) as get:
             cache_frontage(PROPERTY_ID, "Brooklyn", None, None)
         get.assert_not_called()
+
+
+class TestLookupLot:
+    def test_it_gives_the_lots_address_too(self):
+        body = {"features": [{"attributes": {"LotFront": 16.67, "Version": "26v2", "Address": " 313 38 STREET "}}]}
+        with patch(GET, return_value=answer(body)) as get:
+            assert lookup_lot("Brooklyn", "700", "62") == {"frontage_ft": Decimal("16.67"), "source": "mappluto_26v2",
+                                                           "address": "313 38 STREET"}
+        assert get.call_args.kwargs["params"]["outFields"] == "BBL,LotFront,Version,Address"
+
+    def test_a_suspect_frontage_is_none_with_the_address_kept(self):
+        body = {"features": [{"attributes": {"LotFront": 0, "Version": "26v2", "Address": "1 MAIN STREET"}}]}
+        with patch(GET, return_value=answer(body)):
+            assert lookup_lot("Brooklyn", "1", "1")["frontage_ft"] is None
