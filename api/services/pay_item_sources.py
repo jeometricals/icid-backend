@@ -1,7 +1,7 @@
 """
 An IDR's pay items by source (Slice V1): what its flags, its curb segments, the pay items entered on its sites and its
-reports' own (hand-entered) pay items each add to a pay item, and the total. Also the check that keeps a report from
-holding by hand a pay item its sites already hold, and the lines the export prints for a report's sites.
+reports' own (hand-entered) pay items each add to a pay item, and the total; and the lines the export prints for a
+report's sites.
 
 Pay items are matched by item number and budget code, spaces around them ignored, as the flags' check matches them.
 """
@@ -97,29 +97,6 @@ def pay_item_sources(idr: dict[str, Any], reports: list[dict[str, Any]], site_it
         total = sum(entry[source] for source in _SOURCES)
         items.append({**entry, "total": _amount(total), **{source: _amount(entry[source]) for source in _SOURCES}})
     return {"idr_id": idr["idr_id"], "report_id": report_id, "frozen": is_frozen(idr), "pay_items": items}
-
-
-def site_entry_conflicts(site_items: list[dict[str, Any]], pay_items: Any) -> list[str]:
-    """
-    Find the pay items a report would hold by hand that the IDR's sites already hold (entered on a site), so approving
-    would count them twice.
-    Takes the IDR's site pay items (idr_site_pay_items) and the report's payItems as sent (anything that isn't a list counts as none).
-    Returns a message per such item, naming it and the sites holding it, in the report's order (empty when there is none).
-    """
-    entries = [item for item in pay_items if isinstance(item, dict)] if isinstance(pay_items, list) else []
-    sites: dict[tuple[str, str], list[str]] = {}
-    for item in site_items:
-        held = sites.setdefault(_key(item["pay_item_ref"], item["budget_code"]), [])
-        if site_label(item) not in held:
-            held.append(site_label(item))
-    conflicts = []
-    for item in entries:
-        key = _key(item.get("itemNo"), item.get("budgetCode"))
-        if key in sites:
-            conflicts.append(f"Pay item {key[0]} ({key[1]}) is entered on this IDR's imported "
-                             f"{'site' if len(sites[key]) == 1 else 'sites'} {', '.join(sites[key])}; "
-                             "remove it from the report, or from those sites")
-    return conflicts
 
 
 def site_export_lines(site_items: list[dict[str, Any]], report_id: UUID) -> list[dict[str, Any]]:
