@@ -85,7 +85,7 @@ def get_page(pir_page_id: UUID) -> Optional[dict[str, Any]]:
 
 def replace_pages(pir_id: UUID, pages: list[dict[str, Any]], replaced_by: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Give a PIR a new set of pages in one statement: its live pages are marked replaced, with their live flags (and those flags' non-assessable areas), features, segments and match lines soft-deleted, and the new pages are inserted, numbered as given. The old pages' files and title blocks are kept, with the old pages.
+    Give a PIR a new set of pages in one statement: its live pages are marked replaced, with their live flags (and those flags' non-assessable areas), features, segments and match lines soft-deleted, and the new pages are inserted, numbered as given. The old pages' files and title blocks are kept, with the old pages. The new page 1 starts with a title block holding a tax-map width (Slice Y1): the replaced page 1's when it was typed by hand (source manual, a cleared one included), else the property's MapPLUTO frontage; none when there is neither.
     Takes the PIR's id, the new pages (each {page_number, image_path, image_mime, width_px, height_px, scale_px_per_ft}) and the uuid of the user replacing them.
     Returns the new page dicts ordered by page number, or None on failure.
     """
@@ -97,7 +97,7 @@ def replace_pages(pir_id: UUID, pages: list[dict[str, Any]], replaced_by: UUID) 
             UPDATE icid.pir_pages
             SET deleted_at = now(), deleted_by = %s, updated_at = now()
             WHERE pir_id = %s AND deleted_at IS NULL
-            RETURNING pir_page_id
+            RETURNING pir_page_id, page_number
         ),"""
         + _RETIRE_DRAWINGS
         + """,
@@ -110,11 +110,32 @@ def replace_pages(pir_id: UUID, pages: list[dict[str, Any]], replaced_by: UUID) 
         + _DRAWINGS_RETIRED
         + """
             RETURNING *
+        ),
+        carried AS (
+            SELECT a.tax_map_width_ft, a.tax_map_source, a.tax_map_fetched_at
+            FROM old_pages op
+            JOIN icid.pir_annotations a ON a.pir_page_id = op.pir_page_id
+            WHERE op.page_number = 1 AND a.tax_map_source = 'manual'
+        ),
+        title_block AS (
+            INSERT INTO icid.pir_annotations (pir_page_id, tax_map_width_ft, tax_map_source, tax_map_fetched_at)
+            SELECT pg.pir_page_id,
+                   CASE WHEN carried.tax_map_source IS NOT NULL THEN carried.tax_map_width_ft ELSE p.tax_map_frontage_ft END,
+                   COALESCE(carried.tax_map_source, p.tax_map_source),
+                   CASE WHEN carried.tax_map_source IS NOT NULL THEN carried.tax_map_fetched_at ELSE p.tax_map_fetched_at END
+            FROM pg"""
+        + _FROM
+        + """
+            LEFT JOIN carried ON true
+            WHERE pg.page_number = 1 AND COALESCE(carried.tax_map_source, p.tax_map_source) IS NOT NULL
+            ON CONFLICT (pir_page_id) DO NOTHING
+            RETURNING pir_page_id
         )
         SELECT"""
         + _PAGE_COLUMNS
         + "\n        FROM pg"
         + _FROM
+        + "\n        CROSS JOIN (SELECT count(*) FROM title_block) AS title_blocks_started"
         + "\n        ORDER BY pg.page_number;"
     )
     payload = Jsonb([

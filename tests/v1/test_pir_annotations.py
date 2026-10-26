@@ -48,7 +48,7 @@ def written(run) -> dict:
     """
     params = run.call_args.args[1]
     values = dict(zip(ANNOTATION_TYPES, params))
-    values["pir_page_id"] = params[len(ANNOTATION_TYPES)]
+    values["pir_page_id"] = params[-1]
     return values
 
 
@@ -107,7 +107,7 @@ class TestPutAnnotations:
         assert "DO UPDATE SET boro = EXCLUDED.boro, updated_at = now()" in sql
         assert "contract_no = EXCLUDED" not in sql and "date_constructed = EXCLUDED" not in sql
         values = written(run)
-        assert len(run.call_args.args[1]) == len(ANNOTATION_TYPES) + 1
+        assert len(run.call_args.args[1]) == len(ANNOTATION_TYPES) + 3
         # a page without a title block gets one, the fields not sent empty
         assert values["boro"] == "Bronx" and values["violation_not_removed_due_to"] == []
         assert all(values[field] is None for field in ANNOTATION_TYPES
@@ -202,3 +202,29 @@ class TestPutAnnotations:
                 patch(ANNOTATIONS) as run:
             assert client.put(URL, json={"boro": "Bronx"}).status_code == 403
         run.assert_not_called()
+
+
+class TestTaxMapSource:
+    """Slice Y1: a width written here was typed by hand, so it is stamped manual when it changes."""
+
+    def test_a_width_sent_is_stamped_manual_when_it_changes(self, admin_client):
+        stamped = {**ANNOTATION_ROW, "tax_map_source": "manual", "tax_map_fetched_at": CREATED}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(ANNOTATIONS, return_value=[stamped]) as run:
+            response = admin_client.put(URL, json={"tax_map_width_ft": 25.5})
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert (data["tax_map_source"], data["tax_map_width_ft"]) == ("manual", 25.5)
+        sql, params = run.call_args.args
+        one_line = " ".join(sql.split())
+        assert ("CASE WHEN %s::numeric IS NOT NULL THEN 'manual' END, "
+                "CASE WHEN %s::numeric IS NOT NULL THEN now() END") in one_line
+        assert ("tax_map_source = CASE WHEN pir_annotations.tax_map_width_ft IS DISTINCT FROM "
+                "EXCLUDED.tax_map_width_ft THEN 'manual' ELSE pir_annotations.tax_map_source END") in one_line
+        assert params[len(ANNOTATION_TYPES):] == (Decimal("25.5"), Decimal("25.5"), PAGE_ID)
+
+    def test_a_save_without_the_width_leaves_its_source(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(ANNOTATIONS, return_value=[ANNOTATION_ROW]) as run:
+            assert admin_client.put(URL, json={"contract_no": "SE-385"}).status_code == 200
+        sql = " ".join(run.call_args.args[0].split())
+        assert "tax_map_source = CASE" not in sql
+        assert run.call_args.args[1][len(ANNOTATION_TYPES):] == (None, None, PAGE_ID)

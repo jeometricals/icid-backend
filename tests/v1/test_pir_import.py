@@ -206,3 +206,14 @@ class TestFlagMeasurablePayItems:
             admin_client.post(URL, json=body())
         args = run.call_args.args
         assert args[4] == {PAY_ITEM_ID, lf_item} and args[5] == {PAY_ITEM_ID}
+
+
+def test_a_width_in_the_file_is_stamped_manual_and_a_block_without_one_keeps_the_pages(admin_client):
+    """Slice Y1: the transcriber's width is manual; a file without one leaves the width a page has."""
+    _, _, _, run = post(admin_client, body())
+    one_line = " ".join(run.call_args.args[0].split())
+    assert "CASE WHEN x.tax_map_width_ft IS NOT NULL THEN 'manual' END" in one_line
+    kept = "COALESCE(EXCLUDED.tax_map_width_ft, pir_annotations.tax_map_width_ft)"
+    assert f"tax_map_width_ft = {kept}" in one_line
+    assert (f"tax_map_source = CASE WHEN pir_annotations.tax_map_width_ft IS DISTINCT FROM {kept} THEN 'manual' "
+            "ELSE pir_annotations.tax_map_source END") in one_line

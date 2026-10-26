@@ -10,7 +10,7 @@ from api.queries._shared import pay_item_in_project
 from api.queries.features import WRITABLE_TYPES as FEATURE_TYPES
 from api.queries.flags import WRITABLE_TYPES as FLAG_TYPES
 from api.queries.non_assessable_areas import WRITABLE_TYPES as AREA_TYPES
-from api.queries.pir_annotations import ANNOTATION_TYPES
+from api.queries.pir_annotations import ANNOTATION_TYPES, manual_tax_map_sets, manual_tax_map_values
 from api.queries.segments import WRITABLE_TYPES as SEGMENT_TYPES
 from api.queries.segments import segment_length_sql
 
@@ -60,7 +60,12 @@ def import_pir_drawings(
     feature_columns = {"pir_page_id": "uuid", **FEATURE_TYPES, "computed_quantity": "numeric"}
     segment_columns = {"pir_page_id": "uuid", "scale_px_per_ft": "numeric", **SEGMENT_TYPES}
     annotation_columns = {"pir_page_id": "uuid", **ANNOTATION_TYPES}
-    annotation_updates = ", ".join(f"{field} = EXCLUDED.{field}" for field in ANNOTATION_TYPES)
+    # A block is replaced whole, but for its tax-map width (Slice Y1): a width the file gives is the transcriber's,
+    # stamped manual when it changes; a block without one keeps the width (and source) the page has
+    new_width = "COALESCE(EXCLUDED.tax_map_width_ft, pir_annotations.tax_map_width_ft)"
+    annotation_updates = ", ".join(
+        f"{field} = {new_width if field == 'tax_map_width_ft' else f'EXCLUDED.{field}'}" for field in ANNOTATION_TYPES
+    ) + ", " + manual_tax_map_sets("pir_annotations", new_width)
 
     sql = f"""
         WITH live AS (
@@ -121,8 +126,8 @@ def import_pir_drawings(
             RETURNING segment_id
         ),
         new_annotations AS (
-            INSERT INTO icid.pir_annotations (pir_page_id, {", ".join(ANNOTATION_TYPES)})
-            SELECT live.pir_page_id, {_from_x(ANNOTATION_TYPES)}
+            INSERT INTO icid.pir_annotations (pir_page_id, {", ".join(ANNOTATION_TYPES)}, tax_map_source, tax_map_fetched_at)
+            SELECT live.pir_page_id, {_from_x(ANNOTATION_TYPES)}, {manual_tax_map_values("x.tax_map_width_ft")}
             FROM jsonb_to_recordset(%s::jsonb) AS {_recordset(annotation_columns)}
             JOIN live ON live.pir_page_id = x.pir_page_id
             ON CONFLICT (pir_page_id) DO UPDATE SET {annotation_updates}, updated_at = now()

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
@@ -10,7 +11,8 @@ _PROPERTY_COLUMNS = """
             p.id, p.project_id, p.kind::text AS kind, p.boro::text AS boro, p.block, p.lot, p.address, p.property_type,
             p.violation_no, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
             p.facing_street::text AS facing_street, p.ramp_type::text AS ramp_type, p.corner_id, p.community_board, p.notes,
-            p.created_at, p.updated_at, p.created_by, p.deleted_at, p.deleted_by"""
+            p.created_at, p.updated_at, p.created_by, p.deleted_at, p.deleted_by,
+            p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at"""
 # What properties are ordered by: a sidewalk's address, a ped ramp's intersection (then its quadrant)
 PROPERTY_ORDER = (
     "COALESCE(p.address, p.intersection_street_1 || ' & ' || p.intersection_street_2), p.quadrant, p.boro, p.block, p.lot"
@@ -22,6 +24,9 @@ _SAME_LOT = """
                   AND other.boro = %s::icid.boro AND other.block = %s AND other.lot = %s
                   AND other.id <> p.id
                   AND other.deleted_at IS NULL"""
+# Property p is still at the lot new_lot names (SET reads p as it was): its MapPLUTO frontage still holds
+_SAME_TAX_LOT = ("(p.boro = new_lot.boro AND p.block IS NOT DISTINCT FROM new_lot.block"
+                 " AND p.lot IS NOT DISTINCT FROM new_lot.lot)")
 # The latest live task order property p is in, as latest: the one issued last (undated ones after the dated), then
 # the newest
 _LATEST_TASK_ORDER = """LEFT JOIN LATERAL (
@@ -154,7 +159,7 @@ def create_property(project_id: str, created_by_uuid: UUID, data: dict[str, Any]
 
 def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
-    Write a property's record whole, as an edit leaves it (its kind is never written). A live property is left alone when another live sidewalk of its project is already at the borough, block and lot it would end up with.
+    Write a property's record whole, as an edit leaves it (its kind is never written). A live property is left alone when another live sidewalk of its project is already at the borough, block and lot it would end up with. A change of borough, block or lot clears its MapPLUTO frontage (Slice Y1), which was the old lot's.
     Takes the property's id and every written column's value keyed by column (one left out is written as None).
     Returns the updated property dict, or None when no property matches or the change would collide.
     """
@@ -164,7 +169,11 @@ def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[st
         SET """
         + ",\n            ".join(f"{column} = {placeholder}" for column, placeholder in _WRITTEN)
         + """,
+            tax_map_frontage_ft = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_frontage_ft END,
+            tax_map_source = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_source END,
+            tax_map_fetched_at = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_fetched_at END,
             updated_at = now()
+        FROM (SELECT %s::icid.boro AS boro, %s::text AS block, %s::text AS lot) AS new_lot
         WHERE p.id = %s
           AND (
               p.deleted_at IS NOT NULL
@@ -178,7 +187,8 @@ def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[st
         + _PROPERTY_COLUMNS
         + ";"
     )
-    params = (*_written_values(data), property_id, data.get("boro"), data.get("block"), data.get("lot"))
+    lot = (data.get("boro"), data.get("block"), data.get("lot"))
+    params = (*_written_values(data), *lot, property_id, *lot)
     try:
         rows = run_query(sql, params)
     except UniqueViolation:
@@ -240,4 +250,84 @@ def undelete_property(property_id: UUID) -> Optional[dict[str, Any]]:
     except UniqueViolation:
         # Another sidewalk took the lot between the statement's own check and its write
         return None
+    return rows[0] if rows else None
+
+
+def set_property_tax_map(
+    property_id: UUID, boro: str, block: str, lot: str, frontage_ft: Decimal, source: str
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Cache a sidewalk's MapPLUTO frontage (Slice Y1), fetched now, while it is still at the lot it was fetched for.
+    Takes the property's id, the borough, block and lot the frontage was fetched for, the frontage in feet and its source label.
+    Returns [{id}] when it was written, [] when the property is gone, not a sidewalk or now at another lot, or None on failure.
+    """
+    sql = """
+        UPDATE icid.properties p
+        SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()
+        WHERE p.id = %s AND p.kind = 'sidewalk' AND p.boro = %s::icid.boro AND p.block = %s AND p.lot = %s
+        RETURNING p.id;
+    """
+    return run_query(sql, (frontage_ft, source, property_id, boro, block, lot))
+
+
+def list_sidewalks_without_tax_map() -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch every live sidewalk, of every project, that has no MapPLUTO frontage yet (Slice Y1's backfill), with the width its live PIR's page 1 holds now.
+    Takes nothing.
+    Returns [{id, project_id, address, boro, block, lot, page_1_width_ft, page_1_source}] by project then address (the page's two None without one), or None on failure.
+    """
+    sql = """
+        SELECT p.id, p.project_id, p.address, p.boro::text AS boro, p.block, p.lot,
+               a.tax_map_width_ft AS page_1_width_ft, a.tax_map_source AS page_1_source
+        FROM icid.properties p
+        LEFT JOIN icid.pirs pir ON pir.property_id = p.id AND pir.deleted_at IS NULL
+        LEFT JOIN icid.pir_pages pg ON pg.pir_id = pir.id AND pg.page_number = 1 AND pg.deleted_at IS NULL
+        LEFT JOIN icid.pir_annotations a ON a.pir_page_id = pg.pir_page_id
+        WHERE p.kind = 'sidewalk' AND p.deleted_at IS NULL AND p.tax_map_frontage_ft IS NULL
+        ORDER BY p.project_id, p.address;
+    """
+    return run_query(sql)
+
+
+def refresh_property_tax_map(
+    property_id: UUID, boro: str, block: str, lot: str, frontage_ft: Decimal, source: str
+) -> Optional[dict[str, Any]]:
+    """
+    Write a sidewalk's freshly fetched MapPLUTO frontage (Slice Y1) in one statement: onto the property, and onto the title block of every live page of its live PIR whose width wasn't typed by hand (source manual), page 1 getting a title block if it has none.
+    Takes the property's id, the borough, block and lot the frontage was fetched for, the frontage in feet and its source label.
+    Returns {tax_map_frontage_ft, tax_map_source, tax_map_fetched_at, old_frontage_ft, pages_updated}, or None when the property is gone, not a sidewalk or now at another lot (nothing written).
+    """
+    sql = """
+        WITH prop AS (
+            UPDATE icid.properties p
+            SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()
+            FROM icid.properties old
+            WHERE p.id = %s AND old.id = p.id
+              AND p.kind = 'sidewalk' AND p.boro = %s::icid.boro AND p.block = %s AND p.lot = %s
+            RETURNING p.id, p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at,
+                      old.tax_map_frontage_ft AS old_frontage_ft
+        ),
+        pages AS (
+            SELECT pg.pir_page_id, pg.page_number
+            FROM prop
+            JOIN icid.pirs pir ON pir.property_id = prop.id AND pir.deleted_at IS NULL
+            JOIN icid.pir_pages pg ON pg.pir_id = pir.id AND pg.deleted_at IS NULL
+        ),
+        written AS (
+            INSERT INTO icid.pir_annotations AS a (pir_page_id, tax_map_width_ft, tax_map_source, tax_map_fetched_at)
+            SELECT pages.pir_page_id, prop.tax_map_frontage_ft, prop.tax_map_source, prop.tax_map_fetched_at
+            FROM pages CROSS JOIN prop
+            WHERE pages.page_number = 1
+               OR EXISTS (SELECT 1 FROM icid.pir_annotations o WHERE o.pir_page_id = pages.pir_page_id)
+            ON CONFLICT (pir_page_id) DO UPDATE
+                SET tax_map_width_ft = EXCLUDED.tax_map_width_ft, tax_map_source = EXCLUDED.tax_map_source,
+                    tax_map_fetched_at = EXCLUDED.tax_map_fetched_at, updated_at = now()
+                WHERE a.tax_map_source IS DISTINCT FROM 'manual'
+            RETURNING a.pir_page_id
+        )
+        SELECT prop.tax_map_frontage_ft, prop.tax_map_source, prop.tax_map_fetched_at, prop.old_frontage_ft,
+               (SELECT count(*) FROM written) AS pages_updated
+        FROM prop;
+    """
+    rows = run_query(sql, (frontage_ft, source, property_id, boro, block, lot))
     return rows[0] if rows else None

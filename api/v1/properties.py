@@ -1,7 +1,9 @@
+import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from api.queries.ped_ramp_corners import get_live_corner_of_project
@@ -10,6 +12,7 @@ from api.queries.properties import (
     get_property,
     get_sidewalk_at,
     list_properties,
+    refresh_property_tax_map,
     soft_delete_property,
     undelete_property,
     update_property,
@@ -26,6 +29,8 @@ from api.schemas.property import (
     PropertyOut,
     PropertyResponse,
     PropertyUpdate,
+    TaxMapRefresh,
+    TaxMapRefreshResponse,
 )
 from api.services.auth import (
     current_admin,
@@ -36,7 +41,10 @@ from api.services.auth import (
     property_member,
 )
 from api.services.export_common import FORM_TIMEZONE
+from api.services.mappluto import MapPlutoUnavailable, cache_frontage, fetch_frontage_by_bbl
 from api.v1._shared import clean_text, refuse_deleted_for_member, refuse_locked_corner, validated
+
+logger = logging.getLogger(__name__)
 
 # A second router under /v1/projects, for a project's properties. A demo user reaches only their own project.
 project_router = APIRouter(
@@ -66,6 +74,8 @@ KIND_CHANGED = "Property kind cannot be changed. Delete and recreate."
 CONFLICT = {409: {"model": PropertyConflict}}
 # What a member who isn't an admin is told when they change a soft-deleted property
 PROPERTY_DELETED = "Property is deleted"
+NO_TAX_LOT = "A ped ramp has no tax lot to look up"
+MAPPLUTO_DOWN = "MapPLUTO can't be reached right now; nothing was changed. Try again later."
 
 
 def _writable_property(
@@ -187,11 +197,12 @@ def list_project_properties(
     dependencies=[Depends(no_demo_property_writes)],
 )
 def create_project_property(
-    project_id: str, body: PropertyCreate, user: UserOut = Depends(project_member)
+    project_id: str, body: PropertyCreate, background: BackgroundTasks, user: UserOut = Depends(project_member)
 ) -> PropertyResponse | JSONResponse:
     """
     Add a property to a project, created by the signed-in user: a sidewalk or a ped ramp. For a user on the project, in any role, or an admin; not a demo user.
-    Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes, violation_no and community_board are none) and the user.
+    A sidewalk's tax-map frontage is fetched from MapPLUTO after the response has gone (Slice Y1), so it comes back without one.
+    Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes, violation_no and community_board are none), the background tasks and the user.
     Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value or a corner_id that isn't a live corner of the project, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value, a block or lot that isn't digits, or fields that don't fit the kind and 409 (with existing_property_id) when a live sidewalk of the project is at the borough, block and lot. A ped ramp whose corner's inspection is submitted is the RE's (403), and one whose inspection is approved is frozen (409).
     """
     fields = _clean_fields(body)
@@ -201,6 +212,9 @@ def create_project_property(
 
     if row is None:
         return _conflict(project_id, fields)
+
+    if row["kind"] == "sidewalk":
+        background.add_task(cache_frontage, row["id"], row["boro"], row["block"], row["lot"])
 
     return _response(row, "Property created")
 
@@ -219,12 +233,13 @@ def get_property_record(found: dict = Depends(property_member)) -> PropertyDetai
 def update_property_record(
     property_id: UUID,
     body: PropertyUpdate,
+    background: BackgroundTasks,
     found: dict = Depends(_writable_property),
     user: UserOut = Depends(current_user),
 ) -> PropertyResponse | JSONResponse:
     """
-    Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes, violation_no and community_board clear them. Its kind can't change.
-    Takes the property's id as a path parameter, the fields to change in the body, the property (loaded by _writable_property) and the user.
+    Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes, violation_no and community_board clear them. Its kind can't change. A sidewalk moved to another borough, block or lot loses its tax-map frontage, fetched again from MapPLUTO after the response has gone (Slice Y1).
+    Takes the property's id as a path parameter, the fields to change in the body, the background tasks, the property (loaded by _writable_property) and the user.
     Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, a new corner_id isn't a live corner of its project, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live sidewalk of its project is at the borough, block and lot it would end up with. A ped ramp whose corner's inspection is submitted is the RE's (403), and one whose inspection is approved is frozen (409).
     """
     refuse_deleted_for_member(found, user, PROPERTY_DELETED)
@@ -249,6 +264,9 @@ def update_property_record(
     if row is None:
         current = _load_property(property_id)
         return _conflict(current["project_id"], merged, property_id)
+
+    if row["kind"] == "sidewalk" and any(row[field] != found.get(field) for field in ("boro", "block", "lot")):
+        background.add_task(cache_frontage, row["id"], row["boro"], row["block"], row["lot"])
 
     return _response(row, "Property updated")
 
@@ -313,3 +331,40 @@ def undelete_property_record(
         return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
 
     return _response(row, "Property restored")
+
+
+@router.post("/{property_id}/admin/refresh-tax-map", response_model=TaxMapRefreshResponse)
+def refresh_tax_map(property_id: UUID, admin: UserOut = Depends(current_admin)) -> TaxMapRefreshResponse:
+    """
+    Fetch a sidewalk's tax-map frontage from MapPLUTO again, now (Slice Y1), and write it onto the property and onto the title blocks of its live PIR's pages, but those whose width was typed by hand; page 1 gets a title block if it has none. Admins only, a soft-deleted property included. Logged, as the record of it.
+    Takes the property's id as a path parameter and the signed-in admin.
+    Returns a TaxMapRefreshResponse; raises 400 for a ped ramp, 403 for a user who isn't an admin, 404 for an unknown property, 409 when the property moved to another lot meanwhile, 422 when MapPLUTO has no usable frontage for its lot and 503 when MapPLUTO can't be reached (nothing is written for any of them).
+    """
+    current = _load_property(property_id)
+
+    if current["kind"] != "sidewalk":
+        raise HTTPException(status_code=400, detail=NO_TAX_LOT)
+
+    lot = (current["boro"], current["block"], current["lot"])
+    try:
+        found = fetch_frontage_by_bbl(*lot)
+    except MapPlutoUnavailable as exc:
+        logger.warning("MapPLUTO refresh of property %s failed: %s", property_id, exc)
+        raise HTTPException(status_code=503, detail=MAPPLUTO_DOWN) from exc
+
+    if found is None:
+        raise HTTPException(status_code=422, detail=f"MapPLUTO has no usable frontage for {_site(current)}")
+
+    row = refresh_property_tax_map(property_id, *lot, *found)
+
+    if row is None:
+        raise HTTPException(status_code=409, detail="The site moved to another lot meanwhile; refresh it again")
+
+    logger.info(
+        "MapPLUTO refresh: property_id=%s old_frontage=%s new_frontage=%s source=%s pages_updated=%s admin=%s at=%s",
+        property_id, row["old_frontage_ft"], row["tax_map_frontage_ft"], row["tax_map_source"], row["pages_updated"],
+        admin.uuid, datetime.now(timezone.utc).isoformat(),
+    )
+    data = TaxMapRefresh(frontage_ft=row["tax_map_frontage_ft"], source=row["tax_map_source"],
+                         fetched_at=row["tax_map_fetched_at"], pages_updated=row["pages_updated"])
+    return TaxMapRefreshResponse(status="success", message=f"Tax-map frontage refreshed; {row['pages_updated']} title block(s) updated", data=data)

@@ -56,3 +56,11 @@ PEDRAMP_EXPORT_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_EXPORT_URL_EXPIR
 # Ped ramp photos: an inspection's or a TIF's photos live in this private bucket, shown through signed URLs
 PEDRAMP_PHOTO_BUCKET_NAME: str = os.getenv("PEDRAMP_PHOTO_BUCKET_NAME", "pedramp-photos")
 PEDRAMP_PHOTO_URL_EXPIRY_SECONDS: int = int(os.getenv("PEDRAMP_PHOTO_URL_EXPIRY_SECONDS", "3600"))
+
+# MapPLUTO (Slice Y1): DCP's MapPLUTO feature layer, asked for a sidewalk's lot frontage by BBL. No key is needed.
+# A call that takes longer than MAPPLUTO_TIMEOUT_SECONDS is given up on.
+MAPPLUTO_QUERY_URL: str = os.getenv(
+    "MAPPLUTO_QUERY_URL",
+    "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/ArcGIS/rest/services/MAPPLUTO/FeatureServer/0/query",
+)
+MAPPLUTO_TIMEOUT_SECONDS: float = float(os.getenv("MAPPLUTO_TIMEOUT_SECONDS", "10"))

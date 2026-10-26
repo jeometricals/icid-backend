@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
-from unittest.mock import patch
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 
 from api.queries.properties import get_sidewalk_at, list_properties, undelete_property
@@ -264,7 +266,7 @@ class TestUpdateProperty:
         assert "UPDATE icid.properties p" in sql and "updated_at = now()" in sql
         assert "other.deleted_at IS NULL" in sql and "p.deleted_at IS NOT NULL" in sql
         assert params == ("Queens", "1234", "56", "12-34 56th Avenue", "expedited", *SIDEWALK_NOTHING_ELSE, None,
-                          PROPERTY_ID, "Queens", "1234", "56")
+                          "Queens", "1234", "56", PROPERTY_ID, "Queens", "1234", "56")
         one_line = " ".join(sql.split())
         assert ("other.kind = 'sidewalk' AND other.boro = %s::icid.boro AND other.block = %s AND other.lot = %s"
                 in one_line)
@@ -561,8 +563,8 @@ class TestEditingByKind:
             response = admin_client.patch(f"/v1/properties/{RAMP_ID}", json={"quadrant": "SE", "kind": "ped_ramp"})
         assert response.status_code == 200 and response.json()["data"]["quadrant"] == "SE"
         assert run.call_args.args[1] == ("Brooklyn", None, None, None, None, None, "Main St", "1st Ave", "SE",
-                                         "street_2", "PERPENDICULAR", None, None, None, RAMP_ID, "Brooklyn", None,
-                                         None)
+                                         "street_2", "PERPENDICULAR", None, None, None, "Brooklyn", None, None,
+                                         RAMP_ID, "Brooklyn", None, None)
 
     def test_a_sidewalks_field_on_a_ped_ramp_is_422(self, admin_client):
         with patch(PROPS, return_value=[RAMP_ROW]) as run:
@@ -751,3 +753,139 @@ class TestRampCorner:
             response = admin_client.patch(f"/v1/properties/{RAMP_ID}", json={"corner_id": str(CORNER_ID)})
         assert (response.status_code, response.json()) == (400, CORNER_ELSEWHERE)
         assert run.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Slice Y1: a sidewalk's tax-map frontage from MapPLUTO, fetched after a create or a move, and an admin's refresh
+# ---------------------------------------------------------------------------
+
+GET = "api.services.mappluto.httpx.get"
+FETCHED = datetime(2026, 11, 5, 14, 0, tzinfo=timezone.utc)
+CACHED_ROW = {**PROPERTY_ROW, "tax_map_frontage_ft": Decimal("40.00"), "tax_map_source": "mappluto_26v2",
+              "tax_map_fetched_at": FETCHED}
+REFRESHED = {"tax_map_frontage_ft": Decimal("42.50"), "tax_map_source": "mappluto_26v2", "tax_map_fetched_at": FETCHED,
+             "old_frontage_ft": Decimal("40.00"), "pages_updated": 2}
+
+
+def mappluto(front: object, version: str = "26v2") -> MagicMock:
+    """
+    Build MapPLUTO's answer for one lot.
+    Takes its LotFront and Version.
+    Returns the mock response.
+    """
+    response = MagicMock()
+    response.json.return_value = {"features": [{"attributes": {"LotFront": front, "Version": version}}]}
+    return response
+
+
+class TestTaxMapFrontageFetched:
+    def test_a_new_sidewalk_comes_back_without_one_and_is_fetched_after(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(GET, return_value=mappluto(40)) as get, \
+                patch(PROPS, side_effect=[[PROPERTY_ROW], [{"id": PROPERTY_ID}]]) as run:
+            response = admin_client.post(LIST_URL, json=BODY)
+        data = response.json()["data"]
+        assert response.status_code == 201
+        assert (data["tax_map_frontage_ft"], data["tax_map_source"], data["tax_map_fetched_at"]) == (None, None, None)
+        assert get.call_args.kwargs["params"]["where"] == "BBL=4012340056"
+        sql, params = run.call_args.args
+        assert "SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()" in sql
+        assert params == (Decimal("40.00"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "56")
+
+    def test_a_fetch_that_fails_leaves_the_sidewalk_created_without_one(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(GET, side_effect=httpx.ConnectError("down")), \
+                patch(PROPS, return_value=[PROPERTY_ROW]) as run:
+            response = admin_client.post(LIST_URL, json=BODY)
+        assert response.status_code == 201 and run.call_count == 1
+
+    def test_a_ped_ramp_isnt_looked_up(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(GET) as get, patch(PROPS, return_value=[RAMP_ROW]):
+            response = admin_client.post(LIST_URL, json=RAMP_BODY)
+        assert response.status_code == 201
+        get.assert_not_called()
+
+    def test_responses_carry_the_cached_frontage(self, admin_client):
+        with patch(PROPS, return_value=[CACHED_ROW]):
+            data = admin_client.get(URL).json()["data"]
+        assert (data["tax_map_frontage_ft"], data["tax_map_source"]) == (40.0, "mappluto_26v2")
+        assert data["tax_map_fetched_at"].startswith("2026-11-05T14:00:00")
+
+    def test_a_move_to_another_lot_clears_it_and_fetches_the_new_lots(self, admin_client):
+        moved = {**PROPERTY_ROW, "lot": "57"}
+        with patch(GET, return_value=mappluto(25)) as get, \
+                patch(PROPS, side_effect=[[CACHED_ROW], [moved], [{"id": PROPERTY_ID}]]) as run:
+            response = admin_client.patch(URL, json={"lot": "57"})
+        assert response.status_code == 200
+        update_sql, update_params = run.call_args_list[1].args
+        one_line = " ".join(update_sql.split())
+        assert ("tax_map_frontage_ft = CASE WHEN (p.boro = new_lot.boro AND p.block IS NOT DISTINCT FROM new_lot.block "
+                "AND p.lot IS NOT DISTINCT FROM new_lot.lot) THEN p.tax_map_frontage_ft END") in one_line
+        assert "FROM (SELECT %s::icid.boro AS boro, %s::text AS block, %s::text AS lot) AS new_lot" in one_line
+        assert update_params[-7:] == ("Queens", "1234", "57", PROPERTY_ID, "Queens", "1234", "57")
+        assert get.call_args.kwargs["params"]["where"] == "BBL=4012340057"
+        assert run.call_args.args[1] == (Decimal("25.00"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "57")
+
+    def test_an_edit_that_keeps_the_lot_fetches_nothing(self, admin_client):
+        with patch(GET) as get, patch(PROPS, return_value=[CACHED_ROW]):
+            response = admin_client.patch(URL, json={"notes": "corner lot"})
+        assert response.status_code == 200
+        get.assert_not_called()
+
+
+class TestRefreshTaxMap:
+    REFRESH = f"{URL}/admin/refresh-tax-map"
+
+    def test_an_admin_refreshes_the_property_and_its_title_blocks(self, admin_client, caplog):
+        with patch(GET, return_value=mappluto(42.5)), patch(PROPS, side_effect=[[CACHED_ROW], [REFRESHED]]) as run, \
+                caplog.at_level("INFO", logger="api.v1.properties"):
+            response = admin_client.post(self.REFRESH)
+        assert response.status_code == 200
+        assert response.json()["data"] == {"frontage_ft": 42.5, "source": "mappluto_26v2",
+                                           "fetched_at": "2026-11-05T14:00:00Z", "pages_updated": 2}
+        sql, params = run.call_args.args
+        one_line = " ".join(sql.split())
+        assert params == (Decimal("42.50"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "56")
+        assert "JOIN icid.pirs pir ON pir.property_id = prop.id AND pir.deleted_at IS NULL" in one_line
+        assert "WHERE a.tax_map_source IS DISTINCT FROM 'manual'" in one_line
+        assert "WHERE pages.page_number = 1 OR EXISTS" in one_line
+        assert any("MapPLUTO refresh: property_id=" in record.message and "old_frontage=40.00" in record.message
+                   and "new_frontage=42.50" in record.message and "pages_updated=2" in record.message
+                   for record in caplog.records)
+
+    def test_mappluto_down_is_503_and_writes_nothing(self, admin_client):
+        with patch(GET, side_effect=httpx.ReadTimeout("slow")), patch(PROPS, return_value=[CACHED_ROW]) as run:
+            response = admin_client.post(self.REFRESH)
+        assert response.status_code == 503 and "nothing was changed" in response.json()["detail"]
+        assert run.call_count == 1
+
+    def test_no_usable_frontage_is_422_and_writes_nothing(self, admin_client):
+        with patch(GET, return_value=mappluto(0)), patch(PROPS, return_value=[CACHED_ROW]) as run:
+            response = admin_client.post(self.REFRESH)
+        assert (response.status_code, response.json()["detail"]) == (
+            422, "MapPLUTO has no usable frontage for Queens Block 1234 Lot 56")
+        assert run.call_count == 1
+
+    def test_a_move_meanwhile_is_409(self, admin_client):
+        with patch(GET, return_value=mappluto(42.5)), patch(PROPS, side_effect=[[CACHED_ROW], []]):
+            assert admin_client.post(self.REFRESH).status_code == 409
+
+    def test_a_ped_ramp_is_400(self, admin_client):
+        with patch(GET) as get, patch(PROPS, return_value=[RAMP_ROW]):
+            response = admin_client.post(f"/v1/properties/{RAMP_ID}/admin/refresh-tax-map")
+        assert (response.status_code, response.json()["detail"]) == (400, "A ped ramp has no tax lot to look up")
+        get.assert_not_called()
+
+    def test_an_unknown_property_is_404(self, admin_client):
+        with patch(PROPS, return_value=[]):
+            assert admin_client.post(self.REFRESH).status_code == 404
+
+    def test_a_user_who_isnt_an_admin_is_forbidden(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROPS) as run, patch(GET) as get:
+            response = inspector.post(self.REFRESH)
+        assert (response.status_code, response.json()) == FORBIDDEN
+        run.assert_not_called()
+        get.assert_not_called()
+
+    def test_a_demo_user_is_forbidden(self, demo_client):
+        with patch(PROPS) as run:
+            assert demo_client.post(self.REFRESH).status_code == 403
+        run.assert_not_called()
