@@ -424,6 +424,17 @@ CREATE TABLE icid.properties (
     -- The corner a ped ramp is at (migration 047); a sidewalk has none
     corner_id              UUID REFERENCES icid.ped_ramp_corners(corner_id),
     CONSTRAINT chk_properties_corner_kind CHECK (corner_id IS NULL OR kind = 'ped_ramp'),
+    -- A sidewalk's tax-map frontage from DCP's MapPLUTO (Slice Y1, migration 058): all three set, or none
+    tax_map_frontage_ft    NUMERIC(10,2),
+    tax_map_source         TEXT,
+    tax_map_fetched_at     TIMESTAMPTZ,
+    CONSTRAINT chk_properties_tax_map_source
+        CHECK (tax_map_source IS NULL OR tax_map_source ~ '^(mappluto_\d{2}v\d+(\.\d+)?|manual|pip_scrape|r1k)$'),
+    CONSTRAINT chk_properties_tax_map_frontage
+        CHECK (tax_map_frontage_ft IS NULL OR (tax_map_frontage_ft > 0 AND tax_map_frontage_ft < 1000)),
+    CONSTRAINT chk_properties_tax_map_cache
+        CHECK ((tax_map_frontage_ft IS NULL) = (tax_map_source IS NULL)
+               AND (tax_map_source IS NULL) = (tax_map_fetched_at IS NULL)),
     CONSTRAINT properties_kind_fields_consistent CHECK (
         (kind = 'sidewalk' AND
          block IS NOT NULL AND lot IS NOT NULL AND address IS NOT NULL AND property_type IS NOT NULL AND
@@ -985,8 +996,16 @@ CREATE TABLE icid.pir_annotations (
     date_notice_issued           DATE,
     date_excavated               DATE,
     date_constructed             DATE,
+    -- Where tax_map_width_ft came from (Slice Y1, migration 058): mappluto_<version>, manual, ...; a width always has one
+    tax_map_source               TEXT,
+    tax_map_fetched_at           TIMESTAMPTZ,
     created_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_pir_annotations_tax_map_source
+        CHECK (tax_map_source IS NULL OR tax_map_source ~ '^(mappluto_\d{2}v\d+(\.\d+)?|manual|pip_scrape|r1k)$'),
+    CONSTRAINT chk_pir_annotations_tax_map_provenance
+        CHECK ((tax_map_width_ft IS NULL OR tax_map_source IS NOT NULL)
+               AND (tax_map_source IS NULL) = (tax_map_fetched_at IS NULL)),
     CONSTRAINT chk_pir_annotations_boro
         CHECK (boro IS NULL OR boro IN ('Manhattan', 'Bronx', 'Brooklyn', 'Queens', 'Staten Island')),
     CONSTRAINT chk_pir_annotations_property_status CHECK (property_status IS NULL OR
