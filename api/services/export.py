@@ -32,7 +32,7 @@ from api.services import (
     export_ac, export_attachments, export_conc_cyl, export_conc_mix, export_dsp, export_site_sheets, export_smart_sheets,
     export_swcb,
 )
-from api.services.idr_flags import EXPORT_HEADING, IdrFlagError, export_lines
+from api.services.idr_flags import IdrFlagError, export_lines
 from api.services.idr_segments import IdrSegmentError, export_segment_lines
 from api.services.pay_item_sources import site_export_lines
 from api.services import export_general
@@ -137,19 +137,15 @@ def _general_for_export(idr_id: UUID) -> Optional[_General]:
 
 def _flag_lines(idr: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    Lay out an IDR's flag rollup, then its curb segments' (idr_segments.export_segment_lines), as pay items under one
-    "PIR Flags" heading row (see idr_flags.export_lines): live before approval, as frozen at approval after. They carry
-    no id, so no redline touches them.
+    Lay out an IDR's flag rollup (idr_flags.export_lines), then its curb segments' (idr_segments.export_segment_lines),
+    as pay items: live before approval, as frozen at approval after. They carry no id, so no redline touches them.
     Takes the IDR row.
     Returns the rows (empty when there are none); raises ExportDataError when the IDR's flags or segments can't be read.
     """
     try:
-        flag_lines, segment_lines = export_lines(idr), export_segment_lines(idr)
+        return export_lines(idr) + export_segment_lines(idr)
     except (IdrFlagError, IdrSegmentError) as exc:
         raise ExportDataError(str(exc)) from exc
-    if not flag_lines and not segment_lines:
-        return []
-    return (flag_lines or [{"description": EXPORT_HEADING}]) + segment_lines
 
 
 def _with_lines(report_data: dict[str, Any], lines: list[dict[str, Any]]) -> dict[str, Any]:
@@ -167,7 +163,7 @@ def _with_lines(report_data: dict[str, Any], lines: list[dict[str, Any]]) -> dic
 def _with_flag_lines_on_a_report(reports: list[dict[str, Any]], lines: list[dict[str, Any]],
                                  idr_id: UUID) -> list[dict[str, Any]]:
     """
-    Print an IDR's "PIR Flags" lines when it has no General: after the pay items (and "Imported Sites" lines) of its
+    Print an IDR's flag and segment lines when it has no General: after the pay items (and site lines) of its
     first SWCB in page order, else of its first AC report; with neither they don't print, and that is logged.
     Takes the IDR's reports in page order, the lines (_flag_lines) and the IDR's uuid.
     Returns the reports, the one taking the lines as a copy with them added.
@@ -182,7 +178,7 @@ def _with_flag_lines_on_a_report(reports: list[dict[str, Any]], lines: list[dict
             report = {**report, "report_data": _with_lines(report.get("report_data") or {}, lines)}
             return reports[:index] + [report] + reports[index + 1:]
     skipped = [line for line in lines if "payQuantity" in line]
-    logger.warning("IDR %s has PIR Flags lines but no General, SWCB or AC report to print them on: %d pay item "
+    logger.warning("IDR %s has PIR flag lines but no General, SWCB or AC report to print them on: %d pay item "
                    "row(s) not printed (%s)", idr_id, len(skipped),
                    ", ".join(f"{line.get('itemNo')} {line.get('payQuantity')} {line.get('unit')}" for line in skipped))
     return reports
@@ -190,8 +186,8 @@ def _with_flag_lines_on_a_report(reports: list[dict[str, Any]], lines: list[dict
 
 def _with_site_lines(reports: list[dict[str, Any]], idr_id: UUID) -> list[dict[str, Any]]:
     """
-    Add the pay items entered on each SWCB's imported sites to its pay items, after its own, under an "Imported Sites"
-    heading row (pay_item_sources.site_export_lines), summed per pay item. They carry no id, so no redline touches them.
+    Add the pay items entered on each SWCB's imported sites to its pay items, after its own
+    (pay_item_sources.site_export_lines), summed per pay item. They carry no id, so no redline touches them.
     Takes the IDR's reports and its uuid.
     Returns the reports, an SWCB with site pay items getting a copy of its report_data with the lines added; raises
     ExportDataError when the site pay items can't be read.
@@ -499,7 +495,7 @@ def generate_idr_export(idr_id: UUID) -> IdrExport:
     a signature line, and an approved IDR's carry the Resident Engineer's beside it (the inspector's dated with the work date, the RE's with the approval date).
     What reviewers edited prints with its redlines, at any status: the replaced value struck, the reviewer's in blue
     with their initials (see export_redlines); a revised pay item takes a row per revision, which can add pages.
-    The IDR's flag rollup prints with the General's pay items, under a "PIR Flags" heading row; an IDR with no
+    The IDR's flag rollup prints after the General's pay items; an IDR with no
     General prints no General pages (Slice X.3) and puts that rollup on its first SWCB's, else its first AC's, pay
     items.
     An auto-General prints as a summary cover (see _general_for_export).

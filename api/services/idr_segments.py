@@ -147,7 +147,7 @@ def segment_rollup(idr: dict[str, Any]) -> list[dict[str, Any]]:
 
 def export_segment_lines(idr: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    Lay an IDR's segment rollup out as pay items for the export, one row per pay item (item number, budget code, amount, unit, description), to print under the "PIR Flags" heading with the flags' lines.
+    Lay an IDR's segment rollup out as pay items for the export, one row per pay item (item number, budget code, amount, unit, description), to print after the flags' lines.
     Takes the IDR dict.
     Returns the rows, as a report's payItems are; empty when the rollup is; raises IdrSegmentError when it can't be read.
     """

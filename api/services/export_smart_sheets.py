@@ -5,7 +5,7 @@ before the site's PIR pages or inspection forms (export_site_sheets), unnumbered
 A sidewalk's sheet (SMART_PIR_<address>) is what the site's page shows for the IDR: a header (the site, the inspector,
 the IDR's number and work date), the flags the IDR counts there (the sketch workspace's flag table and the amount each
 comes to), its curb segments (the Curb Segments table) and the pay items for the site (what its flags and segments come
-to, an override in their place, the pay items entered by hand, and totals). Live before approval, the flags and
+to, an override in their place, and the pay items entered by hand). Live before approval, the flags and
 segments the IDR claimed after. A ped ramp corner's sheet (SMART_INSP_<corner>) is its inspection: status and signers,
 the corner's fields, its ramps' measurements with their ADA warnings, and the pay items entered on its ramps' sites.
 
@@ -243,7 +243,6 @@ class _SheetWriter:
             "heading": workbook.table_style(workbook.font_style(top, bold=True), HEADING_FILL),
             "cell": workbook.table_style(top),
             "warned": workbook.table_style(workbook.font_style(top, bold=True, rgb=RED)),
-            "total": workbook.table_style(workbook.font_style(top, bold=True)),
             "note": workbook.font_style(top, points=9, rgb=GREY),
             "warning": workbook.font_style(top, points=9, rgb=RED),
         }
@@ -366,7 +365,7 @@ class _SheetWriter:
         self._end_row(lines)
         for row in rows:
             lines = max(self._put(c.first, c.last, c.value(row),
-                                  self.styles["warned" if warned(row, c) else "total" if row.get("_total") else "cell"])
+                                  self.styles["warned" if warned(row, c) else "cell"])
                         for c in columns)
             self._end_row(lines)
 
@@ -415,9 +414,9 @@ def site_pay_item_rows(flags: list[dict[str, Any]], segments: list[dict[str, Any
     Lay out a site's pay items for the IDR as its page's table does: a row per pay item its counting flags and segments
     fill (their amount, or the site's override in its place, marked edited with the amount it replaced), then each pay
     item entered by hand, then any override whose flags and segments are gone; an override an approval dropped is
-    listed as billing nothing. Then a total per unit of what bills.
+    listed as billing nothing.
     Takes the site's flag and segment rows and its site pay items (idr_site_pay_items).
-    Returns rows of {item_no, budget_code, description, quantity (text), source}, the totals with _total set.
+    Returns rows of {item_no, budget_code, description, quantity (text), source}.
     """
     autos: dict[UUID, dict[str, Any]] = {}
     for drawing, is_flag in [(f, True) for f in flags] + [(s, False) for s in segments]:
@@ -432,41 +431,34 @@ def site_pay_item_rows(flags: list[dict[str, Any]], segments: list[dict[str, Any
     overrides = {item["contract_item_id"]: item for item in entered if item.get("overrides_auto")}
 
     rows: list[dict[str, Any]] = []
-    totals: dict[str, Decimal] = {}
 
-    def add(item_no: Any, budget_code: Any, description: Any, quantity: Decimal, unit: str, source: str,
-            bills: bool) -> None:
+    def add(item_no: Any, budget_code: Any, description: Any, quantity: Decimal, unit: str, source: str) -> None:
         rows.append({"item_no": item_no or DASH, "budget_code": budget_code or "", "description": description or "",
                      "quantity": _amount(quantity, unit), "source": source})
-        if bills:
-            totals[unit] = totals.get(unit, Decimal(0)) + quantity
 
     for contract_item_id, auto in autos.items():
         amount = auto["amount"].quantize(CENT, rounding=ROUND_HALF_UP)
         source = _sources(auto["flags"], auto["segments"])
         override = overrides.pop(contract_item_id, None)
         if override is None:
-            add(auto["item_no"], auto["budget_code"], auto["description"], amount, auto["unit"], source, True)
+            add(auto["item_no"], auto["budget_code"], auto["description"], amount, auto["unit"], source)
         elif override.get("override_dropped"):
             add(auto["item_no"], auto["budget_code"], auto["description"], Decimal(str(override["quantity"])),
-                auto["unit"], "override dropped at approval (bills nothing)", False)
+                auto["unit"], "override dropped at approval (bills nothing)")
         else:
             add(auto["item_no"], auto["budget_code"], auto["description"], Decimal(str(override["quantity"])),
-                auto["unit"], f"{source} · edited, originally {_amount(amount, auto['unit'])}", True)
+                auto["unit"], f"{source} · edited, originally {_amount(amount, auto['unit'])}")
     for item in entered:
         unit = canonical_unit(item.get("unit")) or ""
         quantity = Decimal(str(item["quantity"]))
         if not item.get("overrides_auto"):
             note = f": {item['note']}" if item.get("note") else ""
             add(item.get("pay_item_ref"), item.get("budget_code"), item.get("description"), quantity, unit,
-                f"entered{note}", True)
+                f"entered{note}")
         elif item["contract_item_id"] in overrides:
             dropped = item.get("override_dropped")
             add(item.get("pay_item_ref"), item.get("budget_code"), item.get("description"), quantity, unit,
-                "override dropped at approval (bills nothing)" if dropped else "override (no flags left)", not dropped)
-    for unit, total in sorted(totals.items()):
-        rows.append({"item_no": "Total", "budget_code": "", "description": "", "quantity": _amount(total, unit),
-                     "source": "", "_total": True})
+                "override dropped at approval (bills nothing)" if dropped else "override (no flags left)")
     return rows
 
 

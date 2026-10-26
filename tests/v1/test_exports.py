@@ -5722,7 +5722,7 @@ class TestConcCylRedlines:
 
 
 # ---------------------------------------------------------------------------
-# R1f: an IDR's flag rollup prints with the General's pay items, under a "PIR Flags" heading
+# R1f: an IDR's flag rollup prints after the General's pay items, with no heading row
 # ---------------------------------------------------------------------------
 
 class TestFlagLinesOnTheGeneral:
@@ -5732,14 +5732,13 @@ class TestFlagLinesOnTheGeneral:
             "budget_code": "HW0001Q-CONS", "pay_item_description": "4\" CONCRETE SIDEWALK", "unit": "SF",
             "amount": Decimal("25.004")}
 
-    def test_the_rollup_follows_the_generals_own_items_under_its_heading(self):
+    def test_the_rollup_follows_the_generals_own_items(self):
         from api.services.export import _flag_lines, _with_lines
         own = [{"itemNo": "4.02", "payQuantity": "12"}]
         with patch("api.queries.idr_flags.run_query", return_value=[self.FLAG, {**self.FLAG, "amount": Decimal("5")}]):
             data = _with_lines({"payItems": own, "description": "x"}, _flag_lines(self.IDR))
         assert data["description"] == "x"
         assert data["payItems"] == own + [
-            {"description": "PIR Flags"},
             {"itemNo": "4.13 AAS", "budgetCode": "HW0001Q-CONS", "payQuantity": "30.00", "unit": "SF",
              "description": "4\" CONCRETE SIDEWALK"}]
 
@@ -5755,7 +5754,7 @@ class TestFlagLinesOnTheGeneral:
                    "amount": Decimal("90.00")}]
         with patch("api.services.idr_flags.list_flag_quantities", return_value=frozen) as quantities:
             lines = _flag_lines({**self.IDR, "status": "approved"})
-        assert lines[1]["payQuantity"] == "90.00"
+        assert lines[0]["payQuantity"] == "90.00"
         quantities.assert_called_once_with(self.IDR["idr_id"])
 
     def test_flags_that_cant_be_read_fail_the_export(self):
@@ -5765,11 +5764,10 @@ class TestFlagLinesOnTheGeneral:
 
 
 # ---------------------------------------------------------------------------
-# Slice X.3: an auto-General prints as a summary cover; without a General, the "PIR Flags" lines go on a report
+# Slice X.3: an auto-General prints as a summary cover; without a General, the flag lines go on a report
 # ---------------------------------------------------------------------------
 
-FLAG_LINES = [{"description": "PIR Flags"},
-              {"itemNo": "4.13 AAS", "budgetCode": "HW0001Q-CONS", "payQuantity": "30.00", "unit": "SF",
+FLAG_LINES = [{"itemNo": "4.13 AAS", "budgetCode": "HW0001Q-CONS", "payQuantity": "30.00", "unit": "SF",
                "description": "4\" CONCRETE SIDEWALK"}]
 
 
@@ -5798,11 +5796,10 @@ class TestAutoGeneralOnTheExport:
     def test_its_description_prints(self, book):
         assert book["Gen Fr"]["B22"].value == "Sidewalk, Curb, Concrete Base: Poured."
 
-    def test_its_pay_items_say_see_individual_reports_then_the_pir_flags(self, book):
+    def test_its_pay_items_say_see_individual_reports_then_the_flag_lines(self, book):
         sheet = book["Gen Fr"]
         assert sheet["X39"].value == "See individual reports" and sheet["B39"].value is None
-        assert sheet["X40"].value == "PIR Flags"
-        assert sheet["B41"].value == "4.13 AAS"
+        assert sheet["B40"].value == "4.13 AAS"
 
     def test_its_checklist_work_force_and_equipment_are_blank_with_the_note(self, book):
         sheet = book["Gen Bk"]
@@ -5821,15 +5818,14 @@ class TestFlagLinesWithoutAGeneral:
         swcbs = [swcb_row(1, 1, payItems=[pay_item(1)]), swcb_row(2, 2)]
         book = openpyxl.load_workbook(io.BytesIO(export_with_flag_lines(general=None, reports=swcbs)), read_only=True)
         sheet = book["Conc Fr"]
-        assert [sheet[f"{col}{row}"].value for row, col in ((49, "B"), (50, "U"), (51, "B"))] == [
-            "4.01 AAS", "PIR Flags", "4.13 AAS"]
+        assert [sheet[f"B{row}"].value for row in (49, 50)] == ["4.01 AAS", "4.13 AAS"]
         texts_2 = [str(book["Conc Fr 2"][f"{col}{row}"].value) for row in range(49, 61) for col in ("B", "U")]
-        assert "PIR Flags" not in texts_2
+        assert "4.13 AAS" not in texts_2
 
     def test_without_an_swcb_they_go_on_the_first_ac_report(self):
         book = openpyxl.load_workbook(io.BytesIO(export_with_flag_lines(general=None, reports=[ac_row(1, 1)])),
                                       read_only=True)
-        assert book["AC Fr"]["U39"].value == "PIR Flags" and book["AC Fr"]["B40"].value == "4.13 AAS"
+        assert book["AC Fr"]["B39"].value == "4.13 AAS"
 
     def test_with_neither_they_dont_print_and_that_is_logged(self, caplog):
         dsp = {"report_id": UUID(int=0xD500), "report_type": "DSP", "is_addendum": False, "parent_report_id": None,
@@ -5843,6 +5839,6 @@ class TestFlagLinesWithoutAGeneral:
     def test_a_general_takes_them_rather_than_a_report(self):
         swcb = swcb_row(1, 2)
         book = openpyxl.load_workbook(io.BytesIO(export_with_flag_lines(reports=[swcb])), read_only=True)
-        assert book["Gen Fr"]["X39"].value == "PIR Flags"
+        assert book["Gen Fr"]["B39"].value == "4.13 AAS"
         texts = [str(book["Conc Fr"][f"{col}{row}"].value) for row in range(49, 61) for col in ("B", "U")]
-        assert "PIR Flags" not in texts
+        assert "4.13 AAS" not in texts

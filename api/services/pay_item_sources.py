@@ -17,8 +17,6 @@ from api.services.idr_flags import IdrFlagError, flag_rollup, is_frozen
 from api.services.idr_segments import IdrSegmentError, segment_rollup
 from api.services.quantities import canonical_unit, extract_rows
 
-# The heading the export prints over a report's site pay items, as a pay item row of its own
-SITE_EXPORT_HEADING = "Imported Sites"
 CENT = Decimal("0.01")
 _SOURCES = ("flags", "segments", "sites", "manual")
 
@@ -126,9 +124,9 @@ def site_entry_conflicts(site_items: list[dict[str, Any]], pay_items: Any) -> li
 
 def site_export_lines(site_items: list[dict[str, Any]], report_id: UUID) -> list[dict[str, Any]]:
     """
-    Lay the pay items entered on a report's sites out as pay items for the export: an "Imported Sites" heading row,
-    then one row per pay item summed over the sites (item number, budget code, amount, unit, description), by item
-    number then budget code. An override counts as its quantity (the PIR Flags lines leave its drawings out); one an
+    Lay the pay items entered on a report's sites out as pay items for the export, one row per pay item summed over
+    the sites (item number, budget code, amount, unit, description), by item
+    number then budget code. An override counts as its quantity (the flag and segment lines leave its drawings out); one an
     approval dropped is left out.
     Takes the IDR's site pay items (idr_site_pay_items) and the report's uuid.
     Returns the rows, as a report's payItems are; empty when the report's sites hold none.
@@ -141,9 +139,7 @@ def site_export_lines(site_items: list[dict[str, Any]], report_id: UUID) -> list
         entry = lines.setdefault(key, {"itemNo": key[0], "budgetCode": key[1], "amount": Decimal(0),
                                        "unit": canonical_unit(item["unit"]), "description": item["description"]})
         entry["amount"] += Decimal(str(item["quantity"]))
-    if not lines:
-        return []
-    return [{"description": SITE_EXPORT_HEADING}] + [
+    return [
         {"itemNo": entry["itemNo"], "budgetCode": entry["budgetCode"], "payQuantity": f"{entry['amount'].normalize():f}",
          "unit": entry["unit"], "description": entry["description"]}
         for _, entry in sorted(lines.items())
