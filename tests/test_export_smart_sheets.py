@@ -123,18 +123,16 @@ class TestSheetNames:
 
 
 class TestSitePayItemRows:
-    def test_the_drawings_come_to_an_auto_row_per_pay_item_and_totals_per_unit(self):
+    def test_the_drawings_come_to_an_auto_row_per_pay_item_and_no_totals(self):
         rows = site_pay_item_rows([flag(1), flag(2, "60.5")], [segment(1), segment(2, "4.25")], [])
         assert [(r["item_no"], r["quantity"], r["source"]) for r in rows] == [
-            ("4.01 AA", "150.50 SF", "auto (2 flags)"), ("4.08 AA", "24.25 LF", "auto (2 curb segments)"),
-            ("Total", "24.25 LF", ""), ("Total", "150.50 SF", "")]
-        assert [r.get("_total", False) for r in rows] == [False, False, True, True]
+            ("4.01 AA", "150.50 SF", "auto (2 flags)"), ("4.08 AA", "24.25 LF", "auto (2 curb segments)")]
 
     def test_an_override_replaces_the_auto_amount_and_says_what_it_replaced(self):
         rows = site_pay_item_rows([flag(1), flag(2)], [], [site_item(SF_ITEM, "185", overrides_auto=True)])
         assert rows[0]["quantity"] == "185.00 SF"
         assert rows[0]["source"] == "auto (2 flags) · edited, originally 180.00 SF"
-        assert rows[-1]["quantity"] == "185.00 SF"
+        assert len(rows) == 1
 
     def test_an_override_an_approval_dropped_bills_nothing(self):
         rows = site_pay_item_rows([flag(1)], [], [site_item(SF_ITEM, "185", overrides_auto=True, override_dropped=True)])
@@ -145,8 +143,7 @@ class TestSitePayItemRows:
         rows = site_pay_item_rows([], [], [site_item(EXTRA_ITEM, "2", note="NE corner"),
                                            site_item(SF_ITEM, "0", overrides_auto=True)])
         assert [(r["item_no"], r["quantity"], r["source"]) for r in rows] == [
-            ("6.59 P", "2.00 EA", "entered: NE corner"), ("4.01 AA", "0.00 SF", "override (no flags left)"),
-            ("Total", "2.00 EA", ""), ("Total", "0.00 SF", "")]
+            ("6.59 P", "2.00 EA", "entered: NE corner"), ("4.01 AA", "0.00 SF", "override (no flags left)")]
 
     def test_only_the_drawings_that_count_add_up(self):
         rows = site_pay_item_rows([flag(1), flag(2, state="excluded"), flag(3, state="claimed_elsewhere"),
@@ -193,8 +190,8 @@ class TestSidewalkSheet:
         items_at = rows.index(row_starting(rows, "Pay items for this site"))
         assert [rows[items_at + 1][i] for i in (0, 2, 3, 5, 7)] == ["Item", "Budget code", "Description", "Quantity",
                                                                     "Source"]
-        assert [r[0] for r in rows[items_at + 2: items_at + 8]] == ["4.01 AA", "4.08 AA", "6.59 P", "Total", "Total",
-                                                                     "Total"]
+        assert [r[0] for r in rows[items_at + 2: items_at + 5]] == ["4.01 AA", "4.08 AA", "6.59 P"]
+        assert all(r[0] != "Total" for r in rows[items_at:])
 
     def test_an_overridden_flag_is_starred_and_the_override_marked(self):
         content = self.export(flags=[flag(1, overridden=True)],
@@ -334,7 +331,7 @@ class TestCornerSheet:
         items_at = rows.index(row_starting(rows, "Pay items for this site"))
         assert rows[items_at + 1][:4] == ["Item", "Description", None, "Quantity"]
         assert rows[items_at + 2][:4] == ["6.59 P (SE0944)", "Pedestrian ramp", None, "2.00 EA"]
-        assert rows[items_at + 3][0] == "Total" and len(rows) == items_at + 4
+        assert len(rows) == items_at + 3
 
     def test_portrait_letter_on_one_page(self):
         xml = sheet_xml(self.export(), INSPECTION_SHEET)

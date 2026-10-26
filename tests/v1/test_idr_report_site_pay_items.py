@@ -279,12 +279,11 @@ class TestBilling:
 
 
 class TestExportLines:
-    def test_a_reports_site_pay_items_print_summed_under_a_heading(self):
+    def test_a_reports_site_pay_items_print_summed_per_pay_item(self):
         items = [IDR_ITEM, {**IDR_ITEM, "quantity": Decimal("7.5")},
                  {**IDR_ITEM, "pay_item_ref": "4.01 AAS", "quantity": Decimal("100"), "unit": "S.F.", "description": "Walk"},
                  {**IDR_ITEM, "report_id": OTHER_REPORT_ID, "pay_item_ref": "9.99"}]
         assert site_export_lines(items, REPORT_ID) == [
-            {"description": "Imported Sites"},
             {"itemNo": "4.01 AAS", "budgetCode": "HW-200(S)", "payQuantity": "100", "unit": "SF", "description": "Walk"},
             {"itemNo": "6.70 AB", "budgetCode": "HW-200(S)", "payQuantity": "20", "unit": "LS",
              "description": "Maintenance and protection of traffic"},
@@ -295,7 +294,7 @@ class TestExportLines:
         reports = [report(pay_items=[{"itemNo": "1"}]), report("GEN", OTHER_REPORT_ID)]
         with patch(PAY, return_value=[IDR_ITEM]):
             out = _with_site_lines(reports, IDR_ID)
-        assert [item.get("itemNo") for item in out[0]["report_data"]["payItems"]] == ["1", None, "6.70 AB"]
+        assert [item.get("itemNo") for item in out[0]["report_data"]["payItems"]] == ["1", "6.70 AB"]
         assert out[1] is reports[1]
         with patch(PAY) as run:
             assert _with_site_lines([reports[1]], IDR_ID) == [reports[1]]

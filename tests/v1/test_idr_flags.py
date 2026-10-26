@@ -22,7 +22,6 @@ from api.queries.idr_flags import (
 )
 from api.queries.quantities import list_flag_quantities
 from api.services.idr_flags import (
-    EXPORT_HEADING,
     attributed_flag_ids,
     export_lines,
     flag_pay_item_keys,
@@ -389,24 +388,22 @@ class TestService:
             assert manual_entry_conflicts(DRAFT_IDR, []) == [] and manual_entry_conflicts(DRAFT_IDR, None) == []
         run.assert_not_called()
 
-    def test_export_lines_head_the_rollup_with_pir_flags(self):
+    def test_export_lines_are_the_rollup_one_row_per_pay_item(self):
         with patch(IDR_FLAGS, return_value=[flag_row(), cy_row(FLAG_2, "25"), cy_row(FLAG_3, "20")]):
             lines = export_lines(DRAFT_IDR)
         assert lines == [
-            {"description": EXPORT_HEADING},
             {"itemNo": "4.13 AAS", "budgetCode": "HW0001Q-CONS", "payQuantity": "25.00", "unit": "SF",
              "description": "4\" SIDEWALK"},
             {"itemNo": "UTL-6.06", "budgetCode": "EP0007-CONS", "payQuantity": "0.56", "unit": "CY",
              "description": "EXCAVATION"},
         ]
-        assert EXPORT_HEADING == "PIR Flags"
 
     def test_export_lines_of_an_approved_idr_are_its_frozen_rows(self):
         frozen = [{"pay_item_ref": "4.13 AAS", "budget_code": "B", "description": "D", "unit": "SF",
                    "amount": Decimal("90.00")}]
         with patch(IDR_FLAGS) as run, real_flag_quantities(), patch(QUANTITIES, return_value=frozen):
             lines = export_lines(APPROVED_IDR)
-        assert lines[1]["payQuantity"] == "90.00"
+        assert lines[0]["payQuantity"] == "90.00"
         run.assert_not_called()
 
     def test_no_flags_no_export_lines(self):

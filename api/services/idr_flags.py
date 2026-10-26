@@ -1,6 +1,6 @@
 """
 An IDR's flags (R1f): which it lists and in what state, what they roll up to per pay item, the pay items they make
-off-limits to manual entry, and the lines the export prints under "PIR Flags".
+off-limits to manual entry, and the lines the export prints after a report's own pay items.
 
 Before approval the list and the rollup are live, read from the flags as they are; once approved they are frozen: the
 flags it claimed, and the from_flags quantity rows it wrote.
@@ -13,8 +13,6 @@ from uuid import UUID
 from api.queries.idr_flags import list_idr_flags
 from api.queries.quantities import list_flag_quantities
 
-# The heading the export prints over an IDR's flag lines, as a pay item row of its own
-EXPORT_HEADING = "PIR Flags"
 CENT = Decimal("0.01")
 
 
@@ -168,16 +166,13 @@ def flag_rollup(idr: dict[str, Any]) -> list[dict[str, Any]]:
 
 def export_lines(idr: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    Lay an IDR's flag rollup out as pay items for the export: a "PIR Flags" heading row, then one row per pay item (item number, budget code, amount, unit, description).
+    Lay an IDR's flag rollup out as pay items for the export, one row per pay item (item number, budget code, amount, unit, description).
     Takes the IDR dict.
     Returns the rows, as a report's payItems are; empty when the rollup is; raises IdrFlagError when it can't be read.
     """
-    lines = flag_rollup(idr)
-    if not lines:
-        return []
-    return [{"description": EXPORT_HEADING}] + [
+    return [
         {"itemNo": line["pay_item_ref"], "budgetCode": line["budget_code"],
          "payQuantity": f"{Decimal(line['amount']).quantize(CENT, rounding=ROUND_HALF_UP):f}", "unit": line["unit"],
          "description": line["description"]}
-        for line in lines
+        for line in flag_rollup(idr)
     ]
