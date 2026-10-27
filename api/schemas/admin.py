@@ -93,6 +93,8 @@ class UserReferences(BaseModel):
     ped_ramp_photos: int
     idr_report_sites: int
     idr_report_site_pay_items: int
+    sidewalk_strips: int
+    flag_edits: int
 
 
 class UserHasHistory(BaseModel):

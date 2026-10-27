@@ -50,8 +50,9 @@ def no_match_lines():
 @pytest.fixture(scope="session", autouse=True)
 def no_mappluto():
     """
-    Keep MapPLUTO off the network for the whole session (Slice Y1): a property create or a move to another lot fetches
-    its frontage after the response, and finds no lot unless a test patches api.services.mappluto.httpx.get itself.
+    Keep MapPLUTO and DOF off the network for the whole session (Slices Y1, Y1.5): a property create or a move fetches
+    its frontage and its block's tax-map PDF after the response. The patch is httpx.get itself, which both services
+    call, so neither finds anything unless a test patches it again.
     Yields the mock of the call.
     """
     with patch("api.services.mappluto.httpx.get") as get:

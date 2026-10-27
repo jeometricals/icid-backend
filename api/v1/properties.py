@@ -29,8 +29,13 @@ from api.schemas.property import (
     PropertyOut,
     PropertyResponse,
     PropertyUpdate,
+    TaxMapPdf,
+    TaxMapPdfResponse,
     TaxMapRefresh,
     TaxMapRefreshResponse,
+    TaxMapUploadComplete,
+    TaxMapUploadRequest,
+    TaxMapUploadRequestResponse,
 )
 from api.services.auth import (
     current_admin,
@@ -41,6 +46,16 @@ from api.services.auth import (
     property_member,
 )
 from api.services.export_common import FORM_TIMEZONE
+from api.services.dof_tax_map import (
+    DofTaxMapUnavailable,
+    TaxMapPdfError,
+    cache_tax_map_pdf,
+    complete_upload,
+    map_url,
+    request_upload,
+    signed_pdf_url,
+    store_current_map,
+)
 from api.services.mappluto import MapPlutoUnavailable, cache_frontage, fetch_frontage_by_bbl
 from api.v1._shared import clean_text, refuse_deleted_for_member, refuse_locked_corner, validated
 
@@ -76,6 +91,8 @@ CONFLICT = {409: {"model": PropertyConflict}}
 PROPERTY_DELETED = "Property is deleted"
 NO_TAX_LOT = "A ped ramp has no tax lot to look up"
 MAPPLUTO_DOWN = "MapPLUTO can't be reached right now; nothing was changed. Try again later."
+DOF_DOWN = "DOF's tax map service can't be reached right now; nothing was changed. Try again later, or upload the PDF."
+NO_TAX_MAP_PDF = "No tax map PDF on file for this site"
 
 
 def _writable_property(
@@ -201,7 +218,7 @@ def create_project_property(
 ) -> PropertyResponse | JSONResponse:
     """
     Add a property to a project, created by the signed-in user: a sidewalk or a ped ramp. For a user on the project, in any role, or an admin; not a demo user.
-    A sidewalk's tax-map frontage is fetched from MapPLUTO after the response has gone (Slice Y1), so it comes back without one.
+    A sidewalk's tax-map frontage (MapPLUTO, Slice Y1) and its block's DOF tax-map PDF (Slice Y1.5) are fetched after the response has gone, so it comes back without either.
     Takes the project id as a path parameter, the property in the body (its kind's fields; text trimmed; blank notes, violation_no and community_board are none), the background tasks and the user.
     Returns 201 with a PropertyResponse; raises 400 for a blank or over-long value or a corner_id that isn't a live corner of the project, 403 for a demo user or a user who isn't on the project, 404 for an unknown project, 422 for an unknown value, a block or lot that isn't digits, or fields that don't fit the kind and 409 (with existing_property_id) when a live sidewalk of the project is at the borough, block and lot. A ped ramp whose corner's inspection is submitted is the RE's (403), and one whose inspection is approved is frozen (409).
     """
@@ -215,6 +232,7 @@ def create_project_property(
 
     if row["kind"] == "sidewalk":
         background.add_task(cache_frontage, row["id"], row["boro"], row["block"], row["lot"])
+        background.add_task(cache_tax_map_pdf, row["id"], row["boro"], row["block"])
 
     return _response(row, "Property created")
 
@@ -238,7 +256,7 @@ def update_property_record(
     user: UserOut = Depends(current_user),
 ) -> PropertyResponse | JSONResponse:
     """
-    Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes, violation_no and community_board clear them. Its kind can't change. A sidewalk moved to another borough, block or lot loses its tax-map frontage, fetched again from MapPLUTO after the response has gone (Slice Y1).
+    Change some of a property, merged over it and checked whole as a new one of its kind. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted one. A field left out, or sent as null, keeps its value; null or blank notes, violation_no and community_board clear them. Its kind can't change. A sidewalk moved to another borough, block or lot loses its tax-map frontage, fetched again from MapPLUTO after the response has gone (Slice Y1); one moved to another borough or block loses its DOF tax-map PDF too, fetched again the same way (Slice Y1.5).
     Takes the property's id as a path parameter, the fields to change in the body, the background tasks, the property (loaded by _writable_property) and the user.
     Returns a PropertyResponse with the property as it now is; raises 400 when nothing is sent, the kind would change, a value doesn't fit, a new corner_id isn't a live corner of its project, or a user who isn't an admin edits a deleted property, 403 for a demo user or a user who isn't on its project, 404 for an unknown property, 422 for an unknown value or fields that don't fit its kind and 409 (with existing_property_id) when another live sidewalk of its project is at the borough, block and lot it would end up with. A ped ramp whose corner's inspection is submitted is the RE's (403), and one whose inspection is approved is frozen (409).
     """
@@ -267,6 +285,8 @@ def update_property_record(
 
     if row["kind"] == "sidewalk" and any(row[field] != found.get(field) for field in ("boro", "block", "lot")):
         background.add_task(cache_frontage, row["id"], row["boro"], row["block"], row["lot"])
+    if row["kind"] == "sidewalk" and any(row[field] != found.get(field) for field in ("boro", "block")):
+        background.add_task(cache_tax_map_pdf, row["id"], row["boro"], row["block"])
 
     return _response(row, "Property updated")
 
@@ -368,3 +388,106 @@ def refresh_tax_map(property_id: UUID, admin: UserOut = Depends(current_admin)) 
     data = TaxMapRefresh(frontage_ft=row["tax_map_frontage_ft"], source=row["tax_map_source"],
                          fetched_at=row["tax_map_fetched_at"], pages_updated=row["pages_updated"])
     return TaxMapRefreshResponse(status="success", message=f"Tax-map frontage refreshed; {row['pages_updated']} title block(s) updated", data=data)
+
+
+def _sidewalk(property_id: UUID) -> dict[str, Any]:
+    """
+    Fetch a sidewalk for a tax-map PDF route.
+    Takes the property's id.
+    Returns the property dict; raises 404 when there is none and 400 for a ped ramp.
+    """
+    current = _load_property(property_id)
+    if current["kind"] != "sidewalk":
+        raise HTTPException(status_code=400, detail=NO_TAX_LOT)
+    return current
+
+
+def _tax_map_pdf(row: dict[str, Any], message: str) -> TaxMapPdfResponse:
+    """
+    Wrap a site's tax-map PDF in the response envelope, with a signed URL to it.
+    Takes the property dict (with its tax_map_pdf_* columns) and the message.
+    Returns the TaxMapPdfResponse; raises 502 when Storage can't sign the URL.
+    """
+    try:
+        url = signed_pdf_url(row)
+    except TaxMapPdfError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    data = TaxMapPdf(url=url, source=row["tax_map_pdf_source"], map_id=row["tax_map_pdf_map_id"],
+                     effective_date=row["tax_map_pdf_effective_date"], dof_url=map_url(row["tax_map_pdf_map_id"]),
+                     fetched_at=row["tax_map_pdf_fetched_at"], uploaded_by=row["tax_map_pdf_uploaded_by"])
+    return TaxMapPdfResponse(status="success", message=message, data=data)
+
+
+def _log_tax_map_pdf(action: str, property_id: UUID, admin: UserOut, row: dict[str, Any]) -> None:
+    """
+    Log an admin's change of a site's tax-map PDF, the record of it.
+    Takes what was done (refresh or upload), the property's id, the admin and the property as it now is.
+    Returns nothing.
+    """
+    logger.info("Tax map PDF %s: property_id=%s source=%s map_id=%s path=%s admin=%s at=%s", action, property_id,
+                row["tax_map_pdf_source"], row["tax_map_pdf_map_id"], row["tax_map_pdf_path"], admin.uuid,
+                datetime.now(timezone.utc).isoformat())
+
+
+@router.get("/{property_id}/tax-map-pdf", response_model=TaxMapPdfResponse)
+def get_tax_map_pdf(found: dict = Depends(property_member)) -> TaxMapPdfResponse:
+    """
+    Hand out a sidewalk's DOF tax-map PDF (Slice Y1.5) through a signed URL, with where it came from. For a user on its project, or an admin; demo users read.
+    Takes the property (loaded and checked by property_member from the property_id path parameter).
+    Returns a TaxMapPdfResponse; raises 403 for a user who isn't on its project, 404 for an unknown property or one with no tax map PDF on file and 502 when Storage can't sign the URL.
+    """
+    if found.get("tax_map_pdf_path") is None:
+        raise HTTPException(status_code=404, detail=NO_TAX_MAP_PDF)
+    return _tax_map_pdf(found, "Tax map PDF retrieved")
+
+
+@router.post("/{property_id}/admin/refresh-tax-map-pdf", response_model=TaxMapPdfResponse)
+def refresh_tax_map_pdf(property_id: UUID, admin: UserOut = Depends(current_admin)) -> TaxMapPdfResponse:
+    """
+    Fetch a sidewalk's block's current DOF tax map now (Slice Y1.5) and keep it as the site's tax-map PDF, replacing the one it had. Admins only, a soft-deleted property included. Logged, as the record of it.
+    Takes the property's id as a path parameter and the signed-in admin.
+    Returns a TaxMapPdfResponse; raises 400 for a ped ramp, 403 for a user who isn't an admin, 404 for an unknown property, 409 when the site moved to another block meanwhile, 422 when DOF has no current map for its block, 502 when Storage fails and 503 when DOF can't be reached (nothing is changed on any of them).
+    """
+    current = _sidewalk(property_id)
+    try:
+        row = store_current_map(current)
+    except DofTaxMapUnavailable as exc:
+        logger.warning("Tax map PDF refresh of property %s failed: %s", property_id, exc)
+        raise HTTPException(status_code=503, detail=DOF_DOWN) from exc
+    except TaxMapPdfError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    _log_tax_map_pdf("refresh", property_id, admin, row)
+    return _tax_map_pdf(row, "Tax map PDF refreshed from DOF")
+
+
+@router.post("/{property_id}/admin/tax-map-pdf/upload-request", response_model=TaxMapUploadRequestResponse)
+def request_tax_map_pdf_upload(property_id: UUID, admin: UserOut = Depends(current_admin)) -> TaxMapUploadRequestResponse:
+    """
+    Start an admin's upload of a sidewalk's tax-map PDF (Slice Y1.5, when DOF's can't be fetched): a signed URL to PUT the PDF to, at a fresh staging path. Admins only.
+    Takes the property's id as a path parameter and the signed-in admin.
+    Returns a TaxMapUploadRequestResponse; raises 400 for a ped ramp, 403 for a user who isn't an admin, 404 for an unknown property and 502 when Storage can't sign a URL.
+    """
+    _sidewalk(property_id)
+    try:
+        upload = request_upload(property_id)
+    except TaxMapPdfError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return TaxMapUploadRequestResponse(status="success", message="Upload URL created", data=TaxMapUploadRequest(**upload))
+
+
+@router.post("/{property_id}/admin/tax-map-pdf/upload-complete", response_model=TaxMapPdfResponse)
+def complete_tax_map_pdf_upload(
+    property_id: UUID, body: TaxMapUploadComplete, admin: UserOut = Depends(current_admin)
+) -> TaxMapPdfResponse:
+    """
+    Keep an admin's staged upload as a sidewalk's tax-map PDF (Slice Y1.5), replacing the one it had: it is read back, checked to be a PDF by its bytes and stored. Admins only. Logged, as the record of it.
+    Takes the property's id as a path parameter, the staging path in the body and the signed-in admin.
+    Returns a TaxMapPdfResponse; raises 400 for a ped ramp, a path that isn't one of the site's uploads or a file that isn't a PDF, 403 for a user who isn't an admin, 404 for an unknown property or an upload that isn't there, 409 when the site moved to another block meanwhile, 413 for a file over TAX_MAP_MAX_BYTES and 502 when Storage fails.
+    """
+    current = _sidewalk(property_id)
+    try:
+        row = complete_upload(current, body.staging_path, admin.uuid)
+    except TaxMapPdfError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    _log_tax_map_pdf("upload", property_id, admin, row)
+    return _tax_map_pdf(row, "Tax map PDF uploaded")

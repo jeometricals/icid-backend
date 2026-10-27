@@ -374,6 +374,20 @@ class TestUpdateFlag:
                                                      "surveyed_non_assessable_reason": None})
         assert response.status_code == 200 and written(run)["surveyed_non_assessable_reason"] is None
 
+    def test_a_patch_writes_flag_edits_for_assessability_by_the_editor(self, admin_client):
+        """Slice Y1.5: changes of surveyed_is_assessable or its reason are kept in flag_edits, in the same statement."""
+        not_assessable = {**FLAG_ROW, "surveyed_is_assessable": False, "surveyed_non_assessable_reason": "hydrant"}
+        with patch(FLAGS, side_effect=[[not_assessable], [FLAG_ROW]]) as run:
+            admin_client.patch(URL, json={"surveyed_is_assessable": True, "surveyed_non_assessable_reason": None})
+        sql, params = run.call_args.args
+        one_line = " ".join(sql.split())
+        assert "JOIN icid.flags old ON true" in one_line and "old.id = flag.id" in one_line
+        assert ("RETURNING flag.*, old.surveyed_is_assessable AS old_assessable, "
+                "old.surveyed_non_assessable_reason AS old_reason") in one_line
+        assert "INSERT INTO icid.flag_edits (flag_id, field_path, old_value, new_value, reason, editor_uuid)" in one_line
+        assert "WHERE v.old_value IS DISTINCT FROM v.new_value" in one_line  # only the fields that changed
+        assert params[-2:] == (None, ADMIN_USER_ROW["uuid"])  # no reason words; the editor
+
     def test_a_pay_item_of_another_project_is_400(self, admin_client):
         with patch(FLAGS, return_value=[FLAG_ROW]) as run, patch(CONTRACT, return_value=[]):
             response = admin_client.patch(URL, json={"pay_item_id": str(PAY_ITEM_ID)})

@@ -64,3 +64,19 @@ MAPPLUTO_QUERY_URL: str = os.getenv(
     "https://services5.arcgis.com/GfwWNkhOj9bNBqoJ/ArcGIS/rest/services/MAPPLUTO/FeatureServer/0/query",
 )
 MAPPLUTO_TIMEOUT_SECONDS: float = float(os.getenv("MAPPLUTO_TIMEOUT_SECONDS", "10"))
+
+# DOF's Digital Tax Map (Slice Y1.5): a sidewalk's block's current tax-map PDF, found in DOF's public map library (an
+# ArcGIS layer) and downloaded from the Property Information Portal, stored in a private bucket and handed out through
+# signed URLs. No key is needed. A call that takes longer than DOF_TIMEOUT_SECONDS is given up on.
+DOF_MAP_LIBRARY_URL: str = os.getenv(
+    "DOF_MAP_LIBRARY_URL",
+    "https://services6.arcgis.com/yG5s3afENB5iO9fj/ArcGIS/rest/services/DTM_ETL_DAILY_view/FeatureServer/8/query",
+)
+DOF_MAP_PDF_URL: str = os.getenv(
+    "DOF_MAP_PDF_URL", "https://propertyinformationportal.nyc.gov/pdf/home/index/map_library/{map_id}"
+)
+DOF_TIMEOUT_SECONDS: float = float(os.getenv("DOF_TIMEOUT_SECONDS", "20"))
+TAX_MAP_BUCKET_NAME: str = os.getenv("TAX_MAP_BUCKET_NAME", "tax-maps")
+TAX_MAP_URL_EXPIRY_SECONDS: int = int(os.getenv("TAX_MAP_URL_EXPIRY_SECONDS", "600"))
+# The largest tax-map PDF stored, fetched or uploaded (the bucket holds the same); DOF's run 0.1-2 MB
+TAX_MAP_MAX_BYTES: int = int(os.getenv("TAX_MAP_MAX_BYTES", str(10 * 1024 * 1024)))

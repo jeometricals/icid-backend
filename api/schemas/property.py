@@ -4,7 +4,7 @@ import re
 from typing import Annotated, Literal, Optional
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, computed_field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from api.schemas.pir_annotation import Boro
 
@@ -143,6 +143,25 @@ class PropertyOut(BaseModel):
     tax_map_frontage_ft: Optional[float] = None
     tax_map_source: Optional[str] = None
     tax_map_fetched_at: Optional[datetime] = None
+    # A sidewalk's DOF tax-map PDF (Slice Y1.5): where it came from (dof_map_library or upload), DOF's map id and its
+    # effective date (a fetch's), when it was fetched or uploaded, and by whom (an upload's); all None without one. The
+    # file's path stays internal: GET /v1/properties/{id}/tax-map-pdf hands out a signed URL
+    tax_map_pdf_path: Optional[str] = Field(default=None, exclude=True)
+    tax_map_pdf_source: Optional[str] = None
+    tax_map_pdf_map_id: Optional[str] = None
+    tax_map_pdf_effective_date: Optional[Date] = None
+    tax_map_pdf_fetched_at: Optional[datetime] = None
+    tax_map_pdf_uploaded_by: Optional[UUID] = None
+
+    @computed_field
+    @property
+    def has_tax_map_pdf(self) -> bool:
+        """
+        Whether the site has a DOF tax-map PDF on file.
+        Takes the property.
+        Returns True when it has one.
+        """
+        return self.tax_map_pdf_path is not None
 
     @computed_field
     @property
@@ -239,3 +258,47 @@ class TaxMapRefreshResponse(BaseModel):
     status: str
     message: str
     data: TaxMapRefresh
+
+
+class TaxMapPdf(BaseModel):
+    """
+    A sidewalk's DOF tax-map PDF (Slice Y1.5): a signed URL to it (good for TAX_MAP_URL_EXPIRY_SECONDS), where it came
+    from, DOF's map id, effective date and its own address (dof_url, which lists the block's inset maps too) for a
+    fetched one, when it was fetched or uploaded and who uploaded it.
+    """
+
+    url: str
+    source: str
+    map_id: Optional[str] = None
+    effective_date: Optional[Date] = None
+    dof_url: Optional[str] = None
+    fetched_at: datetime
+    uploaded_by: Optional[UUID] = None
+
+
+class TaxMapPdfResponse(BaseModel):
+    status: str
+    message: str
+    data: TaxMapPdf
+
+
+class TaxMapUploadRequest(BaseModel):
+    """Where to PUT a site's tax-map PDF: a signed URL, its staging path (sent back to complete) and its lifetime."""
+
+    upload_url: str
+    staging_path: str
+    expires_in: int
+
+
+class TaxMapUploadRequestResponse(BaseModel):
+    status: str
+    message: str
+    data: TaxMapUploadRequest
+
+
+class TaxMapUploadComplete(BaseModel):
+    """The staged upload to keep as the site's tax-map PDF."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    staging_path: str

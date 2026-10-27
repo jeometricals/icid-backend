@@ -71,6 +71,7 @@ def include_routers(app: FastAPI):
     from api.v1.match_lines import page_router as page_match_lines_router
     from api.v1.match_lines import pir_router as pir_match_lines_router
     from api.v1.match_lines import router as match_lines_router
+    from api.v1.sidewalk_strip import page_router as page_sidewalk_strip_router
     from api.v1.pir_import import router as pir_import_router
     from api.v1.pir_title_block import pir_router as pir_title_block_router
     from api.v1.reviews import router as reviews_router
@@ -129,6 +130,7 @@ def include_routers(app: FastAPI):
     app.include_router(pir_segments_router)
     app.include_router(segments_router)
     app.include_router(page_match_lines_router)
+    app.include_router(page_sidewalk_strip_router)
     app.include_router(pir_match_lines_router)
     app.include_router(match_lines_router)
     app.include_router(pir_import_router)

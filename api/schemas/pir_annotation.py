@@ -72,6 +72,12 @@ class PirAnnotationOut(PirAnnotationIn):
     # Where tax_map_width_ft came from (Slice Y1): mappluto_<version> or manual; set by the server, never sent
     tax_map_source: Optional[str] = None
     tax_map_fetched_at: Optional[datetime] = None
+    # The page's sidewalk strip (Slice Y1.5): [{x, y}, ...] in native pixels, the property line first; set through
+    # PUT /v1/pir-pages/{id}/sidewalk-strip, never here
+    sidewalk_strip_points: Optional[list[dict[str, float]]] = None
+    sidewalk_strip_source: Optional[str] = None
+    sidewalk_strip_set_at: Optional[datetime] = None
+    sidewalk_strip_set_by: Optional[UUID] = None
     pir_page_id: UUID
     created_at: datetime
     updated_at: datetime

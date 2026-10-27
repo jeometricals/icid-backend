@@ -13,7 +13,8 @@ ANNOTATION_TYPES = {
     "date_notice_issued": "date", "date_excavated": "date", "date_constructed": "date",
 }
 _FIELDS = tuple(ANNOTATION_TYPES)
-_COLUMNS = "pir_page_id, " + ", ".join(_FIELDS) + ", tax_map_source, tax_map_fetched_at, created_at, updated_at"
+_COLUMNS = ("pir_page_id, " + ", ".join(_FIELDS) + ", tax_map_source, tax_map_fetched_at, sidewalk_strip_points, "
+            "sidewalk_strip_source, sidewalk_strip_set_at, sidewalk_strip_set_by, created_at, updated_at")
 
 
 def manual_tax_map_values(new_width: str) -> str:

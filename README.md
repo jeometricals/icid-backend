@@ -52,6 +52,12 @@ start without the two required ones.
 | `PEDRAMP_PHOTO_URL_EXPIRY_SECONDS` | no | `3600` | Lifetime of a ped ramp photo's signed URL |
 | `MAPPLUTO_QUERY_URL` | no | DCP's MapPLUTO layer (`services5.arcgis.com/.../MAPPLUTO/FeatureServer/0/query`) | Where a sidewalk's tax-map frontage is asked for, by BBL (Slice Y1). No key |
 | `MAPPLUTO_TIMEOUT_SECONDS` | no | `10` | How long a MapPLUTO call may take before it is given up on (no retry) |
+| `DOF_MAP_LIBRARY_URL` | no | DOF's `DTM_ETL_DAILY_view` layer 8 (`MAPLIBRARY_MAP`) query | Where a block's current tax map is looked up (Slice Y1.5). No key |
+| `DOF_MAP_PDF_URL` | no | `https://propertyinformationportal.nyc.gov/pdf/home/index/map_library/{map_id}` | Where a tax map's PDF is downloaded |
+| `DOF_TIMEOUT_SECONDS` | no | `20` | How long a DOF call may take (no retry) |
+| `TAX_MAP_BUCKET_NAME` | no | `tax-maps` | Bucket for the sites' tax-map PDFs (migration 059b; private, 10 MB, PDF) |
+| `TAX_MAP_URL_EXPIRY_SECONDS` | no | `600` | Lifetime of a tax-map PDF's signed URL |
+| `TAX_MAP_MAX_BYTES` | no | `10485760` | The largest tax-map PDF kept, fetched or uploaded |
 | `CRON_SECRET` | for the daily cleanup | | What Vercel Cron sends as its bearer token; without it the scheduled demo cleanup is refused |
 
 The two Supabase settings are only checked when Storage is first used, so everything that doesn't touch attachments,

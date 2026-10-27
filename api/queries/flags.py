@@ -4,6 +4,7 @@ from uuid import UUID
 
 from api.db.runner import run_query
 from api.queries._shared import PAY_ITEM_OF_PROJECT, placeholders, write_values
+from api.queries.flag_edits import flag_edit_rows_cte
 
 # A flag's net area: its shape's area less its non-assessable areas and the features subtracted from it, never below 0
 _NET = "GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0)"
@@ -189,15 +190,16 @@ def create_flag(
     return rows[0] if rows else None
 
 
-def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal) -> Optional[dict[str, Any]]:
+def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal, editor_uuid: UUID) -> Optional[dict[str, Any]]:
     """
-    Rewrite a flag's writable columns with its merged record, and its computed quantity. Changes nothing when the pay item isn't one of its PIR's project's.
-    Takes the flag's id, the values keyed by column (every writable column) and the area computed from its shape.
+    Rewrite a flag's writable columns with its merged record, and its computed quantity. Changes nothing when the pay item isn't one of its PIR's project's. A change of surveyed_is_assessable or surveyed_non_assessable_reason adds its flag_edits rows in the same statement (Slice Y1.5).
+    Takes the flag's id, the values keyed by column (every writable column), the area computed from its shape and the editing user's uuid.
     Returns the updated flag dict, or None when no flag matches or the pay item is another project's.
     """
     assignments = ",\n                ".join(
         f"{column} = {placeholder}" for column, placeholder in zip(_WRITABLE, _PLACEHOLDERS)
     )
+    # old is the flag as it was: an UPDATE's FROM reads the rows before the statement changes them
     sql = (
         """
         WITH f AS (
@@ -209,19 +211,26 @@ def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal) -> 
                 updated_at = now()
             FROM icid.pirs pir
             JOIN icid.properties p ON p.id = pir.property_id
-            WHERE flag.id = %s AND pir.id = flag.pir_id
+            JOIN icid.flags old ON true
+            WHERE flag.id = %s AND pir.id = flag.pir_id AND old.id = flag.id
               AND """
         + _PAY_ITEM_OF_PROJECT
         + """
-            RETURNING flag.*
+            RETURNING flag.*, old.surveyed_is_assessable AS old_assessable, old.surveyed_non_assessable_reason AS old_reason
+        ),
+        edits AS (
+            """
+        + flag_edit_rows_cte("f")
+        + """
         )
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
         + _FROM
-        + ";"
+        + "\n        CROSS JOIN (SELECT count(*) FROM edits) AS edits_written;"
     )
-    params = (*_values(data), computed_area, flag_id, data.get("pay_item_id"), data.get("pay_item_id"))
+    params = (*_values(data), computed_area, flag_id, data.get("pay_item_id"), data.get("pay_item_id"), None,
+              editor_uuid)
     rows = run_query(sql, params)
     return rows[0] if rows else None
 

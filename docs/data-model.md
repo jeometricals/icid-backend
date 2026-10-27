@@ -423,6 +423,9 @@ read (since S2).
 | `tax_map_frontage_ft` | NUMERIC(10,2) | Sidewalk only (Slice Y1, migration 058): the lot's frontage from DCP's MapPLUTO (`LotFront`), fetched after a create or a move to another lot and by an admin's refresh; above 0 and below 1000 (`chk_properties_tax_map_frontage`). The page-level figure the Construction Report prints is `pir_annotations.tax_map_width_ft` |
 | `tax_map_source` | TEXT | Where the frontage came from: `mappluto_<DCP's version>` (`mappluto_26v2`, `mappluto_25v1.1`); the CHECK `chk_properties_tax_map_source` also takes `manual`, `pip_scrape` (Y1.5) and `r1k` |
 | `tax_map_fetched_at` | TIMESTAMPTZ | When it was fetched. The three are all set or all NULL (`chk_properties_tax_map_cache`): NULL until a fetch works, and always for a ped ramp |
+| `tax_map_pdf_path`, `tax_map_pdf_source` | TEXT | Sidewalk only (Slice Y1.5, migration 059): its block's DOF Digital Tax Map PDF, in bucket `tax-maps` (`{property id}/{DOF map id}.pdf` fetched, `{property id}/upload-{random}.pdf` uploaded); `dof_map_library` or `upload` (`chk_properties_tax_map_pdf_source`). Fetched after a create and a change of borough or block (a lot change keeps the block's map), by an admin's refresh, or uploaded by an admin; a new one replaces (and removes) the old |
+| `tax_map_pdf_map_id`, `tax_map_pdf_effective_date` | TEXT, DATE | A fetched map's DOF id and effective date; NULL for an upload |
+| `tax_map_pdf_fetched_at`, `tax_map_pdf_uploaded_by` | TIMESTAMPTZ, UUID | When it was fetched or uploaded; the admin who uploaded it (FK → users, no action; NULL for a fetch). `chk_properties_tax_map_pdf`: path, source and time together; a fetch has a map id and no uploader, an upload the reverse |
 | `corner_id` | UUID | Ped ramp only, optional (047): the inspection corner it is at; FK → `ped_ramp_corners.corner_id`, no action; CHECK `chk_properties_corner_kind`; `idx_properties_corner`. The API takes only a live corner of the property's project |
 | `notes` | TEXT | Blank is NULL |
 | `created_by` | UUID NOT NULL | The signed-in user who added it: any project member or admin; FK → `users.uuid` |
@@ -589,6 +592,27 @@ Demo users only read.
 | `claimed_by_idr_id` | UUID | The approved IDR that claimed it (migration 037): FK → `idrs.idr_id`, no action (an unlock or a delete releases it first). At most one IDR claims a flag; a soft-deleted flag keeps its claim |
 | `constructed_on` | DATE | The claiming IDR's `report_date`; NULL while unclaimed |
 
+`surveyed_non_assessable_reason` also takes `outside_property_line` (migration 059): a flag wholly outside its page's
+sidewalk strip, set by the strip's auto-flip or by hand. Its changes, and those of `surveyed_is_assessable`, are kept in
+`flag_edits`.
+
+### flag_edits
+
+Each change of a flag's `surveyed_is_assessable` or `surveyed_non_assessable_reason` (Slice Y1.5, migration 059), one
+row per field, written in the statement that changes it: the sidewalk strip's auto-flip (no editor, reason `flag
+entirely outside the sidewalk strip`) and a flag PATCH (its editor). Rows are only ever added.
+
+| Column | Type | Notes |
+|---|---|---|
+| `edit_id` | UUID PK | `gen_random_uuid()` |
+| `flag_id` | UUID NOT NULL | FK → `flags.id`, no action (flags are never hard-deleted) |
+| `field_path` | TEXT NOT NULL | `surveyed_is_assessable` or `surveyed_non_assessable_reason` (`chk_flag_edits_field`; Y3 widens it) |
+| `old_value`, `new_value` | JSONB NOT NULL | As JSON (a cleared reason is JSON `null`); never equal (`chk_flag_edits_changed`) |
+| `reason` | TEXT | Why, in words; NULL for a hand edit |
+| `editor_uuid` | UUID | FK → users, no action; NULL for the system's auto-flip |
+| `editor_stage` | TEXT | NULL, or `stage1` / `stage2` (`chk_flag_edits_stage`), reserved for Y3's reviewer edits |
+| `edited_at` | TIMESTAMPTZ NOT NULL | `now()`; `idx_flag_edits_flag` on (`flag_id`, `edited_at DESC`) |
+
 ### idr_flag_attributions
 
 An override of which flags an IDR covers (migration 037, R1f). By default an IDR covers the live flags on its task
@@ -700,6 +724,8 @@ when typed by hand, else the property's MapPLUTO frontage.
 | `boro` | TEXT | One of the five boroughs, spelled out (`chk_pir_annotations_boro`) |
 | `tax_map_width_ft`, `cc_curb_to_curb_ft` | NUMERIC(10,2) | ≥ 0. The Construction Report draws TAX MAP at scale between the PLs along the top. CC is the curb along the frontage (the column's name is a misreading, to be renamed): printed from the page's curb segments of every kind (concrete, depressed, steel-faced, granite) when it has any, and from `cc_curb_to_curb_ft` only when it has none (R1h.4) |
 | `tax_map_source`, `tax_map_fetched_at` | TEXT, TIMESTAMPTZ | Where `tax_map_width_ft` came from, and when (Slice Y1, migration 058): `mappluto_<version>` (copied from the property onto a new page 1, or written by an admin's refresh) or `manual` (the title-block editor, the annotations PUT or the Smart PIR import, whenever they change the width; a cleared width stays `manual`, so a refresh leaves it cleared). A refresh never overwrites a `manual` row. A width always has a source and the two are set together (`chk_pir_annotations_tax_map_provenance`); the CHECK `chk_pir_annotations_tax_map_source` takes the same values as the property's. 058 marked every width typed before it `manual`. The Construction Report prints it after TAX MAP: `(MapPLUTO 26v2)`, `(Manual)` |
+| `sidewalk_strip_points` | JSONB | The page's sidewalk strip (Slice Y1.5, migration 059): the sidewalk in front of the lot as a closed polygon of 3 or more `{x, y}` in the page's native pixels, its first edge (points 0 → 1) the property line, whose length at the page's scale is the strip frontage (`effective_frontage`: strip > page width > site frontage). Set only by `PUT /v1/pir-pages/{id}/sidewalk-strip`. `chk_pir_annotations_sidewalk_strip_points` |
+| `sidewalk_strip_source`, `sidewalk_strip_set_at`, `sidewalk_strip_set_by` | TEXT, TIMESTAMPTZ, UUID | `manual` (or `r1k`, reserved), when, and who (FK → users, no action; NULL for R1k). Points, source and time together (`chk_pir_annotations_sidewalk_strip`) |
 | `property_status` | TEXT | `all_defects_corrected`, `some_defects_corrected` or `no_work_done` |
 | `corner_property_status` | TEXT | `ped_ramp_installed`, `no_ped_ramp_exists` or `existing_ped_ramp` |
 | `violation_not_removed_due_to` | TEXT[] NOT NULL | Free text, default `{}`. The Construction Report ticks its nine boxes for the codes `work_already_done`, `distinctive_material`, `landmark`, `subway`, `tree`, `vault`, `scaffolding`, `other_perm_obstruction` and `other_temp_obstruction`, and drops any other text |
@@ -1005,6 +1031,8 @@ content as TEXT, linked to a report and a form template).
 | 056 | `056_site_pay_item_overrides.sql` | Slice X.1 | Added `idr_report_site_pay_items.overrides_auto` (BOOLEAN NOT NULL DEFAULT false: the row's quantity replaces what the site's flags and curb segments come to for its pay item); the quantity CHECK became `quantity > 0 OR (overrides_auto AND quantity >= 0)`; `uq_idr_report_site_pay_items_one_override` (one override per site and pay item). Its 2 existing rows took `false`. |
 | 057 | `057_segment_reported_length.sql` | Slice X.2 | Added `segments.reported_length_ft` (NUMERIC, NULL for none: overrides the drawn `length_ft` for billing) and `length_delta_reason` (TEXT), and CHECK `chk_segments_reported_length` (`reported_length_ft IS NULL OR reported_length_ft >= 0`). Modified no rows. |
 | 058 | `058_tax_map_source.sql` | Slice Y1 | Added `properties.tax_map_frontage_ft` (NUMERIC(10,2)), `tax_map_source` (TEXT) and `tax_map_fetched_at` (TIMESTAMPTZ), with CHECKs `chk_properties_tax_map_source` (`^(mappluto_\d{2}v\d+(\.\d+)?\|manual\|pip_scrape\|r1k)$`), `chk_properties_tax_map_frontage` (above 0, below 1000) and `chk_properties_tax_map_cache` (all three or none); and `pir_annotations.tax_map_source` and `tax_map_fetched_at`, with `chk_pir_annotations_tax_map_source` and `chk_pir_annotations_tax_map_provenance` (a width has a source; source and time together). Marked every existing width `manual`, fetched at the migration (one row in prod). |
+| 059 | `059_sidewalk_strip_tax_map_pdf.sql` | Slice Y1.5 | Added `pir_annotations.sidewalk_strip_points` (JSONB, 3 or more `{x, y}`), `sidewalk_strip_source` (`manual`, `r1k`), `sidewalk_strip_set_at` and `sidewalk_strip_set_by` (→ users), with CHECKs `chk_pir_annotations_sidewalk_strip_points`, `_source` and `chk_pir_annotations_sidewalk_strip` (points, source and time together); `properties.tax_map_pdf_path`, `_source` (`dof_map_library`, `upload`), `_map_id`, `_effective_date`, `_fetched_at` and `_uploaded_by` (→ users), with `chk_properties_tax_map_pdf_source` and `chk_properties_tax_map_pdf` (a fetch has a map id and no uploader, an upload the reverse); the table `flag_edits` (index `idx_flag_edits_flag`); and `outside_property_line` in `chk_flags_non_assessable_reason` and `chk_nas_reason`. Modified no rows. |
+| 059b | `059b_tax_maps_bucket.sql` | Slice Y1.5 | The private Storage bucket `tax-maps` (10 MB, PDF). |
 | 046 | `046_pir_match_lines.sql` | R1h.1a | Created `pir_match_lines` (FK to `pir_pages`, no action; to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`: 28 → 30 FKs to `users`; CHECKs `chk_match_lines_label` and `chk_match_lines_length`; partial unique `pir_match_lines_page_label_live_uq` and `pir_match_lines_page_idx`). No existing row changed. |
 | 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |
