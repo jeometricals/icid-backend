@@ -7,11 +7,12 @@ live sidewalk without a frontage it asks MapPLUTO for its lot, then, with --comm
 blocks of its live PIR's pages whose width wasn't typed by hand (page 1 getting a title block if it has none). Without
 --commit nothing is written: each sidewalk's MapPLUTO frontage and address are printed beside the width its page 1
 holds now, for review, and a lot whose MapPLUTO address has another house number than ours is marked CHECK (its BBL
-may name the wrong lot). Running it again skips the sidewalks already fetched.
+may name the wrong lot). Running it again skips the sidewalks already fetched. --skip-bbl leaves a lot out (repeat it
+for several): a site whose BBL is wrong is then neither asked about nor written, and keeps no frontage.
 
 It works on the database DATABASE_URL names (.env). Run from the project root, after migration 058:
     python scripts/backfill_mappluto.py            # dry run
-    python scripts/backfill_mappluto.py --commit
+    python scripts/backfill_mappluto.py --commit --skip-bbl 3012340051
 """
 
 import argparse
@@ -36,10 +37,10 @@ def house_number(address: Optional[str]) -> str:
     return words[0].upper().rstrip(",") if words else ""
 
 
-def main(commit: bool) -> int:
+def main(commit: bool, skip_bbls: frozenset[str] = frozenset()) -> int:
     """
-    Fetch, and with commit write, the MapPLUTO frontage of every live sidewalk that has none.
-    Takes whether to write; reads (and writes) the configured database and asks MapPLUTO.
+    Fetch, and with commit write, the MapPLUTO frontage of every live sidewalk that has none, but those at a BBL skipped.
+    Takes whether to write and the BBLs to leave out; reads (and writes) the configured database and asks MapPLUTO.
     Returns the exit code: 0 when every sidewalk was fetched (and written), 1 when the list couldn't be read or any failed.
     """
     sidewalks = list_sidewalks_without_tax_map()
@@ -47,13 +48,17 @@ def main(commit: bool) -> int:
         print("backfill failed: the sidewalks couldn't be read")
         return 1
     print(f"{len(sidewalks)} live sidewalks without a MapPLUTO frontage ({'writing' if commit else 'dry run'})")
-    found = pages = checks = 0
+    found = pages = checks = skipped = 0
     missing, failed = [], []
     for site in sidewalks:
         lot = (site["boro"], site["block"], site["lot"])
         label = f"{site['project_id']} {site['address']} (BBL {bbl(*lot)})"
         page_1 = (f"page 1 {site['page_1_width_ft']} ft ({site['page_1_source']})"
                   if site["page_1_width_ft"] is not None else "page 1 has no width")
+        if bbl(*lot) in skip_bbls:
+            skipped += 1
+            print(f"  {label}: skipped (--skip-bbl); nothing written")
+            continue
         try:
             record = lookup_lot(*lot)
         except MapPlutoUnavailable as exc:
@@ -86,6 +91,7 @@ def main(commit: bool) -> int:
         print(f"  {label}: {frontage} ft ({source}); {row['pages_updated']} title block(s) updated; was {page_1}{check}")
     print(f"backfill {'complete' if commit else 'dry run complete'}: {found} with a frontage, {len(missing)} without"
           + (f", {pages} title blocks updated" if commit else "")
+          + (f", {skipped} skipped" if skipped else "")
           + (f"; {checks} to check (MapPLUTO's address has another house number)" if checks else ""))
     if failed:
         print(f"{len(failed)} failed and were left as they were; run it again once the cause is fixed")
@@ -96,4 +102,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description="Fetch the MapPLUTO frontage of the sidewalks that have none.")
     parser.add_argument("--commit", action="store_true", help="write the frontages (a dry run without it)")
-    sys.exit(main(parser.parse_args().commit))
+    parser.add_argument("--skip-bbl", action="append", default=[], metavar="BBL",
+                        help="leave out the site at this 10-digit BBL (repeatable)")
+    args = parser.parse_args()
+    sys.exit(main(args.commit, frozenset(args.skip_bbl)))
