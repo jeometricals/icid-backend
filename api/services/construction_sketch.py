@@ -180,7 +180,7 @@ def reading_order(boxes: dict[Any, tuple[float, float, float, float]]) -> list[A
 
 def number_items(flags: list[dict[str, Any]], items: list[SketchItem]) -> dict[str, str]:
     """
-    Number a report's flags and what isn't assessed, as the sketch and the calculations panel show them: flags 1..n and non-assessable flags and areas A1..An, each in reading order (reading_order), page after page (each page's own coordinates); flags and areas not drawn come after, in drawing order. An area on a flag surveyed non-assessable gets no A-number: the whole flag is already one.
+    Number a report's flags and what isn't assessed, as the sketch and the calculations panel show them: flags 1..n and non-assessable flags and areas A1..An, each in reading order (reading_order), page after page (each page's own coordinates); flags and areas not drawn come after, in drawing order. An area on a flag surveyed non-assessable gets no A-number: the whole flag is already one. On a sheet where every flag has the signed PIR's own number (pir_flag_no, Slice Y3a), the flags show those; A-numbers are unchanged.
     Takes the flags (list_report_flags) and the sketch's items (sketch_items, every page's).
     Returns the labels keyed 'flag:<id>' (its number), 'a:flag:<id>' and 'a:area:<id>' (A-numbers).
     """
@@ -210,6 +210,14 @@ def number_items(flags: list[dict[str, Any]], items: list[SketchItem]) -> dict[s
             not_assessed += [("area", str(area["id"])) for area in flag["areas"]]
     for number, (kind, key) in enumerate(in_order(not_assessed), start=1):
         labels[f"a:{kind}:{key}"] = f"A{number}"
+    # A sheet whose every flag carries the signed PIR's own number (Slice Y3a) shows those instead; the other sheets
+    # keep the numbers above, all or nothing per sheet
+    sheets: dict[int, list[dict[str, Any]]] = {}
+    for flag in flags:
+        sheets.setdefault(flag.get("page_number") or 0, []).append(flag)
+    for sheet in sheets.values():
+        if all(flag.get("pir_flag_no") for flag in sheet):
+            labels.update({f"flag:{flag['id']}": str(flag["pir_flag_no"]) for flag in sheet})
     return labels
 
 

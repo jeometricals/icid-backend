@@ -9,6 +9,7 @@ from api.db.runner import run_query
 from api.queries._shared import pay_item_in_project
 from api.queries.features import WRITABLE_TYPES as FEATURE_TYPES
 from api.queries.flags import WRITABLE_TYPES as FLAG_TYPES
+from api.queries.flags import solo_measurements_insert
 from api.queries.non_assessable_areas import WRITABLE_TYPES as AREA_TYPES
 from api.queries.pir_annotations import ANNOTATION_TYPES, manual_tax_map_sets, manual_tax_map_values
 from api.queries.segments import WRITABLE_TYPES as SEGMENT_TYPES
@@ -51,11 +52,12 @@ def import_pir_drawings(
     annotations: list[dict[str, Any]], match_lines: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[dict[str, int]]:
     """
-    Write a Smart PIR import in one statement, so all of it lands or none: page scales and rotations (and the lengths of the segments already on a page whose scale changed), then new flags, their non-assessable areas, features, segments, title blocks (replacing a page's) and match lines (R1h.1a; one whose label its page already has live is left out). Only live pages of the PIR take anything, a pay item must be one of the project's, an area's flag and a feature's flag must be ones this import adds.
-    Takes the PIR's id, the importing user's uuid, and the rows: pages {pir_page_id, scale_px_per_ft, rotation_deg}; flags {id, pir_page_id, the flag's writable columns, computed_quantity}; areas {flag_id, the area's writable columns, computed_quantity}; features {pir_page_id, the feature's writable columns, computed_quantity}; segments {pir_page_id, scale_px_per_ft (the import's scale for the page, or None), the segment's writable columns}; annotations {pir_page_id, the title block's fields}; match lines {pir_page_id, label, x1, y1, x2, y2}.
-    Returns {pages_updated, segments_rescaled, flags, non_assessable_areas, features, segments, annotations, match_lines}: how many of each were written; or None on failure.
+    Write a Smart PIR import in one statement, so all of it lands or none: page scales and rotations (and the lengths of the segments already on a page whose scale changed), then new flags, each with its solo measurement (Slice Y3a), their non-assessable areas, features, segments, title blocks (replacing a page's) and match lines (R1h.1a; one whose label its page already has live is left out). Only live pages of the PIR take anything, a pay item must be one of the project's, a flag's PIR flag number must not be its page's live flags' already (else the flag is left out), an area's flag and a feature's flag must be ones this import adds.
+    Takes the PIR's id, the importing user's uuid, and the rows: pages {pir_page_id, scale_px_per_ft, rotation_deg}; flags {id, pir_page_id, the flag's writable columns, computed_quantity, pir_flag_no}; areas {flag_id, the area's writable columns, computed_quantity}; features {pir_page_id, the feature's writable columns, computed_quantity}; segments {pir_page_id, scale_px_per_ft (the import's scale for the page, or None), the segment's writable columns}; annotations {pir_page_id, the title block's fields}; match lines {pir_page_id, label, x1, y1, x2, y2}.
+    Returns {pages_updated, segments_rescaled, flags, measurements, non_assessable_areas, features, segments, annotations, match_lines}: how many of each were written; or None on failure.
     """
-    flag_columns = {"id": "uuid", "pir_page_id": "uuid", **FLAG_TYPES, "computed_quantity": "numeric"}
+    flag_columns = {"id": "uuid", "pir_page_id": "uuid", **FLAG_TYPES, "computed_quantity": "numeric",
+                    "pir_flag_no": "text"}
     area_columns = {"flag_id": "uuid", **AREA_TYPES, "computed_quantity": "numeric"}
     feature_columns = {"pir_page_id": "uuid", **FEATURE_TYPES, "computed_quantity": "numeric"}
     segment_columns = {"pir_page_id": "uuid", "scale_px_per_ft": "numeric", **SEGMENT_TYPES}
@@ -92,12 +94,21 @@ def import_pir_drawings(
             RETURNING s.segment_id
         ),
         new_flags AS (
-            INSERT INTO icid.flags (id, pir_id, pir_page_id, {", ".join(FLAG_TYPES)}, computed_quantity, created_by)
-            SELECT x.id, live.pir_id, live.pir_page_id, {_from_x(FLAG_TYPES)}, x.computed_quantity, %s::uuid
+            INSERT INTO icid.flags (id, pir_id, pir_page_id, {", ".join(FLAG_TYPES)}, computed_quantity, created_by,
+                                    pir_flag_no, measurement_id)
+            SELECT x.id, live.pir_id, live.pir_page_id, {_from_x(FLAG_TYPES)}, x.computed_quantity, %s::uuid,
+                   x.pir_flag_no, gen_random_uuid()
             FROM jsonb_to_recordset(%s::jsonb) AS {_recordset(flag_columns)}
             JOIN live ON live.pir_page_id = x.pir_page_id
             WHERE {pay_item_in_project("x.pay_item_id", "live.project_id")}
-            RETURNING id
+              AND NOT EXISTS (
+                  SELECT 1 FROM icid.flags taken
+                  WHERE taken.pir_page_id = x.pir_page_id AND taken.pir_flag_no = x.pir_flag_no
+                    AND taken.deleted_at IS NULL)
+            RETURNING id, measurement_id, pir_id, shape, dimensions, computed_quantity, created_by
+        ),
+        new_measurements AS (
+            {solo_measurements_insert("new_flags")}
         ),
         new_areas AS (
             INSERT INTO icid.non_assessable_areas (flag_id, {", ".join(AREA_TYPES)}, computed_quantity, created_by)
@@ -145,6 +156,7 @@ def import_pir_drawings(
             (SELECT count(*) FROM page_settings) AS pages_updated,
             (SELECT count(*) FROM rescaled) AS segments_rescaled,
             (SELECT count(*) FROM new_flags) AS flags,
+            (SELECT count(*) FROM new_measurements) AS measurements,
             (SELECT count(*) FROM new_areas) AS non_assessable_areas,
             (SELECT count(*) FROM new_features) AS features,
             (SELECT count(*) FROM new_segments) AS segments,

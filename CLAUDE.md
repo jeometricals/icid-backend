@@ -177,8 +177,8 @@ Any change must follow these.
       orders; PIRs they digitized, signed as built or deleted; flags they created or deleted; PIR pages they
       replaced or deleted; non-assessable areas, features, segments and match lines they created or deleted; IDR flag
       and segment attributions they set; ped ramp corners they added or deleted; ped ramp inspections they started,
-      signed, approved or returned, TIFs they drafted or signed, ped ramp photos they uploaded, sites they imported into reports or last changed the work at, pay items they entered on sites, tax-map PDFs they uploaded, sidewalk strips they drew and flag edits they made. Any of those is a
-      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (47 in `schema.sql`,
+      signed, approved or returned, TIFs they drafted or signed, ped ramp photos they uploaded, sites they imported into reports or last changed the work at, pay items they entered on sites, tax-map PDFs they uploaded, sidewalk strips they drew, flag edits they made, and flag measurements they created or last changed and measurement edits they made (Y3a). Any of those is a
+      409 with the counts under `references`. Those are all the foreign keys to `users.uuid` (50 in `schema.sql`,
       `users.deleted_by` the one not counted; the `deleted_by` of a property, a task order, a PIR, a flag, a PIR
       page, an area, a feature or a segment, an attribution's `set_by` and a PIR's
       `as_built_signed_by` are `ON DELETE SET NULL`, but are counted anyway); none
@@ -941,6 +941,25 @@ Any change must follow these.
     labelled `Sidewalk strip` on its first edge, and never fitted (a long strip can't shrink the sheet; the pane gives up
     `FRONTAGE_RISE` for it). Its `FRONTAGE N.NN' (Sidewalk strip)` (`strip_frontage`, through `effective_frontage`) prints
     above the TAX MAP line, both when both exist (`list_page_drawings` returns `strips`).
+- **Measurement foundation** (Slice Y3a, migrations 061 and 061b; the brief is `Documents/ICID/slice-y3a-measurement-foundation.md`):
+  every flag is measured through `icid.flag_measurements`, invisibly: no number changes.
+  - **Solo measurements.** In Y3a each flag has its own (`flags.measurement_id`, `area_share_fraction` 1.0000): outer
+    shape, dimensions and area (`outer_area`, NUMERIC(10,2)) the flag's, `deductions` `[]`, `needs_remeasure` false.
+    Made by 061's backfill (every flag, live and soft-deleted), by a flag's create (both routes) and the Smart PIR import
+    in the flag's own statement (`solo_measurements_insert`), and moved with the flag by its PATCH (`update_flag`, the
+    editor stamped only when the shape, dimensions or area changed). The pay item, thickness and assessment stay on the
+    flag; bundles, deductions, remeasuring and `measurement_edits`' first writer are Y3b's.
+  - **One reader path.** A flag's net area is `GREATEST(round(outer_area x area_share_fraction, 2) - its areas - its
+    subtracted features, 0)` (`_NET`, through `quantity_laterals` in `api/queries/flags.py`), so every reader of
+    `FLAG_QUANTITY` / `FLAG_AMOUNT` goes through the measurement: flag responses, an IDR's flags (rollup, export lines,
+    site amounts, SMART sheets), Pay Items Reported, approval's `from_flags` rows, Progress, the Construction Report, the
+    Assessment Summary and Y2's clip. A statement that writes the measurement reads it from its own CTE
+    (`quantity_laterals("m")`). `tests/test_flag_measurements.py` holds every reader to it.
+  - **`pir_flag_no`**: the signed PIR's own flag number, set only by the Smart PIR import (trimmed, at most 16, once per
+    page among live flags: a repeat in the entry or one the page has is dropped, `uq_flags_page_pir_flag_no` backs it).
+    The Construction Report prints them on a sheet where every flag has one (`number_items`), else numbers it as before.
+  - **Rollout:** 061 runs before the deploy (the code before Y3a runs unchanged after it), 061b right after (a
+    measurement for any flag added in between, then `measurement_id` NOT NULL). The Y3a code needs 061.
 - **Ped ramp inspection** (pedramp 2a, migration 047; `api/v1/ped_ramp_corners.py`, `api/v1/ped_ramp_attributes.py`,
   their query modules, `api/schemas/ped_ramp.py`, `api/services/ped_ramp_ada.py` and `ped_ramp_report.py`): NYC DOT's
   Pedestrian Ramp Inspection Form (version 1.6) as data, and ICID's own report of it. DOT's fillable PDF, photos and

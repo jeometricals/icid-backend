@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from api.schemas.feature import FeatureCreate
 from api.schemas.flag import FlagCreate
@@ -10,11 +10,26 @@ from api.schemas.flag import FlagCreate
 
 class FlagImportItem(FlagCreate):
     """
-    A flag in a Smart PIR import: a flag as FlagCreate checks it, with its non-assessable areas. Each area is checked
-    on its own (as NonAssessableAreaCreate), so a bad one is dropped and the flag kept.
+    A flag in a Smart PIR import: a flag as FlagCreate checks it, with its non-assessable areas and, optionally, the
+    signed PIR's own number for it (pir_flag_no, Slice Y3a: trimmed, at most 16 characters, blank for none; only the
+    import sets it). Each area is checked on its own (as NonAssessableAreaCreate), so a bad one is dropped and the flag
+    kept.
     """
 
     non_assessable_areas: list[dict[str, Any]] = []
+    pir_flag_no: Optional[str] = Field(default=None, max_length=16)
+
+    @field_validator("pir_flag_no", mode="before")
+    @classmethod
+    def _trimmed(cls, value: Any) -> Any:
+        """
+        Trim a PIR flag number; a blank one is none.
+        Takes the value as sent.
+        Returns the trimmed text, None, or the value unchanged when it isn't text (refused as a string).
+        """
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
 
 class FeatureImportItem(FeatureCreate):

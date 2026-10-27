@@ -321,6 +321,30 @@ class TestNumbering:
         labels = number_items(flags, sketch_items(flags, NO_DRAWINGS))
         assert labels[f"flag:{flags[0]['id']}"] == "2" and labels[f"flag:{flags[1]['id']}"] == "1"
 
+    def test_a_sheet_whose_every_flag_has_its_pir_number_shows_those(self):
+        """Slice Y3a: the signed PIR's own numbers; A-numbers are unchanged."""
+        flags = [{**piece(1, x=20), "pir_flag_no": "14"}, {**piece(2, x=0, assessable=False), "pir_flag_no": "12"},
+                 {**piece(3, x=10), "pir_flag_no": "13A"}]
+        labels = number_items(flags, sketch_items(flags, NO_DRAWINGS))
+        ids = [str(flag["id"]) for flag in flags]
+        assert [labels[f"flag:{i}"] for i in ids] == ["14", "12", "13A"] and labels[f"a:flag:{ids[1]}"] == "A1"
+
+    def test_a_sheet_with_a_flag_lacking_one_keeps_reading_order(self):
+        """All or nothing per sheet: one flag without a PIR number numbers the whole sheet as before."""
+        flags = [{**piece(1, x=20), "pir_flag_no": "14"}, {**piece(2, x=0), "pir_flag_no": None}, piece(3, x=10)]
+        labels = number_items(flags, sketch_items(flags, NO_DRAWINGS))
+        assert [labels[f"flag:{flag['id']}"] for flag in flags] == ["3", "1", "2"]
+
+    def test_the_rule_is_per_sheet(self):
+        """Sheet 1 fully numbered shows its PIR numbers; sheet 2 not, so its flags keep the running numbers."""
+        page_1 = [{**sketch_flag(x=0), "id": "a", "page_number": 1, "surveyed_is_assessable": True, "pir_flag_no": "7"},
+                  {**sketch_flag(x=100), "id": "b", "page_number": 1, "surveyed_is_assessable": True,
+                   "pir_flag_no": "8"}]
+        page_2 = [{**sketch_flag(x=50, page=OTHER_PAGE), "id": "c", "page_number": 2, "surveyed_is_assessable": True}]
+        items = sketch_items(page_1, NO_DRAWINGS) + sketch_items(page_2, NO_DRAWINGS)
+        labels = number_items(page_1 + page_2, items)
+        assert (labels["flag:a"], labels["flag:b"], labels["flag:c"]) == ("7", "8", "3")
+
 
 class TestMaterials:
     @pytest.mark.parametrize("thickness, assessable, expected, label", [

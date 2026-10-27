@@ -350,3 +350,63 @@ class TestMatchLines:
                                 PAGE_IDS, {PAY_ITEM}, None, None, {})
         assert result.inserted.match_lines == 2 and result.dropped.match_lines == 0
         assert len(write.call_args.args[-1]) == 2
+
+
+def numbered(numbers_1: list, numbers_2: list = None) -> dict:
+    """
+    A file of the sample's first flag repeated, carrying the given PIR flag numbers (Slice Y3a; a key left out for None).
+    Takes page 1's numbers and, optionally, page 2's.
+    Returns the file as a dict.
+    """
+    flag = {key: value for key, value in SAMPLE["pages"][0]["flags"][0].items() if key != "non_assessable_areas"}
+
+    def flags(numbers: list) -> list:
+        return [{**flag, **({} if number is None else {"pir_flag_no": number})} for number in numbers]
+
+    pages = [{"page_number": 1, "flags": flags(numbers_1)}]
+    if numbers_2 is not None:
+        pages.append({"page_number": 2, "flags": flags(numbers_2)})
+    return {"schema_version": "1.0", "pir_id": str(PIR_ID), "pages": pages}
+
+
+def numbers_prepared(raw: dict, live_flag_nos: dict = None):
+    """
+    Check a file as the route does, with the PIR flag numbers its live flags have.
+    Takes the file and {page number: numbers live there}.
+    Returns the PreparedImport.
+    """
+    return prepare_import(SmartPirImport.model_validate(raw), PAGE_IDS, {PAY_ITEM}, None, None, {},
+                          live_flag_nos or {})
+
+
+class TestPirFlagNumbers:
+    """Slice Y3a: a flag can bring the signed PIR's own number for it, once per page."""
+
+    def test_numbers_are_kept_trimmed_and_a_blank_one_is_none(self):
+        out = numbers_prepared(numbered([" 12 ", "", None]))
+        assert [row["pir_flag_no"] for row in out.flags] == ["12", None, None] and out.dropped == []
+
+    def test_a_number_listed_twice_on_a_page_drops_the_second(self):
+        out = numbers_prepared(numbered(["7", "7", "8"]))
+        assert [row["pir_flag_no"] for row in out.flags] == ["7", "8"]
+        assert reasons(out) == [("flag", 1, 1, 'pir_flag_no "7" is listed twice on this page')]
+
+    def test_a_number_the_page_has_live_is_dropped(self):
+        out = numbers_prepared(numbered(["7", "9"]), {1: {"9"}})
+        assert [row["pir_flag_no"] for row in out.flags] == ["7"]
+        assert reasons(out) == [("flag", 1, 1, 'pir_flag_no "9" is already on this page')]
+
+    def test_the_same_number_on_two_pages_is_fine(self):
+        out = numbers_prepared(numbered(["7"], ["7"]), {2: {"8"}})
+        assert [row["pir_flag_no"] for row in out.flags] == ["7", "7"] and out.dropped == []
+
+    def test_a_number_past_16_characters_is_dropped(self):
+        out = numbers_prepared(numbered(["x" * 17]))
+        assert out.flags == [] and reasons(out)[0][3].startswith("pir_flag_no: String should have at most 16")
+
+    def test_a_dropped_flag_takes_no_number(self):
+        """A flag dropped for its number is no flag: a feature naming it by flag_index is dropped too."""
+        raw = numbered(["7", "7"])
+        raw["pages"][0]["features"] = [{"feature_type": "manhole", "sketch_x": 1, "sketch_y": 1, "flag_index": 1}]
+        out = numbers_prepared(raw)
+        assert out.features == [] and reasons(out)[-1][3] == "flag_index 1 is not a flag this page's import kept"
