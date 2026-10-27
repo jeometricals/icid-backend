@@ -297,6 +297,21 @@ def list_sidewalks_without_tax_map() -> Optional[list[dict[str, Any]]]:
     return run_query(sql)
 
 
+def list_sidewalks_without_tax_map_pdf() -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch every live sidewalk, of every project, that has no DOF tax-map PDF yet (Slice Y1.5's backfill).
+    Takes nothing.
+    Returns [{id, project_id, address, boro, block, lot}] by borough, block, project and address, or None on failure.
+    """
+    sql = """
+        SELECT p.id, p.project_id, p.address, p.boro::text AS boro, p.block, p.lot
+        FROM icid.properties p
+        WHERE p.kind = 'sidewalk' AND p.deleted_at IS NULL AND p.tax_map_pdf_path IS NULL
+        ORDER BY p.boro, p.block::int, p.project_id, p.address;
+    """
+    return run_query(sql)
+
+
 def refresh_property_tax_map(
     property_id: UUID, boro: str, block: str, lot: str, frontage_ft: Decimal, source: str
 ) -> Optional[dict[str, Any]]:
