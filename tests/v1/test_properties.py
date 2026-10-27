@@ -786,7 +786,7 @@ class TestTaxMapFrontageFetched:
         data = response.json()["data"]
         assert response.status_code == 201
         assert (data["tax_map_frontage_ft"], data["tax_map_source"], data["tax_map_fetched_at"]) == (None, None, None)
-        assert get.call_args.kwargs["params"]["where"] == "BBL=4012340056"
+        assert get.call_args_list[0].kwargs["params"]["where"] == "BBL=4012340056"
         sql, params = run.call_args.args
         assert "SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()" in sql
         assert params == (Decimal("40.00"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "56")
@@ -889,3 +889,129 @@ class TestRefreshTaxMap:
         with patch(PROPS) as run:
             assert demo_client.post(self.REFRESH).status_code == 403
         run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Slice Y1.5: a sidewalk's DOF tax-map PDF (fetched after a create or a block change, refreshed or uploaded by an admin)
+# ---------------------------------------------------------------------------
+
+DOF = "api.services.dof_tax_map"
+MAP_ID = "30070020130725102158"
+PDF_ROW = {**PROPERTY_ROW, "tax_map_pdf_path": f"{PROPERTY_ID}/{MAP_ID}.pdf", "tax_map_pdf_source": "dof_map_library",
+           "tax_map_pdf_map_id": MAP_ID, "tax_map_pdf_effective_date": datetime(2013, 7, 25).date(),
+           "tax_map_pdf_fetched_at": FETCHED, "tax_map_pdf_uploaded_by": None}
+
+
+def dof_answers(*maps: tuple[str, str], pdf: bytes = b"%PDF-1.7 map") -> list[MagicMock]:
+    """DOF's map library answering with the maps given, then the portal with the PDF."""
+    library = MagicMock()
+    library.json.return_value = {"features": [{"attributes": {"ID": i, "EFFECTIVE_DATE": d}} for i, d in maps]}
+    portal = MagicMock()
+    portal.content = pdf
+    return [library, portal]
+
+
+class TestTaxMapPdf:
+    REFRESH = f"{URL}/admin/refresh-tax-map-pdf"
+
+    def test_a_member_gets_a_signed_url_and_where_it_came_from(self):
+        with signed_in(INSPECTOR_ROW) as member, patch(PROPS, return_value=[PDF_ROW]), \
+                patch(PROJECTS, return_value=[{"?column?": 1}]), \
+                patch(f"{DOF}.create_signed_url", return_value="https://signed/pdf") as sign:
+            response = member.get(f"{URL}/tax-map-pdf")
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert (data["url"], data["source"], data["map_id"], data["effective_date"]) == (
+            "https://signed/pdf", "dof_map_library", MAP_ID, "2013-07-25")
+        assert data["dof_url"].endswith(f"/map_library/{MAP_ID}")
+        assert sign.call_args.args[0] == f"{PROPERTY_ID}/{MAP_ID}.pdf" and sign.call_args.args[3] == "tax-maps"
+
+    def test_none_on_file_is_404(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]):
+            response = admin_client.get(f"{URL}/tax-map-pdf")
+        assert (response.status_code, response.json()["detail"]) == (404, "No tax map PDF on file for this site")
+
+    def test_responses_say_whether_there_is_one_but_never_its_path(self, admin_client):
+        with patch(PROPS, return_value=[PDF_ROW]):
+            data = admin_client.get(URL).json()["data"]
+        assert data["has_tax_map_pdf"] is True and "tax_map_pdf_path" not in data
+        assert (data["tax_map_pdf_source"], data["tax_map_pdf_map_id"]) == ("dof_map_library", MAP_ID)
+
+    def test_an_admin_refreshes_it_from_dof(self, admin_client):
+        with patch(PROPS, side_effect=[[PROPERTY_ROW], [{**PDF_ROW, "old_tax_map_pdf_path": None}]]), \
+                patch(GET, side_effect=dof_answers((MAP_ID, "2013/07/25"))), patch(f"{DOF}.upload_file") as upload, \
+                patch(f"{DOF}.create_signed_url", return_value="https://signed/pdf"):
+            response = admin_client.post(self.REFRESH)
+        assert response.status_code == 200 and response.json()["message"] == "Tax map PDF refreshed from DOF"
+        assert upload.call_args.args[:2] == ("tax-maps", f"{PROPERTY_ID}/{MAP_ID}.pdf")
+
+    def test_dof_down_is_503_and_changes_nothing(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]) as run, patch(GET, side_effect=httpx.ConnectError("down")):
+            response = admin_client.post(self.REFRESH)
+        assert response.status_code == 503 and "upload the PDF" in response.json()["detail"]
+        assert run.call_count == 1
+
+    def test_a_block_dof_has_no_map_for_is_422(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(GET, side_effect=dof_answers()):
+            response = admin_client.post(self.REFRESH)
+        assert (response.status_code, response.json()["detail"]) == (422, "DOF has no current tax map for Queens block 1234")
+
+    def test_a_ped_ramp_is_400(self, admin_client):
+        with patch(PROPS, return_value=[RAMP_ROW]):
+            assert admin_client.post(f"/v1/properties/{RAMP_ID}/admin/refresh-tax-map-pdf").status_code == 400
+
+    def test_an_admin_uploads_one_in_two_steps(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(f"{DOF}.create_signed_upload_url", return_value="https://signed/upload"):
+            step = admin_client.post(f"{URL}/admin/tax-map-pdf/upload-request").json()["data"]
+        assert step["upload_url"] == "https://signed/upload" and step["staging_path"].startswith(f"staging/{PROPERTY_ID}/")
+        uploaded = {**PDF_ROW, "tax_map_pdf_source": "upload", "tax_map_pdf_map_id": None,
+                    "tax_map_pdf_effective_date": None, "tax_map_pdf_uploaded_by": ADMIN_ID, "old_tax_map_pdf_path": None}
+        with patch(PROPS, side_effect=[[PROPERTY_ROW], [uploaded]]), patch(f"{DOF}.object_exists", return_value=True), \
+                patch(f"{DOF}.download_file", return_value=b"%PDF-1.7"), patch(f"{DOF}.upload_file"), \
+                patch(f"{DOF}.remove_files"), patch(f"{DOF}.create_signed_url", return_value="https://signed/pdf"):
+            response = admin_client.post(f"{URL}/admin/tax-map-pdf/upload-complete",
+                                         json={"staging_path": step["staging_path"]})
+        assert response.status_code == 200
+        assert (response.json()["data"]["source"], response.json()["data"]["uploaded_by"]) == ("upload", str(ADMIN_ID))
+
+    def test_a_png_upload_is_400(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(f"{DOF}.object_exists", return_value=True), \
+                patch(f"{DOF}.download_file", return_value=b"\x89PNG"), patch(f"{DOF}.remove_files"):
+            response = admin_client.post(f"{URL}/admin/tax-map-pdf/upload-complete",
+                                         json={"staging_path": f"staging/{PROPERTY_ID}/a.pdf"})
+        assert (response.status_code, response.json()["detail"]) == (400, "The file isn't a PDF")
+
+    @pytest.mark.parametrize("method,path", [("post", "/admin/refresh-tax-map-pdf"),
+                                             ("post", "/admin/tax-map-pdf/upload-request")])
+    def test_a_user_who_isnt_an_admin_is_forbidden(self, method, path):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROPS) as run, patch(GET) as get:
+            response = getattr(inspector, method)(f"{URL}{path}")
+        assert (response.status_code, response.json()) == FORBIDDEN
+        run.assert_not_called()
+        get.assert_not_called()
+
+    def test_a_new_sidewalk_fetches_its_blocks_map_in_the_background(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), \
+                patch(GET, side_effect=[mappluto(40), *dof_answers((MAP_ID, "2013/07/25"))]) as get, \
+                patch(f"{DOF}.upload_file") as upload, \
+                patch(PROPS, side_effect=[[PROPERTY_ROW], [{"id": PROPERTY_ID}], [{**PDF_ROW, "old_tax_map_pdf_path": None}]]):
+            assert admin_client.post(LIST_URL, json=BODY).status_code == 201
+        assert get.call_args_list[1].kwargs["params"]["where"] == "BOROUGH='4' AND BLOCK=1234 AND CURRENT_FLAG='Y'"
+        upload.assert_called_once()
+
+    def test_a_block_change_clears_the_map_in_the_statement_and_fetches_the_new_one(self, admin_client):
+        moved = {**PROPERTY_ROW, "block": "1235"}
+        with patch(GET, side_effect=[mappluto(25), *dof_answers()]) as get, \
+                patch(PROPS, side_effect=[[PDF_ROW], [moved], [{"id": PROPERTY_ID}]]) as run:
+            assert admin_client.patch(URL, json={"block": "1235"}).status_code == 200
+        one_line = " ".join(run.call_args_list[1].args[0].split())
+        assert ("tax_map_pdf_path = CASE WHEN (p.boro = new_lot.boro AND p.block IS NOT DISTINCT FROM new_lot.block) "
+                "THEN p.tax_map_pdf_path END") in one_line
+        assert get.call_args_list[1].kwargs["params"]["where"] == "BOROUGH='4' AND BLOCK=1235 AND CURRENT_FLAG='Y'"
+
+    def test_a_lot_change_keeps_the_blocks_map(self, admin_client):
+        moved = {**PDF_ROW, "lot": "57"}
+        with patch(GET, return_value=mappluto(25)) as get, patch(PROPS, side_effect=[[PDF_ROW], [moved], [{"id": PROPERTY_ID}]]):
+            assert admin_client.patch(URL, json={"lot": "57"}).status_code == 200
+        assert get.call_count == 1  # MapPLUTO only

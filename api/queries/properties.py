@@ -12,7 +12,9 @@ _PROPERTY_COLUMNS = """
             p.violation_no, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
             p.facing_street::text AS facing_street, p.ramp_type::text AS ramp_type, p.corner_id, p.community_board, p.notes,
             p.created_at, p.updated_at, p.created_by, p.deleted_at, p.deleted_by,
-            p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at"""
+            p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at,
+            p.tax_map_pdf_path, p.tax_map_pdf_source, p.tax_map_pdf_map_id, p.tax_map_pdf_effective_date,
+            p.tax_map_pdf_fetched_at, p.tax_map_pdf_uploaded_by"""
 # What properties are ordered by: a sidewalk's address, a ped ramp's intersection (then its quadrant)
 PROPERTY_ORDER = (
     "COALESCE(p.address, p.intersection_street_1 || ' & ' || p.intersection_street_2), p.quadrant, p.boro, p.block, p.lot"
@@ -27,6 +29,11 @@ _SAME_LOT = """
 # Property p is still at the lot new_lot names (SET reads p as it was): its MapPLUTO frontage still holds
 _SAME_TAX_LOT = ("(p.boro = new_lot.boro AND p.block IS NOT DISTINCT FROM new_lot.block"
                  " AND p.lot IS NOT DISTINCT FROM new_lot.lot)")
+# Property p is still on the block new_lot names (SET reads p as it was): its DOF tax-map PDF, a map of the block, holds
+_SAME_TAX_BLOCK = "(p.boro = new_lot.boro AND p.block IS NOT DISTINCT FROM new_lot.block)"
+# The tax-map PDF's columns (Slice Y1.5), all cleared together
+_TAX_MAP_PDF_COLUMNS = ("tax_map_pdf_path", "tax_map_pdf_source", "tax_map_pdf_map_id", "tax_map_pdf_effective_date",
+                        "tax_map_pdf_fetched_at", "tax_map_pdf_uploaded_by")
 # The latest live task order property p is in, as latest: the one issued last (undated ones after the dated), then
 # the newest
 _LATEST_TASK_ORDER = """LEFT JOIN LATERAL (
@@ -159,7 +166,7 @@ def create_property(project_id: str, created_by_uuid: UUID, data: dict[str, Any]
 
 def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
-    Write a property's record whole, as an edit leaves it (its kind is never written). A live property is left alone when another live sidewalk of its project is already at the borough, block and lot it would end up with. A change of borough, block or lot clears its MapPLUTO frontage (Slice Y1), which was the old lot's.
+    Write a property's record whole, as an edit leaves it (its kind is never written). A live property is left alone when another live sidewalk of its project is already at the borough, block and lot it would end up with. A change of borough, block or lot clears its MapPLUTO frontage (Slice Y1), which was the old lot's; a change of borough or block clears its DOF tax-map PDF too (Slice Y1.5), the old block's map (its file stays in Storage).
     Takes the property's id and every written column's value keyed by column (one left out is written as None).
     Returns the updated property dict, or None when no property matches or the change would collide.
     """
@@ -172,7 +179,8 @@ def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[st
             tax_map_frontage_ft = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_frontage_ft END,
             tax_map_source = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_source END,
             tax_map_fetched_at = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_fetched_at END,
-            updated_at = now()
+            """ + "".join(f"{column} = CASE WHEN {_SAME_TAX_BLOCK} THEN p.{column} END,\n            "
+                          for column in _TAX_MAP_PDF_COLUMNS) + """updated_at = now()
         FROM (SELECT %s::icid.boro AS boro, %s::text AS block, %s::text AS lot) AS new_lot
         WHERE p.id = %s
           AND (
@@ -330,4 +338,31 @@ def refresh_property_tax_map(
         FROM prop;
     """
     rows = run_query(sql, (frontage_ft, source, property_id, boro, block, lot))
+    return rows[0] if rows else None
+
+
+def set_property_tax_map_pdf(property_id: UUID, boro: str, block: str, fields: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """
+    Record a sidewalk's DOF tax-map PDF (Slice Y1.5), replacing any it had, while it is still on the block the map is of.
+    Takes the property's id, the borough and block the map is of, and the PDF's columns: tax_map_pdf_path, _source ('dof_map_library' or 'upload'), _map_id and _effective_date (a fetch's) and _uploaded_by (an upload's); its fetched_at is now.
+    Returns the property dict with old_tax_map_pdf_path (the file it replaced, or None), or None when the property is gone, isn't a sidewalk or is now on another block.
+    """
+    sql = (
+        """
+        WITH updated AS (
+            UPDATE icid.properties p
+            SET tax_map_pdf_path = %s, tax_map_pdf_source = %s, tax_map_pdf_map_id = %s,
+                tax_map_pdf_effective_date = %s::date, tax_map_pdf_fetched_at = now(), tax_map_pdf_uploaded_by = %s::uuid
+            FROM icid.properties old
+            WHERE p.id = %s AND old.id = p.id AND p.kind = 'sidewalk' AND p.boro = %s::icid.boro AND p.block = %s
+            RETURNING p.*, old.tax_map_pdf_path AS old_tax_map_pdf_path
+        )
+        SELECT"""
+        + _PROPERTY_COLUMNS
+        + """, p.old_tax_map_pdf_path
+        FROM updated p;"""
+    )
+    params = (fields["tax_map_pdf_path"], fields["tax_map_pdf_source"], fields.get("tax_map_pdf_map_id"),
+              fields.get("tax_map_pdf_effective_date"), fields.get("tax_map_pdf_uploaded_by"), property_id, boro, block)
+    rows = run_query(sql, params)
     return rows[0] if rows else None
