@@ -77,3 +77,14 @@ def test_a_lot_whose_mapPLUTO_address_has_another_house_number_is_flagged(capsys
     out = capsys.readouterr().out
     assert "28.83 ft (mappluto_26v2, 296 MAIN STREET); page 1 has no width  CHECK: MapPLUTO's lot is 296 MAIN STREET" in out
     assert "1 to check (MapPLUTO's address has another house number)" in out
+
+
+def test_a_skipped_bbl_is_neither_asked_about_nor_written(capsys):
+    refreshed = {"tax_map_frontage_ft": Decimal("16.67"), "tax_map_source": "mappluto_26v2", "tax_map_fetched_at": None,
+                 "old_frontage_ft": None, "pages_updated": 0}
+    with patch(PROPS, side_effect=[[SITE_1, SITE_2], [refreshed]]) as run, patch(GET, side_effect=mappluto(16.67)) as get:
+        assert main(commit=True, skip_bbls=frozenset({"3375020052"})) == 0
+    assert get.call_count == 1 and run.call_count == 2  # the list, then 313's write only
+    out = capsys.readouterr().out
+    assert "350 Main St (BBL 3375020052): skipped (--skip-bbl); nothing written" in out
+    assert "1 with a frontage, 0 without, 0 title blocks updated, 1 skipped" in out
