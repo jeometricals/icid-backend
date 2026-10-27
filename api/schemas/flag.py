@@ -14,6 +14,8 @@ FlagNonAssessableReason = Literal[
     "tree_damage", "city_tree", "transition", "no_driveway", "hydrant", "fronting_city", "utility", "settlement", "other",
     "tree", "driveway", "grass", "dirt", "existing_sidewalk", "asphalt", "tree_pit", "landmark", "vault", "subway",
     "scaffolding", "other_perm_obstruction", "other_temp_obstruction",
+    # Slice Y1.5: wholly outside its page's sidewalk strip (the strip's auto-flip sets it; a user may too)
+    "outside_property_line",
 ]
 FlagThickness = Literal["4in", "7in", "7in_as_4in"]
 # The DOT defect codes, in the order a flag stores them

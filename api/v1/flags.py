@@ -234,7 +234,7 @@ def update_flag_record(
     merged = validated(FlagCreate, {**{field: found[field] for field in FlagCreate.model_fields}, **changes})
     _check_flag_pay_item(found["project_id"], merged.pay_item_id, new=merged.pay_item_id != found["pay_item_id"])
 
-    row = update_flag(flag_id, merged.model_dump(), compute_area(merged.shape, merged.dimensions))
+    row = update_flag(flag_id, merged.model_dump(), compute_area(merged.shape, merged.dimensions), user.uuid)
 
     if row is None:
         # The pay item was deleted or moved between the check and the statement

@@ -8,6 +8,8 @@ from api.schemas.flag import DIMENSIONS_BY_SHAPE, FlagShape, checked_dimensions
 
 NonAssessableReason = Literal[
     "driveway", "grass", "dirt", "existing_sidewalk", "asphalt", "tree_pit", "landmark", "other",
+    # Slice Y1.5: the part of a flag outside its page's sidewalk strip
+    "outside_property_line",
 ]
 
 
