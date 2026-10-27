@@ -69,6 +69,9 @@ class PirAnnotationOut(PirAnnotationIn):
 
     tax_map_width_ft: Optional[float] = None
     cc_curb_to_curb_ft: Optional[float] = None
+    # Where tax_map_width_ft came from (Slice Y1): mappluto_<version> or manual; set by the server, never sent
+    tax_map_source: Optional[str] = None
+    tax_map_fetched_at: Optional[datetime] = None
     pir_page_id: UUID
     created_at: datetime
     updated_at: datetime

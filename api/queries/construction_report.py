@@ -16,7 +16,7 @@ from api.queries.properties import PROPERTY_ORDER
 # The title block fields the form prints, read off page 1 of the live PIR (tb_ so they don't meet the property's)
 _TITLE_BLOCK_FIELDS = (
     "contract_no", "violation_no", "cross_street_left", "cross_street_right", "frontage_street", "tax_map_width_ft",
-    "cc_curb_to_curb_ft", "property_status", "corner_property_status", "violation_not_removed_due_to",
+    "tax_map_source", "cc_curb_to_curb_ft", "property_status", "corner_property_status", "violation_not_removed_due_to",
     "date_notice_issued", "date_excavated", "date_constructed",
 )
 _TITLE_BLOCK_COLUMNS = ",\n            ".join(f"a.{field} AS tb_{field}" for field in _TITLE_BLOCK_FIELDS)

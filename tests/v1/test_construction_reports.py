@@ -539,3 +539,20 @@ class TestIdrReports:
             assert demo_client.get(ZIP_URL).status_code == 404
         run.assert_not_called()
         assert IDR_ROW["reporter_uuid"] != DEMO_USER_ROW["uuid"]
+
+
+@pytest.mark.parametrize("source,label", [("mappluto_26v2", "TAX MAP 40.00' (MapPLUTO 26v2)"),
+                                          ("manual", "TAX MAP 40.00' (Manual)")])
+def test_the_tax_map_prints_its_source(admin_client, storage, source, label):
+    """Slice Y1: the TAX MAP dimension says where its width came from."""
+    header = {**HEADER, "tb_tax_map_source": source}
+    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(header=header)):
+        text = pdf_text(admin_client.get(URL).content)
+    assert label in text
+
+
+def test_a_tax_map_without_a_source_prints_as_before(admin_client, storage):
+    """Slice Y1: a width with no source (none recorded) prints without a note."""
+    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
+        text = pdf_text(admin_client.get(URL).content)
+    assert "TAX MAP 40.00'" in text and "(MapPLUTO" not in text and "(Manual)" not in text

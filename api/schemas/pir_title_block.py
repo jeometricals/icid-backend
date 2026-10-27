@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
@@ -24,6 +24,9 @@ class PirTitleBlock(BaseModel):
     cross_street_right: Optional[str] = None
     frontage_street: Optional[str] = None
     tax_map_width_ft: Optional[float] = None
+    # Where the width came from (Slice Y1): mappluto_<version> or manual; None without a width
+    tax_map_source: Optional[str] = None
+    tax_map_fetched_at: Optional[datetime] = None
     cc_curb_to_curb_ft: Optional[float] = None
 
 

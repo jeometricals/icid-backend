@@ -68,6 +68,7 @@ from api.services.construction_sketch import (
 from api.services.construction_slabs import edge_runs, group_bounds, slab_groups
 from api.services.export_common import signed_date
 from api.services.field_edits import initials
+from api.services.mappluto import source_display
 from api.services.signatures import fetch_signature_file
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,8 @@ MATCH_LINE_WIDTH = 1.6
 MATCH_LINE_RADIUS = 5.0
 # A label printed inside a shape, and a number's circle
 LABEL_PT = 6.5
+# A dimension's note, after its text: the TAX MAP's source (Slice Y1)
+NOTE_PT = 5
 MARK_RADIUS = 4.5
 # A strap dimension: its text, and how far its line sits from the slab
 STRAP_PT = 6.0
@@ -1117,10 +1120,11 @@ def _arrowhead(c: Canvas, x: float, y: float, pointing_left: bool) -> None:
     c.drawPath(_path(c, [(x, y), (x + back, y + 1.5), (x + back, y - 1.5)]), stroke=0, fill=1)
 
 
-def _dimension(c: Canvas, left: float, right: float, y: float, text: str) -> None:
+def _dimension(c: Canvas, left: float, right: float, y: float, text: str, note: Optional[str] = None) -> None:
     """
-    Draw a dimension: a line with an arrowhead at each end and its text centred just above it.
-    Takes the canvas, the line's two ends and height on the sheet, and the text.
+    Draw a dimension: a line with an arrowhead at each end and its text centred just above it, followed by a note in
+    smaller italics when one is given (the TAX MAP's source, "(MapPLUTO 26v2)").
+    Takes the canvas, the line's two ends and height on the sheet, the text and the note (None for none).
     Returns nothing.
     """
     c.setStrokeColorRGB(0, 0, 0)
@@ -1131,7 +1135,13 @@ def _dimension(c: Canvas, left: float, right: float, y: float, text: str) -> Non
         c.line(x, y - 3, x, y + 3)
     _arrowhead(c, left, y, True)
     _arrowhead(c, right, y, False)
-    _text(c, (left + right) / 2, y + 2, text, 6.5, align="centre")
+    if note is None:
+        _text(c, (left + right) / 2, y + 2, text, 6.5, align="centre")
+        return
+    note = f" {note}"
+    start = (left + right - stringWidth(text, FONT, 6.5) - stringWidth(note, ITALIC, NOTE_PT)) / 2
+    _text(c, start, y + 2, text, 6.5)
+    _text(c, start + stringWidth(text, FONT, 6.5), y + 2, note, NOTE_PT, ITALIC)
 
 
 def frontage_curb(items: list[SketchItem], fit: Fit) -> Optional[tuple[Decimal, float, float]]:
@@ -1167,7 +1177,8 @@ def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: 
     if tax_map:
         half = float(tax_map) * fit.points_per_foot / 2
         ends = (middle - half, middle + half)
-        _dimension(c, ends[0], ends[1], line_y, f"TAX MAP {width_text(tax_map)}")
+        source = source_display(header.get("tb_tax_map_source"))
+        _dimension(c, ends[0], ends[1], line_y, f"TAX MAP {width_text(tax_map)}", f"({source})" if source else None)
     else:
         ends = (min_x, max_x)
     c.setLineWidth(0.4)

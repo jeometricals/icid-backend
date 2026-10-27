@@ -524,3 +524,20 @@ class TestRendering:
         with pytest.raises(PirImageError) as refused:
             image_to_page(image_bytes("PNG", (6000, 5000)))
         assert refused.value.detail.startswith("The image is 30.0 megapixels")
+
+
+def test_a_new_page_1_starts_with_the_tax_map_width(storage, admin_client):
+    """Slice Y1: the replaced page 1's manual width carries forward, else the property's MapPLUTO frontage."""
+    storage.upload = FIXTURE.read_bytes()
+    pages = FakePages(pages=2)
+    with patch(PIRS, side_effect=pir_with(pages)), patch(PAGES, side_effect=pages):
+        assert admin_client.post(f"{PIR_URL}/image/complete", json={"staging_path": STAGED}).status_code == 200
+    replace_sql, _ = next(call for call in pages.calls if "INSERT INTO icid.pir_pages" in call[0])
+    one_line = " ".join(replace_sql.split())
+    assert "RETURNING pir_page_id, page_number" in one_line
+    assert "WHERE op.page_number = 1 AND a.tax_map_source = 'manual'" in one_line
+    assert ("CASE WHEN carried.tax_map_source IS NOT NULL THEN carried.tax_map_width_ft ELSE p.tax_map_frontage_ft END"
+            in one_line)
+    assert "WHERE pg.page_number = 1 AND COALESCE(carried.tax_map_source, p.tax_map_source) IS NOT NULL" in one_line
+    assert "ON CONFLICT (pir_page_id) DO NOTHING" in one_line
+    assert "CROSS JOIN (SELECT count(*) FROM title_block) AS title_blocks_started" in one_line

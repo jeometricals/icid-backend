@@ -48,6 +48,18 @@ def no_match_lines():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_mappluto():
+    """
+    Keep MapPLUTO off the network for the whole session (Slice Y1): a property create or a move to another lot fetches
+    its frontage after the response, and finds no lot unless a test patches api.services.mappluto.httpx.get itself.
+    Yields the mock of the call.
+    """
+    with patch("api.services.mappluto.httpx.get") as get:
+        get.return_value.json.return_value = {"features": []}
+        yield get
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_site_pay_items():
     """
     Patch the site pay-item statements for the whole session (Slice V1), so the report saves, the export and the pay-item deletes that now read an IDR's site pay items find none unless a test patches api.queries.idr_report_site_pay_items.run_query itself.

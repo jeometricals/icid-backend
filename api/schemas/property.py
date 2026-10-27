@@ -138,6 +138,11 @@ class PropertyOut(BaseModel):
     created_by: UUID
     deleted_at: Optional[datetime] = None
     deleted_by: Optional[UUID] = None
+    # A sidewalk's tax-map frontage from MapPLUTO (Slice Y1), its source (mappluto_26v2) and when it was fetched; all
+    # three None until a fetch works, and always for a ped ramp
+    tax_map_frontage_ft: Optional[float] = None
+    tax_map_source: Optional[str] = None
+    tax_map_fetched_at: Optional[datetime] = None
 
     @computed_field
     @property
@@ -216,3 +221,21 @@ class PropertyConflict(BaseModel):
 
     detail: str
     existing_property_id: UUID
+
+
+class TaxMapRefresh(BaseModel):
+    """
+    A sidewalk's tax-map frontage as an admin's refresh from MapPLUTO left it (Slice Y1): the frontage in feet, its
+    source, when it was fetched, and how many of its PIR's title blocks took it (those typed by hand don't).
+    """
+
+    frontage_ft: float
+    source: str
+    fetched_at: datetime
+    pages_updated: int
+
+
+class TaxMapRefreshResponse(BaseModel):
+    status: str
+    message: str
+    data: TaxMapRefresh

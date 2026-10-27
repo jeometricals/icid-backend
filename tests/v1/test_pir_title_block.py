@@ -82,7 +82,8 @@ class TestFields:
         assert response.status_code == 200 and response.json()["message"] == "Title block saved"
         assert response.json()["data"] == {"pir_id": str(PIR_ID), "contract_no": "HWS0023",
                                            "date_notice_issued": "2026-09-15", "date_excavated": "2026-10-01",
-                                           "date_constructed": "2026-10-05", "north_bearing": "NE", **STREETS}
+                                           "date_constructed": "2026-10-05", "north_bearing": "NE", **STREETS,
+                                           "tax_map_source": None, "tax_map_fetched_at": None}
         sql, params = write_call(run)
         assert "UPDATE icid.pirs pir SET north_bearing = %s::icid.compass_point" in sql
         assert "INSERT INTO icid.pir_annotations AS a (pir_page_id, contract_no, date_notice_issued, date_excavated, date_constructed)" in sql
@@ -167,7 +168,7 @@ class TestStreetsAndWidths:
         assert (data["tax_map_width_ft"], data["cc_curb_to_curb_ft"]) == (40.0, 34.25)
         sql, params = write_call(run)
         assert ("(pir_page_id, cross_street_left, cross_street_right, frontage_street, tax_map_width_ft, "
-                "cc_curb_to_curb_ft)") in sql
+                "cc_curb_to_curb_ft, tax_map_source, tax_map_fetched_at)") in sql
         assert "%s::numeric" in sql
         assert params[:5] == ("139 AVENUE", "138 AVENUE", "227 STREET", Decimal("40"), Decimal("34.25"))
 
@@ -316,3 +317,40 @@ class TestWho:
             response = demo_client.patch(URL, json={"north_bearing": "N"})
         assert response.status_code == 403 and response.json() == {"detail": "Demo mode: PIRs are read-only"}
         run.assert_not_called()
+
+
+class TestTaxMapSource:
+    """Slice Y1: the editor's width is typed by hand, so a change stamps it manual; the source comes back with it."""
+
+    def test_a_width_changed_is_stamped_manual(self, admin_client):
+        after = {**EMPTY, "tax_map_width_ft": Decimal("40.00"), "tax_map_source": "manual",
+                 "tax_map_fetched_at": CREATED}
+        p1, p2, p3 = patch_all(title=block(after=after, bearing=0))
+        with p1, p2, p3 as run:
+            response = admin_client.patch(URL, json={"tax_map_width_ft": 40})
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert (data["tax_map_width_ft"], data["tax_map_source"]) == (40.0, "manual")
+        assert data["tax_map_fetched_at"].startswith("2026-10-15")
+        sql, params = write_call(run)
+        assert ("INSERT INTO icid.pir_annotations AS a (pir_page_id, tax_map_width_ft, tax_map_source, "
+                "tax_map_fetched_at)") in sql
+        assert ("tax_map_source = CASE WHEN a.tax_map_width_ft IS DISTINCT FROM EXCLUDED.tax_map_width_ft "
+                "THEN 'manual' ELSE a.tax_map_source END") in sql
+        assert ("tax_map_fetched_at = CASE WHEN a.tax_map_width_ft IS DISTINCT FROM EXCLUDED.tax_map_width_ft "
+                "THEN now() ELSE a.tax_map_fetched_at END") in sql
+        assert params[:3] == (Decimal("40"), Decimal("40"), Decimal("40"))
+
+    def test_other_fields_leave_the_source_alone(self, admin_client):
+        p1, p2, p3 = patch_all(title=block(bearing=0))
+        with p1, p2, p3 as run:
+            assert admin_client.patch(URL, json={"contract_no": "HWS0024"}).status_code == 200
+        sql, _ = write_call(run)
+        assert "tax_map_source" not in sql
+
+    def test_the_read_carries_the_source(self, admin_client):
+        p1, p2, p3 = patch_all(title=block(bearing=0))
+        with p1, p2, p3 as run:
+            admin_client.patch(URL, json={"contract_no": "HWS0024"})
+        read_sql = next(call.args[0] for call in run.call_args_list if not call.args[0].lstrip().startswith("WITH"))
+        assert "a.tax_map_source" in read_sql and "a.tax_map_fetched_at" in read_sql
