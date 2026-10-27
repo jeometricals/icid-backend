@@ -172,7 +172,16 @@ def store_current_map(prop: dict[str, Any]) -> dict[str, Any]:
     found = current_map(prop["boro"], prop["block"])
     if found is None:
         raise TaxMapPdfError(422, f"DOF has no current tax map for {prop['boro']} block {prop['block']}")
-    data = fetch_map_pdf(found["map_id"])
+    return store_map(prop, found, fetch_map_pdf(found["map_id"]))
+
+
+def store_map(prop: dict[str, Any], found: dict[str, Any], data: bytes) -> dict[str, Any]:
+    """
+    Keep a map already fetched from DOF as a sidewalk's tax-map PDF (the backfill fetches a block's map once for all its
+    sites).
+    Takes the property (id, boro, block), the map as current_map found it ({map_id, effective_date}) and its PDF's bytes.
+    Returns the property as it now is; raises TaxMapPdfError 502 when Storage fails and 409 when the site moved meanwhile.
+    """
     path = f"{prop['id']}/{found['map_id']}.pdf"
     try:
         upload_file(TAX_MAP_BUCKET_NAME, path, data, PDF)
