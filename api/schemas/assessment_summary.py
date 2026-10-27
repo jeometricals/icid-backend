@@ -20,6 +20,8 @@ class AssessmentFigures(BaseModel):
     seven_total: float
     seven_amount: Optional[float] = None
     grand_total: Optional[float] = None
+    # The part outside the sidewalk strip, clipped at approval and not assessed (Slice Y2); in the non-assessable figures
+    outside_pl: float = 0
 
 
 class AssessmentSite(AssessmentFigures):

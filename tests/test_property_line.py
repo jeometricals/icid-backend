@@ -6,6 +6,8 @@ from api.services.property_line import (
     StripError,
     check_strip,
     effective_frontage,
+    flag_clip,
+    flag_clips,
     outside_flags,
     strip_frontage_ft,
     strip_points,
@@ -103,3 +105,33 @@ class TestEffectiveFrontage:
 
     def test_otherwise_unavailable(self):
         assert effective_frontage(None, {"tax_map_frontage_ft": None}, SCALE) == (None, "unavailable")
+
+
+def claimed(x: float, y: float, quantity: str = "25", **extra) -> dict:
+    """A claimed, assessable 5 x 5 ft flag centred at (x, y), on a page with the strip, as list_clip_inputs reads it."""
+    return flag(x, y, id="f1", claimed_by_idr_id="i1", surveyed_is_assessable=True, quantity=Decimal(quantity),
+                scale_px_per_ft=SCALE, sidewalk_strip_points=[{"x": x_, "y": y_} for x_, y_ in STRIP], **extra)
+
+
+class TestFlagClip:
+    def test_a_flag_inside_the_strip_has_no_clip(self):
+        assert flag_clip(claimed(380, 350)) is None
+
+    def test_a_flag_half_across_the_property_line_is_clipped_by_half_its_quantity(self):
+        assert flag_clip(claimed(300, 350)) == {"pre_clip_sf": Decimal("25.00"), "clipped_sf": Decimal("12.50")}
+
+    def test_a_flag_wholly_outside_is_clipped_whole(self):
+        assert flag_clip(claimed(100, 350)) == {"pre_clip_sf": Decimal("25.00"), "clipped_sf": Decimal("25.00")}
+
+    def test_the_clip_starts_from_the_quantity_so_an_override_is_clipped_in_proportion(self):
+        assert flag_clip(claimed(300, 350, quantity="18.33"))["clipped_sf"] == Decimal("9.17")  # 9.165, halves up
+
+    @pytest.mark.parametrize("extra", [{"surveyed_is_assessable": False}, {"scale_px_per_ft": None},
+                                       {"sidewalk_strip_points": None}, {"shape": "polygon", "dimensions": {}}])
+    def test_no_clip_without_an_assessable_flag_a_scale_a_strip_or_an_outline(self, extra):
+        assert flag_clip({**claimed(100, 350), **extra}) is None
+
+    def test_flag_clips_names_the_claiming_idr_only_for_a_re_clip(self):
+        flags = [claimed(300, 350), {**claimed(380, 350), "id": "f2"}]
+        assert flag_clips(flags) == [{"flag_id": "f1", "pre_clip_sf": Decimal("25.00"), "clipped_sf": Decimal("12.50")}]
+        assert flag_clips(flags, with_idr=True)[0]["idr_id"] == "i1"

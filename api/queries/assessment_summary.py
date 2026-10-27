@@ -17,7 +17,7 @@ def list_assessment_flags(project_id: str) -> Optional[list[dict[str, Any]]]:
     """
     Fetch every flag claimed by an approved IDR of a project that isn't deleted, for the Assessment Summary.
     Takes the project id.
-    Returns rows (idr_id, re_signed_at, property_id and its kind, address fields, community_board, block, lot and violation_no, date_constructed: page 1's of its live PIR or None, surveyed_thickness, surveyed_is_assessable, computed_quantity, quantity: the override or else the net area); [] for a project with none; None on failure.
+    Returns rows (idr_id, re_signed_at, property_id and its kind, address fields, community_board, block, lot and violation_no, date_constructed: page 1's of its live PIR or None, surveyed_thickness, surveyed_is_assessable, computed_quantity, quantity: the override or else the net area, clipped_sf: the part outside its page's sidewalk strip its IDR's approval clipped, Slice Y2, 0 for none); [] for a project with none; None on failure.
     """
     sql = f"""
         SELECT
@@ -26,9 +26,11 @@ def list_assessment_flags(project_id: str) -> Optional[list[dict[str, Any]]]:
             p.intersection_street_2, p.quadrant::text AS quadrant, p.facing_street::text AS facing_street,
             p.community_board, p.block, p.lot, p.violation_no,
             a.date_constructed,
-            f.surveyed_thickness, f.surveyed_is_assessable, f.computed_quantity, {FLAG_QUANTITY} AS quantity
+            f.surveyed_thickness, f.surveyed_is_assessable, f.computed_quantity, {FLAG_QUANTITY} AS quantity,
+            COALESCE(clip.clipped_sf, 0) AS clipped_sf
         FROM icid.flags f
         JOIN icid.idrs i ON i.idr_id = f.claimed_by_idr_id AND i.status = 'approved' AND i.deleted_at IS NULL
+        LEFT JOIN icid.assessment_clip_audits clip ON clip.flag_id = f.id AND clip.idr_id = i.idr_id
         JOIN icid.pirs claimed_pir ON claimed_pir.id = f.pir_id
         JOIN icid.properties p ON p.id = claimed_pir.property_id
         LEFT JOIN icid.pirs live ON live.property_id = p.id AND live.deleted_at IS NULL

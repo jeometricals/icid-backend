@@ -34,11 +34,15 @@ MONEY_FORMAT = "$#,##0.00"
 DASH = "—"
 COLUMNS = ("Property Address", "CB", '4" Assessable (SF)', '4" Non-Assessable (SF)', '4" Total (SF)', '4" Amount ($)',
            '7" Assessable (SF)', '7" Non-Assessable (SF)', '7" Total (SF)', '7" Amount ($)', "Grand Total ($)",
-           "Remarks")
-COLUMN_WIDTHS = (34, 8, 14, 16, 12, 14, 14, 16, 12, 14, 15, 40)
+           "Outside PL (SF)", "Remarks")
+COLUMN_WIDTHS = (34, 8, 14, 16, 12, 14, 14, 16, 12, 14, 15, 14, 40)
 # Where the amounts and the square feet are, by column number
 MONEY_COLUMNS = (6, 10, 11)
-SF_COLUMNS = (3, 4, 5, 7, 8, 9)
+SF_COLUMNS = (3, 4, 5, 7, 8, 9, 12)
+# The tab's note when any row has a part outside the property line (Slice Y2)
+OUTSIDE_PL_NOTE = ("Outside PL (SF): the part of the flags outside the sidewalk strip drawn at the property line, "
+                   "clipped at approval and not assessed (it is counted in Non-Assessable). Contractor billing is not "
+                   "clipped.")
 TOTALS_FILL = PatternFill("solid", fgColor="D9D9D9")
 NO_ACTIVITY = "No activity"
 EMPTY_PROJECT = "No approved IDRs in this project yet."
@@ -46,7 +50,7 @@ EMPTY_RANGE = "No approved IDRs in the selected range."
 EMPTY_VIEW = "No constructed sites in this view."
 # The figures a row (and a totals row) sums: square feet, and the amounts, which are None without a rate
 SF_FIELDS = ("four_assessable", "four_non_assessable", "four_total", "seven_assessable", "seven_non_assessable",
-             "seven_total")
+             "seven_total", "outside_pl")
 AMOUNT_FIELDS = ("four_amount", "seven_amount", "grand_total")
 
 
@@ -85,6 +89,8 @@ class SummaryRow:
     seven_assessable: Decimal = ZERO
     seven_non_assessable: Decimal = ZERO
     seven_total: Decimal = ZERO
+    # The part of its flags outside the sidewalk strip, clipped at approval and not assessed (Slice Y2)
+    outside_pl: Decimal = ZERO
     built_7_billed_4: Decimal = ZERO
     used_approval_date: bool = False
     four_amount: Optional[Decimal] = None
@@ -144,6 +150,8 @@ def _rows_by(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]], f
             row = rows[key(day, flag)] = _new_row(flag)
         row.used_approval_date = row.used_approval_date or fallback
         total, assessable, non_assessable = flag_areas(flag)
+        if flag["surveyed_is_assessable"]:
+            row.outside_pl += Decimal(flag["quantity"]) - assessable  # the clip, as flag_areas applied it
         if flag["surveyed_thickness"] == "7in":
             row.seven_total += total
             row.seven_assessable += assessable
@@ -299,7 +307,7 @@ def _sf(value: Decimal) -> Any:
 def _write_row(sheet: Worksheet, row_number: int, values: list[Any], bold: bool = False) -> None:
     """
     Write one row of a tab, numbers formatted by their column: SF to two decimals, amounts in dollars.
-    Takes the sheet, the row's number, its twelve values (None leaves a cell blank) and whether it is the totals row.
+    Takes the sheet, the row's number, its thirteen values (None leaves a cell blank) and whether it is the totals row.
     Returns nothing.
     """
     for column, value in enumerate(values, start=1):
@@ -317,7 +325,7 @@ def _write_row(sheet: Worksheet, row_number: int, values: list[Any], bold: bool 
 
 def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str, rows: list[SummaryRow]) -> None:
     """
-    Add a tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many.
+    Add a tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many, and when any row has a part outside the property line, a note saying what that column is (Slice Y2).
     Takes the workbook, the project row, the tab's name and label, and its rows (at least one).
     Returns nothing.
     """
@@ -331,20 +339,25 @@ def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str
         _write_row(sheet, 4 + offset, [
             row.address, row.community_board, _sf(row.four_assessable), _sf(row.four_non_assessable), _sf(row.four_total), row.four_amount,
             _sf(row.seven_assessable), _sf(row.seven_non_assessable), _sf(row.seven_total), row.seven_amount,
-            row.grand_total, "; ".join(row.remarks) or None,
+            row.grand_total, _sf(row.outside_pl), "; ".join(row.remarks) or None,
         ])
 
     totals_row = 4 + len(rows)
     _write_row(sheet, totals_row, [
         "Totals", None, total(rows, "four_assessable"), total(rows, "four_non_assessable"), total(rows, "four_total"),
         total(rows, "four_amount"), total(rows, "seven_assessable"), total(rows, "seven_non_assessable"),
-        total(rows, "seven_total"), total(rows, "seven_amount"), total(rows, "grand_total"), None,
+        total(rows, "seven_total"), total(rows, "seven_amount"), total(rows, "grand_total"), total(rows, "outside_pl"),
+        None,
     ], bold=True)
+    notes = []
     fallback = sum(row.used_approval_date for row in rows)
     if fallback:
-        note = sheet.cell(totals_row + 2, 1, f"{fallback} {'row' if fallback == 1 else 'rows'} used IDR approval date "
-                                              "(no page-level Date Constructed).")
-        note.font = Font(italic=True)
+        notes.append(f"{fallback} {'row' if fallback == 1 else 'rows'} used IDR approval date "
+                     "(no page-level Date Constructed).")
+    if any(row.outside_pl for row in rows):
+        notes.append(OUTSIDE_PL_NOTE)
+    for offset, text in enumerate(notes):
+        sheet.cell(totals_row + 2 + offset, 1, text).font = Font(italic=True)
 
 
 def _empty_tab(workbook: Workbook, project: dict[str, Any], name: str, message: str) -> None:

@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from api.queries.assessment_clip_audits import list_property_clip_inputs, replace_property_clips
 from api.queries.ped_ramp_corners import get_live_corner_of_project
 from api.queries.properties import (
     create_property,
@@ -29,6 +30,8 @@ from api.schemas.property import (
     PropertyOut,
     PropertyResponse,
     PropertyUpdate,
+    ReClip,
+    ReClipResponse,
     TaxMapPdf,
     TaxMapPdfResponse,
     TaxMapRefresh,
@@ -56,6 +59,7 @@ from api.services.dof_tax_map import (
     signed_pdf_url,
     store_current_map,
 )
+from api.services.property_line import flag_clips
 from api.services.mappluto import MapPlutoUnavailable, cache_frontage, fetch_frontage_by_bbl
 from api.v1._shared import clean_text, refuse_deleted_for_member, refuse_locked_corner, validated
 
@@ -491,3 +495,23 @@ def complete_tax_map_pdf_upload(
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     _log_tax_map_pdf("upload", property_id, admin, row)
     return _tax_map_pdf(row, "Tax map PDF uploaded")
+
+
+@router.post("/{property_id}/admin/re-clip-approvals", response_model=ReClipResponse)
+def re_clip_approvals(property_id: UUID, admin: UserOut = Depends(current_admin)) -> ReClipResponse:
+    """
+    Work the assessment clips (Slice Y2) of every flag of a property claimed by an approved IDR out again from its pages' sidewalk strips as they are now, and replace the clips those IDRs have on it, in one statement. Admins only, a soft-deleted property included. Logged, as the record of it.
+    Takes the property's id as a path parameter and the signed-in admin.
+    Returns a ReClipResponse; raises 403 for a user who isn't an admin, 404 for an unknown property and 500 when the flags can't be read or the clips written.
+    """
+    _load_property(property_id)
+    flags = list_property_clip_inputs(property_id)
+    if flags is None:
+        raise HTTPException(status_code=500, detail="Failed to read the property's flags")
+    result = replace_property_clips(property_id, flag_clips(flags, with_idr=True))
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to write the clips")
+    logger.info("re_clip property_id=%s actor=%s idrs=%s before=%s after=%s", property_id, admin.uuid,
+                result["idrs_reclipped"], result["rows_before"], result["rows_after"])
+    data = ReClip(**{key: result[key] for key in ("idrs_reclipped", "rows_before", "rows_after")})
+    return ReClipResponse(status="success", message=f"Re-clipped {data.idrs_reclipped} approved IDR(s)", data=data)

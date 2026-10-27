@@ -24,6 +24,8 @@ CENT = Decimal("0.01")
 MAX_STRIP_POINTS = 200
 # Overlap below this (square feet) is no overlap: a flag that only touches the strip's edge is outside
 OUTSIDE_TOLERANCE_SF = 0.01
+# A flag less than this fraction outside its strip is wholly inside it: no clip (Slice Y2)
+OUTSIDE_FRACTION_MIN = 0.001
 # What effective_frontage says its figure came from, but for the tax-map sources, which are passed through as stored
 STRIP_LABEL = "sidewalk_strip"
 UNAVAILABLE = "unavailable"
@@ -124,6 +126,49 @@ def outside_flags(points: list[Point], flags: list[dict[str, Any]], scale: float
         if overlap_area(outline, points) / (scale * scale) <= OUTSIDE_TOLERANCE_SF:
             outside.append(flag)
     return outside
+
+
+def flag_clip(flag: dict[str, Any]) -> Optional[dict[str, Decimal]]:
+    """
+    Work out the part of a claimed flag outside its page's sidewalk strip, which the homeowner isn't assessed for
+    (Slice Y2): its quantity (the override, or else its net area) times the fraction of its outline outside the strip,
+    to the cent, halves up. A flag surveyed non-assessable, without a place or a shape to draw, on a page without a scale
+    or a strip, or (nearly) wholly inside the strip (under 0.1% outside) has no clip.
+    Takes the flag (shape, dimensions, sketch_x, sketch_y, rotation, surveyed_is_assessable, quantity, scale_px_per_ft,
+    sidewalk_strip_points; as assessment_clip_audits.list_clip_inputs reads it).
+    Returns {pre_clip_sf, clipped_sf}, or None for no clip.
+    """
+    scale, strip = flag.get("scale_px_per_ft"), flag.get("sidewalk_strip_points")
+    if not flag.get("surveyed_is_assessable") or not scale or not strip:
+        return None
+    outline = placed_outline(flag, float(scale))
+    if len(outline) < 3:
+        return None
+    area = abs(_signed_area(outline))
+    if area <= 0:
+        return None
+    outside = max(0.0, 1.0 - overlap_area(outline, strip_points(strip)) / area)
+    if outside < OUTSIDE_FRACTION_MIN:
+        return None
+    quantity = Decimal(str(flag["quantity"])).quantize(CENT, rounding=ROUND_HALF_UP)
+    clipped = min((quantity * Decimal(str(outside))).quantize(CENT, rounding=ROUND_HALF_UP), quantity)
+    if clipped <= 0:
+        return None
+    return {"pre_clip_sf": quantity, "clipped_sf": clipped}
+
+
+def flag_clips(flags: list[dict[str, Any]], with_idr: bool = False) -> list[dict[str, Any]]:
+    """
+    Work out the clips of the flags an approval, an un-delete or a re-clip handles (Slice Y2), as the statements take them.
+    Takes the flags (list_clip_inputs' rows) and whether each clip names its flag's claiming IDR (a re-clip's).
+    Returns [{flag_id, (idr_id,) pre_clip_sf, clipped_sf}] for the flags that have a clip.
+    """
+    clips = []
+    for flag in flags:
+        clip = flag_clip(flag)
+        if clip is not None:
+            clips.append({"flag_id": flag["id"], **({"idr_id": flag["claimed_by_idr_id"]} if with_idr else {}), **clip})
+    return clips
 
 
 def effective_frontage(annotation: Optional[dict[str, Any]], prop: dict[str, Any],

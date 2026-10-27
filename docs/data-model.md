@@ -613,6 +613,31 @@ entirely outside the sidewalk strip`) and a flag PATCH (its editor). Rows are on
 | `editor_stage` | TEXT | NULL, or `stage1` / `stage2` (`chk_flag_edits_stage`), reserved for Y3's reviewer edits |
 | `edited_at` | TIMESTAMPTZ NOT NULL | `now()`; `idx_flag_edits_flag` on (`flag_id`, `edited_at DESC`) |
 
+### assessment_clip_audits
+
+The part of a claimed, assessable flag outside its page's sidewalk strip, which the homeowner isn't assessed for (Slice
+Y2, migration 060): one row per flag and the IDR that claimed it. Only the homeowner's reports read it (the Construction
+Report's measure and calculations, the Assessment Summary, through `flag_areas`); contractor billing never does, and
+nothing in `icid.quantities` is clipped.
+
+- **Worked out** in Python (`property_line.flag_clip`): `clipped = quantity x outside fraction of the flag's outline`,
+  from its quantity (the override, else its net area), to the cent; none for a flag surveyed non-assessable, one under
+  0.1% outside, or a page without a strip or a scale.
+- **Written as a set per IDR** in the statements that claim its flags (approve-stage2, an un-delete back to approved):
+  the clips of the flags the statement claimed, the IDR's others removed. **Removed** by admin unlock and admin delete,
+  in theirs. **Rewritten per property** by an admin's re-clip, from the strips as they are then. A strip edited after
+  approval changes nothing until then.
+
+| Column | Type | Notes |
+|---|---|---|
+| `audit_id` | UUID PK | `gen_random_uuid()` |
+| `flag_id` | UUID NOT NULL | FK → `flags.id`, no action |
+| `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, ON DELETE CASCADE (goes with a purged IDR); UNIQUE with `flag_id` (`uq_assessment_clip_audits_flag_idr`); `idx_assessment_clip_audits_idr` |
+| `pre_clip_sf` | NUMERIC(10,2) NOT NULL | The flag's quantity when clipped |
+| `clipped_sf` | NUMERIC(10,2) NOT NULL | The part outside; 0 ≤ clipped ≤ pre-clip (`chk_assessment_clip_audits_amounts`) |
+| `clip_reason` | TEXT | `outside_property_line` (`chk_assessment_clip_audits_reason`) |
+| `at` | TIMESTAMPTZ NOT NULL | `now()`, when last written |
+
 ### idr_flag_attributions
 
 An override of which flags an IDR covers (migration 037, R1f). By default an IDR covers the live flags on its task

@@ -71,6 +71,16 @@ def no_site_pay_items():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_clip_inputs():
+    """
+    Patch the assessment-clip statements for the whole session (Slice Y2), so an approval or an un-delete that reads its flags' sidewalk strips finds none unless a test patches api.queries.assessment_clip_audits.run_query itself.
+    Yields the mock of the statements.
+    """
+    with patch("api.queries.assessment_clip_audits.run_query", return_value=[]) as run:
+        yield run
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_site_sheets():
     """
     Patch the read of an IDR's imported sites for its export for the whole session (W5), so the export finds no site sheets to print unless a test patches api.services.export_site_sheets.idr_site_sheets itself.

@@ -69,6 +69,17 @@ class TestFlagAreas:
     def test_an_override_above_the_gross_area_never_makes_non_assessable_negative(self):
         assert flag_areas(flag("4in", "25", "30")) == (Decimal(25), Decimal(30), Decimal(0))
 
+    def test_a_clip_at_the_property_line_comes_off_the_assessable_part(self):
+        clipped = {**flag("4in", "25", "20"), "clipped_sf": Decimal("4.50")}
+        assert flag_areas(clipped) == (Decimal(25), Decimal("15.50"), Decimal("9.50"))
+
+    def test_a_clip_never_takes_the_assessable_part_below_zero(self):
+        assert flag_areas({**flag("4in", "25", "20"), "clipped_sf": Decimal("30")}) == (Decimal(25), 0, Decimal(25))
+
+    def test_a_clip_on_a_flag_surveyed_non_assessable_changes_nothing(self):
+        clipped = {**flag("4in", "25", "25", assessable=False), "clipped_sf": Decimal("5")}
+        assert flag_areas(clipped) == (Decimal(25), 0, Decimal(25))
+
 
 class TestComputeMeasure:
     def test_every_row_is_listed_in_the_forms_order(self):
@@ -375,6 +386,14 @@ class TestCalculations:
         groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
         assert groups[0].non_assessable_rows == [] and groups[0].adjustment == Decimal("10")
         assert groups[0].non_assessable == Decimal("10")
+
+    def test_a_clip_at_the_property_line_is_a_non_assessable_piece_so_the_panel_agrees_with_box_2(self):
+        flags = [{**piece(1, L=10, W=5, areas=[area(1, x=1, y=1)], quantity="46"), "clipped_sf": Decimal("12.25")}]
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        assert [(row.label, row.length, row.width, row.sub_total) for row in groups[0].non_assessable_rows] == [
+            ("1", "clipped at PL", "", Decimal("12.25")), ("A1", "2.00", "2.00", Decimal("4"))]
+        assert (groups[0].non_assessable, groups[0].assessable, groups[0].adjustment) == (
+            Decimal("16.25"), Decimal("33.75"), Decimal("0"))
 
     def test_an_area_larger_than_its_flag_is_capped_by_an_adjustment(self):
         flags = [piece(1, "7in", L=5, W=5, quantity="0", areas=[area(1, L=10, W=3)])]  # 30 SF of area on 25 SF

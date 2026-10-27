@@ -18,7 +18,7 @@ every request to it.
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
 | `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `idr_report_sites.py`, `idr_report_site_pay_items.py`, `property_work.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`, `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py`, `ped_ramp_listing.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`, `corner_router`, `inspection_router`, `tif_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, the lock a ped ramp corner's inspection puts on it (`refuse_locked_corner`), and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
-| `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. `idr_flags.py` is which flags an IDR covers: its overrides and the claim and release CTEs the IDR statements carry; `idr_segments.py` the same for curb segments, with their quantity CTE. `progress.py` is the progress rollup's one statement: a project's flags and curb segments by property, pay item and state. `construction_report.py` reads a Construction Report's property, title block, IDR, flags and drawings; `assessment_summary.py` a project's claimed flags for the Assessment Summary. `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py` and `ped_ramp_listing.py` are the ped ramp inspection's. |
+| `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. `idr_flags.py` is which flags an IDR covers: its overrides and the claim and release CTEs the IDR statements carry; `idr_segments.py` the same for curb segments, with their quantity CTE. `progress.py` is the progress rollup's one statement: a project's flags and curb segments by property, pay item and state. `construction_report.py` reads a Construction Report's property, title block, IDR, flags and drawings; `assessment_summary.py` a project's claimed flags for the Assessment Summary. `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py` and `ped_ramp_listing.py` are the ped ramp inspection's. `assessment_clip_audits.py` is the homeowner's clip at the property line (Slice Y2): its reads, the CTEs the IDR statements carry, and the re-clip. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
 | `api/storage/` | Supabase Storage plumbing: `client.py` is the only module that imports `supabase`. |
@@ -26,7 +26,7 @@ every request to it.
 | `api/core/` | App-wide configuration: env loading. `DATABASE_URL` and `JWT_SECRET_KEY` are required at startup; every setting (JWT, `CRON_SECRET`, the Storage buckets, URL lifetimes and the PIR upload caps) is listed in `README.md`. No business logic. |
 | `tests/v1/` | Pytest suites mirroring `api/v1/`, one file per endpoint module. Service tests sit in `tests/` (`test_*.py`), files they read in `tests/fixtures/` (`smart_pir_sample.json` is a valid Smart PIR import). |
 | `schema.sql` | Authoritative DDL for the `icid` schema. `seed.sql` holds mock data; `seed_sidewalk_pay_items.sql` seeds the pay-item catalog (`spec_items`, and `contract_items` for `HWS0023`, each row carrying its spec item's number, description, unit and section) and runs after it. `seed_auth_users.sql` seeds the admin account and its project assignments and `seed_test_project.sql` the Test Project (`DEMO01`). |
-| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 059b (and 050b, the pedramp buckets) is in the live database (041 was skipped). 060 (Slice Y2's `assessment_clip_audits`) must run before the Y2 code is deployed; the code before it runs unchanged after it. A schema change is run on ICID Dev_DB first (`.env.dev`), then on prod. A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
+| `migrations/` | Numbered SQL migrations, run by hand in the Supabase SQL editor. A schema change ships as a migration plus the matching `schema.sql` edit. Every migration through 060 (and 050b, the pedramp buckets) is in the live database (041 was skipped). A schema change is run on ICID Dev_DB first (`.env.dev`), then on prod. A data migration (039 and 040, M1: SE384's site data moved to HWS0023; 042, Walk003's budget code; 045, the curb segments' pay items and claims) has no `schema.sql` edit. When new code needs a migration run first (or the code before it breaks once it is), say so in that feature's section until it has been run, then drop the note; `docs/data-model.md` keeps the migration history. |
 | `docs/` | `dot-forms.md`: DOT's fillable forms, field by field. `data-model.md`: developer reference for the tables, the Storage buckets, the auto-General and the migration history. `endpoints.md`: every route, its body, responses and refusals (CLAUDE.md keeps an index). |
 | `README.md` | How to run, configure, test and deploy the backend. The one README. |
 | `templates/` | `report_forms.xlsx`, the export base (built from `report_forms_source.xltx` by `scripts/clean_report_template.py`). `conc_cyl_source.xlsx` is the DDC Data Sheet for Concrete Test Cylinders, the source of the template's Conc Cyl tab. `dot_ped_ramp_inspection_v1.6.pdf` and `dot_tif_v1.9.pdf` are DOT's fillable forms as published, filled by the `dot_*_pdf.py` services. |
@@ -45,7 +45,7 @@ auth routes:
 - **Users and signatures:** `/v1/users/`, `/v1/users/me/password`; `/v1/signatures/upload-request`, `/confirm`
 - **Projects:** `/v1/projects/` and `/{project_id}`, `/roles` (admin), `/quantities`, `/progress-rollup`, `/assessment-summary` (with `.xlsx` and `/tailored.xlsx`),
   `/properties`, `/task-orders`; `/v1/contract_items/`
-- **Sites:** `/v1/properties/{id}` (with `/admin/soft-delete`, `/admin/undelete`, `/admin/refresh-tax-map`, `/tax-map-pdf` with `/admin/refresh-tax-map-pdf` and `/admin/tax-map-pdf/upload-request` / `upload-complete`, `/pir`, `/pirs`,
+- **Sites:** `/v1/properties/{id}` (with `/admin/soft-delete`, `/admin/undelete`, `/admin/refresh-tax-map`, `/tax-map-pdf` with `/admin/refresh-tax-map-pdf` and `/admin/tax-map-pdf/upload-request` / `upload-complete`, `/admin/re-clip-approvals`, `/pir`, `/pirs`,
   `/construction-report`, `/ped-ramp-attributes`, `/work-history`, `/pay-item-summary`); `/v1/ped-ramp-corners/{id}` (with `/inspection-report` and its
   `.pdf`, and `/inspection` with `/start`; a project's under `/v1/projects/{id}/ped-ramp-corners`, and a corner with a ramp at once under `/pedramp-sites`); `/v1/ped-ramp-inspections/{id}` (with `/submit`, `/return`,
   `/approve`, `/dot-pdf`, `/tifs`, `/ramps/{property_id}/tif`, `/photos`); `/v1/ped-ramp-tifs/{id}` (with `/approve`, `/dot-pdf`,
@@ -909,8 +909,8 @@ Any change must follow these.
     that changes `surveyed_is_assessable` or its reason (the editor), in the same statement (the PATCH reads the old row
     through a self-join in its UPDATE's FROM).
   - **`effective_frontage(annotation, prop, scale)`**: the strip's first edge, else the page's `tax_map_width_ft` (with
-    its source), else the site's MapPLUTO frontage, else `(None, "unavailable")`. Y2's billing clip and the Construction
-    Report will call it; nothing calls it yet.
+    its source), else the site's MapPLUTO frontage, else `(None, "unavailable")`. The Construction Report's FRONTAGE
+    calls it (Y2).
   - **The tax-map PDF** (`properties.tax_map_pdf_*`, bucket `tax-maps`): the block's current sheet of DOF's Digital Tax
     Map, OE's reference for the strip (DOF says it isn't a survey). Found in DOF's public map library (ArcGIS
     `DTM_ETL_DAILY_view` layer 8, `CURRENT_FLAG = 'Y'`) and downloaded from the Property Information Portal: two plain
@@ -918,6 +918,29 @@ Any change must follow these.
     the block's map; the PATCH clears it in its statement), alongside Y1's MapPLUTO fetch (`cache_tax_map_pdf`, never
     raises); by an admin's Refresh; or uploaded by an admin in two steps (signed URL, then complete, checked `%PDF-`). A
     new one replaces and removes the old file; the path never leaves the backend (`GET .../tax-map-pdf` signs a URL).
+- **Assessment clip at the property line** (Slice Y2, migration 060; `api/queries/assessment_clip_audits.py`,
+  `property_line.flag_clip` / `flag_clips`; the brief is `Documents/ICID/slice-y2-billing-clip.md`): a claimed flag that
+  crosses its page's sidewalk strip is assessed to the homeowner only for its part inside it.
+  - **The clip** is `quantity x the fraction of the flag's placed outline outside the strip` (`overlap_area`), from its
+    quantity (override, else net area), to the cent, in `icid.assessment_clip_audits` per flag and IDR. None for a flag
+    surveyed non-assessable (Y1.5's flip already covers one wholly outside), under 0.1% outside, or on a page without a
+    strip or a scale.
+  - **Lifecycle, in the IDR's own statements.** approve-stage2 and an un-delete back to approved read the flags they are
+    about to claim (`list_clip_inputs`, 500 when they can't), work the clips out in the route, and write them in the one
+    statement for the flags it claimed (`replace_clips_ctes`, after `claimed_flags`; the IDR's other clips removed).
+    Admin unlock and admin delete remove the IDR's clips (`delete_clips_cte`); a purge cascades. **A strip edited after
+    approval changes nothing** until an admin's `POST /v1/properties/{id}/admin/re-clip-approvals` rewrites the
+    property's clips for its approved IDRs (`replace_property_clips`, one statement; logged `re_clip ...`).
+  - **Who reads it: the homeowner's reports only.** `list_report_flags` and `list_assessment_flags` join the clip of the
+    flag's claiming IDR (`clipped_sf`, 0 for none), and `flag_areas` takes it off the assessable part (never below 0)
+    and counts it non-assessable. The Construction Report's calculations list it as a piece, `<flag no.>  clipped at PL
+    <amount>` (`CLIPPED_AT_PL`), so the panel still agrees with box 2; the Assessment Summary's tabs and its page carry it
+    as **Outside PL (SF)** (`outside_pl`, before Remarks), with a footer note on a tab where any row has one. Contractor
+    billing (`FLAG_AMOUNT`, `icid.quantities`, Progress, the rollups) is never clipped.
+  - **The strip on the Construction Report:** a sheet's page strip is drawn dashed red (`STRIP_RGB`, `STRIP_DASH`),
+    labelled `Sidewalk strip` on its first edge, and never fitted (a long strip can't shrink the sheet; the pane gives up
+    `FRONTAGE_RISE` for it). Its `FRONTAGE N.NN' (Sidewalk strip)` (`strip_frontage`, through `effective_frontage`) prints
+    above the TAX MAP line, both when both exist (`list_page_drawings` returns `strips`).
 - **Ped ramp inspection** (pedramp 2a, migration 047; `api/v1/ped_ramp_corners.py`, `api/v1/ped_ramp_attributes.py`,
   their query modules, `api/schemas/ped_ramp.py`, `api/services/ped_ramp_ada.py` and `ped_ramp_report.py`): NYC DOT's
   Pedestrian Ramp Inspection Form (version 1.6) as data, and ICID's own report of it. DOT's fillable PDF, photos and

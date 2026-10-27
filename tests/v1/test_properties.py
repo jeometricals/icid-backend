@@ -1015,3 +1015,57 @@ class TestTaxMapPdf:
         with patch(GET, return_value=mappluto(25)) as get, patch(PROPS, side_effect=[[PDF_ROW], [moved], [{"id": PROPERTY_ID}]]):
             assert admin_client.patch(URL, json={"lot": "57"}).status_code == 200
         assert get.call_count == 1  # MapPLUTO only
+
+
+CLIPS = "api.queries.assessment_clip_audits.run_query"
+IDR_ID = UUID("1d000000-0000-4000-8000-000000000001")
+
+
+def clip_input(x: float, flag_id: str) -> dict:
+    """A claimed 5 x 5 ft flag at (x, 350) on a 16 px/ft page whose strip starts at x = 300, as list_property_clip_inputs reads it."""
+    strip = [{"x": 300, "y": 250}, {"x": 460, "y": 250}, {"x": 460, "y": 450}, {"x": 300, "y": 450}]
+    return {"id": UUID(flag_id), "claimed_by_idr_id": IDR_ID, "shape": "rectangle", "dimensions": {"L": 5, "W": 5},
+            "sketch_x": x, "sketch_y": 350, "rotation": 0, "surveyed_is_assessable": True, "quantity": Decimal("25"),
+            "scale_px_per_ft": 16, "sidewalk_strip_points": strip}
+
+
+class TestReClip:
+    REFRESH = f"{URL}/admin/re-clip-approvals"
+
+    def test_an_admin_re_clips_from_the_strips_as_they_are(self, admin_client):
+        flags = [clip_input(300, "f0000000-0000-4000-8000-000000000001"),
+                 clip_input(380, "f0000000-0000-4000-8000-000000000002")]
+        result = {"idrs_reclipped": 1, "rows_before": 2, "rows_after": 1, "rows_removed": 1}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(CLIPS, side_effect=[flags, [result]]) as run:
+            response = admin_client.post(self.REFRESH)
+        assert response.status_code == 200
+        assert response.json()["data"] == {"idrs_reclipped": 1, "rows_before": 2, "rows_after": 1}
+        sql, params = run.call_args_list[1].args
+        assert "INSERT INTO icid.assessment_clip_audits" in sql and "DELETE FROM icid.assessment_clip_audits" in sql
+        assert params[0] == PROPERTY_ID and params[1].obj == [{
+            "flag_id": "f0000000-0000-4000-8000-000000000001", "idr_id": str(IDR_ID),
+            "pre_clip_sf": "25.00", "clipped_sf": "12.50"}]
+
+    def test_a_strip_removed_writes_none_and_removes_the_old(self, admin_client):
+        unstripped = {**clip_input(300, "f0000000-0000-4000-8000-000000000001"), "sidewalk_strip_points": None}
+        result = {"idrs_reclipped": 1, "rows_before": 1, "rows_after": 0, "rows_removed": 1}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(CLIPS, side_effect=[[unstripped], [result]]) as run:
+            response = admin_client.post(self.REFRESH)
+        assert response.json()["data"] == {"idrs_reclipped": 1, "rows_before": 1, "rows_after": 0}
+        assert run.call_args_list[1].args[1][1].obj == []
+
+    def test_an_unknown_property_is_404(self, admin_client):
+        with patch(PROPS, return_value=[]), patch(CLIPS) as run:
+            assert admin_client.post(self.REFRESH).status_code == 404
+        run.assert_not_called()
+
+    def test_a_user_who_isnt_an_admin_is_forbidden(self):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROPS) as run, patch(CLIPS) as clips:
+            response = inspector.post(self.REFRESH)
+        assert (response.status_code, response.json()) == FORBIDDEN
+        run.assert_not_called()
+        clips.assert_not_called()
+
+    def test_a_failed_read_is_500(self, admin_client):
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(CLIPS, return_value=None):
+            assert admin_client.post(self.REFRESH).status_code == 500
