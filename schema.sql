@@ -435,6 +435,27 @@ CREATE TABLE icid.properties (
     CONSTRAINT chk_properties_tax_map_cache
         CHECK ((tax_map_frontage_ft IS NULL) = (tax_map_source IS NULL)
                AND (tax_map_source IS NULL) = (tax_map_fetched_at IS NULL)),
+    -- A sidewalk's DOF Digital Tax Map PDF, its block's current sheet (Slice Y1.5, migration 059), in bucket tax-maps:
+    -- fetched from DOF's map library (with DOF's map id and effective date) or uploaded by an admin
+    tax_map_pdf_path            TEXT,
+    tax_map_pdf_source          TEXT,
+    tax_map_pdf_map_id          TEXT,
+    tax_map_pdf_effective_date  DATE,
+    tax_map_pdf_fetched_at      TIMESTAMPTZ,
+    tax_map_pdf_uploaded_by     UUID REFERENCES icid.users(uuid),
+    CONSTRAINT chk_properties_tax_map_pdf_source
+        CHECK (tax_map_pdf_source IS NULL OR tax_map_pdf_source IN ('dof_map_library', 'upload')),
+    CONSTRAINT chk_properties_tax_map_pdf
+        CHECK ((tax_map_pdf_path IS NULL) = (tax_map_pdf_source IS NULL)
+               AND (tax_map_pdf_source IS NULL) = (tax_map_pdf_fetched_at IS NULL)
+               AND (tax_map_pdf_source IS DISTINCT FROM 'dof_map_library'
+                    OR (tax_map_pdf_map_id IS NOT NULL AND tax_map_pdf_uploaded_by IS NULL))
+               AND (tax_map_pdf_source IS DISTINCT FROM 'upload'
+                    OR (tax_map_pdf_uploaded_by IS NOT NULL AND tax_map_pdf_map_id IS NULL
+                        AND tax_map_pdf_effective_date IS NULL))
+               AND (tax_map_pdf_source IS NOT NULL
+                    OR (tax_map_pdf_map_id IS NULL AND tax_map_pdf_effective_date IS NULL
+                        AND tax_map_pdf_uploaded_by IS NULL))),
     CONSTRAINT properties_kind_fields_consistent CHECK (
         (kind = 'sidewalk' AND
          block IS NOT NULL AND lot IS NOT NULL AND address IS NOT NULL AND property_type IS NOT NULL AND
@@ -800,7 +821,8 @@ CREATE TABLE icid.flags (
                                            'fronting_city', 'utility', 'settlement', 'other',
                                            'tree', 'driveway', 'grass', 'dirt', 'existing_sidewalk', 'asphalt',
                                            'tree_pit', 'landmark', 'vault', 'subway', 'scaffolding',
-                                           'other_perm_obstruction', 'other_temp_obstruction')),
+                                           'other_perm_obstruction', 'other_temp_obstruction',
+                                           'outside_property_line')),
     CONSTRAINT chk_flags_thickness CHECK (surveyed_thickness IN ('4in', '7in', '7in_as_4in')),
     CONSTRAINT chk_flags_reported_quantity CHECK (reported_quantity IS NULL OR reported_quantity > 0),
     CONSTRAINT chk_flags_live_on_a_page CHECK (pir_page_id IS NOT NULL OR deleted_at IS NOT NULL),
@@ -816,6 +838,27 @@ CREATE INDEX idx_flags_pay_item ON icid.flags (pay_item_id) WHERE deleted_at IS 
 CREATE INDEX flags_pir_page_idx ON icid.flags (pir_page_id);
 CREATE INDEX idx_flags_claimed_by_idr ON icid.flags (claimed_by_idr_id) WHERE claimed_by_idr_id IS NOT NULL;
 CREATE INDEX idx_flags_scope_rollup ON icid.flags (pay_item_id, claimed_by_idr_id) WHERE deleted_at IS NULL;
+
+------------------------------------------------------------
+-- FLAG EDITS (Slice Y1.5, migration 059): each change of a flag's surveyed_is_assessable or surveyed_non_assessable_reason,
+-- by the sidewalk strip's auto-flip (editor NULL) or a flag edit; rows are only ever added
+------------------------------------------------------------
+CREATE TABLE icid.flag_edits (
+    edit_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    flag_id       UUID NOT NULL REFERENCES icid.flags(id),
+    field_path    TEXT NOT NULL,
+    old_value     JSONB NOT NULL,
+    new_value     JSONB NOT NULL,
+    reason        TEXT,
+    editor_uuid   UUID REFERENCES icid.users(uuid),
+    editor_stage  TEXT,
+    edited_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_flag_edits_field
+        CHECK (field_path IN ('surveyed_is_assessable', 'surveyed_non_assessable_reason')),
+    CONSTRAINT chk_flag_edits_stage CHECK (editor_stage IS NULL OR editor_stage IN ('stage1', 'stage2')),
+    CONSTRAINT chk_flag_edits_changed CHECK (old_value IS DISTINCT FROM new_value)
+);
+CREATE INDEX idx_flag_edits_flag ON icid.flag_edits (flag_id, edited_at DESC);
 
 ------------------------------------------------------------
 -- IDR FLAG ATTRIBUTION (an override of an IDR's default flag attribution; migrations/037)
@@ -856,7 +899,7 @@ CREATE TABLE icid.non_assessable_areas (
     CONSTRAINT chk_nas_display_order CHECK (display_order >= 1),
     CONSTRAINT chk_nas_shape CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
     CONSTRAINT chk_nas_reason CHECK (reason IN ('driveway', 'grass', 'dirt', 'existing_sidewalk', 'asphalt',
-                                                'tree_pit', 'landmark', 'other'))
+                                                'tree_pit', 'landmark', 'other', 'outside_property_line'))
 );
 CREATE INDEX nas_flag_idx ON icid.non_assessable_areas (flag_id);
 CREATE UNIQUE INDEX nas_flag_order_live_uq ON icid.non_assessable_areas (flag_id, display_order)
@@ -1006,6 +1049,20 @@ CREATE TABLE icid.pir_annotations (
     CONSTRAINT chk_pir_annotations_tax_map_provenance
         CHECK ((tax_map_width_ft IS NULL OR tax_map_source IS NOT NULL)
                AND (tax_map_source IS NULL) = (tax_map_fetched_at IS NULL)),
+    -- The page's sidewalk strip (Slice Y1.5, migration 059): the sidewalk in front of the lot as a closed polygon of
+    -- {x, y} points in the page's native pixels, its first edge the property line; manual, or r1k (reserved)
+    sidewalk_strip_points        JSONB,
+    sidewalk_strip_source        TEXT,
+    sidewalk_strip_set_at        TIMESTAMPTZ,
+    sidewalk_strip_set_by        UUID REFERENCES icid.users(uuid),
+    CONSTRAINT chk_pir_annotations_sidewalk_strip_points CHECK (sidewalk_strip_points IS NULL OR
+        (jsonb_typeof(sidewalk_strip_points) = 'array' AND jsonb_array_length(sidewalk_strip_points) >= 3)),
+    CONSTRAINT chk_pir_annotations_sidewalk_strip_source
+        CHECK (sidewalk_strip_source IS NULL OR sidewalk_strip_source IN ('manual', 'r1k')),
+    CONSTRAINT chk_pir_annotations_sidewalk_strip
+        CHECK ((sidewalk_strip_points IS NULL) = (sidewalk_strip_source IS NULL)
+               AND (sidewalk_strip_source IS NULL) = (sidewalk_strip_set_at IS NULL)
+               AND (sidewalk_strip_set_by IS NULL OR sidewalk_strip_points IS NOT NULL)),
     CONSTRAINT chk_pir_annotations_boro
         CHECK (boro IS NULL OR boro IN ('Manhattan', 'Bronx', 'Brooklyn', 'Queens', 'Staten Island')),
     CONSTRAINT chk_pir_annotations_property_status CHECK (property_status IS NULL OR
