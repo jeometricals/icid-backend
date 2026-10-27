@@ -6,6 +6,7 @@ from psycopg.errors import UniqueViolation
 
 from api.db.runner import run_query
 from api.queries.idr_audit import AUDIT_CTE
+from api.queries.assessment_clip_audits import clips_json, delete_clips_cte, replace_clips_ctes
 from api.queries.idr_flags import claim_flags_cte, reclaim_ids_sql, release_flags_cte, released_note
 from api.queries.idr_segments import (
     claim_segments_cte,
@@ -504,24 +505,28 @@ def accept_stage2(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any
 def approve_stage2(
     idr_id: UUID, actor_uuid: UUID, signature_path: str, as_reviewer: bool, quantity_rows: list[dict[str, Any]],
     flag_ids: Optional[list[UUID]] = None, segment_ids: Optional[list[UUID]] = None,
+    clips: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[list[dict[str, Any]]]:
     """
     Approve an IDR for good: move it to approved, stamp the approver's signature (its path, and now as when it was signed), record them as its RE reviewer, clear any return, claim its attributed flags and curb segments (constructed on its report date; one another IDR claimed meanwhile is left out), and write its quantities to icid.quantities in place of any it had: its reports' pay items (manual), the claimed flags summed per pay item (from_flags), the claimed segments' lengths (from_segments) and the pay items entered on its sites (from_sites). A site's override bills in place of its flags and segments of that pay item (claimed, adding nothing), only when this approval claims at least one of them; otherwise it is dropped and logged (site_override_dropped). The reviewer is set here so the name on the IDR is always the signer's, also when an admin approves in a reviewer's place. All of it is one statement: an IDR that isn't approved claims nothing and gets no quantities, and a quantity that can't be written stops the approval.
-    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, whether they must already be the IDR's RE reviewer (False for an admin), the IDR's quantity rows from its reports (empty when it has no pay items), and the uuids of its attributed flags and segments (none when None).
-    Returns a one-row list with the IDR, flags_claimed, segments_claimed (how many of each it claimed) and overrides_dropped, an empty list if it isn't in Stage 2 review under that reviewer, or None on failure.
+    Its claimed flags' assessment clips (Slice Y2) are written too, those of the clips given whose flag it claimed, in place of any it had.
+    Takes the IDR uuid, the acting user's uuid, the object path of the IDR's own copy of their signature, whether they must already be the IDR's RE reviewer (False for an admin), the IDR's quantity rows from its reports (empty when it has no pay items), the uuids of its attributed flags and segments (none when None) and their clips ({flag_id, pre_clip_sf, clipped_sf}, property_line.flag_clips; none when None).
+    Returns a one-row list with the IDR, flags_claimed, segments_claimed (how many of each it claimed), overrides_dropped, clips_written and clips_removed, an empty list if it isn't in Stage 2 review under that reviewer, or None on failure.
     """
     assignments = ("re_reviewer_uuid = %s, re_signature_path = %s, re_signed_at = now(), "
                    "return_reason = NULL, returned_from = NULL")
     also = (f"{replace_quantities_ctes('moved')},{claim_flags_cte('moved')},{insert_flag_quantities_cte('moved')},"
             f"{claim_segments_cte('moved')},{insert_segment_quantities_cte('moved')},{insert_site_quantities_cte('moved')},"
-            f"{dropped_overrides_cte('moved', 'i.re_reviewer_uuid')}")
+            f"{dropped_overrides_cte('moved', 'i.re_reviewer_uuid')},{replace_clips_ctes('moved')}")
     return _move_idr(idr_id, actor_uuid, "approve_stage2", "stage2_review", "approved", assignments,
                      (actor_uuid, signature_path), reviewer_column="re_reviewer_uuid" if as_reviewer else None,
                      also=also, also_values=(quantity_rows_json(quantity_rows), list(flag_ids or []),
-                                             list(segment_ids or [])),
+                                             list(segment_ids or []), clips_json(clips or [])),
                      also_columns="(SELECT count(*) FROM claimed_flags) AS flags_claimed, "
                                   "(SELECT count(*) FROM claimed_segments) AS segments_claimed, "
-                                  "(SELECT count(*) FROM dropped_overrides) AS overrides_dropped")
+                                  "(SELECT count(*) FROM dropped_overrides) AS overrides_dropped, "
+                                  "(SELECT count(*) FROM written_clips) AS clips_written, "
+                                  "(SELECT count(*) FROM stale_clips) AS clips_removed")
 
 
 def return_idr(
@@ -551,14 +556,15 @@ UNLOCKABLE_STATUSES = ["approved", "stage2_review"]
 
 def admin_unlock_idr(idr_id: UUID, actor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again, and record the unlock (last_unlocked_at, last_unlocked_by). Its number, the inspector's signature and stage1_accepted_at stay. Its quantity rows are deleted and its flags' and curb segments' claims released in the same statement: it is no longer approved, and approving it again claims and writes them afresh. Its attribution overrides stay.
+    Unlock an IDR for the RE to review again: move it to stage2_review, clear the RE's signature and its time, and clear the RE reviewer and stage2_accepted_at so an RE has to accept it again, and record the unlock (last_unlocked_at, last_unlocked_by). Its number, the inspector's signature and stage1_accepted_at stay. Its quantity rows and assessment clips (Slice Y2) are deleted and its flags' and curb segments' claims released in the same statement: it is no longer approved, and approving it again claims and writes them afresh. Its attribution overrides stay.
     Takes the IDR uuid and the admin's uuid.
     Returns a one-row list with the IDR, flags_released and segments_released, an empty list if it isn't in one of UNLOCKABLE_STATUSES (or is deleted), or None on failure.
     """
     assignments = ("re_signature_path = NULL, re_signed_at = NULL, re_reviewer_uuid = NULL, stage2_accepted_at = NULL, "
                    "last_unlocked_at = now(), last_unlocked_by = %s")
     return _move_idr(idr_id, actor_uuid, "admin_unlock", UNLOCKABLE_STATUSES, "stage2_review", assignments, (actor_uuid,),
-                     also=f"{delete_quantities_cte('moved')},{release_flags_cte('moved')},{release_segments_cte('moved')}",
+                     also=f"{delete_quantities_cte('moved')},{release_flags_cte('moved')},{release_segments_cte('moved')},"
+                          f"{delete_clips_cte('moved')}",
                      also_columns="(SELECT count(*) FROM released_flags) AS flags_released, "
                                   "(SELECT count(*) FROM released_segments) AS segments_released")
 
@@ -568,23 +574,24 @@ def admin_delete_idr(
     claimed_segments: Optional[list[UUID]] = None,
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Soft-delete an IDR, whatever its status: mark it deleted with when and by whom. The row and everything under it are kept, but for its quantity rows, which are deleted in the same statement, and its flags' and curb segments' claims, which are released; its day and its IDR number become free again. The flags and segments it had claimed are recorded in the audit row's note, for an un-delete to claim them again.
+    Soft-delete an IDR, whatever its status: mark it deleted with when and by whom. The row and everything under it are kept, but for its quantity rows and assessment clips (Slice Y2), which are deleted in the same statement, and its flags' and curb segments' claims, which are released; its day and its IDR number become free again. The flags and segments it had claimed are recorded in the audit row's note, for an un-delete to claim them again.
     Takes the IDR uuid, the admin's uuid and the flags and segments it has claimed (read just before; none when None).
     Returns a one-row list with the IDR, flags_released and segments_released, an empty list if it was already deleted, or None on failure.
     """
     return _move_idr(idr_id, actor_uuid, "admin_delete", None, "deleted", "deleted_at = now(), deleted_by = %s",
                      (actor_uuid,), note=released_note(claimed or [], claimed_segments),
-                     also=f"{delete_quantities_cte('moved')},{release_flags_cte('moved')},{release_segments_cte('moved')}",
+                     also=f"{delete_quantities_cte('moved')},{release_flags_cte('moved')},{release_segments_cte('moved')},"
+                          f"{delete_clips_cte('moved')}",
                      also_columns="(SELECT count(*) FROM released_flags) AS flags_released, "
                                   "(SELECT count(*) FROM released_segments) AS segments_released")
 
 
 def undelete_idr(
-    idr_id: UUID, actor_uuid: UUID, quantity_rows: list[dict[str, Any]]
+    idr_id: UUID, actor_uuid: UUID, quantity_rows: list[dict[str, Any]], clips: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Bring a soft-deleted IDR back in one statement: give it the status it had when it was deleted, clear deleted_at and deleted_by, and log it in icid.idr_audit as admin_undelete. The status is read off the IDR's latest admin_delete row in icid.idr_audit, which the delete wrote; an IDR with no such row comes back as a draft. One that comes back approved gets its quantity rows written in the same statement, as an approval writes them (its sites' pay items included, an override dropped as an approval drops it), and claims again the flags and curb segments its delete released (as that row's note lists them; one another IDR claimed meanwhile is left out: the route refuses first).
-    Takes the IDR uuid, the admin's uuid and the IDR's quantity rows as its reports give them now (used only when it comes back approved).
+    Bring a soft-deleted IDR back in one statement: give it the status it had when it was deleted, clear deleted_at and deleted_by, and log it in icid.idr_audit as admin_undelete. The status is read off the IDR's latest admin_delete row in icid.idr_audit, which the delete wrote; an IDR with no such row comes back as a draft. One that comes back approved gets its quantity rows written in the same statement, as an approval writes them (its sites' pay items included, an override dropped as an approval drops it), and claims again the flags and curb segments its delete released (as that row's note lists them; one another IDR claimed meanwhile is left out: the route refuses first), with their assessment clips (Slice Y2) as the strips now give them.
+    Takes the IDR uuid, the admin's uuid, the IDR's quantity rows as its reports give them now and its released flags' clips (property_line.flag_clips; both used only when it comes back approved).
     Returns a one-row list with the IDR, status_on_record (False when it came back as a draft for want of a record), flags_claimed and segments_claimed, an empty list if it isn't deleted, or None on failure; raises IdrSlotTakenError when another IDR holds its day or its number.
     """
     sql = f"""
@@ -615,15 +622,17 @@ def undelete_idr(
             insert_flag_quantities_cte("approved")},{
             claim_segments_cte("approved", reclaim_segment_ids_sql("target"))},{
             insert_segment_quantities_cte("approved")},{insert_site_quantities_cte("approved")},{
-            dropped_overrides_cte("approved", "%s::uuid")}
+            dropped_overrides_cte("approved", "%s::uuid")},{replace_clips_ctes("approved")}
         SELECT {IDR_COLUMNS},
             (SELECT status_before IS NOT NULL FROM target) AS status_on_record,
             (SELECT count(*) FROM claimed_flags) AS flags_claimed,
-            (SELECT count(*) FROM claimed_segments) AS segments_claimed
+            (SELECT count(*) FROM claimed_segments) AS segments_claimed,
+            (SELECT count(*) FROM written_clips) AS clips_written
         FROM moved;
     """
     try:
-        return run_query(sql, (idr_id, actor_uuid, "admin_undelete", None, quantity_rows_json(quantity_rows), actor_uuid))
+        return run_query(sql, (idr_id, actor_uuid, "admin_undelete", None, quantity_rows_json(quantity_rows), actor_uuid,
+                               clips_json(clips or [])))
     except UniqueViolation as exc:
         raise IdrSlotTakenError(str(idr_id)) from exc
 

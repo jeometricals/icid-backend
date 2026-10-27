@@ -302,3 +302,17 @@ class TaxMapUploadComplete(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     staging_path: str
+
+
+class ReClip(BaseModel):
+    """What an admin's re-clip of a property did (Slice Y2): how many approved IDRs claim its flags, and its clip rows before and after."""
+
+    idrs_reclipped: int
+    rows_before: int
+    rows_after: int
+
+
+class ReClipResponse(BaseModel):
+    status: str
+    message: str
+    data: ReClip

@@ -276,6 +276,18 @@ class TestUndeleteClaimsFlagsBack:
         assert "flag_quantities AS ( INSERT INTO icid.quantities" in one_line and "FROM approved i JOIN icid.flags f" in one_line
         assert "(SELECT count(*) FROM claimed_flags) AS flags_claimed" in one_line
 
+    def test_an_idr_back_approved_gets_its_clips_from_the_strips_as_they_are_now(self, admin_client):
+        with patch("api.queries.idr_flags.run_query", return_value=released()),                 patch("api.queries.assessment_clip_audits.run_query", return_value=[]) as clips,                 backend(restored=[{**RESTORED, "flags_claimed": 1}]) as seen:
+            assert admin_client.post(UNDELETE).status_code == 200
+        assert clips.call_args.args[1] == ([TAKEN_FLAG],)
+        sql, params = writes(seen)[0]
+        assert "new_clips AS (" in flat(sql) and "CROSS JOIN approved i" in flat(sql) and params[-1].obj == []
+
+    def test_an_idr_back_as_a_draft_reads_no_clips(self, admin_client):
+        with patch("api.queries.idr_flags.run_query", return_value=released("draft")),                 patch("api.queries.assessment_clip_audits.run_query") as clips,                 backend(restored=[{**RESTORED, "status": "draft"}]):
+            assert admin_client.post(UNDELETE).status_code == 200
+        clips.assert_not_called()
+
     def test_a_record_that_cant_be_read_is_500(self, admin_client):
         with patch("api.queries.idr_flags.run_query", return_value=None), backend() as seen:
             response = admin_client.post(UNDELETE)

@@ -65,11 +65,11 @@ def tab(content: bytes, name: str):
 
 def values(sheet, row: int) -> list:
     """
-    Read one row's twelve cells.
+    Read one row's thirteen cells.
     Takes the sheet and the row number.
     Returns the values.
     """
-    return [sheet.cell(row, column).value for column in range(1, 13)]
+    return [sheet.cell(row, column).value for column in range(1, 14)]
 
 
 class TestGrouping:
@@ -218,7 +218,7 @@ class TestWorkbook:
         assert (sheet["A2"].value, sheet["C2"].value, sheet["G2"].value) == (
             "October 2026", '4" rate: $11.54', '7" rate: $12.64')
         assert values(sheet, 3)[:3] == ["Property Address", "CB", '4" Assessable (SF)']
-        assert values(sheet, 3)[11] == "Remarks"
+        assert values(sheet, 3)[11:13] == ["Outside PL (SF)", "Remarks"]
         assert sheet.freeze_panes == "A4"
         main = values(sheet, 4)
         assert main[0] == "138-22 227 STREET" and main[1] is None  # no CB set
@@ -253,11 +253,31 @@ class TestWorkbook:
         sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
         assert sheet["A7"].value is None
 
+    def test_a_clip_at_the_property_line_has_its_column_and_a_note(self):
+        flags = [{**flag(MAIN, "4in", "100", "100"), "clipped_sf": Decimal("25.50")}, flag(MAIN, "4in", "10", "10"),
+                 {**flag(MAIN, "4in", "40", "40", assessable=False), "clipped_sf": Decimal("5")}]
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
+        row = values(sheet, 4)
+        assert row[2] == pytest.approx(84.5) and row[3] == pytest.approx(65.5) and row[11] == pytest.approx(25.5)
+        assert sheet["L4"].number_format == "#,##0.00" and sheet["L5"].value == pytest.approx(25.5)
+        assert sheet["A8"].value.startswith("Outside PL (SF): the part of the flags outside the sidewalk strip")
+
+    def test_without_a_clip_the_column_reads_a_dash_and_there_is_no_note(self):
+        flags = [flag(MAIN, "4in", "10", "10", constructed=date(2026, 10, 3))]
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
+        assert sheet["L4"].value == "—" and sheet["A7"].value is None
+
+    def test_the_page_carries_the_clip_too(self):
+        flags = [{**flag(MAIN, "4in", "100", "100"), "clipped_sf": Decimal("25.50")}]
+        payload = summary_payload(summary_sites(flags, RATES), RATES, None, None)
+        assert payload["sites"][0]["outside_pl"] == 25.5 and payload["totals"]["outside_pl"] == 25.5
+        assert payload["sites"][0]["four_assessable"] == 74.5
+
     def test_a_missing_rate_reads_as_a_dash_in_the_header(self):
         project = {**PROJECT, "cost_per_sf_7in": None}
         sheet = tab(build_workbook(project, summary_months(SE384, {**RATES, "cost_per_sf_7in": None}), False), "Oct 2026")
         assert sheet["G2"].value == '7" rate: —'
-        assert sheet["J4"].value is None and sheet["L4"].value == '7" rate not set'
+        assert sheet["J4"].value is None and sheet["M4"].value == '7" rate not set'
 
     def test_two_months_are_two_tabs(self):
         flags = [flag(MAIN, "4in", "10", "10"), flag(MAIN, "4in", "20", "20", approved=NOV_2)]

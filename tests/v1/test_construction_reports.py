@@ -556,3 +556,39 @@ def test_a_tax_map_without_a_source_prints_as_before(admin_client, storage):
     with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
         text = pdf_text(admin_client.get(URL).content)
     assert "TAX MAP 40.00'" in text and "(MapPLUTO" not in text and "(Manual)" not in text
+
+
+# Slice Y2: a page's sidewalk strip, its first edge (the property line) 720 px = 30.00 ft at 24 px/ft
+STRIP = [{"x": 100, "y": 100}, {"x": 820, "y": 100}, {"x": 820, "y": 280}, {"x": 100, "y": 280}]
+
+
+def test_a_pages_sidewalk_strip_prints_with_its_frontage_beside_the_tax_map(admin_client, storage):
+    """Slice Y2: the strip is drawn and labelled, and its FRONTAGE prints as well as the TAX MAP."""
+    drawings = {**DRAWINGS, "strips": [{"points": STRIP}]}
+    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
+        text = pdf_text(admin_client.get(URL).content)
+    assert "Sidewalk strip" in text and "FRONTAGE 30.00' (Sidewalk strip)" in text and "TAX MAP 40.00'" in text
+
+
+def test_without_a_strip_no_frontage_prints(admin_client, storage):
+    """Slice Y2: a page without a strip prints as before."""
+    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
+        text = pdf_text(admin_client.get(URL).content)
+    assert "FRONTAGE" not in text and "Sidewalk strip" not in text
+
+
+def test_a_strip_reaching_far_past_the_flags_doesnt_shrink_the_sketch(admin_client, storage):
+    """Slice Y2: the strip is drawn but never fitted, so a long one can't make the sheet refuse as too large."""
+    far = [{"x": -20000, "y": 100}, {"x": 20000, "y": 100}, {"x": 20000, "y": 280}, {"x": -20000, "y": 280}]
+    drawings = {**DRAWINGS, "strips": [{"points": far}]}
+    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
+        response = admin_client.get(URL)
+    assert response.status_code == 200
+
+
+def test_a_flag_clipped_at_the_property_line_shows_in_the_calculations(admin_client, storage):
+    """Slice Y2: the part its approval clipped is a non-assessable piece, and comes off box 2's assessable."""
+    flags = [{**FLAGS[1], "clipped_sf": Decimal("13.19")}, *FLAGS[2:]]
+    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
+        text = pdf_text(admin_client.get(URL).content)
+    assert "clipped at PL 13.19" in text and "160.69 - 60.69 100.00" in text

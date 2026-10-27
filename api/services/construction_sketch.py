@@ -138,7 +138,7 @@ def placed_outline(item: dict[str, Any], scale: float) -> list[Point]:
 class SketchItem:
     """Something to draw, its points already on the sheet's page in feet, the page turned as the workspace shows it; an area knows its flag."""
 
-    kind: str  # flag, area, feature, segment, match_line
+    kind: str  # flag, area, feature, segment, match_line, strip
     points: list[Point]
     source: dict[str, Any]
     parent: Optional[dict[str, Any]] = None
@@ -235,9 +235,9 @@ class Fit:
 def sketch_items(flags: list[dict[str, Any]], drawings: dict[str, Any], match_lines: Optional[list[dict[str, Any]]] = None,
                  page_number: Optional[int] = None) -> list[SketchItem]:
     """
-    Lay out one sheet's sketch: the claimed flags on one page, their non-assessable areas, the features and segments on that page, and its match lines, in feet, the page turned by its rotation. Raises SketchError when the page has no scale or no flag has a place.
-    Takes the page's flags (list_report_flags), its drawings (list_page_drawings), its match lines (each with label, x1, y1, x2, y2 and a caption) and the page's number when the report has more than one sheet (named in a message), else None.
-    Returns the items, flags first, match lines last.
+    Lay out one sheet's sketch: the claimed flags on one page, their non-assessable areas, the features and segments on that page, its match lines, and its sidewalk strip (Slice Y2), in feet, the page turned by its rotation. Raises SketchError when the page has no scale or no flag has a place.
+    Takes the page's flags (list_report_flags), its drawings (list_page_drawings; strips optional), its match lines (each with label, x1, y1, x2, y2 and a caption) and the page's number when the report has more than one sheet (named in a message), else None.
+    Returns the items, flags first, then match lines and the strip, its source carrying the page's scale_px_per_ft.
     """
     scale = flags[0]["scale_px_per_ft"] if flags else None
     if not scale:
@@ -273,6 +273,10 @@ def sketch_items(flags: list[dict[str, Any]], drawings: dict[str, Any], match_li
     for line in match_lines or []:
         points = [(float(line["x1"]), float(line["y1"])), (float(line["x2"]), float(line["y2"]))]
         items.append(SketchItem("match_line", in_feet(points), line))
+    for strip in drawings.get("strips", []):
+        points = [(float(point["x"]), float(point["y"])) for point in strip["points"]]
+        if len(points) >= 3:
+            items.append(SketchItem("strip", in_feet(points), {**strip, "scale_px_per_ft": scale}))
     return items
 
 
@@ -280,10 +284,10 @@ def fit_to_pane(items: list[SketchItem], pane: tuple[float, float, float, float]
                 page_number: Optional[int] = None) -> Fit:
     """
     Fit a sketch to the pane, keeping its proportions, with PADDING round it. Raises SketchError when a foot would print smaller than MIN_POINTS_PER_FOOT.
-    Takes the items (sketch_items, its match lines among them), the pane (x, bottom y, width, height, in points), the least width the drawing must make room for, in feet (a dimension drawn at scale beside it: the tax map's, the curb-to-curb), and the page's number when the report has more than one sheet (named in the message).
+    Takes the items (sketch_items, its match lines among them; a sidewalk strip is drawn but never fitted, so it can't shrink the sheet), the pane (x, bottom y, width, height, in points), the least width the drawing must make room for, in feet (a dimension drawn at scale beside it: the tax map's, the curb-to-curb), and the page's number when the report has more than one sheet (named in the message).
     Returns the Fit, the drawing centred in the pane.
     """
-    min_x, min_y, max_x, max_y = bounds_of(point for item in items for point in item.points)
+    min_x, min_y, max_x, max_y = bounds_of(point for item in items if item.kind != "strip" for point in item.points)
     width_ft, height_ft = max(max_x - min_x, 1.0, min_width_ft), max(max_y - min_y, 1.0)
     min_x = (min_x + max_x) / 2 - width_ft / 2
     padded_w, padded_h = width_ft * (1 + 2 * PADDING), height_ft * (1 + 2 * PADDING)

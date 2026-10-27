@@ -840,6 +840,27 @@ CREATE INDEX idx_flags_claimed_by_idr ON icid.flags (claimed_by_idr_id) WHERE cl
 CREATE INDEX idx_flags_scope_rollup ON icid.flags (pay_item_id, claimed_by_idr_id) WHERE deleted_at IS NULL;
 
 ------------------------------------------------------------
+-- ASSESSMENT CLIP AUDITS (Slice Y2, migration 060): the part of a claimed flag outside its page's sidewalk strip, not
+-- assessed to the homeowner (clipped_sf = quantity x the outline's outside fraction). One row per flag and IDR; the
+-- IDR's set is replaced at approval, un-delete and re-clip, and removed by unlock and delete. Contractor billing never
+-- reads it.
+------------------------------------------------------------
+CREATE TABLE icid.assessment_clip_audits (
+    audit_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    flag_id      UUID NOT NULL REFERENCES icid.flags(id),
+    idr_id       UUID NOT NULL REFERENCES icid.idrs(idr_id) ON DELETE CASCADE,
+    pre_clip_sf  NUMERIC(10,2) NOT NULL,
+    clipped_sf   NUMERIC(10,2) NOT NULL,
+    clip_reason  TEXT NOT NULL,
+    at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_assessment_clip_audits_flag_idr UNIQUE (flag_id, idr_id),
+    CONSTRAINT chk_assessment_clip_audits_amounts
+        CHECK (pre_clip_sf >= 0 AND clipped_sf >= 0 AND clipped_sf <= pre_clip_sf),
+    CONSTRAINT chk_assessment_clip_audits_reason CHECK (clip_reason IN ('outside_property_line'))
+);
+CREATE INDEX idx_assessment_clip_audits_idr ON icid.assessment_clip_audits (idr_id, flag_id);
+
+------------------------------------------------------------
 -- FLAG EDITS (Slice Y1.5, migration 059): each change of a flag's surveyed_is_assessable or surveyed_non_assessable_reason,
 -- by the sidewalk strip's auto-flip (editor NULL) or a flag edit; rows are only ever added
 ------------------------------------------------------------

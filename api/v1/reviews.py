@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from api.queries.assessment_clip_audits import list_clip_inputs
 from api.queries.idr_flags import claimed_flag_ids, released_claims
 from api.queries.idr_segments import claimed_segment_ids, released_segment_claims
 from api.queries.idrs import (
@@ -41,6 +42,7 @@ from api.services.field_edits import FieldEditError, untouched_message, untouche
 from api.services.idr_flags import IdrFlagError, attributed_flag_ids
 from api.services.idr_segments import IdrSegmentError, attributed_segment_ids
 from api.services.idr_purge import purge_idr
+from api.services.property_line import flag_clips
 from api.services.quantities import quantity_rows_for_idr
 from api.services.signatures import SignatureStorageError, snapshot_signature_for_idr
 
@@ -140,6 +142,18 @@ def _number_conflict(idr: dict[str, Any], idr_number: str) -> Optional[JSONRespo
 
     conflict = IdrConflict(detail="This IDR number is already in use on this project", existing_idr_id=existing_idr_id)
     return JSONResponse(status_code=409, content=conflict.model_dump(mode="json"))
+
+
+def _clips_for(flag_ids: list) -> list[dict]:
+    """
+    Work out the assessment clips (Slice Y2) of the flags an approval or an un-delete is about to claim.
+    Takes the flags' uuids.
+    Returns their clips ({flag_id, pre_clip_sf, clipped_sf}, property_line.flag_clips); raises 500 when the flags can't be read.
+    """
+    flags = list_clip_inputs(list(flag_ids))
+    if flags is None:
+        raise HTTPException(status_code=500, detail="Failed to read the flags' sidewalk strips")
+    return flag_clips(flags)
 
 
 @router.get("/queue", response_model=IdrListResponse)
@@ -274,6 +288,10 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
     except (IdrFlagError, IdrSegmentError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    # The part of each of those flags outside its page's sidewalk strip isn't assessed to the homeowner (Slice Y2):
+    # worked out now, from the strips as they are, and written in the statement for the flags it claims
+    clips = _clips_for(flag_ids)
+
     # As at submit, the copy comes first: an approved IDR must never point at a signature that isn't there. If the
     # approval below doesn't go through, the copy is left behind, unreferenced.
     try:
@@ -282,7 +300,8 @@ def approve_at_stage2(idr_id: UUID, user: UserOut = Depends(resident_engineer)) 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
-        rows = approve_stage2(idr_id, user.uuid, signature_copy, as_reviewer, quantity_rows, flag_ids, segment_ids)
+        rows = approve_stage2(idr_id, user.uuid, signature_copy, as_reviewer, quantity_rows, flag_ids, segment_ids,
+                              clips)
     except Exception:
         logger.warning("Approval of IDR %s failed after its RE signature was copied; %s is left orphaned", idr_id, signature_copy)
         raise
@@ -454,8 +473,11 @@ def undelete_idr_record(idr_id: UUID, user: UserOut = Depends(current_admin)) ->
     if quantity_rows is None:
         raise HTTPException(status_code=500, detail="Failed to load IDR reports")
 
+    # And the assessment clips of the flags it claims back (Slice Y2), from the strips as they are now
+    clips = _clips_for(released["released"]) if released["status_before"] == "approved" else []
+
     try:
-        rows = undelete_idr(idr_id, user.uuid, quantity_rows)
+        rows = undelete_idr(idr_id, user.uuid, quantity_rows, clips)
     except IdrSlotTakenError as exc:
         raise HTTPException(
             status_code=409, detail="Another IDR took this one's day or its IDR number meanwhile; reload and try again"

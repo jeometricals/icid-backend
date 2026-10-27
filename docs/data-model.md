@@ -613,6 +613,31 @@ entirely outside the sidewalk strip`) and a flag PATCH (its editor). Rows are on
 | `editor_stage` | TEXT | NULL, or `stage1` / `stage2` (`chk_flag_edits_stage`), reserved for Y3's reviewer edits |
 | `edited_at` | TIMESTAMPTZ NOT NULL | `now()`; `idx_flag_edits_flag` on (`flag_id`, `edited_at DESC`) |
 
+### assessment_clip_audits
+
+The part of a claimed, assessable flag outside its page's sidewalk strip, which the homeowner isn't assessed for (Slice
+Y2, migration 060): one row per flag and the IDR that claimed it. Only the homeowner's reports read it (the Construction
+Report's measure and calculations, the Assessment Summary, through `flag_areas`); contractor billing never does, and
+nothing in `icid.quantities` is clipped.
+
+- **Worked out** in Python (`property_line.flag_clip`): `clipped = quantity x outside fraction of the flag's outline`,
+  from its quantity (the override, else its net area), to the cent; none for a flag surveyed non-assessable, one under
+  0.1% outside, or a page without a strip or a scale.
+- **Written as a set per IDR** in the statements that claim its flags (approve-stage2, an un-delete back to approved):
+  the clips of the flags the statement claimed, the IDR's others removed. **Removed** by admin unlock and admin delete,
+  in theirs. **Rewritten per property** by an admin's re-clip, from the strips as they are then. A strip edited after
+  approval changes nothing until then.
+
+| Column | Type | Notes |
+|---|---|---|
+| `audit_id` | UUID PK | `gen_random_uuid()` |
+| `flag_id` | UUID NOT NULL | FK → `flags.id`, no action |
+| `idr_id` | UUID NOT NULL | FK → `idrs.idr_id`, ON DELETE CASCADE (goes with a purged IDR); UNIQUE with `flag_id` (`uq_assessment_clip_audits_flag_idr`); `idx_assessment_clip_audits_idr` |
+| `pre_clip_sf` | NUMERIC(10,2) NOT NULL | The flag's quantity when clipped |
+| `clipped_sf` | NUMERIC(10,2) NOT NULL | The part outside; 0 ≤ clipped ≤ pre-clip (`chk_assessment_clip_audits_amounts`) |
+| `clip_reason` | TEXT | `outside_property_line` (`chk_assessment_clip_audits_reason`) |
+| `at` | TIMESTAMPTZ NOT NULL | `now()`, when last written |
+
 ### idr_flag_attributions
 
 An override of which flags an IDR covers (migration 037, R1f). By default an IDR covers the live flags on its task
@@ -1033,6 +1058,7 @@ content as TEXT, linked to a report and a form template).
 | 058 | `058_tax_map_source.sql` | Slice Y1 | Added `properties.tax_map_frontage_ft` (NUMERIC(10,2)), `tax_map_source` (TEXT) and `tax_map_fetched_at` (TIMESTAMPTZ), with CHECKs `chk_properties_tax_map_source` (`^(mappluto_\d{2}v\d+(\.\d+)?\|manual\|pip_scrape\|r1k)$`), `chk_properties_tax_map_frontage` (above 0, below 1000) and `chk_properties_tax_map_cache` (all three or none); and `pir_annotations.tax_map_source` and `tax_map_fetched_at`, with `chk_pir_annotations_tax_map_source` and `chk_pir_annotations_tax_map_provenance` (a width has a source; source and time together). Marked every existing width `manual`, fetched at the migration (one row in prod). |
 | 059 | `059_sidewalk_strip_tax_map_pdf.sql` | Slice Y1.5 | Added `pir_annotations.sidewalk_strip_points` (JSONB, 3 or more `{x, y}`), `sidewalk_strip_source` (`manual`, `r1k`), `sidewalk_strip_set_at` and `sidewalk_strip_set_by` (→ users), with CHECKs `chk_pir_annotations_sidewalk_strip_points`, `_source` and `chk_pir_annotations_sidewalk_strip` (points, source and time together); `properties.tax_map_pdf_path`, `_source` (`dof_map_library`, `upload`), `_map_id`, `_effective_date`, `_fetched_at` and `_uploaded_by` (→ users), with `chk_properties_tax_map_pdf_source` and `chk_properties_tax_map_pdf` (a fetch has a map id and no uploader, an upload the reverse); the table `flag_edits` (index `idx_flag_edits_flag`); and `outside_property_line` in `chk_flags_non_assessable_reason` and `chk_nas_reason`. Modified no rows. |
 | 059b | `059b_tax_maps_bucket.sql` | Slice Y1.5 | The private Storage bucket `tax-maps` (10 MB, PDF). |
+| 060 | `060_assessment_clip_audits.sql` | Slice Y2 | Added the table `assessment_clip_audits` (`flag_id` → flags, no action; `idr_id` → idrs, ON DELETE CASCADE; `pre_clip_sf`, `clipped_sf` NUMERIC(10,2); `clip_reason`; `at`), UNIQUE `uq_assessment_clip_audits_flag_idr` (`flag_id`, `idr_id`), CHECKs `chk_assessment_clip_audits_amounts` (both ≥ 0, clipped ≤ pre-clip) and `chk_assessment_clip_audits_reason` (`outside_property_line`), index `idx_assessment_clip_audits_idr`. Modified no rows. |
 | 046 | `046_pir_match_lines.sql` | R1h.1a | Created `pir_match_lines` (FK to `pir_pages`, no action; to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`: 28 → 30 FKs to `users`; CHECKs `chk_match_lines_label` and `chk_match_lines_length`; partial unique `pir_match_lines_page_label_live_uq` and `pir_match_lines_page_idx`). No existing row changed. |
 | 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |

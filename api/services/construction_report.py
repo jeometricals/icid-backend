@@ -17,7 +17,9 @@ The sketch (R1h.3) takes the left two thirds of its band, as on DOT's sheets: ea
 (4" stippled, 7" in diagonal lines, what isn't assessed tinted blue and cross-hatched, a flag surveyed non-assessable
 crossed through), numbered (1..n, A1..An) and labelled when the label fits; the property line along the top (PL, and
 TAX MAP at scale when the title block has its width), the curb-to-curb at scale along the bottom (CC), the frontage
-street under it and the cross streets at the sides. The right third is the calculations panel
+street under it and the cross streets at the sides. Slice Y2 adds the page's sidewalk strip, dashed red and labelled,
+with its FRONTAGE (its first edge, the property line) above the TAX MAP's line, and the part of each flag outside it,
+clipped at approval, as a "clipped at PL" piece of the calculations. The right third is the calculations panel
 (construction_measure.calc_groups), whose totals are box 2's.
 
 R1h.4 brings it closer still: flags that abut are drawn as one slab with light division lines (construction_slabs.py),
@@ -69,6 +71,7 @@ from api.services.construction_slabs import edge_runs, group_bounds, slab_groups
 from api.services.export_common import signed_date
 from api.services.field_edits import initials
 from api.services.mappluto import source_display
+from api.services.property_line import effective_frontage
 from api.services.signatures import fetch_signature_file
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,11 @@ CALC_TOO_LONG_MESSAGE = ("This property has too many pieces for one sheet's calc
                          "across PIR pages with a match line.")
 # A match line on a sheet: its dash, its weight, and its end circles' radius
 MATCH_LINE_DASH = (7, 4)
+# A page's sidewalk strip (Slice Y2): dashed red, labelled; its FRONTAGE dimension stands this far above the TAX MAP's
+STRIP_DASH = (4, 2)
+STRIP_RGB = (0.8, 0.1, 0.1)
+STRIP_LABEL_TEXT = "Sidewalk strip"
+FRONTAGE_RISE = 20.0
 MATCH_LINE_WIDTH = 1.6
 MATCH_LINE_RADIUS = 5.0
 # A label printed inside a shape, and a number's circle
@@ -307,8 +315,8 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
         page_flags = [flag for flag in flags if flag["pir_page_id"] == page_id]
         number = numbers.get(page_id)
         # The drawings come back as JSON, their page ids as text
-        page_drawings = {kind: [row for row in drawings[kind] if str(row.get("pir_page_id")) == str(page_id)]
-                         for kind in ("features", "segments")}
+        page_drawings = {kind: [row for row in drawings.get(kind, []) if str(row.get("pir_page_id")) == str(page_id)]
+                         for kind in ("features", "segments", "strips")}
         page_lines = [{**line, "caption": match_line_caption(line["label"], number, label_pages, sheet_of_page)}
                       for line in lines if line["pir_page_id"] == page_id]
         per_page.append((number, page_flags,
@@ -330,7 +338,11 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
             raise SketchError(CALC_TOO_LONG_MESSAGE if not many else
                               f"PIR page {number} has too many pieces for one sheet's calculations panel; split its "
                               "flags across pages with a match line.")
-        fit = fit_to_pane(items, layout.pane, min_width, number if many else None)
+        pane = layout.pane
+        if any(item.kind == "strip" for item in items):
+            # Room above the TAX MAP line for the strip's FRONTAGE
+            pane = (pane[0], pane[1], pane[2], pane[3] - FRONTAGE_RISE)
+        fit = fit_to_pane(items, pane, min_width, number if many else None)
         sheets.append(Sheet(number or 1, items, fit, groups, layout, extra))
 
     signature = _signature(header["inspector_signature_path"], idr_id)
@@ -1158,9 +1170,45 @@ def frontage_curb(items: list[SketchItem], fit: Fit) -> Optional[tuple[Decimal, 
     return Decimal(str(round(length, 2))), min(xs), max(xs)
 
 
+def strip_frontage(items: list[SketchItem], fit: Fit) -> Optional[tuple[Decimal, float, float]]:
+    """
+    The frontage of the sheet's page by its sidewalk strip (Slice Y2), as effective_frontage resolves it: the strip's first edge, the property line, and the stretch of the sheet it spans.
+    Takes the sketch's items and their Fit.
+    Returns (length in feet, to the hundredth; left and right x on the sheet), or None when the page has no strip.
+    """
+    strip = next((item for item in items if item.kind == "strip"), None)
+    if strip is None:
+        return None
+    length, source = effective_frontage({"sidewalk_strip_points": strip.source["points"]}, {},
+                                        float(strip.source["scale_px_per_ft"]))
+    if length is None or source != "sidewalk_strip":
+        return None
+    xs = [fit.place(point)[0] for point in strip.points[:2]]
+    return length, min(xs), max(xs)
+
+
+def _strip(c: Canvas, item: SketchItem, fit: Fit) -> None:
+    """
+    Draw a page's sidewalk strip (Slice Y2): its outline dashed in red, closed, and "Sidewalk strip" in small red italics at the middle of its first edge, the property line.
+    Takes the canvas, the strip's item and the sketch's Fit.
+    Returns nothing.
+    """
+    points = [fit.place(point) for point in item.points]
+    c.saveState()
+    c.setStrokeColorRGB(*STRIP_RGB)
+    c.setFillColorRGB(*STRIP_RGB)
+    c.setLineWidth(0.8)
+    c.setDash(*STRIP_DASH)
+    c.drawPath(_path(c, points), stroke=1, fill=0)
+    c.setDash()
+    (x1, y1), (x2, y2) = points[0], points[1]
+    _text(c, (x1 + x2) / 2, (y1 + y2) / 2 + 2, STRIP_LABEL_TEXT, 6, ITALIC, align="centre")
+    c.restoreState()
+
+
 def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, sketch_width: float) -> list[Box]:
     """
-    Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at each end, the tax map's width at scale between them when known, else the drawing's ends), the curb along the bottom (CC: its curb segments' length, every kind, under the stretch they span; else the title block's cc_curb_to_curb_ft at scale, as a manual figure), the frontage street under it and the cross streets up the sides.
+    Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at each end, the tax map's width at scale between them when known, else the drawing's ends; above it, the page's sidewalk strip's FRONTAGE across its first edge, Slice Y2), the curb along the bottom (CC: its curb segments' length, every kind, under the stretch they span; else the title block's cc_curb_to_curb_ft at scale, as a manual figure), the frontage street under it and the cross streets up the sides.
     Takes the canvas, the header row (tb_ streets and widths), the items, their Fit and the sketch's width.
     Returns the boxes its dimensions and PLs take, for the straps to keep clear of.
     """
@@ -1185,6 +1233,11 @@ def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: 
     for x in ends:
         c.line(x, max_y + 2, x, line_y + 6)
         _text(c, x, line_y + 9, "PL", 6.5, BOLD, align="centre")
+    frontage = strip_frontage(items, fit)
+    if frontage is not None:
+        length, left, right = frontage
+        _dimension(c, left, right, line_y + FRONTAGE_RISE, f"FRONTAGE {width_text(length)}", "(Sidewalk strip)")
+        taken.append((left - 4, line_y + FRONTAGE_RISE - 4, right + 4, line_y + FRONTAGE_RISE + 9))
     concrete = frontage_curb(items, fit)
     curb_y = min_y - STRAP_LANE - 4
     if concrete is not None:
@@ -1303,7 +1356,7 @@ def _match_line(c: Canvas, item: SketchItem, fit: Fit) -> None:
 def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, north: Optional[float],
             labels: dict[str, str], sketch_width: float) -> None:
     """
-    Draw the sketch, in the band's left part: segments, then the flags as slabs (construction_slabs), their areas, features on top; its perimeter (_perimeter); then the labels and numbers, and the straps where they find room; the north arrow when the bearing is known.
+    Draw the sketch, in the band's left part: segments, then the flags as slabs (construction_slabs), their areas, features on top, match lines and the sidewalk strip; its perimeter (_perimeter); then the labels and numbers, and the straps where they find room; the north arrow when the bearing is known.
     Takes the canvas, the header row, the items, their Fit, the north arrow's direction (None: no arrow), the labels (number_items) and the sketch's width.
     Returns nothing.
     """
@@ -1323,6 +1376,8 @@ def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit
     for item in items:
         if item.kind == "match_line":
             _match_line(c, item, fit)
+        elif item.kind == "strip":
+            _strip(c, item, fit)
     taken = _perimeter(c, header, items, fit, sketch_width)
     # A match line and its caption, on either side, keep the straps away
     taken += [(min(xs) - 14, min(ys) - 4, max(xs) + 14, max(ys) + 4)

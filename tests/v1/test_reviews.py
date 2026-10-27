@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID
 
@@ -381,11 +382,11 @@ class TestApproveStage2:
         seen["signature"].assert_called_once_with(REVIEWER["signature_path"], UUID(IDR_ID), "re")
         sql, params = seen["moves"][0]
         assert "re_signature_path = %s, re_signed_at = now()" in sql and "AND re_reviewer_uuid = %s" in sql
-        assert params[:-3] == (UUID(IDR_ID), "stage2_review", REVIEWER["uuid"], "approved", REVIEWER["uuid"],
+        assert params[:-4] == (UUID(IDR_ID), "stage2_review", REVIEWER["uuid"], "approved", REVIEWER["uuid"],
                                RE_SIGNATURE_COPY, REVIEWER["uuid"], "approve_stage2", None)
-        assert params[-3].obj == []  # the IDR's quantity rows: it has no pay items
-        assert params[-2] == []  # the flags it claims: none is attributed to it
-        assert params[-1] == []  # and the curb segments: none either
+        assert params[-4].obj == []  # the IDR's quantity rows: it has no pay items
+        assert params[-3] == []  # the flags it claims: none is attributed to it
+        assert params[-2] == []  # and the curb segments: none either
 
     def test_the_approver_is_recorded_as_the_re_reviewer(self):
         with signed_in(REVIEWER) as client, review(idr=STAGE2_IDR, roles=("re",), moved=[APPROVED_IDR]) as seen:
@@ -420,7 +421,7 @@ class TestApproveStage2:
         sql, params = seen["moves"][0]
         assert "AND re_reviewer_uuid = %s" not in sql
         # the admin replaces whoever accepted: their name goes with their signature
-        assert params[:-3] == (UUID(IDR_ID), "stage2_review", "approved", ADMIN_USER_ROW["uuid"], RE_SIGNATURE_COPY,
+        assert params[:-4] == (UUID(IDR_ID), "stage2_review", "approved", ADMIN_USER_ROW["uuid"], RE_SIGNATURE_COPY,
                                ADMIN_USER_ROW["uuid"], "approve_stage2", None)
 
     def test_an_re_without_a_signature_is_400(self):
@@ -1106,7 +1107,7 @@ class TestApprovalWritesQuantities:
         response, moves = approve()
         assert response.status_code == 200 and len(moves) == 1
         sql, params = moves[0]
-        rows = params[-3].obj
+        rows = params[-4].obj
         assert [(r["report_type"], r["pay_item_ref"], r["amount"], r["unit"], r["budget_code"]) for r in rows] == [
             ("GEN", "4.10 A", "2", "EA", "12345"), ("SWCB", "4.10 A", "1200.50", "LF", "12345"),
             ("SWCB", "4.20 A", "29.00", "SF", "12345"), ("AC", "4.10 A", "18.25", "TN", None)]
@@ -1130,20 +1131,20 @@ class TestApprovalWritesQuantities:
         response, moves = approve(reports=(trucks, cylinders), edits=())
         assert response.status_code == 200 and response.json()["data"]["status"] == "approved"
         sql, params = moves[0]
-        assert params[-3].obj == [] and DELETE_QUANTITIES in flat(sql)  # any rows it had still go
+        assert params[-4].obj == [] and DELETE_QUANTITIES in flat(sql)  # any rows it had still go
 
     def test_an_auto_generated_generals_sums_are_not_written(self):
         auto = pay_report(GEN_REPORT, item("merged-1", "89.00"), report_type="GEN", is_auto_generated=True)
         _, moves = approve(reports=(auto, *TWO_ITEMS), edits=[attest("approve", "item-1", "60.00", stage="stage2"),
                                                               attest("approve", "item-2", "29.00", stage="stage2")])
-        assert [r["report_type"] for r in moves[0][1][-3].obj] == ["SWCB", "SWCB"]
+        assert [r["report_type"] for r in moves[0][1][-4].obj] == ["SWCB", "SWCB"]
 
     def test_a_quantity_that_isnt_a_number_is_left_out_and_the_idr_is_still_approved(self):
         reports = (pay_report(SWCB_REPORT, item("item-1", "abc"), item("item-2", "29.00")),)
         edits = [attest("approve", "item-1", "abc", stage="stage2"), attest("approve", "item-2", "29.00", stage="stage2")]
         response, moves = approve(reports=reports, edits=edits)
         assert response.status_code == 200
-        assert [r["amount"] for r in moves[0][1][-3].obj] == ["29.00"]
+        assert [r["amount"] for r in moves[0][1][-4].obj] == ["29.00"]
 
     def test_a_lost_race_is_409_and_the_statement_that_ran_could_write_nothing(self):
         response, moves = approve(moved=[])
@@ -1206,7 +1207,7 @@ class TestUnlockAndDeleteRemoveQuantities:
         response, moves = approve(reports=revised, edits=edits)
         assert response.status_code == 200
         assert DELETE_QUANTITIES in flat(moves[0][0])  # whatever was there goes first
-        assert [r["amount"] for r in moves[0][1][-3].obj] == ["55.00", "29.00"]
+        assert [r["amount"] for r in moves[0][1][-4].obj] == ["55.00", "29.00"]
 
     @pytest.mark.parametrize("route,body", [("accept-stage2", None), ("return", {"to": "oe", "comment": "check"})])
     def test_no_other_move_touches_quantities(self, route, body):
@@ -1318,7 +1319,7 @@ class TestApprovalClaimsFlags:
             response, moves = approve(moved=[{**APPROVED_IDR, "flags_claimed": 2}])
         assert response.status_code == 200
         sql, params = moves[0]
-        assert params[-2] == [FLAG_A, FLAG_B]  # only the attributed ones
+        assert params[-3] == [FLAG_A, FLAG_B]  # only the attributed ones
         one_line = flat(sql)
         assert ("claimed_flags AS ( UPDATE icid.flags f SET claimed_by_idr_id = i.idr_id, is_constructed = true, "
                 "constructed_on = i.report_date FROM moved i WHERE f.id IN (SELECT unnest(%s::uuid[])) "
@@ -1335,7 +1336,7 @@ class TestApprovalClaimsFlags:
         with patch("api.queries.idr_segments.run_query", return_value=segments):
             response, moves = approve(moved=[{**APPROVED_IDR, "flags_claimed": 0, "segments_claimed": 1}])
         sql, params = moves[0]
-        assert params[-1] == [FLAG_A, FLAG_B]  # only the attributed ones
+        assert params[-2] == [FLAG_A, FLAG_B]  # only the attributed ones
         one_line = flat(sql)
         assert "claimed_segments AS ( UPDATE icid.segments s SET claimed_by_idr_id = i.idr_id" in one_line
         assert "'PIR_SEGMENTS'" in one_line and "'from_segments'" in one_line
@@ -1358,8 +1359,29 @@ class TestApprovalClaimsFlags:
 
     def test_an_idr_without_flags_claims_none(self):
         response, moves = approve(moved=[{**APPROVED_IDR, "flags_claimed": 0}])
-        assert moves[0][1][-1] == []
+        assert moves[0][1][-2] == [] and moves[0][1][-1].obj == []  # no segments; no clips (Slice Y2)
         assert (response.json()["flags_claimed"], response.json()["flags_dropped"]) == (0, 0)
+
+    def test_the_claimed_flags_clips_at_the_property_line_go_into_the_approving_statement(self):
+        strip = [{"x": 300, "y": 250}, {"x": 460, "y": 250}, {"x": 460, "y": 450}, {"x": 300, "y": 450}]
+        crossing = {"id": FLAG_A, "claimed_by_idr_id": None, "shape": "rectangle", "dimensions": {"L": 5, "W": 5},
+                    "sketch_x": 300, "sketch_y": 350, "rotation": 0, "surveyed_is_assessable": True,
+                    "quantity": Decimal("25"), "scale_px_per_ft": 16, "sidewalk_strip_points": strip}
+        with patch(IDR_FLAGS, return_value=flag_rows((FLAG_A, "attributed"), (FLAG_B, "attributed"))),                 patch("api.queries.assessment_clip_audits.run_query",
+                      return_value=[crossing, {**crossing, "id": FLAG_B, "sketch_x": 380}]) as clips:
+            response, moves = approve(moved=[{**APPROVED_IDR, "flags_claimed": 2}])
+        assert response.status_code == 200
+        assert clips.call_args.args[1] == ([FLAG_A, FLAG_B],)
+        sql, params = moves[0]
+        assert params[-1].obj == [{"flag_id": str(FLAG_A), "pre_clip_sf": "25.00", "clipped_sf": "12.50"}]
+        one_line = flat(sql)
+        assert "new_clips AS ( SELECT x.flag_id, i.idr_id" in one_line and "JOIN claimed_flags c" in one_line
+        assert "INSERT INTO icid.assessment_clip_audits" in one_line and "stale_clips AS ( DELETE" in one_line
+
+    def test_clips_that_cant_be_read_stop_the_approval(self):
+        with patch(IDR_FLAGS, return_value=flag_rows((FLAG_A, "attributed"))),                 patch("api.queries.assessment_clip_audits.run_query", return_value=None):
+            response, moves = approve()
+        assert response.status_code == 500 and moves == []
 
     def test_flags_that_cant_be_read_stop_the_approval(self):
         with patch(IDR_FLAGS, return_value=None):
@@ -1376,6 +1398,7 @@ class TestUnlockAndDeleteReleaseFlags:
         assert ("released_flags AS ( UPDATE icid.flags f SET claimed_by_idr_id = NULL, is_constructed = false, "
                 "constructed_on = NULL FROM moved i WHERE f.claimed_by_idr_id = i.idr_id") in one_line
         assert "(SELECT count(*) FROM released_flags) AS flags_released" in one_line
+        assert "deleted_clips AS ( DELETE FROM icid.assessment_clip_audits c" in one_line  # Slice Y2
 
     def test_delete_records_the_claimed_flags_in_its_note_and_releases_them(self, admin_client):
         with patch(IDR_FLAGS, return_value=[{"id": FLAG_A}, {"id": FLAG_B}]) as flags, \
@@ -1385,7 +1408,7 @@ class TestUnlockAndDeleteReleaseFlags:
         assert "WHERE claimed_by_idr_id = %s" in flags.call_args.args[0]
         sql, params = seen["moves"][0]
         assert params[-1] == f'{{"released_flag_ids": ["{FLAG_A}", "{FLAG_B}"]}}'
-        assert "released_flags AS (" in flat(sql)
+        assert "released_flags AS (" in flat(sql) and "deleted_clips AS (" in flat(sql)
 
     def test_delete_without_its_claimed_flags_read_is_500_and_writes_nothing(self, admin_client):
         with patch(IDR_FLAGS, return_value=None), review(idr=APPROVED_IDR, roles=()) as seen:
