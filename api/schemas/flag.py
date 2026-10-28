@@ -4,11 +4,15 @@ from decimal import Decimal
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from api.services.corner_quadrant import corner_quadrant
 from api.services.flag_area import polygon_area
 
+# The shapes a flag and a non-assessable area share
 FlagShape = Literal["rectangle", "trapezoid", "triangle", "polygon", "arc"]
+# A flag's own: those and the corner quadrant (Slice Y5), which only a flag takes
+FlagOwnShape = Literal["rectangle", "trapezoid", "triangle", "polygon", "arc", "corner_quadrant"]
 FlagMark = Literal["number_only", "cross", "cross_with_number", "tick", "none"]
 FlagNonAssessableReason = Literal[
     "tree_damage", "city_tree", "transition", "no_driveway", "hydrant", "fronting_city", "utility", "settlement", "other",
@@ -102,6 +106,51 @@ class CircleDimensions(_Dimensions):
     r: float = Length
 
 
+def _two_places(value: float) -> float:
+    """
+    Check a length is typed to at most two decimal places (the OE sheet's).
+    Takes the length.
+    Returns it; raises ValueError for more places.
+    """
+    if Decimal(str(value)) != Decimal(str(value)).quantize(Decimal("0.01")):
+        raise ValueError("at most two decimal places")
+    return value
+
+
+class CornerQuadrantDimensions(_Dimensions):
+    """
+    A corner quadrant (Slice Y5): the arc's height H and chord C, the triangle's legs R1 and R2 (above 0) and the
+    correction rectangle's A and B (0 or more), feet to two places. H/C must come to 0.01-0.50 and the area above 0.
+    """
+
+    H: float = Length
+    C: float = Length
+    R1: float = Length
+    R2: float = Length
+    A: float = Field(ge=0, allow_inf_nan=False)
+    B: float = Field(ge=0, allow_inf_nan=False)
+
+    @field_validator("H", "C", "R1", "R2", "A", "B")
+    @classmethod
+    def _places(cls, value: float) -> float:
+        """
+        Hold each length to two decimal places.
+        Takes the length.
+        Returns it; raises ValueError for more places.
+        """
+        return _two_places(value)
+
+    @model_validator(mode="after")
+    def _area(self) -> "CornerQuadrantDimensions":
+        """
+        Check H/C falls within the coefficient table and the area comes to more than 0.
+        Takes the parsed dimensions.
+        Returns them; raises ValueError otherwise.
+        """
+        corner_quadrant(self.model_dump())
+        return self
+
+
 # The dimensions each shape takes (a flag's and a non-assessable area's)
 DIMENSIONS_BY_SHAPE: dict[str, type[_Dimensions]] = {
     "rectangle": RectangleDimensions,
@@ -110,6 +159,9 @@ DIMENSIONS_BY_SHAPE: dict[str, type[_Dimensions]] = {
     "polygon": PolygonDimensions,
     "arc": ArcDimensions,
 }
+# A flag's: those and the corner quadrant
+FLAG_DIMENSIONS_BY_SHAPE: dict[str, type[_Dimensions]] = {**DIMENSIONS_BY_SHAPE,
+                                                           "corner_quadrant": CornerQuadrantDimensions}
 # A feature's shapes: a flag's, and a circle
 FEATURE_DIMENSIONS_BY_SHAPE: dict[str, type[_Dimensions]] = {**DIMENSIONS_BY_SHAPE, "circle": CircleDimensions}
 
@@ -132,7 +184,7 @@ class FlagCreate(BaseModel):
     """
 
     display_order: int = Field(ge=0)
-    shape: FlagShape
+    shape: FlagOwnShape
     dimensions: dict[str, Any]
     sketch_x: Optional[float] = Field(default=None, allow_inf_nan=False)
     sketch_y: Optional[float] = Field(default=None, allow_inf_nan=False)
@@ -154,7 +206,7 @@ class FlagCreate(BaseModel):
         Takes the parsed flag.
         Returns it; raises ValueError naming the first rule broken.
         """
-        self.dimensions = checked_dimensions(self.shape, self.dimensions, DIMENSIONS_BY_SHAPE)
+        self.dimensions = checked_dimensions(self.shape, self.dimensions, FLAG_DIMENSIONS_BY_SHAPE)
         self.defect_codes = ordered_defect_codes(self.defect_codes)
         if self.surveyed_is_assessable and self.surveyed_non_assessable_reason is not None:
             raise ValueError("an assessable flag has no surveyed_non_assessable_reason")
@@ -175,7 +227,7 @@ class FlagUpdate(BaseModel):
     """
 
     display_order: Optional[int] = None
-    shape: Optional[FlagShape] = None
+    shape: Optional[FlagOwnShape] = None
     dimensions: Optional[dict[str, Any]] = None
     sketch_x: Optional[float] = None
     sketch_y: Optional[float] = None

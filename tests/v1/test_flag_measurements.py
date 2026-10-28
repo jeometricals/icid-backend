@@ -123,6 +123,14 @@ class TestBundle:
                                                     "outer_dimensions": OUTLINE})
         assert response.status_code == 201
 
+    def test_a_corner_quadrant_is_never_bundled_422(self, admin_client):
+        quadrant = {**B, "shape": "corner_quadrant", "dimensions": {"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(MEASUREMENTS, side_effect=measurements((A, quadrant))) as run:
+            response = admin_client.post(URL, json={"flag_ids": [str(A["id"]), str(B["id"])], "outer_dimensions": OUTLINE})
+        assert response.status_code == 422
+        assert response.json()["detail"] == "corner_quadrant cannot be bundled: Flag 2"
+        assert not any("bd_new AS" in call.args[0] for call in run.call_args_list)
+
     @pytest.mark.parametrize("ids, page, detail", [
         ([1], (A, B), "A bundle takes at least two flags"),
         ([1, 1], (A, B), f"Flag {flag_id(1)} is listed twice"),

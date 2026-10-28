@@ -161,8 +161,9 @@ class TestCreateFeature:
         ({"shape": "circle", "dimensions": {"L": 1}}, "Field required"),
         ({"feature_type": "bench"}, "Input should be"),
         ({"reported_quantity": 0}, "greater than 0"),
+        ({"area_impact": "sits_on_top", "shape": "corner_quadrant", "dimensions": {"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}}, "Input should be"),
     ], ids=["shape-alone", "dimensions-alone", "sits-without-shape", "subtract-without-flag", "bad-circle",
-            "unknown-type", "zero-override"])
+            "unknown-type", "zero-override", "corner-quadrant"])
     def test_a_feature_that_breaks_a_rule_is_422(self, admin_client, changes, message):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(FEATURES) as run:
             response = admin_client.post(PAGE_FEATURES_URL, json={**BODY, **changes})

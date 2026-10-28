@@ -801,7 +801,8 @@ CREATE TABLE icid.flag_measurements (
     surveyed_is_assessable  BOOLEAN,
     retired_at              TIMESTAMPTZ,
     CONSTRAINT chk_flag_measurements_outer_shape
-        CHECK (outer_shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc', 'component_rectangles')),
+        CHECK (outer_shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc', 'component_rectangles',
+                               'corner_quadrant')),
     CONSTRAINT chk_flag_measurements_outer_area CHECK (outer_area >= 0),
     CONSTRAINT chk_flag_measurements_deductions CHECK (jsonb_typeof(deductions) = 'array'),
     CONSTRAINT chk_flag_measurements_component_rectangles
@@ -865,7 +866,8 @@ CREATE TABLE icid.flags (
     area_share_fraction             NUMERIC(5,4) NOT NULL DEFAULT 1.0000,
     pir_flag_no                     TEXT,
     CONSTRAINT chk_flags_display_order CHECK (display_order >= 0),
-    CONSTRAINT chk_flags_shape CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
+    CONSTRAINT chk_flags_shape
+        CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc', 'corner_quadrant')),
     CONSTRAINT chk_flags_surveyed_mark
         CHECK (surveyed_mark IN ('number_only', 'cross', 'cross_with_number', 'tick', 'none')),
     CONSTRAINT chk_flags_non_assessable_reason CHECK (surveyed_non_assessable_reason IS NULL OR

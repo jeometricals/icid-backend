@@ -157,6 +157,16 @@ class TestPropertyReport:
                          "Genghis Khan 2026-10-15", "Ada Admin 2026-10-15", "139 AVENUE", "227 STREET"):
             assert expected in text, expected
 
+    def test_a_corner_quadrant_prints_its_working_across_its_row(self, admin_client, storage):
+        quadrant = {**flag_row(1, "7in_as_4in", "129.87", "129.87"), "shape": "corner_quadrant",
+                    "dimensions": {"H": 5.66, "C": 18.0, "R1": 12.58, "R2": 12.0, "A": 4.83, "B": 3.83}}
+        with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=[quadrant])):
+            response = admin_client.get(URL)
+        assert response.status_code == 200
+        text = pdf_text(response.content)
+        assert "0.7154×5.66×18.00 + ½×12.58×12.00 - 4.83×3.83" in text
+        assert "129.87" in text
+
     def test_it_prints_the_construction_measure(self, admin_client, storage):
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
             text = pdf_text(admin_client.get(URL).content)

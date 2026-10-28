@@ -1020,6 +1020,28 @@ Any change must follow these.
     re-measured is allowed). Same people as the bundle routes. `GET` names the bundle's creator (`created_by_name`).
   - **Flags carry their measurement** (Y4a): every flag response has `measurement_id` and `bundled`, for the workspace
     (the frontend's Y4a: Ctrl-click multi-select, "Bundle flags", the bundle panel, the curb tool).
+- **Corner quadrant** (Slice Y5, migration 063; `api/services/corner_quadrant.py`; the brief is
+  `Documents/ICID/slice-y5-corner-quadrant.md`): a flag shape for a corner's sidewalk as the OE sheet measures it. **063
+  must run before the Y5 code is deployed.**
+  - **Its area** (`corner_quadrant`, through `compute_area`): `Coef(round(H/C, 2)) x H x C + 0.5 x R1 x R2 - A x B`, an
+    arc segment (A1) on a right triangle less the correction rectangle where the triangle overshoots the inner corner.
+    H/C rounds halves up to the hundredth, no interpolation; `COEF_TABLE` is the OE's 50 coefficients (0.01-0.50, Decimal
+    keys, verbatim; each the exact circular segment's to 4 places). The parts are kept exact and the total rounded halves
+    up to the cent (BLK_13136_LOT_133: 72.884952 + 75.48 - 18.4989 = **129.87**); the OE sheet prints each row cut to the
+    cent (`truncated`), so the rows needn't visibly add.
+  - **Dimensions** (`CornerQuadrantDimensions`, 422): all six, feet to at most two places; H, C, R1, R2 above 0, A and B 0
+    or more (0, 0 for no correction); H/C outside 0.01-0.50 (`RATIO_RANGE_MESSAGE`) and an area of 0 or less
+    (`CORRECTION_TOO_LARGE_MESSAGE`) refused. R1 and R2 go either way.
+  - **A flag's only** (`FlagOwnShape`): its solo measurement carries it like any shape. Non-assessable areas and
+    features refuse it (422: their shape types, and their tables' CHECKs, don't have it).
+  - **Never bundled:** the bundle route refuses it first among its checks (422 `corner_quadrant cannot be bundled: Flag
+    N`), the remesh's `join_target` keeps it solo, and a bundled flag's PATCH to it is 422 (`...: break up its bundle
+    first`).
+  - **Its outline** (`corner_quadrant_outline`, and `lib/flagGeometry.js` the same): the right angle at the bottom left,
+    leg R1 along the bottom and R2 up the side, an arc of height H out of the hypotenuse (the hypotenuse is the drawn chord,
+    not C), and an A x B notch at the right angle. For drawing and the geometric checks only.
+  - **On the Construction Report** its row prints its working across Length to Width, `0.7154×5.66×18.00 +
+    ½×12.58×12.00 - 4.83×3.83`, then its Sub-Total (`flag_terms`, `CalcRow.terms`).
 - **Ped ramp inspection** (pedramp 2a, migration 047; `api/v1/ped_ramp_corners.py`, `api/v1/ped_ramp_attributes.py`,
   their query modules, `api/schemas/ped_ramp.py`, `api/services/ped_ramp_ada.py` and `ped_ramp_report.py`): NYC DOT's
   Pedestrian Ramp Inspection Form (version 1.6) as data, and ICID's own report of it. DOT's fillable PDF, photos and
@@ -1215,7 +1237,8 @@ Any change must follow these.
     `surveyed_mark`, `surveyed_is_assessable`, `surveyed_non_assessable_reason`, `surveyed_thickness`,
     `added_in_field` (default false), `pay_item_id`, `reported_quantity` and `quantity_delta_reason` (optional),
     and `defect_codes` (default `[]`).
-    The values each enum takes: shape `rectangle` `trapezoid` `triangle` `polygon` `arc`; mark `number_only`
+    The values each enum takes: shape `rectangle` `trapezoid` `triangle` `polygon` `arc` and, a flag's only,
+    `corner_quadrant` (Slice Y5, below); mark `number_only`
     `cross` `cross_with_number` `tick` `none`; reason R1b's `tree_damage` `city_tree` `transition` `no_driveway`
     `hydrant` `fronting_city` `utility` `settlement` `other` and the R1e.1 survey's `tree` `driveway` `grass`
     `dirt` `existing_sidewalk` `asphalt` `tree_pit` `landmark` `vault` `subway` `scaffolding`
@@ -1225,8 +1248,9 @@ Any change must follow these.
   - **Dimensions, by shape** (feet; finite numbers, lengths above 0, no other keys): rectangle `{L, W}`;
     trapezoid `{a, b, w}` (the parallel sides and the width between them); triangle `{a, b}` (a right
     triangle's legs); polygon `{vertices: [{x, y}, ...]}` (three or more, in order, enclosing some area: a
-    collinear set is refused); arc `{r, theta}` (a circular segment, `0 < theta ≤ 2π` radians). Checked by the
-    `DIMENSIONS_BY_SHAPE` models; the database only knows `dimensions` is JSON.
+    collinear set is refused); arc `{r, theta}` (a circular segment, `0 < theta ≤ 2π` radians); corner quadrant
+    `{H, C, R1, R2, A, B}`. Checked by the `FLAG_DIMENSIONS_BY_SHAPE` models (an area's by `DIMENSIONS_BY_SHAPE`, without
+    the corner quadrant); the database only knows `dimensions` is JSON.
   - **The area** (`compute_area`) is computed by the server on create and on every PATCH and stored as
     `computed_quantity`, square feet to 2 decimal places, halves up: rectangle `L × W`; trapezoid
     `(a + b) / 2 × w`; triangle `a × b / 2`; polygon the shoelace formula, its absolute value; arc

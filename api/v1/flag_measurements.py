@@ -16,6 +16,7 @@ from api.schemas.auth import UserOut
 from api.schemas.flag_measurement import BundleIn, MeasurementOut, MeasurementPatch, MeasurementResponse
 from api.services.auth import current_user, measurement_member, no_demo_pir_writes, pir_page_member
 from api.services.construction_sketch import placed_outline
+from api.services.corner_quadrant import CORNER_QUADRANT, NOT_BUNDLED_MESSAGE
 from api.services.measurement_bundles import classification, unconnected
 from api.v1._shared import PAGE_CHAIN, PAGE_DELETED, refuse_deleted_chain, require_roles
 
@@ -112,7 +113,7 @@ def bundle_flags(pir_page_id: UUID, body: BundleIn, page: dict = Depends(_page_w
     """
     Bundle a page's flags into one measurement (Slice Y3b-2): two or more live, unclaimed flags in solo measurements, of one thickness, assessment and pay item, sharing edges in one chain (within 0.1 ft). The measurement is the outline the OE measured (1 to 3 rectangles, outer_area their sum, needs_remeasure false), its deductions the flags' areas and subtracted features of 1 SF or more; each flag takes a share by its own area. In one statement, which checks the flags again. For an OE or RE on the project, or an admin; not a demo user.
     Takes the page's id as a path parameter, the flags' ids and the outline in the body, the page (loaded by _page_writer) and the user.
-    Returns a MeasurementResponse (201) with the bundle and its members; raises 400 for a flag that can't be bundled (each case named) or a page that is deleted or has no scale, 403 for a demo user or a user without the role, 404 for an unknown page, 409 when the flags changed meanwhile and 422 for a malformed body.
+    Returns a MeasurementResponse (201) with the bundle and its members; raises 400 for a flag that can't be bundled (each case named) or a page that is deleted or has no scale, 403 for a demo user or a user without the role, 404 for an unknown page, 409 when the flags changed meanwhile and 422 for a malformed body or a corner-quadrant flag (Slice Y5: never bundled).
     """
     if page["deleted_at"] is not None:
         raise HTTPException(status_code=400, detail=PAGE_DELETED)
@@ -139,6 +140,8 @@ def bundle_flags(pir_page_id: UUID, body: BundleIn, page: dict = Depends(_page_w
             raise HTTPException(status_code=400, detail=f"Flag {flag_id} is not on this page")
     flags = [live[flag_id] for flag_id in ids]
     for flag in flags:
+        if flag["shape"] == CORNER_QUADRANT:
+            raise HTTPException(status_code=422, detail=f"{NOT_BUNDLED_MESSAGE}: {_name(flag)}")
         if flag["claimed_by_idr_id"] is not None:
             raise HTTPException(status_code=400,
                                 detail=f"{_name(flag)} is claimed by IDR {flag['claimed_by_idr_number']}")

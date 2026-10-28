@@ -13,6 +13,7 @@ from uuid import UUID
 
 from api.services.construction_sketch import Point, placed_outline
 from api.services.construction_slabs import abut
+from api.services.corner_quadrant import CORNER_QUADRANT
 
 
 def classification(flag: dict[str, Any]) -> tuple[Any, Any, Optional[str]]:
@@ -59,8 +60,11 @@ def join_target(flag: dict[str, Any], neighbours: list[dict[str, Any]],
     Takes the flag as it will be (id, its shape, dimensions and place, and its new classification), its page's live
     flags (list_remesh_neighbours, the flag itself among them) and the ids of other flags the same statement moves
     (their bundles aren't settled, so they don't count).
-    Returns the bundle's measurement id, or None: no place, no page scale, or no single bundle.
+    Returns the bundle's measurement id, or None: a corner quadrant (never bundled, Slice Y5), no place, no page scale,
+    or no single bundle.
     """
+    if flag.get("shape") == CORNER_QUADRANT:
+        return None
     me = next((row for row in neighbours if row["id"] == flag["id"]), None)
     if me is None or not me.get("scale_px_per_ft"):
         return None

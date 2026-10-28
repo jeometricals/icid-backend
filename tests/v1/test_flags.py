@@ -125,6 +125,7 @@ class TestCreateFlag:
         ("triangle", {"a": 3, "b": 4}, "6.00"),
         ("polygon", {"vertices": [{"x": 0, "y": 0}, {"x": 4, "y": 0}, {"x": 4, "y": 3}, {"x": 0, "y": 3}]}, "12.00"),
         ("arc", {"r": 2, "theta": math.pi}, "6.28"),
+        ("corner_quadrant", {"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}, "129.87"),
     ])
     def test_each_shape_is_stored_with_its_area(self, admin_client, shape, dimensions, area):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
@@ -178,6 +179,27 @@ class TestCreateFlag:
         with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS) as run:
             response = admin_client.post(FLAGS_URL, json={**BODY, "shape": shape, "dimensions": dimensions})
         assert response.status_code == 422
+        run.assert_not_called()
+
+    @pytest.mark.parametrize("changes,message", [
+        ({"H": 10}, "H/C must come to between 0.01 and 0.50"),
+        ({"H": 0.01, "C": 100}, "H/C must come to between 0.01 and 0.50"),
+        ({"A": 100, "B": 100}, "Correction rectangle exceeds arc + triangle"),
+        ({"R1": 12.585}, "at most two decimal places"),
+        ({"A": -1}, "greater than or equal to 0"),
+    ], ids=["ratio-above", "ratio-below", "correction-too-large", "three-places", "negative-a"])
+    def test_a_corner_quadrant_that_breaks_a_rule_is_422_saying_why(self, admin_client, changes, message):
+        dimensions = {**{"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}, **changes}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "shape": "corner_quadrant", "dimensions": dimensions})
+        assert response.status_code == 422 and message in error_messages(response)
+        run.assert_not_called()
+
+    def test_a_corner_quadrant_needs_all_six(self, admin_client):
+        dimensions = {key: value for key, value in {"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}.items() if key != "B"}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS) as run:
+            response = admin_client.post(FLAGS_URL, json={**BODY, "shape": "corner_quadrant", "dimensions": dimensions})
+        assert response.status_code == 422 and "Field required" in error_messages(response)
         run.assert_not_called()
 
     def test_a_degenerate_polygon_says_why(self, admin_client):
@@ -339,6 +361,19 @@ class TestUpdateFlag:
         with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]) as run:
             admin_client.patch(URL, json={"dimensions": {"L": 10, "W": 2.5}})
         assert written(run)["computed_quantity"] == Decimal("25.00")
+
+    def test_a_flag_becomes_a_corner_quadrant_with_the_formulas_area(self, admin_client):
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]) as run:
+            response = admin_client.patch(URL, json={"shape": "corner_quadrant", "dimensions": {"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}})
+        assert response.status_code == 200
+        assert written(run)["shape"] == "corner_quadrant" and written(run)["computed_quantity"] == Decimal("129.87")
+
+    def test_a_bundled_flag_cant_become_a_corner_quadrant(self, admin_client):
+        with patch(FLAGS, return_value=[{**FLAG_ROW, "bundled": True}]) as run:
+            response = admin_client.patch(URL, json={"shape": "corner_quadrant", "dimensions": {"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}})
+        assert response.status_code == 422
+        assert response.json()["detail"] == "corner_quadrant cannot be bundled: break up its bundle first"
+        assert run.call_count == 1  # the flag read, nothing written
 
     def test_a_new_shape_without_dimensions_is_422(self, admin_client):
         with patch(FLAGS, return_value=[FLAG_ROW]) as run:

@@ -1451,12 +1451,17 @@ def _calc_line(c: Canvas, line: tuple[Any, ...], x: float, y: float, w: float, h
             cell(index, text, BOLD)
     elif kind == "row":
         row: CalcRow = line[1]
-        rules(1, 2, 3, 4)
-        cell(0, row.label)
-        cell(1, row.length)
-        if row.length and row.width:
-            cell(2, "x")
-        cell(3, row.width)
+        if row.terms:
+            rules(1, 4)
+            cell(0, row.label)
+            cell(1, row.terms, span=3)
+        else:
+            rules(1, 2, 3, 4)
+            cell(0, row.label)
+            cell(1, row.length)
+            if row.length and row.width:
+                cell(2, "x")
+            cell(3, row.width)
         cell(4, calc_amount(row.sub_total), align="right")
     elif kind == "note":
         cell(0, line[1], BOLD if line[2] else FONT, "left", span=5)

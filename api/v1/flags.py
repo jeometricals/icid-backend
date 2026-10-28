@@ -25,6 +25,7 @@ from api.services.auth import (
     pir_page_member,
 )
 from api.queries.contract_items import get_project_pay_item
+from api.services.corner_quadrant import CORNER_QUADRANT, NOT_BUNDLED_MESSAGE
 from api.services.flag_area import compute_area
 from api.services.measurement_bundles import classification, join_target
 from api.services.pay_item_units import FLAG_UNITS, flag_unit
@@ -222,7 +223,7 @@ def update_flag_record(
     """
     Change some of a flag. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted flag, or a flag of a soft-deleted page, PIR or property. The body is merged over the stored flag and the whole is checked as a new flag is; the area is computed again. A null clears sketch_x, sketch_y, surveyed_non_assessable_reason, pay_item_id or quantity_delta_reason; on reported_quantity it reverts to the computed quantity and clears quantity_delta_reason; on anything else it counts as not sent. Its measurement follows it in the same statement (Slice Y3b-1); a change of its thickness, assessment or pay item reads its page's flags first, for a bundle it joins.
     Takes the flag's id as a path parameter, the fields to change in the body, the flag (loaded by _writable_flag) and the user.
-    Returns a FlagResponse with the flag as it now is; raises 400 when nothing is sent, the flag or its page, PIR or property is deleted (a user who isn't an admin) or the pay item is another project's, 403 for a demo user or a user who isn't on its project, 404 for an unknown flag and 422 when the merged flag breaks a rule (a new shape needs its dimensions).
+    Returns a FlagResponse with the flag as it now is; raises 400 when nothing is sent, the flag or its page, PIR or property is deleted (a user who isn't an admin) or the pay item is another project's, 403 for a demo user or a user who isn't on its project, 404 for an unknown flag and 422 when the merged flag breaks a rule (a new shape needs its dimensions) or a bundled flag would become a corner quadrant (Slice Y5).
     """
     refuse_deleted_for_member(found, user, "Flag is deleted")
     refuse_deleted_chain(found, user, FLAG_PARENTS)
@@ -234,6 +235,8 @@ def update_flag_record(
         changes["quantity_delta_reason"] = None  # back to the computed quantity: no override left to explain
 
     merged = validated(FlagCreate, {**{field: found[field] for field in FlagCreate.model_fields}, **changes})
+    if merged.shape == CORNER_QUADRANT and found.get("bundled"):
+        raise HTTPException(status_code=422, detail=f"{NOT_BUNDLED_MESSAGE}: break up its bundle first")
     _check_flag_pay_item(found["project_id"], merged.pay_item_id, new=merged.pay_item_id != found["pay_item_id"])
 
     values = merged.model_dump()

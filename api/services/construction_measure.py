@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional
 
+from api.services.corner_quadrant import corner_quadrant_terms
+
 ZERO = Decimal(0)
 # The calculations panel's words for an assessable flag's part outside its page's sidewalk strip (Slice Y2)
 CLIPPED_AT_PL = "clipped at PL"
@@ -99,12 +101,14 @@ def compute_measure(flags: list[dict[str, Any]], rates: dict[str, Optional[Decim
 
 @dataclass
 class CalcRow:
-    """One line of a calculations table: the piece's label (1, A1), its Length and Width as printed ('' when its shape has none) and its Sub-Total."""
+    """One line of a calculations table: the piece's label (1, A1), its Length and Width as printed ('' when its shape has none), its Sub-Total, and a corner quadrant's working (terms), printed in place of Length and Width."""
 
     label: str
     length: str
     width: str
     sub_total: Decimal
+    # A corner quadrant's working, printed across Length to Width in place of them (Slice Y5)
+    terms: str = ""
 
 
 @dataclass
@@ -157,6 +161,17 @@ def shape_terms(shape: Optional[str], dimensions: Optional[dict[str, Any]]) -> t
         return f"0.5({_length(dimensions['a'])})", _length(dimensions["b"])
     return "", ""
 
+
+
+def flag_terms(shape: Optional[str], dimensions: Optional[dict[str, Any]]) -> str:
+    """
+    A flag's working, printed across its row in place of Length and Width: a corner quadrant's Coef x H x C + 1/2 x R1 x R2 - A x B (Slice Y5).
+    Takes the flag's shape and dimensions.
+    Returns the text; '' for any other shape.
+    """
+    if shape != "corner_quadrant" or not dimensions:
+        return ""
+    return corner_quadrant_terms(dimensions)
 
 def _number(label: str) -> tuple[int, str]:
     """
@@ -274,11 +289,12 @@ def calc_groups(flags: list[dict[str, Any]], measure: Measure, labels: dict[str,
                     pieces.append(CalcRow(labels.get(f"flag:{flag['id']}", ""), CLIPPED_AT_PL, "", clipped))
                 continue
             length, width = shape_terms(flag["shape"], flag["dimensions"])
+            terms = flag_terms(flag["shape"], flag["dimensions"])
             rows.append(CalcRow(labels.get(f"flag:{flag['id']}", ""), length, width,
-                                Decimal(flag["computed_quantity"])))
+                                Decimal(flag["computed_quantity"]), terms))
             if not flag["surveyed_is_assessable"]:
                 pieces.append(CalcRow(labels.get(f"a:flag:{flag['id']}", ""), length, width,
-                                      Decimal(flag["computed_quantity"])))
+                                      Decimal(flag["computed_quantity"]), terms))
                 continue
             for area in flag["areas"]:
                 length, width = shape_terms(area.get("shape"), area.get("dimensions"))
