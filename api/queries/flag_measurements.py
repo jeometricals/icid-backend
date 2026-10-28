@@ -537,6 +537,8 @@ def get_measurement(measurement_id: UUID) -> Optional[dict[str, Any]]:
 
     sql = f"""
         SELECT me.*, pir.property_id, p.project_id, me.surveyed_is_assessable IS NOT NULL AS bundled,
+               (SELECT NULLIF(btrim(concat_ws(' ', u.first_name, u.last_name)), '') FROM icid.users u
+                WHERE u.uuid = me.created_by) AS created_by_name,
                {_HAS_CLAIMED.format(id="me.measurement_id")} AS frozen,
                (SELECT i.idr_number FROM icid.flags c JOIN icid.idrs i ON i.idr_id = c.claimed_by_idr_id
                 WHERE c.measurement_id = me.measurement_id ORDER BY i.idr_number LIMIT 1) AS claimed_by_idr_number,
@@ -556,3 +558,57 @@ def get_measurement(measurement_id: UUID) -> Optional[dict[str, Any]]:
     """
     rows = run_query(sql, (measurement_id,))
     return rows[0] if rows else None
+
+
+REASON_REMEASURED = "re-measured"
+
+
+def update_measurement(measurement_id: UUID, rectangles: Optional[list[dict[str, Any]]], outer_area: Optional[Decimal],
+                       editor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Mark a bundle re-measured, in one statement (Slice Y4a): its outline, when given, replaced by the rectangles
+    measured (outer_area their sum), and needs_remeasure cleared either way; each field it changes a measurement_edits
+    row by the editor. Writes nothing unless it is still a live bundle, and, for a new outline, has no member claimed
+    (a frozen bundle's figures never change).
+    Takes the bundle's id, the rectangles ([{L, W}], 1 to 3; None to keep the outline), their total area (None with
+    them) and the editing user's uuid.
+    Returns [{measurement_id}] when written, [] when it no longer may be, or None on failure.
+    """
+    sql = f"""
+        WITH me_editor AS (
+            SELECT %s::uuid AS uuid
+        ),
+        me AS MATERIALIZED (
+            SELECT fm.*
+            FROM icid.flag_measurements fm
+            WHERE fm.measurement_id = %s AND {BUNDLED} AND fm.retired_at IS NULL
+              AND (%s::jsonb IS NULL OR NOT {_HAS_CLAIMED.format(id="fm.measurement_id")})
+        ),
+        me_new AS (
+            UPDATE icid.flag_measurements fm
+            SET outer_shape = CASE WHEN %s::jsonb IS NULL THEN fm.outer_shape ELSE 'component_rectangles' END,
+                outer_dimensions = COALESCE(%s::jsonb, fm.outer_dimensions),
+                outer_area = COALESCE(%s::numeric, fm.outer_area),
+                needs_remeasure = false, updated_at = now(), updated_by = (SELECT uuid FROM me_editor)
+            FROM me
+            WHERE fm.measurement_id = me.measurement_id
+            RETURNING fm.*
+        ),
+        me_edits AS (
+            INSERT INTO icid.measurement_edits (measurement_id, field_path, old_value, new_value, reason, editor_uuid)
+            SELECT me.measurement_id, v.field_path, v.old_value, v.new_value, '{REASON_REMEASURED}',
+                   (SELECT uuid FROM me_editor)
+            FROM me
+            JOIN me_new n ON n.measurement_id = me.measurement_id
+            CROSS JOIN LATERAL (VALUES
+                ('outer_dimensions', me.outer_dimensions, n.outer_dimensions),
+                ('outer_area', to_jsonb(me.outer_area), to_jsonb(n.outer_area)),
+                ('needs_remeasure', to_jsonb(me.needs_remeasure), to_jsonb(n.needs_remeasure))
+            ) AS v(field_path, old_value, new_value)
+            WHERE v.old_value IS DISTINCT FROM v.new_value
+            RETURNING edit_id
+        )
+        SELECT n.measurement_id FROM me_new n CROSS JOIN (SELECT count(*) FROM me_edits) AS edits;
+    """
+    outline = None if rectangles is None else Jsonb({"rectangles": rectangles})
+    return run_query(sql, (editor_uuid, measurement_id, outline, outline, outline, outer_area))

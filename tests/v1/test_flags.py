@@ -816,3 +816,19 @@ class TestFlagPlacement:
         sql = " ".join(run.call_args.args[0].split())
         assert "pg.scale_px_per_ft FROM icid.flags f LEFT JOIN icid.pir_pages pg" in sql
         assert run.call_args.args[1] == (FLAG_ID,)
+
+
+class TestMeasurementFields:
+    """Slice Y4a: a flag carries its measurement and whether that is a bundle, for the workspace to group by."""
+
+    def test_the_read_carries_them(self):
+        with patch(FLAGS, return_value=[]) as run:
+            list_flags(PIR_ID)
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "f.measurement_id, fm.surveyed_is_assessable IS NOT NULL AS bundled" in one_line
+
+    def test_the_response_carries_them(self, admin_client):
+        measurement = UUID("b1000000-0000-4000-8000-000000000001")
+        with patch(FLAGS, return_value=[{**FLAG_ROW, "measurement_id": measurement, "bundled": True}]):
+            data = admin_client.get(URL).json()["data"]
+        assert (data["measurement_id"], data["bundled"]) == (str(measurement), True)

@@ -56,7 +56,7 @@ auth routes:
   (`/scale`, `/rotation`, `/flags`, `/features`, `/segments`, `/match-lines`, `/annotations`); `/v1/flags/{id}` (with
   its admin routes and `/non-assessable-areas`); `/v1/non-assessable-areas/{id}`, `/v1/features/{id}`,
   `/v1/segments/{id}`, `/v1/match-lines/{id}`; measurement bundles: `POST /v1/pir-pages/{id}/measurements/bundle`,
-  `GET` and `DELETE /v1/measurements/{id}`
+  `GET`, `PATCH` and `DELETE /v1/measurements/{id}`
 - **IDRs:** `/v1/idrs/` and `/{idr_id}` (header, reports, submit, export, attachments); the review queue and moves
   (`/queue`, accept / approve at both stages, `/return`); reviewer edits (`/field`, pay items, trucks); the admin
   moves (`/admin/unlock`, `/delete`, `/undelete`, `/permanent`); `/attributed-flags`; `/attributed-segments`; `/construction-reports`; a report's
@@ -1013,6 +1013,13 @@ Any change must follow these.
     and is unchanged otherwise (the tailored download too). The monthly workbook always ends with a **Project Total**
     tab: the same properties summed over the same months (`summary_project_total`), or the same line saying why there
     are none.
+  - **Re-measuring** (Slice Y4a; `PATCH /v1/measurements/{id}`, `update_measurement`): `{needs_remeasure: false}` and/or a
+    new outline (`outer_dimensions`, 1 to 3 rectangles, `outer_area` their sum), which is the re-measurement and clears
+    `needs_remeasure` too; each change a `measurement_edits` row by the user (reason `re-measured`). 400 for a solo
+    measurement or an empty body, 404 for a retired one, 409 for a new outline on a frozen bundle (marking a frozen one
+    re-measured is allowed). Same people as the bundle routes. `GET` names the bundle's creator (`created_by_name`).
+  - **Flags carry their measurement** (Y4a): every flag response has `measurement_id` and `bundled`, for the workspace
+    (the frontend's Y4a: Ctrl-click multi-select, "Bundle flags", the bundle panel, the curb tool).
 - **Ped ramp inspection** (pedramp 2a, migration 047; `api/v1/ped_ramp_corners.py`, `api/v1/ped_ramp_attributes.py`,
   their query modules, `api/schemas/ped_ramp.py`, `api/services/ped_ramp_ada.py` and `ped_ramp_report.py`): NYC DOT's
   Pedestrian Ramp Inspection Form (version 1.6) as data, and ICID's own report of it. DOT's fillable PDF, photos and

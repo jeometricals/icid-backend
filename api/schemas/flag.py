@@ -237,6 +237,9 @@ class FlagOut(BaseModel):
     claimed_by_idr_id: Optional[UUID] = None
     claimed_by_idr_number: Optional[str] = None
     constructed_on: Optional[date] = None
+    # Its measurement (Slice Y3a), and whether that is a bundle of several flags (Slice Y4a: the workspace groups by it)
+    measurement_id: Optional[UUID] = None
+    bundled: bool = False
 
 
 class FlagResponse(BaseModel):
