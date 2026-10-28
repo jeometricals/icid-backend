@@ -11,7 +11,6 @@ from api.queries.task_orders import get_task_order
 from api.schemas.assessment_summary import AssessmentSummary, AssessmentSummaryResponse
 from api.schemas.auth import UserOut
 from api.services.assessment_summary import (
-    CSV,
     XLSX,
     MonthError,
     SummaryFooter,
@@ -33,6 +32,7 @@ from api.services.assessment_summary import (
     summary_sites,
 )
 from api.services.auth import current_user, demo_project_fence, project_member
+from api.services.csv_files import CSV
 from api.services.export_common import signed_date
 from api.v1._shared import day_range
 
