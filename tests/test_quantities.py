@@ -372,6 +372,8 @@ class TestFlagAmount:
         assert f"WHEN 'CY' THEN {FLAG_QUANTITY} * (CASE f.surveyed_thickness WHEN '7in' THEN 7 ELSE 4 END) / 324" in sql
         assert "WHEN 'EA' THEN 1" in sql and "ELSE" not in sql.split("END)")[-2].split("WHEN 'EA' THEN 1")[-1]
         assert "WHEN 'EACH' THEN 'EA'" in FLAG_UNIT and "regexp_replace(ci.unit, '[^A-Za-z]', '', 'g')" in FLAG_UNIT
-        # Slice Y3a: the net area through the flag's measurement (for a solo one, the shape's area as before)
-        assert FLAG_QUANTITY == ("COALESCE(f.reported_quantity, GREATEST(round(fm.outer_area * f.area_share_fraction, 2)"
-                                 " - naa.quantity - sub.quantity, 0))")
+        # Slice Y3a: the net area through the flag's measurement (for a solo one, the shape's area as before); Slice
+        # Y3b-1: less a bundle's deductions, and a solo one's own covers only
+        assert FLAG_QUANTITY == ("COALESCE(f.reported_quantity, GREATEST(round((fm.outer_area - ded.quantity) * "
+                                 "f.area_share_fraction, 2) - CASE WHEN fm.surveyed_is_assessable IS NULL THEN "
+                                 "naa.quantity + sub.quantity ELSE 0 END, 0))")

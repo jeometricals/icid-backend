@@ -290,7 +290,7 @@ class TestComplete:
         assert not set(old) & set(storage.removed)  # the old pages' files stay, for their flags' history
         replace_sql, replace_params = next(call for call in pages.calls if "INSERT INTO icid.pir_pages" in call[0])
         one_line = " ".join(replace_sql.split())
-        assert "UPDATE icid.flags SET deleted_at = now(), deleted_by = %s" in one_line
+        assert "UPDATE icid.flags flag SET deleted_at = now(), deleted_by = %s" in one_line
         assert "WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL" in one_line
         assert "CROSS JOIN (SELECT count(*) FROM old_pages) AS replaced" in one_line  # old out of the index first
         assert replace_params[0] == ADMIN_ID and replace_params[2:6] == (ADMIN_ID,) * 4
@@ -398,7 +398,7 @@ class TestPages:
             response = client.delete(f"{PIR_URL}/pages")
         assert response.status_code == 204 and pages.live() == [] and storage.removed == []
         sql, params = pages.calls[-1]
-        assert "UPDATE icid.flags" in sql and "INSERT" not in sql and params == (MEMBER_ID, PIR_ID, *(MEMBER_ID,) * 5)
+        assert "UPDATE icid.flags" in sql and "INSERT INTO icid.pir_pages" not in sql and params == (MEMBER_ID, PIR_ID, *(MEMBER_ID,) * 5)
         assert "UPDATE icid.pir_match_lines" in sql  # its match lines go with it (R1h.1a)
         for table in ("non_assessable_areas", "features", "segments"):
             assert f"UPDATE icid.{table}" in sql

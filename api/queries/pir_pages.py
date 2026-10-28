@@ -5,6 +5,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from api.db.runner import run_query
+from api.queries.flag_measurements import REASON_RETIRE, remesh_ctes, snapshot_intent
 from api.queries.segments import segment_length_sql
 
 # A page as every function here returns it: its own columns, and its PIR's property, project and deleted states
@@ -16,15 +17,28 @@ _PAGE_COLUMNS = """
 _FROM = """
         JOIN icid.pirs pir ON pir.id = pg.pir_id
         JOIN icid.properties p ON p.id = pir.property_id"""
-# What goes with a PIR's pages when they are replaced or deleted, all in the same statement: the live flags on them,
-# those flags' live non-assessable areas, and the live features, segments and match lines on them. Reads old_pages (pir_page_id);
-# takes the deleting user's uuid four times.
-_RETIRE_DRAWINGS = """
+# What goes with a PIR's pages when they are replaced or deleted, all in the same statement: the live flags on them
+# (each unclaimed one in a bundle leaving it for a measurement of its own: remesh_ctes, Slice Y3b-1), those flags' live
+# non-assessable areas, and the live features, segments and match lines on them. Reads old_pages (pir_page_id,
+# deleted_by); takes the deleting user's uuid five times.
+_RETIRED_FLAGS = "SELECT id FROM icid.flags WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL"
+_RETIRE_DRAWINGS = (
+    """
+        intent AS (
+            """
+    + snapshot_intent("delete", REASON_RETIRE, _RETIRED_FLAGS)
+    + """
+        )"""
+    + remesh_ctes("(SELECT deleted_by FROM old_pages LIMIT 1)")
+    + """,
         old_flags AS (
-            UPDATE icid.flags
-            SET deleted_at = now(), deleted_by = %s, updated_at = now()
-            WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL
-            RETURNING id
+            UPDATE icid.flags flag
+            SET deleted_at = now(), deleted_by = %s, updated_at = now(), measurement_id = rf.measurement_id,
+                area_share_fraction = rf.share
+            FROM rm_flags rf
+            WHERE flag.pir_page_id IN (SELECT pir_page_id FROM old_pages) AND flag.deleted_at IS NULL
+              AND rf.flag_id = flag.id
+            RETURNING flag.id
         ),
         old_areas AS (
             UPDATE icid.non_assessable_areas
@@ -50,6 +64,7 @@ _RETIRE_DRAWINGS = """
             WHERE pir_page_id IN (SELECT pir_page_id FROM old_pages) AND deleted_at IS NULL
             RETURNING match_line_id
         )"""
+)
 # Makes the statement wait for every CTE of _RETIRE_DRAWINGS
 _DRAWINGS_RETIRED = """
             CROSS JOIN (SELECT count(*) FROM old_flags) AS flags_retired
@@ -97,7 +112,7 @@ def replace_pages(pir_id: UUID, pages: list[dict[str, Any]], replaced_by: UUID) 
             UPDATE icid.pir_pages
             SET deleted_at = now(), deleted_by = %s, updated_at = now()
             WHERE pir_id = %s AND deleted_at IS NULL
-            RETURNING pir_page_id, page_number
+            RETURNING pir_page_id, page_number, deleted_by
         ),"""
         + _RETIRE_DRAWINGS
         + """,
@@ -157,7 +172,7 @@ def delete_pages_for_pir(pir_id: UUID, deleted_by: UUID) -> Optional[list[dict[s
             UPDATE icid.pir_pages
             SET deleted_at = now(), deleted_by = %s, updated_at = now()
             WHERE pir_id = %s AND deleted_at IS NULL
-            RETURNING pir_page_id, image_path
+            RETURNING pir_page_id, image_path, deleted_by
         ),"""
         + _RETIRE_DRAWINGS
         + """

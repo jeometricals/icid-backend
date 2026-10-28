@@ -777,9 +777,12 @@ CREATE INDEX pir_pages_pir_idx ON icid.pir_pages (pir_id);
 -- FLAG MEASUREMENT (Slice Y3a, migration 061): what a flag's area is measured from. Since Y3a every flag has one; in
 -- Y3a each is a solo measurement, one flag's own: its outer shape and dimensions are the flag's and outer_area its
 -- computed_quantity (kept in step by the flag's create, PATCH and the Smart PIR import), deductions [] and
--- needs_remeasure false. A flag's quantity is COALESCE(reported_quantity, GREATEST(round(outer_area x
--- area_share_fraction, 2) - its areas - its subtracted features, 0)) (api/queries/flags.py). Bundles, deductions and
--- remeasuring are Y3b's.
+-- needs_remeasure false. A flag's quantity is COALESCE(reported_quantity, GREATEST(round((outer_area - its
+-- measurement's deductions) x area_share_fraction, 2) - (a solo one only) its areas - its subtracted features, 0))
+-- (api/queries/flags.py). A bundle (Slice Y3b, migration 062) measures several abutting flags of one classification,
+-- which it carries (pay_item_id, surveyed_thickness, surveyed_is_assessable: NULL on a solo measurement, so set exactly
+-- on a bundle); its deductions are its members' areas and subtracted features of 1 SF or more. retired_at: a bundle
+-- whose last member left (rows are never deleted: measurement_edits names them).
 ------------------------------------------------------------
 CREATE TABLE icid.flag_measurements (
     measurement_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -793,10 +796,27 @@ CREATE TABLE icid.flag_measurements (
     created_by        UUID NOT NULL REFERENCES icid.users(uuid),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by        UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    pay_item_id             UUID REFERENCES icid.contract_items(contract_item_id) ON DELETE SET NULL,
+    surveyed_thickness      TEXT,
+    surveyed_is_assessable  BOOLEAN,
+    retired_at              TIMESTAMPTZ,
     CONSTRAINT chk_flag_measurements_outer_shape
-        CHECK (outer_shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
+        CHECK (outer_shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc', 'component_rectangles')),
     CONSTRAINT chk_flag_measurements_outer_area CHECK (outer_area >= 0),
-    CONSTRAINT chk_flag_measurements_deductions CHECK (jsonb_typeof(deductions) = 'array')
+    CONSTRAINT chk_flag_measurements_deductions CHECK (jsonb_typeof(deductions) = 'array'),
+    CONSTRAINT chk_flag_measurements_component_rectangles
+        CHECK (outer_shape <> 'component_rectangles' OR (
+            outer_dimensions - 'rectangles' = '{}'::jsonb
+            AND jsonb_typeof(outer_dimensions -> 'rectangles') = 'array'
+            AND jsonb_array_length(outer_dimensions -> 'rectangles') BETWEEN 1 AND 3
+            AND NOT jsonb_path_exists(outer_dimensions,
+                '$.rectangles[*] ? (!(@.type() == "object" && @.L.type() == "number" && @.W.type() == "number"
+                                      && @.L > 0 && @.W > 0))')
+        )),
+    CONSTRAINT chk_flag_measurements_classification
+        CHECK ((surveyed_thickness IS NULL) = (surveyed_is_assessable IS NULL)
+               AND (surveyed_thickness IS NULL OR surveyed_thickness IN ('4in', '7in', '7in_as_4in'))
+               AND (surveyed_is_assessable IS NOT NULL OR pay_item_id IS NULL))
 );
 CREATE INDEX idx_flag_measurements_pir ON icid.flag_measurements (pir_id);
 

@@ -59,6 +59,18 @@ def no_pir_flag_nos():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_flag_measurements():
+    """
+    Patch the measurement-bundle reads for the whole session (Slice Y3b-1), so a flag's PATCH or a sidewalk strip that
+    reads its page's flags for the remesh finds none (and no bundle to join) unless a test patches
+    api.queries.flag_measurements.run_query itself.
+    Yields the mock of the reads.
+    """
+    with patch("api.queries.flag_measurements.run_query", return_value=[]) as run:
+        yield run
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_mappluto():
     """
     Keep MapPLUTO and DOF off the network for the whole session (Slices Y1, Y1.5): a property create or a move fetches

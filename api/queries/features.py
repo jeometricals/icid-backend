@@ -4,6 +4,7 @@ from uuid import UUID
 
 from api.db.runner import run_query
 from api.queries._shared import PARENT_COLUMNS, PAY_ITEM_OF_PROJECT, page_parents, placeholders, write_values
+from api.queries.flag_measurements import REASON_COVERS, remesh_ctes, snapshot_intent
 
 # A feature as every function here returns it: its own columns, what counts as its quantity, and its page's PIR,
 # property, project and deleted states (what the routes check before a write). Read from a row source named ft.
@@ -39,13 +40,37 @@ def _select(where: str) -> str:
     return "\n        SELECT" + _FEATURE_COLUMNS + "\n        FROM icid.features ft" + _FROM + "\n        " + where
 
 
+# The features a statement writes (ft) as the remesh reads covers, and the measurements of the flags they were and are
+# subtracted from resynced with them (Slice Y3b-1: a bundle's deductions are its members' covers)
+_TOUCHED_FLAGS = """SELECT flag_id FROM ft WHERE flag_id IS NOT NULL
+                    UNION SELECT was.flag_id FROM icid.features was
+                    WHERE was.feature_id IN (SELECT feature_id FROM ft) AND was.flag_id IS NOT NULL"""
+_RESYNC = (
+    """,
+        intent AS (
+            """
+    + snapshot_intent("covers", REASON_COVERS, _TOUCHED_FLAGS)
+    + """
+        ),
+        rm_written AS (
+            SELECT flag_id, 'subtract_feature'::text AS kind, feature_id AS source_id,
+                   COALESCE(reported_quantity, computed_quantity) AS area_sf,
+                   deleted_at IS NULL AND area_impact = 'subtract' AND flag_id IS NOT NULL AS live
+            FROM ft
+        )"""
+    + remesh_ctes(written="rm_written")
+)
+
+
 def _written(cte: str) -> str:
     """
-    A statement that writes features in a CTE named ft and returns them as every function here does.
+    A statement that writes features in a CTE named ft and returns them as every function here does; the measurements
+    of the flags they touch are resynced in it (_RESYNC).
     Takes the CTE's body.
     Returns the SQL.
     """
-    return "\n        WITH ft AS (" + cte + "\n        )\n        SELECT" + _FEATURE_COLUMNS + "\n        FROM ft" + _FROM + ";"
+    return ("\n        WITH ft AS (" + cte + "\n        )" + _RESYNC + "\n        SELECT" + _FEATURE_COLUMNS
+            + "\n        FROM ft" + _FROM + ";")
 
 
 def _checks(data: dict[str, Any]) -> tuple[Any, ...]:

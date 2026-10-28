@@ -18,6 +18,8 @@ PAGES = "api.queries.pir_pages.run_query"
 FLAGS = "api.queries.flags.run_query"
 STRIPS = "api.queries.sidewalk_strip.run_query"
 PROJECTS = "api.queries.projects.run_query"
+MEASUREMENTS = "api.queries.flag_measurements.run_query"
+BUNDLE_ID = UUID("b1000000-0000-4000-8000-000000000001")
 
 ADMIN_ID = ADMIN_USER_ROW["uuid"]
 MEMBER_ROW = {**ADMIN_USER_ROW, "uuid": UUID("b0000000-0000-4000-8000-000000000002"), "role": None}
@@ -77,7 +79,8 @@ class TestDraw:
         assert [(f["display_order"], f["claimed_by_idr_id"]) for f in data["outside_claimed"]] == [(5, str(IDR_ID))]
         sql, params = run.call_args.args
         assert params[0].obj == STRIP and params[1:4] == (ADMIN_ID, PAGE_ID, [OUTSIDE["id"]])
-        assert params[4:] == (FLIP_REASON, None)  # the system's edits: no editor
+        # Slice Y3b-1: no bundle picked for it (none on the page), then the flags again for the remesh and the flip
+        assert params[4:] == ([None], [OUTSIDE["id"]], [OUTSIDE["id"]], FLIP_REASON, None)  # the edits: no editor
 
     def test_the_one_statement_writes_the_strip_flips_and_their_edits(self, admin_client):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=PAGE_FLAGS), \
@@ -99,6 +102,34 @@ class TestDraw:
             response = admin_client.put(URL, json={"points": STRIP})
         assert response.json()["message"] == "Sidewalk strip saved; 0 flags marked non-assessable"
         assert run.call_args.args[1][3] == []
+
+    def test_a_flipped_flag_joins_the_one_bundle_open_to_it(self, admin_client):
+        """Slice Y3b-1: the flip reclassifies it, so the page's flags are read for the one bundle it joins, which goes
+        to the statement (it checks the pick again)."""
+        outside = {**OUTSIDE, "surveyed_thickness": "4in", "pay_item_id": None}
+        me = {**outside, "measurement_id": UUID("a1000000-0000-4000-8000-000000000003"), "scale_px_per_ft": Decimal("16"),
+              "bundled": False, "frozen": False}
+        bundle = {**flag_row(6, 780, 300, assessable=False), "surveyed_thickness": "4in", "pay_item_id": None,
+                  "measurement_id": BUNDLE_ID, "scale_px_per_ft": Decimal("16"), "bundled": True, "frozen": False}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[INSIDE, outside]), \
+                patch(MEASUREMENTS, return_value=[me, bundle]) as read, \
+                patch(STRIPS, return_value=[strip_row()]) as run:
+            response = admin_client.put(URL, json={"points": STRIP})
+        assert response.status_code == 200
+        assert read.call_args.args[1] == (PAGE_ID,)
+        assert run.call_args.args[1][3:5] == ([OUTSIDE["id"]], [BUNDLE_ID])
+
+    def test_nothing_to_flip_reads_no_flags_for_the_remesh(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[INSIDE]), patch(MEASUREMENTS) as read, \
+                patch(STRIPS, return_value=[strip_row(flipped=[])]):
+            assert admin_client.put(URL, json={"points": STRIP}).status_code == 200
+        read.assert_not_called()
+
+    def test_a_failed_read_of_the_page_for_the_remesh_is_500(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=PAGE_FLAGS), \
+                patch(MEASUREMENTS, return_value=None), patch(STRIPS) as run:
+            assert admin_client.put(URL, json={"points": STRIP}).status_code == 500
+        run.assert_not_called()
 
     def test_an_oe_draws_it(self):
         with signed_in(MEMBER_ROW) as oe, patch(PAGES, return_value=[PAGE_ROW]), patch(PROJECTS, side_effect=roles("oe")), \
