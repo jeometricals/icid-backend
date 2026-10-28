@@ -574,7 +574,8 @@ PATH_VALUES = {"idr_id": "9b2d4f6a-8c1e-4a3b-9d5f-7e1a2b3c4d5e", "report_id": "e
                "tif_id": "5a4b5c6d-7e8f-4a9b-8c0d-2e3f4a5b6c7d",
                "photo_id": "7c6d7e8f-9a0b-4c1d-8e3f-4a5b6c7d8e9f",
                "site_id": "8d7e8f9a-0b1c-4d2e-9f4a-5b6c7d8e9f0a",
-               "item_id": "9e8f9a0b-1c2d-4e3f-8a5b-6c7d8e9f0a1b"}
+               "item_id": "9e8f9a0b-1c2d-4e3f-8a5b-6c7d8e9f0a1b",
+               "measurement_id": "af9a0b1c-2d3e-4f4a-8b6c-7d8e9f0a1b2c"}
 
 
 def api_routes() -> list[tuple[str, str]]:
@@ -597,7 +598,7 @@ class TestEveryRouteNeedsSignIn:
         assert all(path.startswith("/v1/") for _, path in PROTECTED_ROUTES)
         assert [route for route in api_routes() if route[1].startswith("/v1/") and route in PUBLIC_ROUTES] == [
             ("POST", "/v1/auth/demo"), ("POST", "/v1/auth/login"), ("POST", "/v1/auth/logout")]
-        assert len(PROTECTED_ROUTES) == 194
+        assert len(PROTECTED_ROUTES) == 197
         for route in (("GET", "/v1/projects/{project_id}/ped-ramp-corners"),
                       ("POST", "/v1/projects/{project_id}/ped-ramp-corners"), ("GET", "/v1/ped-ramp-corners/{corner_id}"),
                       ("POST", "/v1/projects/{project_id}/pedramp-sites"),
@@ -652,6 +653,9 @@ class TestEveryRouteNeedsSignIn:
                       ("POST", "/v1/properties/{property_id}/admin/tax-map-pdf/upload-complete")):
             assert route in PROTECTED_ROUTES  # Slice Y1.5's
         assert ("POST", "/v1/properties/{property_id}/admin/re-clip-approvals") in PROTECTED_ROUTES  # Slice Y2's
+        for route in (("POST", "/v1/pir-pages/{pir_page_id}/measurements/bundle"),
+                      ("GET", "/v1/measurements/{measurement_id}"), ("DELETE", "/v1/measurements/{measurement_id}")):
+            assert route in PROTECTED_ROUTES  # Slice Y3b-2's
         for expected in (("GET", "/v1/projects/"), ("GET", "/v1/idrs/"), ("POST", "/v1/idrs/"),
                          ("GET", "/v1/idrs/{idr_id}/attributed-flags"),
                          ("POST", "/v1/idrs/{idr_id}/attributed-flags/{flag_id}/exclude"),

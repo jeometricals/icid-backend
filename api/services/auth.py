@@ -21,6 +21,7 @@ from fastapi import Depends, Header, HTTPException, Request
 
 from api.core.config import CRON_SECRET, JWT_ALGORITHM, JWT_EXPIRY_SECONDS, JWT_SECRET_KEY
 from api.queries.features import get_feature
+from api.queries.flag_measurements import get_measurement
 from api.queries.flags import get_flag
 from api.queries.idrs import get_idr_by_id
 from api.queries.non_assessable_areas import get_area
@@ -345,6 +346,15 @@ def flag_member(flag_id: UUID, user: UserOut = Depends(current_user)) -> dict:
     Returns the flag dict; raises 404 or 403 as _readable_on_project does.
     """
     return _readable_on_project(get_flag(flag_id), user, "Flag not found")
+
+
+def measurement_member(measurement_id: UUID, user: UserOut = Depends(current_user)) -> dict:
+    """
+    FastAPI dependency for routes that read one measurement (Slice Y3b-2): the signed-in user must be assigned to its PIR's property's project (in any role), or be an admin.
+    Takes the measurement_id path parameter and the current user.
+    Returns the measurement dict (get_measurement); raises 404 or 403 as _readable_on_project does.
+    """
+    return _readable_on_project(get_measurement(measurement_id), user, "Measurement not found")
 
 
 def non_assessable_area_member(non_assessable_area_id: UUID, user: UserOut = Depends(current_user)) -> dict:

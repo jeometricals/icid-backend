@@ -22,6 +22,8 @@ class AssessmentFigures(BaseModel):
     grand_total: Optional[float] = None
     # The part outside the sidewalk strip, clipped at approval and not assessed (Slice Y2); in the non-assessable figures
     outside_pl: float = 0
+    # Whether a measurement of its flags waits to be re-measured by the OE (Slice Y3b-2); any, for the totals
+    remeasure_pending: bool = False
 
 
 class AssessmentSite(AssessmentFigures):

@@ -44,6 +44,15 @@ OUTSIDE_PL_NOTE = ("Outside PL (SF): the part of the flags outside the sidewalk 
                    "clipped at approval and not assessed (it is counted in Non-Assessable). Contractor billing is not "
                    "clipped.")
 TOTALS_FILL = PatternFill("solid", fgColor="D9D9D9")
+# A tab's warning when any of its rows takes a measurement waiting to be re-measured (Slice Y3b-2), and its column
+REMEASURE_BANNER = ("\u26a0 One or more measurements need to be re-measured by OE. Numbers below use the pre-remesh "
+                    "outer dimensions.")
+BANNER_FILL = PatternFill("solid", fgColor="FFF2CC")
+REMEASURE_COLUMN = "Remeasure Pending"
+REMEASURE_WIDTH = 12
+PENDING = "\u26a0"
+# The workbook's last tab: every month's rows summed per property (Slice Y3b-2)
+PROJECT_TOTAL = "Project Total"
 NO_ACTIVITY = "No activity"
 EMPTY_PROJECT = "No approved IDRs in this project yet."
 EMPTY_RANGE = "No approved IDRs in the selected range."
@@ -93,6 +102,8 @@ class SummaryRow:
     outside_pl: Decimal = ZERO
     built_7_billed_4: Decimal = ZERO
     used_approval_date: bool = False
+    # Whether any of its flags' measurements waits to be re-measured (Slice Y3b-2)
+    remeasure_pending: bool = False
     four_amount: Optional[Decimal] = None
     seven_amount: Optional[Decimal] = None
     grand_total: Optional[Decimal] = None
@@ -149,6 +160,7 @@ def _rows_by(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]], f
         if row is None:
             row = rows[key(day, flag)] = _new_row(flag)
         row.used_approval_date = row.used_approval_date or fallback
+        row.remeasure_pending = row.remeasure_pending or bool(flag.get("needs_remeasure"))
         total, assessable, non_assessable = flag_areas(flag)
         if flag["surveyed_is_assessable"]:
             row.outside_pl += Decimal(flag["quantity"]) - assessable  # the clip, as flag_areas applied it
@@ -177,6 +189,15 @@ def _rows_by(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]], f
     return list(rows.items())
 
 
+def _month_end(month: Optional[date]) -> Optional[date]:
+    """
+    A month's last day.
+    Takes the month's first day (None: open).
+    Returns the next month's first day less one, or None.
+    """
+    return None if month is None else date(month.year + month.month // 12, month.month % 12 + 1, 1) - timedelta(days=1)
+
+
 def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]],
                    first: Optional[date] = None, last: Optional[date] = None) -> dict[date, list[SummaryRow]]:
     """
@@ -187,9 +208,7 @@ def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decima
     def by_month(day: date, flag: dict[str, Any]) -> Hashable:
         return day.replace(day=1), flag["property_id"]
 
-    # The last month's last day: the next month's first, less one
-    end = None if last is None else date(last.year + last.month // 12, last.month % 12 + 1, 1) - timedelta(days=1)
-    rows = _rows_by(flags, rates, first, end, by_month)
+    rows = _rows_by(flags, rates, first, _month_end(last), by_month)
     months: dict[date, list[SummaryRow]] = {}
     for (month, _), row in sorted(rows, key=lambda item: (item[0][0], item[1].address.lower())):
         months.setdefault(month, []).append(row)
@@ -206,6 +225,31 @@ def summary_sites(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal
     kept = [flag for flag in flags if property_ids is None or flag["property_id"] in property_ids]
     rows = _rows_by(kept, rates, first, last, lambda day, flag: flag["property_id"])
     return sorted((row for _, row in rows), key=lambda row: row.address.lower())
+
+
+def summary_project_total(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]],
+                          first: Optional[date] = None, last: Optional[date] = None) -> list[SummaryRow]:
+    """
+    The Project Total tab's rows (Slice Y3b-2): every property the month tabs have, summed over the same months.
+    Takes the flags (list_assessment_flags), the project's rates and the months kept (first and last, each a month's first day, inclusive; None: open).
+    Returns the rows by address, any case (summary_sites over those months' days).
+    """
+    return summary_sites(flags, rates, first, _month_end(last))
+
+
+def project_total_label(first: Optional[date], last: Optional[date]) -> str:
+    """
+    The Project Total tab's label: the months it sums.
+    Takes the months asked for (first and last, each a month's first day; None: open).
+    Returns 'Project Total', or with its months ('Project Total, October 2026 to December 2026', 'from' or 'through' one).
+    """
+    if first and last:
+        return f"{PROJECT_TOTAL}, {first:%B %Y} to {last:%B %Y}"
+    if first:
+        return f"{PROJECT_TOTAL} from {first:%B %Y}"
+    if last:
+        return f"{PROJECT_TOTAL} through {last:%B %Y}"
+    return PROJECT_TOTAL
 
 
 def total(rows: list[SummaryRow], attribute: str) -> Optional[Decimal]:
@@ -238,13 +282,15 @@ def summary_payload(rows: list[SummaryRow], rates: dict[str, Optional[Decimal]],
         "property_id": row.property_id, "kind": row.kind, "display_address": row.address, "block": row.block,
         "lot": row.lot, "violation_no": row.violation_no, "community_board": row.community_board,
         "remarks": row.remarks, "used_approval_date": row.used_approval_date,
+        "remeasure_pending": row.remeasure_pending,
         **_figures(lambda name, row=row: getattr(row, name)),
     } for row in rows]
     return {
         "range": {"from": first, "to": last},
         **{name: None if rates.get(name) is None else float(rates[name]) for name in ("cost_per_sf_4in", "cost_per_sf_7in")},
         "sites": sites,
-        "totals": _figures(lambda name: total(rows, name)),
+        "totals": {**_figures(lambda name: total(rows, name)),
+                   "remeasure_pending": any(row.remeasure_pending for row in rows)},
     }
 
 
@@ -307,7 +353,7 @@ def _sf(value: Decimal) -> Any:
 def _write_row(sheet: Worksheet, row_number: int, values: list[Any], bold: bool = False) -> None:
     """
     Write one row of a tab, numbers formatted by their column: SF to two decimals, amounts in dollars.
-    Takes the sheet, the row's number, its thirteen values (None leaves a cell blank) and whether it is the totals row.
+    Takes the sheet, the row's number, its values (the thirteen columns, and the remeasure column's when the tab has it; None leaves a cell blank) and whether it is the totals row.
     Returns nothing.
     """
     for column, value in enumerate(values, start=1):
@@ -325,30 +371,42 @@ def _write_row(sheet: Worksheet, row_number: int, values: list[Any], bold: bool 
 
 def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str, rows: list[SummaryRow]) -> None:
     """
-    Add a tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many, and when any row has a part outside the property line, a note saying what that column is (Slice Y2).
+    Add a tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many, and when any row has a part outside the property line, a note saying what that column is (Slice Y2). When any row takes a measurement waiting to be re-measured (Slice Y3b-2), a banner across the tab above the column titles and a fourteenth column marking those rows; otherwise neither, and the tab is as before.
     Takes the workbook, the project row, the tab's name and label, and its rows (at least one).
     Returns nothing.
     """
     sheet = workbook.create_sheet(name)
     _header(sheet, project, label)
-    for column, title in enumerate(COLUMNS, start=1):
-        sheet.cell(3, column, title).font = Font(bold=True)
-        sheet.cell(3, column).alignment = Alignment(wrap_text=True, vertical="top")
-    sheet.freeze_panes = "A4"
+    pending = any(row.remeasure_pending for row in rows)
+    columns = COLUMNS + ((REMEASURE_COLUMN,) if pending else ())
+    titles = 3
+    if pending:
+        banner = sheet.cell(3, 1, REMEASURE_BANNER)
+        banner.font = Font(bold=True)
+        sheet.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(columns))
+        for column in range(1, len(columns) + 1):
+            sheet.cell(3, column).fill = BANNER_FILL
+        sheet.column_dimensions[sheet.cell(1, len(columns)).column_letter].width = REMEASURE_WIDTH
+        titles = 4
+    for column, title in enumerate(columns, start=1):
+        sheet.cell(titles, column, title).font = Font(bold=True)
+        sheet.cell(titles, column).alignment = Alignment(wrap_text=True, vertical="top")
+    first_row = titles + 1
+    sheet.freeze_panes = f"A{first_row}"
     for offset, row in enumerate(rows):
-        _write_row(sheet, 4 + offset, [
+        _write_row(sheet, first_row + offset, [
             row.address, row.community_board, _sf(row.four_assessable), _sf(row.four_non_assessable), _sf(row.four_total), row.four_amount,
             _sf(row.seven_assessable), _sf(row.seven_non_assessable), _sf(row.seven_total), row.seven_amount,
             row.grand_total, _sf(row.outside_pl), "; ".join(row.remarks) or None,
-        ])
+        ] + ([PENDING if row.remeasure_pending else None] if pending else []))
 
-    totals_row = 4 + len(rows)
+    totals_row = first_row + len(rows)
     _write_row(sheet, totals_row, [
         "Totals", None, total(rows, "four_assessable"), total(rows, "four_non_assessable"), total(rows, "four_total"),
         total(rows, "four_amount"), total(rows, "seven_assessable"), total(rows, "seven_non_assessable"),
         total(rows, "seven_total"), total(rows, "seven_amount"), total(rows, "grand_total"), total(rows, "outside_pl"),
         None,
-    ], bold=True)
+    ] + ([PENDING] if pending else []), bold=True)
     notes = []
     fallback = sum(row.used_approval_date for row in rows)
     if fallback:
@@ -383,18 +441,24 @@ def _saved(workbook: Workbook) -> bytes:
     return buffer.getvalue()
 
 
-def build_workbook(project: dict[str, Any], months: dict[date, list[SummaryRow]], filtered: bool) -> bytes:
+def build_workbook(project: dict[str, Any], months: dict[date, list[SummaryRow]], filtered: bool,
+                   total_rows: list[SummaryRow], total_label: str = PROJECT_TOTAL) -> bytes:
     """
-    Build the Assessment Summary workbook: one tab per month with rows (named 'Nov 2026'), or a single 'No activity' tab saying why there are none.
-    Takes the project row, the months (summary_months) and whether a month range was asked for.
+    Build the Assessment Summary workbook: one tab per month with rows (named 'Nov 2026'), or a single 'No activity' tab saying why there are none; then, always last, the Project Total tab (Slice Y3b-2): the same properties summed over the same months, or the same line saying why there are none.
+    Takes the project row, the months (summary_months), whether a month range was asked for, the Project Total's rows (summary_project_total, over the same months) and its label (project_total_label).
     Returns the .xlsx file's bytes.
     """
     workbook = Workbook()
     workbook.remove(workbook.active)
     for month, rows in months.items():
         _rows_tab(workbook, project, month.strftime("%b %Y"), month.strftime("%B %Y"), rows)
+    empty = EMPTY_RANGE if filtered else EMPTY_PROJECT
     if not months:
-        _empty_tab(workbook, project, NO_ACTIVITY, EMPTY_RANGE if filtered else EMPTY_PROJECT)
+        _empty_tab(workbook, project, NO_ACTIVITY, empty)
+    if total_rows:
+        _rows_tab(workbook, project, PROJECT_TOTAL, total_label, total_rows)
+    else:
+        _empty_tab(workbook, project, PROJECT_TOTAL, empty)
     return _saved(workbook)
 
 

@@ -7,13 +7,23 @@ from uuid import UUID
 import pytest
 
 from api.queries.features import create_feature, soft_delete_feature, update_feature
-from api.queries.flag_measurements import MIN_DEDUCTION_SF, list_remesh_neighbours, remesh_ctes, snapshot_intent
+from api.queries.assessment_summary import list_assessment_flags
+from api.queries.construction_report import list_report_flags
+from api.queries.flag_measurements import (
+    MIN_DEDUCTION_SF,
+    form_bundle,
+    get_measurement,
+    list_remesh_neighbours,
+    remesh_ctes,
+    snapshot_intent,
+    unbundle,
+)
 from api.queries.flags import create_flag, soft_delete_flag, undelete_flag, update_flag
 from api.queries.non_assessable_areas import create_area, soft_delete_area, update_area
 from api.queries.pir_import import import_pir_drawings
 from api.queries.pir_pages import delete_pages_for_pir, replace_pages
 from api.queries.sidewalk_strip import set_sidewalk_strip
-from api.services.measurement_bundles import classification, join_target
+from api.services.measurement_bundles import classification, join_target, unconnected
 from tests.conftest import ADMIN_USER_ROW
 
 # ---------------------------------------------------------------------------
@@ -287,3 +297,66 @@ class TestMigration062:
         migration = ROOT.joinpath("migrations", "062_flag_measurement_bundles.sql").read_text(encoding="utf-8")
         assert "ADD COLUMN IF NOT EXISTS retired_at TIMESTAMPTZ" in migration
         assert "UPDATE" not in migration and "INSERT" not in migration
+
+
+class TestBundleStatements:
+    """Slice Y3b-2: forming a bundle, breaking one up and reading one, each in one statement."""
+
+    def statement(self, call) -> tuple[str, tuple]:
+        """The statement a measurement function runs, on one line, and its parameters."""
+        with patch("api.queries.flag_measurements.run_query", return_value=[]) as run:
+            call()
+        return one_line(run.call_args.args[0]), run.call_args.args[1]
+
+    def test_forming_checks_every_flag_again_and_writes_it_all_at_once(self):
+        sql, params = self.statement(lambda: form_bundle(PAGE_ID, [flag_id(1), flag_id(2)], ("4in", True, None),
+                                                         [{"L": 10, "W": 5}], Decimal("50.00"), ADMIN_ID))
+        assert ("WHERE x.id = ANY(%s::uuid[]) AND x.pir_page_id = %s AND x.deleted_at IS NULL AND x.claimed_by_idr_id "
+                "IS NULL AND src.surveyed_is_assessable IS NULL AND src.retired_at IS NULL") in sql
+        assert "HAVING count(*) = cardinality(%s::uuid[])" in sql  # all of them, or nothing
+        assert ("SELECT o.measurement_id, o.pir_id, 'component_rectangles', %s::jsonb, %s::numeric") in sql
+        assert "c.area_sf >= 1" in sql and "ORDER BY c.flag_id::text, c.kind, c.source_id::text" in sql
+        assert "SET measurement_id = s.measurement_id, area_share_fraction = s.share FROM rm_shares s" in sql
+        assert "SET retired_at = now()" in sql and "'bundle formed'" in sql
+        assert params[0] == ADMIN_ID and params[7].obj == {"rectangles": [{"L": 10, "W": 5}]}
+        assert params[8] == Decimal("50.00") and params[9:] == (None, "4in", True)
+
+    def test_forming_takes_no_needs_remeasure(self):
+        sql, _ = self.statement(lambda: form_bundle(PAGE_ID, [flag_id(1)], ("4in", True, None), [], Decimal(0), ADMIN_ID))
+        assert "needs_remeasure" not in sql  # the column's default, false: the OE just measured it
+
+    def test_breaking_up_gives_each_member_its_own_and_retires_the_bundle_as_it_stood(self):
+        sql, params = self.statement(lambda: unbundle(BUNDLE, ADMIN_ID))
+        assert ("WHERE fm.measurement_id = %s AND fm.surveyed_is_assessable IS NOT NULL AND fm.retired_at IS NULL "
+                "AND NOT EXISTS") in sql
+        assert ("INSERT INTO icid.flag_measurements (measurement_id, pir_id, outer_shape, outer_dimensions, outer_area, "
+                "created_by) SELECT u.to_id, u.pir_id, u.shape, u.dimensions, u.computed_quantity") in sql
+        assert "SET measurement_id = u.to_id, area_share_fraction = 1" in sql
+        assert "SET retired_at = now(), updated_at = now()" in sql and "outer_area =" not in sql.split("ub_retired")[1]
+        assert "'bundle broken up'" in sql and params == (ADMIN_ID, BUNDLE)
+
+    def test_reading_one_brings_its_members_and_whether_frozen(self):
+        sql, params = self.statement(lambda: get_measurement(BUNDLE))
+        assert "me.surveyed_is_assessable IS NOT NULL AS bundled" in sql and "AS frozen" in sql
+        assert "'quantity', COALESCE(f.reported_quantity" in sql and "WHERE f.measurement_id = me.measurement_id" in sql
+        assert params == (BUNDLE,)
+
+    def test_a_chain_is_flags_sharing_edges_one_to_the_next(self):
+        a, b, c = (neighbour(n, x, BUNDLE) for n, x in ((1, 400), (2, 480), (3, 560)))
+        assert unconnected([a, c, b], 16) == []
+        assert unconnected([a, c], 16) == [c]
+        assert unconnected([a, b, neighbour(4, 480, BUNDLE, y=380)], 16) == []  # under b
+
+
+class TestReadersCarryTheBundle:
+    def test_the_construction_report_reads_each_flags_bundle(self):
+        with patch("api.queries.construction_report.run_query", return_value=[]) as run:
+            list_report_flags(PIR_ID, PIR_ID)
+        sql = one_line(run.call_args.args[0])
+        assert "CASE WHEN fm.surveyed_is_assessable IS NOT NULL THEN jsonb_build_object(" in sql and "AS bundle" in sql
+        assert "'what', COALESCE(da.reason, df.feature_type)" in sql
+
+    def test_the_assessment_summary_reads_needs_remeasure(self):
+        with patch("api.queries.assessment_summary.run_query", return_value=[]) as run:
+            list_assessment_flags("HWS0023")
+        assert "fm.needs_remeasure" in run.call_args.args[0]

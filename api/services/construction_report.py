@@ -54,7 +54,7 @@ from api.queries.construction_report import (
 )
 from api.queries.match_lines import list_match_lines_for_pir
 from api.schemas.property import display_address_of
-from api.services.construction_measure import CalcGroup, CalcRow, Measure, calc_groups, compute_measure
+from api.services.construction_measure import CalcGroup, CalcRow, Measure, bundle_numbers, calc_groups, compute_measure
 from api.services.construction_sketch import (
     Fit,
     Point,
@@ -325,10 +325,11 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
     labels = number_items(flags, [item for _, _, items in per_page for item in items])
     rates = {"cost_per_sf_4in": header["cost_per_sf_4in"], "cost_per_sf_7in": header["cost_per_sf_7in"]}
     measure = compute_measure(flags, rates)
+    numbers = bundle_numbers(flags, labels)
     min_width = max(_width_ft(header.get("tb_tax_map_width_ft")), _width_ft(header.get("tb_cc_curb_to_curb_ft")))
     sheets = []
     for index, (number, page_flags, items) in enumerate(per_page):
-        groups = calc_groups(page_flags, compute_measure(page_flags, rates) if many else measure, labels)
+        groups = calc_groups(page_flags, compute_measure(page_flags, rates) if many else measure, labels, numbers)
         layout = report_layout(groups)
         extra = total_lines(measure) if many and index == len(per_page) - 1 else []
         if _too_long(layout, extra):
@@ -511,14 +512,18 @@ def calc_amount(value: Decimal) -> str:
 
 def calc_lines(groups: list[CalcGroup]) -> list[tuple[Any, ...]]:
     """
-    The calculations panel line by line: per thickness, its title, the column heads, a row per flag and the total; the non-assessable title, heads, pieces, any adjustment and total (when it has any); and the assessable line (Total - Non-Assessable, or the total alone).
+    The calculations panel line by line: per thickness, its title, the column heads, a row per flag, each bundle (Slice Y3b-2: "Measurement M1 (Flags 1-3)", the row of its flags' own areas, then its derivation) and the total; the non-assessable title, heads, pieces, any adjustment and total (when it has any); and the assessable line (Total - Non-Assessable, or the total alone).
     Takes the groups (calc_groups).
-    Returns the lines, each a tuple naming its kind first: title, heads, row, total, adjustment, subtraction.
+    Returns the lines, each a tuple naming its kind first: title, heads, row, note (its text and whether bold), total, adjustment, subtraction.
     """
     lines: list[tuple[Any, ...]] = []
     for group in groups:
         lines += [("title", f"Total {group.label}"), ("heads",)]
         lines += [("row", row) for row in group.rows]
+        for bundle in group.bundles:
+            lines += [("note", f"Measurement M{bundle.number} (Flags {bundle.flags})", True),
+                      ("row", CalcRow(f"M{bundle.number}", f"Flags {bundle.flags}", "", bundle.own_area))]
+            lines += [("note", text, False) for text in bundle.lines]
         lines.append(("total", group.total))
         has_non = bool(group.non_assessable_rows) or group.adjustment != 0
         if has_non:
@@ -1412,7 +1417,7 @@ def _calc_cells(x: float, w: float) -> list[tuple[float, float]]:
 
 def _calc_line(c: Canvas, line: tuple[Any, ...], x: float, y: float, w: float, h: float) -> None:
     """
-    Draw one line of the calculations panel, ruled as a table: a grey title bar, the column heads, a piece (label, Length x Width, Sub-Total), a total, an adjustment, or the assessable subtraction.
+    Draw one line of the calculations panel, ruled as a table: a grey title bar, the column heads, a piece (label, Length x Width, Sub-Total), a line of a bundle's derivation (Slice Y3b-2: its text across the line, bold for its heading), a total, an adjustment, or the assessable subtraction.
     Takes the canvas, the line (calc_lines), the line's box (x, bottom y, width, height).
     Returns nothing.
     """
@@ -1453,6 +1458,8 @@ def _calc_line(c: Canvas, line: tuple[Any, ...], x: float, y: float, w: float, h
             cell(2, "x")
         cell(3, row.width)
         cell(4, calc_amount(row.sub_total), align="right")
+    elif kind == "note":
+        cell(0, line[1], BOLD if line[2] else FONT, "left", span=5)
     elif kind == "total":
         rules(4)
         cell(0, "Total", BOLD, span=4)

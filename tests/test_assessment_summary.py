@@ -13,11 +13,14 @@ from api.services.assessment_summary import (
     EMPTY_VIEW,
     build_tailored_workbook,
     build_workbook,
+    REMEASURE_BANNER,
     parse_month,
+    project_total_label,
     range_label,
     summary_filename,
     summary_months,
     summary_payload,
+    summary_project_total,
     summary_sites,
 )
 
@@ -210,9 +213,9 @@ class TestParseMonth:
 
 class TestWorkbook:
     def test_se384_has_one_tab_with_the_header_rows_and_totals(self):
-        content = build_workbook(PROJECT, summary_months(SE384, RATES), filtered=False)
+        content = build_workbook(PROJECT, summary_months(SE384, RATES), filtered=False, total_rows=[])
         book = openpyxl.load_workbook(io.BytesIO(content))
-        assert book.sheetnames == ["Oct 2026"]
+        assert book.sheetnames == ["Oct 2026", "Project Total"]
         sheet = book["Oct 2026"]
         assert sheet["A1"].value == "Sidewalks Queens · Project ID: SE384 · Reg: 2024123456 · Borough: Queens"
         assert (sheet["A2"].value, sheet["C2"].value, sheet["G2"].value) == (
@@ -240,23 +243,23 @@ class TestWorkbook:
         assert len(content) < 30_000
 
     def test_cells_keep_full_precision(self):
-        content = build_workbook(PROJECT, summary_months([flag(MAIN, "4in", "1.005", "1.005")], RATES), False)
+        content = build_workbook(PROJECT, summary_months([flag(MAIN, "4in", "1.005", "1.005")], RATES), False, [])
         assert tab(content, "Oct 2026")["C4"].value == pytest.approx(1.005)
 
     def test_each_row_carries_its_propertys_community_board(self):
         flags = [{**flag(MAIN, "4in", "10", "10"), "community_board": "QN13"}]
-        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False, []), "Oct 2026")
         assert sheet["B3"].value == "CB" and sheet["B4"].value == "QN13"
 
     def test_with_dates_typed_there_is_no_footer_note(self):
         flags = [flag(MAIN, "4in", "10", "10", constructed=date(2026, 10, 3))]
-        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False, []), "Oct 2026")
         assert sheet["A7"].value is None
 
     def test_a_clip_at_the_property_line_has_its_column_and_a_note(self):
         flags = [{**flag(MAIN, "4in", "100", "100"), "clipped_sf": Decimal("25.50")}, flag(MAIN, "4in", "10", "10"),
                  {**flag(MAIN, "4in", "40", "40", assessable=False), "clipped_sf": Decimal("5")}]
-        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False, []), "Oct 2026")
         row = values(sheet, 4)
         assert row[2] == pytest.approx(84.5) and row[3] == pytest.approx(65.5) and row[11] == pytest.approx(25.5)
         assert sheet["L4"].number_format == "#,##0.00" and sheet["L5"].value == pytest.approx(25.5)
@@ -264,7 +267,7 @@ class TestWorkbook:
 
     def test_without_a_clip_the_column_reads_a_dash_and_there_is_no_note(self):
         flags = [flag(MAIN, "4in", "10", "10", constructed=date(2026, 10, 3))]
-        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False), "Oct 2026")
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False, []), "Oct 2026")
         assert sheet["L4"].value == "—" and sheet["A7"].value is None
 
     def test_the_page_carries_the_clip_too(self):
@@ -275,20 +278,20 @@ class TestWorkbook:
 
     def test_a_missing_rate_reads_as_a_dash_in_the_header(self):
         project = {**PROJECT, "cost_per_sf_7in": None}
-        sheet = tab(build_workbook(project, summary_months(SE384, {**RATES, "cost_per_sf_7in": None}), False), "Oct 2026")
+        sheet = tab(build_workbook(project, summary_months(SE384, {**RATES, "cost_per_sf_7in": None}), False, []), "Oct 2026")
         assert sheet["G2"].value == '7" rate: —'
         assert sheet["J4"].value is None and sheet["M4"].value == '7" rate not set'
 
     def test_two_months_are_two_tabs(self):
         flags = [flag(MAIN, "4in", "10", "10"), flag(MAIN, "4in", "20", "20", approved=NOV_2)]
-        book = openpyxl.load_workbook(io.BytesIO(build_workbook(PROJECT, summary_months(flags, RATES), False)))
-        assert book.sheetnames == ["Oct 2026", "Nov 2026"]
+        book = openpyxl.load_workbook(io.BytesIO(build_workbook(PROJECT, summary_months(flags, RATES), False, [])))
+        assert book.sheetnames == ["Oct 2026", "Nov 2026", "Project Total"]
         assert book["Nov 2026"]["A2"].value == "November 2026"
 
     @pytest.mark.parametrize("filtered, message", [(False, EMPTY_PROJECT), (True, EMPTY_RANGE)])
     def test_nothing_is_one_no_activity_tab(self, filtered, message):
-        book = openpyxl.load_workbook(io.BytesIO(build_workbook(PROJECT, {}, filtered)))
-        assert book.sheetnames == ["No activity"]
+        book = openpyxl.load_workbook(io.BytesIO(build_workbook(PROJECT, {}, filtered, [])))
+        assert book.sheetnames == ["No activity", "Project Total"]
         assert book["No activity"]["A4"].value == message and book["No activity"]["A4"].font.italic
         assert book["No activity"]["A1"].value.startswith("Sidewalks Queens")
 
@@ -297,3 +300,64 @@ def test_the_file_is_named_for_the_project_and_the_day_in_new_york():
     # 03:00 UTC on Oct 17 is still Oct 16 in New York
     assert summary_filename("SE384", datetime(2026, 10, 17, 3, 0, tzinfo=timezone.utc)) == \
         "SE384_assessment_summary_2026-10-16.xlsx"
+
+
+class TestRemeasureAndProjectTotal:
+    """Slice Y3b-2: the warning for measurements waiting to be re-measured, and the Project Total tab."""
+
+    def pending(self, flag_row: dict) -> dict:
+        """A flag whose measurement waits to be re-measured."""
+        return {**flag_row, "needs_remeasure": True}
+
+    def test_a_row_is_pending_when_any_of_its_flags_measurements_is(self):
+        rows = summary_sites([self.pending(flag(MAIN, "4in", "25", "25")), flag(MAIN, "4in", "10", "10"),
+                              flag(ELM, "4in", "5", "5")], RATES)
+        assert [(row.address, row.remeasure_pending) for row in rows] == [
+            ("138-22 227 STREET", True), ("350 Main St, Brooklyn", False)]
+        payload = summary_payload(rows, RATES, None, None)
+        assert [site["remeasure_pending"] for site in payload["sites"]] == [True, False]
+        assert payload["totals"]["remeasure_pending"] is True
+        assert summary_payload(summary_sites(SE384, RATES), RATES, None, None)["totals"]["remeasure_pending"] is False
+
+    def test_a_tab_with_a_pending_row_gets_the_banner_and_the_column(self):
+        flags = [self.pending(flag(MAIN, "4in", "25", "25")), flag(ELM, "4in", "5", "5")]
+        sheet = tab(build_workbook(PROJECT, summary_months(flags, RATES), False, summary_sites(flags, RATES)), "Oct 2026")
+        assert sheet["A3"].value == REMEASURE_BANNER and sheet["A3"].font.bold and "A3:N3" in sheet.merged_cells
+        assert sheet.cell(4, 14).value == "Remeasure Pending" and sheet.freeze_panes == "A5"
+        assert [sheet.cell(row, 14).value for row in (5, 6, 7)] == ["⚠", None, "⚠"]  # the totals row: any
+        assert sheet.cell(7, 1).value == "Totals"
+
+    def test_a_tab_without_one_is_as_before(self):
+        sheet = tab(build_workbook(PROJECT, summary_months(SE384, RATES), False, summary_sites(SE384, RATES)), "Oct 2026")
+        assert sheet["A3"].value == "Property Address" and sheet.freeze_panes == "A4" and sheet.max_column == 13
+
+    def test_the_project_total_is_every_month_summed_per_property_last(self):
+        flags = [flag(MAIN, "4in", "10", "10"), flag(MAIN, "4in", "5", "5", approved=NOV_2), flag(ELM, "7in", "4", "4")]
+        content = build_workbook(PROJECT, summary_months(flags, RATES), False, summary_project_total(flags, RATES))
+        book = openpyxl.load_workbook(io.BytesIO(content))
+        assert book.sheetnames == ["Oct 2026", "Nov 2026", "Project Total"]
+        sheet = book["Project Total"]
+        assert sheet["A2"].value == "Project Total"
+        assert values(sheet, 4)[:6] == ["138-22 227 STREET", None, 15, "—", 15, pytest.approx(173.10)]
+        assert values(sheet, 5)[0] == "350 Main St, Brooklyn" and values(sheet, 6)[0] == "Totals"
+        assert values(sheet, 6)[10] == pytest.approx(223.66)  # 15 x 11.54 + 4 x 12.64
+
+    def test_the_project_total_sums_the_same_months_as_the_tabs(self):
+        flags = [flag(MAIN, "4in", "10", "10"), flag(MAIN, "4in", "5", "5", approved=NOV_2)]
+        [row] = summary_project_total(flags, RATES, last=date(2026, 10, 1))
+        assert row.four_total == Decimal("10")
+        [row] = summary_project_total(flags, RATES, first=date(2026, 11, 1))
+        assert row.four_total == Decimal("5")
+        assert project_total_label(date(2026, 10, 1), date(2026, 12, 1)) == "Project Total, October 2026 to December 2026"
+        assert project_total_label(date(2026, 10, 1), None) == "Project Total from October 2026"
+        assert project_total_label(None, date(2026, 12, 1)) == "Project Total through December 2026"
+
+    @pytest.mark.parametrize("filtered, message", [(False, EMPTY_PROJECT), (True, EMPTY_RANGE)])
+    def test_nothing_still_has_a_project_total_saying_why(self, filtered, message):
+        book = openpyxl.load_workbook(io.BytesIO(build_workbook(PROJECT, {}, filtered, [])))
+        assert book.sheetnames == ["No activity", "Project Total"] and book["Project Total"]["A4"].value == message
+
+    def test_the_tailored_download_warns_too(self):
+        rows = summary_sites([self.pending(flag(MAIN, "4in", "25", "25"))], RATES)
+        sheet = openpyxl.load_workbook(io.BytesIO(build_tailored_workbook(PROJECT, rows, None, None))).active
+        assert sheet["A3"].value == REMEASURE_BANNER and sheet.cell(5, 14).value == "⚠"

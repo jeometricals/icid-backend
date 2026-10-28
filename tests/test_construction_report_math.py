@@ -4,7 +4,14 @@ from uuid import UUID
 
 import pytest
 
-from api.services.construction_measure import calc_groups, compute_measure, flag_areas, shape_terms
+from api.services.construction_measure import (
+    bundle_numbers,
+    calc_groups,
+    compute_measure,
+    flag_areas,
+    flag_ranges,
+    shape_terms,
+)
 from api.services.construction_report import (
     CALC_WIDTH,
     CALC_WIDTH_TWO,
@@ -466,3 +473,91 @@ class TestLayout:
         (None, "CITY PROPERTY")])
     def test_the_header_prints_the_property_class(self, property_type, label):
         assert property_class(property_type) == label
+
+
+def bundled(flags: list[dict], members: int, rectangles: list[dict], deductions=(), measurement: str = "b1") -> list[dict]:
+    """
+    Put flags in one bundle (Slice Y3b-2), as list_report_flags returns its rows.
+    Takes the flags, how many flags the bundle measures in all, its rectangles and deductions, and its id's tail.
+    Returns the flags, each carrying the bundle.
+    """
+    area = sum(Decimal(str(r["L"])) * Decimal(str(r["W"])) for r in rectangles)
+    bundle = {"measurement_id": f"b1000000-0000-4000-8000-0000000000{measurement[-1]}0",
+              "outer_dimensions": {"rectangles": rectangles}, "outer_area": float(area), "members": members,
+              "deductions": list(deductions)}
+    return [{**flag, "bundle": bundle} for flag in flags]
+
+
+def tree_pit(flag: dict, sf: float = 2.0) -> dict:
+    """A tree pit's deduction on a flag, as _BUNDLE names it."""
+    return {"type": "non_ass_area", "area_sf": sf, "source_flag_id": str(flag["id"]), "source_area_id": "x",
+            "what": "tree_pit"}
+
+
+class TestBundles:
+    @pytest.mark.parametrize("labels, expected", [
+        (["1", "2", "3", "4", "5", "7A", "10", "11", "12"], "1-5, 7A, 10-12"),
+        (["5", "5A", "6"], "5, 5A, 6"),
+        (["3", "1", "2", "15", "28", "20", "21", "22", "23", "24", "25", "26", "27"], "1-3, 15, 20-28"),
+        (["2"], "2"), (["1", "2"], "1-2"),
+    ])
+    def test_flag_numbers_print_as_ranges(self, labels, expected):
+        assert flag_ranges(labels) == expected
+
+    def test_bundles_are_numbered_by_their_lowest_flag_in_the_report(self):
+        first = bundled([piece(3, x=10), piece(4, x=15)], 2, [{"L": 10, "W": 5}], measurement="b1")
+        second = bundled([piece(1, x=0), piece(2, x=5)], 2, [{"L": 10, "W": 5}], measurement="b2")
+        labels = {f"flag:{f['id']}": str(n) for n, f in enumerate([second[0], second[1], first[0], first[1]], start=1)}
+        assert bundle_numbers(first + second, labels) == {second[0]["bundle"]["measurement_id"]: 1,
+                                                          first[0]["bundle"]["measurement_id"]: 2}
+
+    def test_a_bundle_shows_its_derivation_and_the_panel_still_agrees_with_box_2(self):
+        one, two = piece(1, x=0), piece(2, x=5)
+        flags = bundled([{**one, "quantity": Decimal("24"), "areas": [area(1, x=1, y=1, L=2, W=1)]},
+                         {**two, "quantity": Decimal("24")}], 2, [{"L": 10, "W": 5}], [tree_pit(one)])
+        flags.append(piece(3, x=12))
+        groups = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        four = groups[0]
+        assert [row.label for row in four.rows] == ["3"]  # the bundled flags are its row, not their own
+        [bundle] = four.bundles
+        assert (bundle.number, bundle.flags, bundle.own_area) == (1, "1-2", Decimal("50"))
+        assert bundle.lines == ["10.00 x 5.00 = 50.00 SF", "- Tree pit (Flag 1)  2.00 SF", "Net: 48.00 SF"]
+        # Box 2: 75 in all, 73 assessed; the area on flag 1 isn't a piece (the bundle deducts it): the adjustment
+        assert (four.total, four.assessable, four.non_assessable_rows, four.adjustment) == (
+            Decimal("75"), Decimal("73"), [], Decimal("2"))
+        lines = calc_lines(groups)
+        assert ("note", "Measurement M1 (Flags 1-2)", True) in lines and ("note", "Net: 48.00 SF", False) in lines
+        assert any(line[0] == "row" and line[1].label == "M1" and line[1].sub_total == Decimal("50") for line in lines)
+
+    def test_a_report_with_some_of_a_bundles_flags_says_what_this_idr_takes(self):
+        flags = bundled([{**piece(1, x=0), "quantity": Decimal("16.67")}, {**piece(3, x=10), "quantity": Decimal("16.66")}],
+                        3, [{"L": 15, "W": 5}])
+        labels = {f"flag:{flags[0]['id']}": "1", f"flag:{flags[1]['id']}": "3"}
+        [group] = calc_groups(flags, compute_measure(flags, RATES), labels)
+        assert group.bundles[0].lines[-1] == "This IDR: Flags 1, 3 = 33.33 SF"
+
+    def test_component_rectangles_each_take_a_line_and_their_total(self):
+        flags = bundled([piece(1, x=0), piece(2, x=5)], 2, [{"L": 10, "W": 8}, {"L": 6, "W": 4}])
+        [group] = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        assert group.bundles[0].lines[:3] == ["Component A: 10.00 x 8.00 = 80.00 SF", "Component B: 6.00 x 4.00 = 24.00 SF",
+                                              "Total: 104.00 SF"]
+
+    def test_a_deduction_from_a_flag_outside_the_report_names_no_flag(self):
+        other = {"id": UUID("f0000000-0000-4000-8000-000000000099")}
+        flags = bundled([piece(1, x=0)], 2, [{"L": 10, "W": 5}], [{**tree_pit(other, 3.5), "what": "utility_cover",
+                                                                 "type": "subtract_feature"}])
+        [group] = calc_groups(flags, compute_measure(flags, RATES), {f"flag:{flags[0]['id']}": "1"})
+        assert "- Utility cover  3.50 SF" in group.bundles[0].lines
+
+    def test_a_bundle_surveyed_non_assessable_is_one_piece(self):
+        flags = bundled([piece(1, assessable=False, x=0), piece(2, assessable=False, x=5)], 2, [{"L": 10, "W": 5}])
+        [group] = calc_groups(flags, compute_measure(flags, RATES), number_items(flags, sketch_items(flags, NO_DRAWINGS)))
+        assert [(row.label, row.length, row.sub_total) for row in group.non_assessable_rows] == [
+            ("M1", "Flags 1-2", Decimal("50"))]
+        assert group.adjustment == Decimal("0")
+
+    def test_solo_flags_print_no_bundle_lines(self):
+        flags = [piece(1, x=0), piece(2, x=5)]
+        lines = calc_lines(calc_groups(flags, compute_measure(flags, RATES),
+                                       number_items(flags, sketch_items(flags, NO_DRAWINGS))))
+        assert not any(line[0] == "note" for line in lines)

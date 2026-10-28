@@ -17,7 +17,7 @@ every request to it.
 | Path | What lives here |
 |---|---|
 | `api/index.py` | FastAPI app: CORS, global exception handler, router registration, `/status`. |
-| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `idr_report_sites.py`, `idr_report_site_pay_items.py`, `property_work.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`, `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py`, `ped_ramp_listing.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`, `corner_router`, `inspection_router`, `tif_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, the lock a ped ramp corner's inspection puts on it (`refuse_locked_corner`), and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
+| `api/v1/` | HTTP endpoints, one module per resource (`auth.py`, `signatures.py`, `admin.py`, `admin_users.py`, `admin_projects.py`, `admin_pay_items.py`, `users.py`, `projects.py`, `idrs.py`, `reviews.py`, `field_edits.py`, `attachments.py`, `exports.py`, `contract_items.py`, `quantities.py`, `properties.py`, `task_orders.py`, `pirs.py`, `pir_pages.py`, `flags.py`, `non_assessable_areas.py`, `features.py`, `segments.py`, `match_lines.py`, `flag_measurements.py`, `pir_import.py`, `idr_flags.py`, `idr_segments.py`, `idr_report_sites.py`, `idr_report_site_pay_items.py`, `property_work.py`, `progress.py`, `construction_reports.py`, `assessment_summary.py`, `pir_title_block.py`, `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py`, `ped_ramp_listing.py`). Each exports a `router`; one with routes under another resource's prefix exports a second router named for it (`project_router`, `property_router`, `pir_router`, `page_router`, `flag_router`, `corner_router`, `inspection_router`, `tif_router`). `api/index.py` registers them all, in order. `_shared.py` is not a router: it holds what several of them use (reading the date and discipline filters, reading a text field off a request body (the admin project form's), checking a new password, shaping an IDR list's rows, the lock a ped ramp corner's inspection puts on it (`refuse_locked_corner`), and, for a PIR's drawings, the deleted-parent checks, the pay-item check and merging and checking a PATCH). |
 | `api/queries/` | SQL functions, one module per table area. The only place SQL is written. `_shared.py` is not a table area: it holds the SQL pieces the PIR drawings' modules share (typed placeholders, the pay-item check, the joins from a page to its PIR and property). `pir_import.py` is the Smart PIR import's one statement, across the drawings' tables. `idr_flags.py` is which flags an IDR covers: its overrides and the claim and release CTEs the IDR statements carry; `idr_segments.py` the same for curb segments, with their quantity CTE. `progress.py` is the progress rollup's one statement: a project's flags and curb segments by property, pay item and state. `construction_report.py` reads a Construction Report's property, title block, IDR, flags and drawings; `assessment_summary.py` a project's claimed flags for the Assessment Summary. `ped_ramp_corners.py`, `ped_ramp_attributes.py`, `ped_ramp_inspections.py`, `ped_ramp_tifs.py`, `ped_ramp_photos.py` and `ped_ramp_listing.py` are the ped ramp inspection's. `assessment_clip_audits.py` is the homeowner's clip at the property line (Slice Y2): its reads, the CTEs the IDR statements carry, and the re-clip. `flag_measurements.py` is measurement bundles' remesh (Slice Y3b-1): the CTEs every flag, area and feature write carries, and the read of a page's flags for it. |
 | `api/schemas/` | Pydantic request/response models, one module per resource. |
 | `api/db/` | Connection plumbing: `connection.py` opens the psycopg connection, `runner.py` exposes `run_query(sql, params)`. |
@@ -55,7 +55,8 @@ auth routes:
   `/flags`, `/features`, `/segments`, `/match-lines`, `/import`, and the deprecated R1d routes); `/v1/pir-pages/{id}`
   (`/scale`, `/rotation`, `/flags`, `/features`, `/segments`, `/match-lines`, `/annotations`); `/v1/flags/{id}` (with
   its admin routes and `/non-assessable-areas`); `/v1/non-assessable-areas/{id}`, `/v1/features/{id}`,
-  `/v1/segments/{id}`, `/v1/match-lines/{id}`
+  `/v1/segments/{id}`, `/v1/match-lines/{id}`; measurement bundles: `POST /v1/pir-pages/{id}/measurements/bundle`,
+  `GET` and `DELETE /v1/measurements/{id}`
 - **IDRs:** `/v1/idrs/` and `/{idr_id}` (header, reports, submit, export, attachments); the review queue and moves
   (`/queue`, accept / approve at both stages, `/return`); reviewer edits (`/field`, pay items, trucks); the admin
   moves (`/admin/unlock`, `/delete`, `/undelete`, `/permanent`); `/attributed-flags`; `/attributed-segments`; `/construction-reports`; a report's
@@ -986,8 +987,32 @@ Any change must follow these.
     unlock and delete of an IDR don't remesh. Deleting a pay item nulls it on flags and measurements alike.
   - **The pick** (`join_target`): after a change of classification (a PATCH, or the flip), the page's flags are read
     (`list_remesh_neighbours`) and the flag joins a bundle only when exactly one is open to it (live, unfrozen, its new
-    classification, a member sharing an edge within 0.1 ft); none or several, it goes solo. **In Y3b-1 only bundles are
-    candidates**, never a neighbour's solo measurement, so the remesh forms no bundle of its own.
+    classification, a member sharing an edge within 0.1 ft); none or several, it goes solo. **Only bundles are
+    candidates**, never a neighbour's solo measurement: a classification change never forms a bundle (Y3b-2 lock).
+- **Measurement bundles: the routes and their rendering** (Slice Y3b-2, no migration; `api/v1/flag_measurements.py`; the
+  brief is `Documents/ICID/slice-y3b-2-bundle-route-rendering.md`). Backend only: the UI is Y4.
+  - **Forming one** (`POST /v1/pir-pages/{id}/measurements/bundle`, `form_bundle`): `{flag_ids, outer_dimensions:
+    {rectangles: [{L, W}]}}`, 1 to 3 rectangles the OE measured. Two or more live, unclaimed flags of the page in solo
+    measurements, of one classification, in one chain of shared edges (`unconnected`, 0.1 ft); else a 400 naming the
+    flag (409 when they changed meanwhile: the statement checks them again). The bundle is `component_rectangles`,
+    `outer_area` the rectangles' sum (not the flags': a bundle is a re-measurement), `needs_remeasure` false, its
+    deductions its flags' covers of 1 SF or more; each flag a share by its own area; their solo measurements retired.
+  - **Breaking one up** (`DELETE /v1/measurements/{id}`, `unbundle`): each member back to a solo measurement of its own
+    (`needs_remeasure` false), the bundle retired as it stood. 400 for a solo measurement, 404 for a retired one, 409 for
+    a frozen one. **Reading one** (`GET`): its outline, deductions, classification, whether frozen, its members with
+    their shares and quantities. All three for an OE or RE on the project, or an admin; never a demo user.
+  - **The Construction Report** prints a bundle as one measurement (`bundle_calc`, `calc_lines`' `note` lines):
+    `Measurement M1 (Flags 1-3)` (M-numbers per report, by each bundle's lowest flag label there; ranges by
+    `flag_ranges`, a non-numeric PIR number breaking a run), a row of its flags' own areas (so Total stays their gross
+    area), its rectangles, each deduction with its flag (when that flag is in the report), `Net`, and `This IDR: Flags
+    1, 3 = <SF>` when the report holds only some of its flags. Its flags' own areas aren't listed as pieces; what the
+    bundle takes off them is in the `Adjustment to box 2`, so the panel agrees with box 2. A bundle is one page, so it
+    never spans sheets.
+  - **The Assessment Summary:** a row is `remeasure_pending` when a flag's measurement `needs_remeasure` (JSON: per site
+    and on the totals); a tab with one gets a banner above the column titles and a 14th column (`Remeasure Pending`),
+    and is unchanged otherwise (the tailored download too). The monthly workbook always ends with a **Project Total**
+    tab: the same properties summed over the same months (`summary_project_total`), or the same line saying why there
+    are none.
 - **Ped ramp inspection** (pedramp 2a, migration 047; `api/v1/ped_ramp_corners.py`, `api/v1/ped_ramp_attributes.py`,
   their query modules, `api/schemas/ped_ramp.py`, `api/services/ped_ramp_ada.py` and `ped_ramp_report.py`): NYC DOT's
   Pedestrian Ramp Inspection Form (version 1.6) as data, and ICID's own report of it. DOT's fillable PDF, photos and

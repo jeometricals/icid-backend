@@ -14,8 +14,10 @@ from api.services.assessment_summary import (
     build_workbook,
     parse_month,
     summary_filename,
+    project_total_label,
     summary_months,
     summary_payload,
+    summary_project_total,
     summary_sites,
 )
 from api.services.auth import current_user, demo_project_fence, project_member
@@ -110,4 +112,6 @@ def get_assessment_summary(
 
     project, flags, rates = _project_and_flags(project_id)
     months = summary_months(flags, rates, first, last)
-    return _xlsx(build_workbook(project, months, filtered=bool(first or last)), summary_filename(project_id))
+    totals = summary_project_total(flags, rates, first, last)
+    workbook = build_workbook(project, months, bool(first or last), totals, project_total_label(first, last))
+    return _xlsx(workbook, summary_filename(project_id))
