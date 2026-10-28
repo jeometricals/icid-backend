@@ -6,13 +6,22 @@ from api.db.runner import run_query
 from api.queries._shared import PAY_ITEM_OF_PROJECT, placeholders, write_values
 from api.queries.flag_edits import flag_edit_rows_cte
 
-# A flag's net area: its shape's area less its non-assessable areas and the features subtracted from it, never below 0
-_NET = "GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0)"
+# A flag's net area (Slice Y3a: through its measurement, fm): its part of the measurement's outer area, to the cent,
+# less its non-assessable areas and the features subtracted from it, never below 0. A solo measurement's outer area is
+# the flag's own computed_quantity and its share 1, so this is the flag's shape's area less those, as before Y3a.
+_NET = "GREATEST(round(fm.outer_area * f.area_share_fraction, 2) - naa.quantity - sub.quantity, 0)"
 # What counts as a flag's quantity, in square feet: its override, or else its net area. Needs QUANTITY_LATERALS.
 FLAG_QUANTITY = f"COALESCE(f.reported_quantity, {_NET})"
-# A flag's areas are its live ones, and, once it is deleted, those deleted with it (at the same moment); the features
-# subtracted from it are the live ones. Read for a row source named f.
-QUANTITY_LATERALS = """
+
+
+def quantity_laterals(measurements: str = "icid.flag_measurements") -> str:
+    """
+    The joins a flag's quantity reads, for a row source named f: its measurement (fm), its areas (its live ones, and, once it is deleted, those deleted with it, at the same moment) and the live features subtracted from it.
+    Takes where its measurement is read from: the table, or the name of a CTE of measurements the same statement writes (a statement can't read its own writes from the table).
+    Returns the SQL, to follow the FROM clause that defines f.
+    """
+    return f"""
+        JOIN {measurements} fm ON fm.measurement_id = f.measurement_id
         CROSS JOIN LATERAL (
             SELECT count(*) AS area_count, COALESCE(sum(na.computed_quantity), 0) AS quantity
             FROM icid.non_assessable_areas na
@@ -23,6 +32,22 @@ QUANTITY_LATERALS = """
             FROM icid.features ft
             WHERE ft.flag_id = f.id AND ft.area_impact = 'subtract' AND ft.deleted_at IS NULL
         ) sub"""
+
+
+# quantity_laterals over the table, for every statement that only reads flags
+QUANTITY_LATERALS = quantity_laterals()
+
+
+def solo_measurements_insert(flags: str) -> str:
+    """
+    The INSERT that gives flags just added their solo measurements (Slice Y3a): each its own, of the flag's shape, dimensions and area (computed_quantity), under the measurement_id the flag's INSERT gave it, created by whoever added the flag.
+    Takes the name of a CTE earlier in the statement holding the new flags (measurement_id, pir_id, shape, dimensions, computed_quantity, created_by); written here, never from a request.
+    Returns the INSERT, its RETURNING every column (a measurement row source for quantity_laterals); no parameters.
+    """
+    return f"""INSERT INTO icid.flag_measurements (measurement_id, pir_id, outer_shape, outer_dimensions, outer_area,
+                                                created_by)
+            SELECT measurement_id, pir_id, shape, dimensions, computed_quantity, created_by FROM {flags}
+            RETURNING *"""
 # A flag's pay item's unit (ci, its contract item) in short form, as the units a flag measures are spelled: SF, SY,
 # CY, EA
 _UNIT_LETTERS = "upper(regexp_replace(ci.unit, '[^A-Za-z]', '', 'g'))"
@@ -59,11 +84,25 @@ _FLAG_COLUMNS = (
                 AS claimed_by_idr_number,
             pg.deleted_at AS page_deleted_at, pir.deleted_at AS pir_deleted_at, p.deleted_at AS property_deleted_at"""
 )
-# A flag's PIR, property and page, and its areas and subtracted features (QUANTITY_LATERALS)
-_FROM = """
+
+
+def _from(measurements: str = "icid.flag_measurements") -> str:
+    """
+    A flag's PIR, property and page, and what its quantity reads (quantity_laterals), for a row source named f.
+    Takes where its measurement is read from (see quantity_laterals).
+    Returns the SQL, to follow "FROM <f>".
+    """
+    return """
         JOIN icid.pirs pir ON pir.id = f.pir_id
         JOIN icid.properties p ON p.id = pir.property_id
-        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id""" + QUANTITY_LATERALS
+        LEFT JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id""" + quantity_laterals(measurements)
+
+
+# _from over the measurements table, for every statement that doesn't write one
+_FROM = _from()
+# Whether a flag's edit changes its solo measurement (fm): its shape, dimensions or area (f, the flag as written)
+_MEASUREMENT_CHANGED = ("(fm.outer_shape, fm.outer_dimensions, fm.outer_area)"
+                        " IS DISTINCT FROM (f.shape, f.dimensions, f.computed_quantity)")
 # The columns a write sets from the request, in the order their values are passed, each with its type (so a NULL
 # parameter is typed, not text)
 _WRITABLE_TYPES = {
@@ -125,6 +164,21 @@ def list_flags_for_page(pir_page_id: UUID) -> Optional[list[dict[str, Any]]]:
     return run_query(sql, (pir_page_id,))
 
 
+def list_pir_flag_nos(pir_id: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch the PIR flag numbers (Slice Y3a) its live flags on its live pages have, for a Smart PIR import to check against.
+    Takes the PIR's id.
+    Returns [{page_number, pir_flag_no}], or None on failure.
+    """
+    sql = """
+        SELECT pg.page_number, f.pir_flag_no
+        FROM icid.flags f
+        JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id
+        WHERE f.pir_id = %s AND f.deleted_at IS NULL AND pg.deleted_at IS NULL AND f.pir_flag_no IS NOT NULL;
+    """
+    return run_query(sql, (pir_id,))
+
+
 def get_flag_placement(flag_id: UUID) -> Optional[list[dict[str, Any]]]:
     """
     Fetch where a flag sits on its page, for checking an area against it: its shape, dimensions and place, and its page's scale.
@@ -155,7 +209,7 @@ def create_flag(
     pir_page_id: UUID, created_by_uuid: UUID, data: dict[str, Any], computed_area: Decimal
 ) -> Optional[dict[str, Any]]:
     """
-    Add a flag to a page of a PIR (and so to the PIR). Adds nothing when the page doesn't exist or was replaced, or the pay item isn't one of its project's.
+    Add a flag to a page of a PIR (and so to the PIR), with its solo measurement (Slice Y3a: its shape, dimensions and area), in one statement. Adds nothing when the page doesn't exist or was replaced, or the pay item isn't one of its project's.
     Takes the page's id, the uuid of the user adding it, the values keyed by column (every writable column) and the area computed from its shape.
     Returns the new flag dict, or None when nothing was added.
     """
@@ -164,10 +218,10 @@ def create_flag(
         WITH f AS (
             INSERT INTO icid.flags ("""
         + ", ".join(_WRITABLE)
-        + """, computed_quantity, pir_id, pir_page_id, created_by)
+        + """, computed_quantity, pir_id, pir_page_id, created_by, measurement_id)
             SELECT """
         + ", ".join(_PLACEHOLDERS)
-        + """, %s::numeric, pir.id, page.pir_page_id, %s::uuid
+        + """, %s::numeric, pir.id, page.pir_page_id, %s::uuid, gen_random_uuid()
             FROM icid.pir_pages page
             JOIN icid.pirs pir ON pir.id = page.pir_id
             JOIN icid.properties p ON p.id = pir.property_id
@@ -176,11 +230,16 @@ def create_flag(
         + _PAY_ITEM_OF_PROJECT
         + """
             RETURNING *
+        ),
+        m AS (
+            """
+        + solo_measurements_insert("f")
+        + """
         )
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
-        + _FROM
+        + _from("m")
         + ";"
     )
     params = (
@@ -192,7 +251,7 @@ def create_flag(
 
 def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal, editor_uuid: UUID) -> Optional[dict[str, Any]]:
     """
-    Rewrite a flag's writable columns with its merged record, and its computed quantity. Changes nothing when the pay item isn't one of its PIR's project's. A change of surveyed_is_assessable or surveyed_non_assessable_reason adds its flag_edits rows in the same statement (Slice Y1.5).
+    Rewrite a flag's writable columns with its merged record, and its computed quantity. Changes nothing when the pay item isn't one of its PIR's project's. A change of surveyed_is_assessable or surveyed_non_assessable_reason adds its flag_edits rows in the same statement (Slice Y1.5), and its solo measurement takes its shape, dimensions and area (Slice Y3a; stamped updated by the editor only when one of them changed).
     Takes the flag's id, the values keyed by column (every writable column), the area computed from its shape and the editing user's uuid.
     Returns the updated flag dict, or None when no flag matches or the pay item is another project's.
     """
@@ -222,15 +281,28 @@ def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal, edi
             """
         + flag_edit_rows_cte("f")
         + """
+        ),
+        m AS (
+            UPDATE icid.flag_measurements fm
+            SET outer_shape = f.shape, outer_dimensions = f.dimensions, outer_area = f.computed_quantity,
+                updated_at = CASE WHEN """
+        + _MEASUREMENT_CHANGED
+        + """ THEN now() ELSE fm.updated_at END,
+                updated_by = CASE WHEN """
+        + _MEASUREMENT_CHANGED
+        + """ THEN %s::uuid ELSE fm.updated_by END
+            FROM f
+            WHERE fm.measurement_id = f.measurement_id
+            RETURNING fm.*
         )
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
-        + _FROM
+        + _from("m")
         + "\n        CROSS JOIN (SELECT count(*) FROM edits) AS edits_written;"
     )
     params = (*_values(data), computed_area, flag_id, data.get("pay_item_id"), data.get("pay_item_id"), None,
-              editor_uuid)
+              editor_uuid, editor_uuid)
     rows = run_query(sql, params)
     return rows[0] if rows else None
 

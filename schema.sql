@@ -774,6 +774,33 @@ CREATE UNIQUE INDEX pir_pages_pir_page_num_live_uq ON icid.pir_pages (pir_id, pa
 CREATE INDEX pir_pages_pir_idx ON icid.pir_pages (pir_id);
 
 ------------------------------------------------------------
+-- FLAG MEASUREMENT (Slice Y3a, migration 061): what a flag's area is measured from. Since Y3a every flag has one; in
+-- Y3a each is a solo measurement, one flag's own: its outer shape and dimensions are the flag's and outer_area its
+-- computed_quantity (kept in step by the flag's create, PATCH and the Smart PIR import), deductions [] and
+-- needs_remeasure false. A flag's quantity is COALESCE(reported_quantity, GREATEST(round(outer_area x
+-- area_share_fraction, 2) - its areas - its subtracted features, 0)) (api/queries/flags.py). Bundles, deductions and
+-- remeasuring are Y3b's.
+------------------------------------------------------------
+CREATE TABLE icid.flag_measurements (
+    measurement_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    pir_id            UUID NOT NULL REFERENCES icid.pirs(id),
+    outer_shape       TEXT NOT NULL,
+    outer_dimensions  JSONB NOT NULL,
+    outer_area        NUMERIC(10,2) NOT NULL,
+    deductions        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    needs_remeasure   BOOLEAN NOT NULL DEFAULT false,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by        UUID NOT NULL REFERENCES icid.users(uuid),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by        UUID REFERENCES icid.users(uuid) ON DELETE SET NULL,
+    CONSTRAINT chk_flag_measurements_outer_shape
+        CHECK (outer_shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
+    CONSTRAINT chk_flag_measurements_outer_area CHECK (outer_area >= 0),
+    CONSTRAINT chk_flag_measurements_deductions CHECK (jsonb_typeof(deductions) = 'array')
+);
+CREATE INDEX idx_flag_measurements_pir ON icid.flag_measurements (pir_id);
+
+------------------------------------------------------------
 -- FLAG (a marked piece of sidewalk on a PIR: shape, survey classification, quantity; soft-deleted; migrations/032)
 -- dimensions are checked per shape by the API; computed_quantity is the shape's area (sq ft), reported_quantity an
 -- override (NULL: none). pay_item_id is SET NULL on delete: pay items are hard-deleted by the admin routes.
@@ -812,6 +839,11 @@ CREATE TABLE icid.flags (
     -- (unlock, admin delete) before its IDR can be purged
     claimed_by_idr_id               UUID REFERENCES icid.idrs(idr_id),
     constructed_on                  DATE,
+    -- Its measurement, the part of it the flag takes (1.0000 for a solo one) and the signed PIR's own flag number
+    -- (the Smart PIR import's; unique per page among live flags) (Slice Y3a, migrations/061 and 061b)
+    measurement_id                  UUID NOT NULL REFERENCES icid.flag_measurements(measurement_id),
+    area_share_fraction             NUMERIC(5,4) NOT NULL DEFAULT 1.0000,
+    pir_flag_no                     TEXT,
     CONSTRAINT chk_flags_display_order CHECK (display_order >= 0),
     CONSTRAINT chk_flags_shape CHECK (shape IN ('rectangle', 'trapezoid', 'triangle', 'polygon', 'arc')),
     CONSTRAINT chk_flags_surveyed_mark
@@ -830,10 +862,16 @@ CREATE TABLE icid.flags (
         CHECK (defect_codes <@ ARRAY['1', '2', '3', '4', '5', '6A', '6B', '6C']::TEXT[]),
     CONSTRAINT chk_flags_claim_consistent CHECK (
         (claimed_by_idr_id IS NULL AND is_constructed = false AND constructed_on IS NULL)
-        OR (claimed_by_idr_id IS NOT NULL AND is_constructed = true AND constructed_on IS NOT NULL))
+        OR (claimed_by_idr_id IS NOT NULL AND is_constructed = true AND constructed_on IS NOT NULL)),
+    CONSTRAINT chk_flags_area_share_fraction CHECK (area_share_fraction > 0 AND area_share_fraction <= 1),
+    CONSTRAINT chk_flags_pir_flag_no
+        CHECK (pir_flag_no IS NULL OR (pir_flag_no = btrim(pir_flag_no) AND length(pir_flag_no) BETWEEN 1 AND 16))
 );
 
 CREATE INDEX idx_flags_pir ON icid.flags (pir_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_flags_measurement ON icid.flags (measurement_id);
+CREATE UNIQUE INDEX uq_flags_page_pir_flag_no
+    ON icid.flags (pir_page_id, pir_flag_no) WHERE pir_flag_no IS NOT NULL AND deleted_at IS NULL;
 CREATE INDEX idx_flags_pay_item ON icid.flags (pay_item_id) WHERE deleted_at IS NULL AND pay_item_id IS NOT NULL;
 CREATE INDEX flags_pir_page_idx ON icid.flags (pir_page_id);
 CREATE INDEX idx_flags_claimed_by_idr ON icid.flags (claimed_by_idr_id) WHERE claimed_by_idr_id IS NOT NULL;
@@ -859,6 +897,25 @@ CREATE TABLE icid.assessment_clip_audits (
     CONSTRAINT chk_assessment_clip_audits_reason CHECK (clip_reason IN ('outside_property_line'))
 );
 CREATE INDEX idx_assessment_clip_audits_idr ON icid.assessment_clip_audits (idr_id, flag_id);
+
+------------------------------------------------------------
+-- MEASUREMENT EDITS (Slice Y3a, migration 061): each change of a measurement, shaped as flag_edits; rows are only ever
+-- added. Nothing writes it yet: Y3b's remesh is its first writer (editor NULL for the system)
+------------------------------------------------------------
+CREATE TABLE icid.measurement_edits (
+    edit_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    measurement_id  UUID NOT NULL REFERENCES icid.flag_measurements(measurement_id),
+    field_path      TEXT NOT NULL,
+    old_value       JSONB NOT NULL,
+    new_value       JSONB NOT NULL,
+    reason          TEXT,
+    editor_uuid     UUID REFERENCES icid.users(uuid),
+    editor_stage    TEXT,
+    edited_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_measurement_edits_stage CHECK (editor_stage IS NULL OR editor_stage IN ('stage1', 'stage2')),
+    CONSTRAINT chk_measurement_edits_changed CHECK (old_value IS DISTINCT FROM new_value)
+);
+CREATE INDEX idx_measurement_edits_measurement ON icid.measurement_edits (measurement_id, edited_at DESC);
 
 ------------------------------------------------------------
 -- FLAG EDITS (Slice Y1.5, migration 059): each change of a flag's surveyed_is_assessable or surveyed_non_assessable_reason,

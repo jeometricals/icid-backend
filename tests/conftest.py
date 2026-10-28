@@ -48,6 +48,17 @@ def no_match_lines():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def no_pir_flag_nos():
+    """
+    Patch the Smart PIR import's read of its PIR's flag numbers for the whole session (Slice Y3a), so an import sees
+    none unless a test patches api.v1.pir_import.list_pir_flag_nos itself.
+    Yields the mock of the read.
+    """
+    with patch("api.v1.pir_import.list_pir_flag_nos", return_value=[]) as read:
+        yield read
+
+
+@pytest.fixture(scope="session", autouse=True)
 def no_mappluto():
     """
     Keep MapPLUTO and DOF off the network for the whole session (Slices Y1, Y1.5): a property create or a move fetches

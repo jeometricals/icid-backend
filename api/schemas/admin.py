@@ -95,6 +95,8 @@ class UserReferences(BaseModel):
     idr_report_site_pay_items: int
     sidewalk_strips: int
     flag_edits: int
+    flag_measurements: int
+    measurement_edits: int
 
 
 class UserHasHistory(BaseModel):

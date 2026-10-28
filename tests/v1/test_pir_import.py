@@ -217,3 +217,60 @@ def test_a_width_in_the_file_is_stamped_manual_and_a_block_without_one_keeps_the
     assert f"tax_map_width_ft = {kept}" in one_line
     assert (f"tax_map_source = CASE WHEN pir_annotations.tax_map_width_ft IS DISTINCT FROM {kept} THEN 'manual' "
             "ELSE pir_annotations.tax_map_source END") in one_line
+
+
+class TestMeasurementsAndNumbers:
+    """Slice Y3a: each imported flag gets its solo measurement in the statement, and pir_flag_no once per page."""
+
+    def test_each_new_flag_gets_its_solo_measurement_in_the_statement(self, admin_client):
+        _, _, _, run = post(admin_client, body())
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "computed_quantity, created_by, pir_flag_no, measurement_id) SELECT" in one_line
+        assert "x.computed_quantity, %s::uuid, x.pir_flag_no, gen_random_uuid() FROM" in one_line
+        assert "RETURNING id, measurement_id, pir_id, shape, dimensions, computed_quantity, created_by" in one_line
+        assert ("new_measurements AS ( INSERT INTO icid.flag_measurements (measurement_id, pir_id, outer_shape, "
+                "outer_dimensions, outer_area, created_by) SELECT measurement_id, pir_id, shape, dimensions, "
+                "computed_quantity, created_by FROM new_flags RETURNING * )") in one_line
+        assert "(SELECT count(*) FROM new_measurements) AS measurements" in one_line
+
+    def test_a_number_taken_meanwhile_leaves_the_flag_out(self, admin_client):
+        _, _, _, run = post(admin_client, body())
+        one_line = " ".join(run.call_args.args[0].split())
+        assert ("AND NOT EXISTS ( SELECT 1 FROM icid.flags taken WHERE taken.pir_page_id = x.pir_page_id "
+                "AND taken.pir_flag_no = x.pir_flag_no AND taken.deleted_at IS NULL)") in one_line
+
+    def test_the_number_goes_in_the_flags_rows(self, admin_client):
+        payload = body()
+        payload["pages"][0]["flags"][0]["pir_flag_no"] = " 14 "
+        _, _, _, run = post(admin_client, payload)
+        flags = run.call_args.args[1][3].obj  # the flags' JSON parameter
+        assert flags[0]["pir_flag_no"] == "14" and all("pir_flag_no" in row for row in flags)
+
+    def test_the_route_hands_over_the_numbers_live_on_each_page(self, admin_client):
+        live = [{"page_number": 1, "pir_flag_no": "3"}, {"page_number": 1, "pir_flag_no": "4"},
+                {"page_number": 2, "pir_flag_no": "3"}]
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PAGES, return_value=PAGE_ROWS), \
+                patch(CONTRACT, return_value=PAY_ITEM_ROWS), \
+                patch("api.v1.pir_import.list_pir_flag_nos", return_value=live) as read, \
+                patch("api.v1.pir_import.run_import", return_value=None) as run:
+            admin_client.post(URL, json=body())
+        read.assert_called_once_with(PIR_ID)
+        assert run.call_args.args[8] == {1: {"3", "4"}, 2: {"3"}}
+
+    def test_numbers_that_cant_be_read_are_500(self, admin_client):
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PAGES, return_value=PAGE_ROWS), \
+                patch(CONTRACT, return_value=PAY_ITEM_ROWS), patch("api.v1.pir_import.list_pir_flag_nos", return_value=None), \
+                patch(IMPORT) as run:
+            response = admin_client.post(URL, json=body())
+        assert response.status_code == 500 and run.call_count == 0
+
+
+def test_the_numbers_read_is_the_live_flags_on_live_pages():
+    """Slice Y3a: what an import checks a PIR flag number against."""
+    from api.queries.flags import list_pir_flag_nos
+
+    with patch("api.queries.flags.run_query", return_value=[]) as run:
+        list_pir_flag_nos(PIR_ID)
+    one_line = " ".join(run.call_args.args[0].split())
+    assert ("WHERE f.pir_id = %s AND f.deleted_at IS NULL AND pg.deleted_at IS NULL AND f.pir_flag_no IS NOT NULL"
+            in one_line) and run.call_args.args[1] == (PIR_ID,)

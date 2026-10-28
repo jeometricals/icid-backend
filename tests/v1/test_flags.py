@@ -138,8 +138,22 @@ class TestCreateFlag:
         assert "WHERE page.pir_page_id = %s AND page.deleted_at IS NULL" in one_line
         assert run.call_args.args[1][CREATOR + 1] == PAGE_ID
         assert "ci.contract_item_id = %s::uuid AND ci.project_id = p.project_id" in one_line
-        assert "COALESCE(f.reported_quantity, GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0)) AS quantity" in one_line
+        assert "COALESCE(f.reported_quantity, GREATEST(round(fm.outer_area * f.area_share_fraction, 2) - naa.quantity - sub.quantity, 0)) AS quantity" in one_line
         assert "%s::real" in one_line and "%s::jsonb" in one_line  # a NULL parameter is typed, not text
+
+    def test_the_flag_comes_with_its_solo_measurement_in_the_same_statement(self, admin_client):
+        """Slice Y3a: the INSERT gives the flag a new measurement id, and the same statement adds that measurement of
+        the flag's own shape, dimensions and area; the flag's quantity is read through it."""
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(FLAGS_URL, json=BODY)
+        assert response.status_code == 201
+        one_line = " ".join(run.call_args.args[0].split())
+        assert "created_by, measurement_id) SELECT" in one_line and "%s::uuid, gen_random_uuid() FROM" in one_line
+        assert ("m AS ( INSERT INTO icid.flag_measurements (measurement_id, pir_id, outer_shape, outer_dimensions, "
+                "outer_area, created_by) SELECT measurement_id, pir_id, shape, dimensions, computed_quantity, created_by "
+                "FROM f RETURNING * )") in one_line
+        # the new flag's quantity is read from the measurement just written (a statement can't read its own writes)
+        assert "JOIN m fm ON fm.measurement_id = f.measurement_id" in one_line
 
     @pytest.mark.parametrize("dimensions,shape", [
         ({"L": -1, "W": 4}, "rectangle"),
@@ -386,7 +400,24 @@ class TestUpdateFlag:
                 "old.surveyed_non_assessable_reason AS old_reason") in one_line
         assert "INSERT INTO icid.flag_edits (flag_id, field_path, old_value, new_value, reason, editor_uuid)" in one_line
         assert "WHERE v.old_value IS DISTINCT FROM v.new_value" in one_line  # only the fields that changed
-        assert params[-2:] == (None, ADMIN_USER_ROW["uuid"])  # no reason words; the editor
+        assert params[-3:] == (None, ADMIN_USER_ROW["uuid"], ADMIN_USER_ROW["uuid"])  # no reason words; the editor
+
+    def test_a_patch_moves_the_solo_measurement_with_the_flag(self, admin_client):
+        """Slice Y3a: the same statement gives the flag's measurement its shape, dimensions and area as written,
+        stamped by the editor only when one of them changed, and the flag's quantity is read through it."""
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]) as run:
+            response = admin_client.patch(URL, json={"dimensions": {"L": 6, "W": 4}})
+        assert response.status_code == 200
+        sql, params = run.call_args.args
+        one_line = " ".join(sql.split())
+        changed = ("(fm.outer_shape, fm.outer_dimensions, fm.outer_area) IS DISTINCT FROM "
+                   "(f.shape, f.dimensions, f.computed_quantity)")
+        assert ("m AS ( UPDATE icid.flag_measurements fm SET outer_shape = f.shape, outer_dimensions = f.dimensions, "
+                f"outer_area = f.computed_quantity, updated_at = CASE WHEN {changed} THEN now() ELSE fm.updated_at END, "
+                f"updated_by = CASE WHEN {changed} THEN %s::uuid ELSE fm.updated_by END FROM f "
+                "WHERE fm.measurement_id = f.measurement_id RETURNING fm.* )") in one_line
+        assert "JOIN m fm ON fm.measurement_id = f.measurement_id" in one_line
+        assert written(run)["computed_quantity"] == Decimal("24.00") and params[-1] == ADMIN_USER_ROW["uuid"]
 
     def test_a_pay_item_of_another_project_is_400(self, admin_client):
         with patch(FLAGS, return_value=[FLAG_ROW]) as run, patch(CONTRACT, return_value=[]):
@@ -639,7 +670,9 @@ class TestNetQuantity:
         with patch(FLAGS, return_value=[]) as run:
             list_flags(PIR_ID)
         one_line = " ".join(run.call_args.args[0].split())
-        assert "GREATEST(f.computed_quantity - naa.quantity - sub.quantity, 0) AS net_quantity" in one_line
+        assert "GREATEST(round(fm.outer_area * f.area_share_fraction, 2) - naa.quantity - sub.quantity, 0) AS net_quantity" in one_line
+        # Slice Y3a: through the flag's measurement, which every flag has
+        assert "JOIN icid.flag_measurements fm ON fm.measurement_id = f.measurement_id" in one_line
         # an area counts while live, and once its flag is deleted, if it went with the flag
         assert "na.flag_id = f.id AND (na.deleted_at IS NULL OR na.deleted_at = f.deleted_at)" in one_line
         assert "ft.flag_id = f.id AND ft.area_impact = 'subtract' AND ft.deleted_at IS NULL" in one_line

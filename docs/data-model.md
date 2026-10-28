@@ -582,7 +582,7 @@ Demo users only read.
 | `surveyed_thickness` | TEXT NOT NULL | `4in`, `7in` or `7in_as_4in`; CHECK `chk_flags_thickness` |
 | `is_constructed` | BOOLEAN NOT NULL | Default false; true exactly while an approved IDR claims it (`chk_flags_claim_consistent`, migration 037). Set by approval, never by a flag route |
 | `pay_item_id` | UUID | FK → `contract_items.contract_item_id`, **ON DELETE SET NULL**; a contract item of the PIR's project (the API checks); `idx_flags_pay_item` (live, mapped flags) |
-| `computed_quantity` | NUMERIC NOT NULL | The shape's area in square feet, 2 decimal places, computed by the API. Its **net** area (in responses, not stored) is this less its non-assessable areas and the live `subtract` features naming it, never below 0 |
+| `computed_quantity` | NUMERIC NOT NULL | The shape's area in square feet, 2 decimal places, computed by the API. Its **net** area (in responses, not stored) is, since Y3a, its part of its measurement's outer area (`round(outer_area x area_share_fraction, 2)`; for a solo measurement exactly this) less its non-assessable areas and the live `subtract` features naming it, never below 0 |
 | `reported_quantity` | NUMERIC | An override, above 0 (`chk_flags_reported_quantity`); NULL means the net area stands |
 | `defect_codes` | TEXT[] NOT NULL | The DOT defect codes marked on it, a subset of `1` `2` `3` `4` `5` `6A` `6B` `6C` (`chk_flags_defect_codes`), stored in that order, each once; default `{}`. Migration 034 |
 | `quantity_delta_reason` | TEXT | Why the override differs |
@@ -591,10 +591,52 @@ Demo users only read.
 | `deleted_by` | UUID | The admin who did; FK → `users.uuid`, **ON DELETE SET NULL** |
 | `claimed_by_idr_id` | UUID | The approved IDR that claimed it (migration 037): FK → `idrs.idr_id`, no action (an unlock or a delete releases it first). At most one IDR claims a flag; a soft-deleted flag keeps its claim |
 | `constructed_on` | DATE | The claiming IDR's `report_date`; NULL while unclaimed |
+| `measurement_id` | UUID NOT NULL | Its measurement (Slice Y3a, migrations 061 and 061b): FK → `flag_measurements.measurement_id`, no action; `idx_flags_measurement`. Given by the flag's create and the Smart PIR import, in the same statement as the measurement |
+| `area_share_fraction` | NUMERIC(5,4) NOT NULL | The part of the measurement the flag takes, above 0 and at most 1 (`chk_flags_area_share_fraction`); default 1.0000, and 1.0000 for every flag in Y3a |
+| `pir_flag_no` | TEXT | The signed PIR's own number for the flag, 1 to 16 characters, trimmed (`chk_flags_pir_flag_no`); set only by the Smart PIR import; unique per page among live flags (`uq_flags_page_pir_flag_no`). The Construction Report prints it on a sheet where every flag has one |
 
 `surveyed_non_assessable_reason` also takes `outside_property_line` (migration 059): a flag wholly outside its page's
 sidewalk strip, set by the strip's auto-flip or by hand. Its changes, and those of `surveyed_is_assessable`, are kept in
 `flag_edits`.
+
+### flag_measurements
+
+What a flag's area is measured from (Slice Y3a, migration 061). Since Y3a every flag has one; in Y3a each is a **solo
+measurement**, one flag's own, made by 061's backfill (every flag, live and soft-deleted), by a flag's create and by the
+Smart PIR import, in the flag's own statement, and kept in step by a flag PATCH (its shape, dimensions and area, in the
+same statement). Every reader of a flag's quantity reads it through the measurement (`quantity_laterals` in
+`api/queries/flags.py`): `COALESCE(reported_quantity, GREATEST(round(outer_area x area_share_fraction, 2) - the
+flag's areas - its subtracted features, 0))`, which for a solo measurement is the net of before. Bundles of flags,
+deductions, remeasuring, and the pay item, thickness and assessment on the measurement are Y3b's.
+
+| Column | Type | Notes |
+|---|---|---|
+| `measurement_id` | UUID PK | `gen_random_uuid()` |
+| `pir_id` | UUID NOT NULL | FK → `pirs.id`, no action; `idx_flag_measurements_pir` |
+| `outer_shape` | TEXT NOT NULL | A flag's shapes (`chk_flag_measurements_outer_shape`); a solo measurement's is its flag's |
+| `outer_dimensions` | JSONB NOT NULL | As the shape's dimensions; a solo measurement's are its flag's |
+| `outer_area` | NUMERIC(10,2) NOT NULL | ≥ 0 (`chk_flag_measurements_outer_area`); a solo measurement's is its flag's `computed_quantity` |
+| `deductions` | JSONB NOT NULL | A JSON array (`chk_flag_measurements_deductions`), default `[]`; empty in Y3a (a flag's areas and subtracted features stay on the flag) |
+| `needs_remeasure` | BOOLEAN NOT NULL | Default false; false in Y3a |
+| `created_at`, `updated_at` | TIMESTAMPTZ NOT NULL | `now()`; the backfill copied the flag's |
+| `created_by` | UUID NOT NULL | FK → users, no action: whoever added the flag |
+| `updated_by` | UUID | FK → users, ON DELETE SET NULL: the editor of the last flag PATCH that changed its shape, dimensions or area |
+
+### measurement_edits
+
+Each change of a measurement, shaped as `flag_edits` (Slice Y3a, migration 061). Created empty: nothing writes it in
+Y3a; Y3b's remesh is its first writer.
+
+| Column | Type | Notes |
+|---|---|---|
+| `edit_id` | UUID PK | `gen_random_uuid()` |
+| `measurement_id` | UUID NOT NULL | FK → `flag_measurements.measurement_id`, no action; `idx_measurement_edits_measurement` on (`measurement_id`, `edited_at DESC`) |
+| `field_path` | TEXT NOT NULL | Unconstrained until Y3b names its paths |
+| `old_value`, `new_value` | JSONB NOT NULL | Never equal (`chk_measurement_edits_changed`) |
+| `reason` | TEXT | Why, in words |
+| `editor_uuid` | UUID | FK → users, no action; NULL for the system |
+| `editor_stage` | TEXT | NULL, or `stage1` / `stage2` (`chk_measurement_edits_stage`) |
+| `edited_at` | TIMESTAMPTZ NOT NULL | `now()` |
 
 ### flag_edits
 
@@ -1059,6 +1101,8 @@ content as TEXT, linked to a report and a form template).
 | 059 | `059_sidewalk_strip_tax_map_pdf.sql` | Slice Y1.5 | Added `pir_annotations.sidewalk_strip_points` (JSONB, 3 or more `{x, y}`), `sidewalk_strip_source` (`manual`, `r1k`), `sidewalk_strip_set_at` and `sidewalk_strip_set_by` (→ users), with CHECKs `chk_pir_annotations_sidewalk_strip_points`, `_source` and `chk_pir_annotations_sidewalk_strip` (points, source and time together); `properties.tax_map_pdf_path`, `_source` (`dof_map_library`, `upload`), `_map_id`, `_effective_date`, `_fetched_at` and `_uploaded_by` (→ users), with `chk_properties_tax_map_pdf_source` and `chk_properties_tax_map_pdf` (a fetch has a map id and no uploader, an upload the reverse); the table `flag_edits` (index `idx_flag_edits_flag`); and `outside_property_line` in `chk_flags_non_assessable_reason` and `chk_nas_reason`. Modified no rows. |
 | 059b | `059b_tax_maps_bucket.sql` | Slice Y1.5 | The private Storage bucket `tax-maps` (10 MB, PDF). |
 | 060 | `060_assessment_clip_audits.sql` | Slice Y2 | Added the table `assessment_clip_audits` (`flag_id` → flags, no action; `idr_id` → idrs, ON DELETE CASCADE; `pre_clip_sf`, `clipped_sf` NUMERIC(10,2); `clip_reason`; `at`), UNIQUE `uq_assessment_clip_audits_flag_idr` (`flag_id`, `idr_id`), CHECKs `chk_assessment_clip_audits_amounts` (both ≥ 0, clipped ≤ pre-clip) and `chk_assessment_clip_audits_reason` (`outside_property_line`), index `idx_assessment_clip_audits_idr`. Modified no rows. |
+| 061 | `061_flag_measurements.sql` | Slice Y3a | Added the tables `flag_measurements` (`pir_id` → pirs; `outer_shape`, `outer_dimensions`, `outer_area` NUMERIC(10,2), `deductions` JSONB `[]`, `needs_remeasure`; `created_by` → users, no action; `updated_by` → users, ON DELETE SET NULL) and `measurement_edits` (shaped as `flag_edits`, on a measurement), and on `flags` `measurement_id` (→ flag_measurements, nullable until 061b), `area_share_fraction` NUMERIC(5,4) default 1.0000 and `pir_flag_no` (unique per page among live flags, `uq_flags_page_pir_flag_no`). Backfilled one solo measurement per flag, live and soft-deleted, of the flag's own shape, dimensions and area (prod: 354, of which 147 soft-deleted); refuses to run if a `computed_quantity` wouldn't fit NUMERIC(10,2) exactly. The code before Y3a runs unchanged after it. |
+| 061b | `061b_flag_measurements_not_null.sql` | Slice Y3a | Run after the Y3a deploy: a solo measurement for any flag added between 061 and the deploy, then `flags.measurement_id` NOT NULL. |
 | 046 | `046_pir_match_lines.sql` | R1h.1a | Created `pir_match_lines` (FK to `pir_pages`, no action; to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`: 28 → 30 FKs to `users`; CHECKs `chk_match_lines_label` and `chk_match_lines_length`; partial unique `pir_match_lines_page_label_live_uq` and `pir_match_lines_page_idx`). No existing row changed. |
 | 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |
