@@ -2,26 +2,42 @@ from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
+from psycopg.types.json import Jsonb
+
 from api.db.runner import run_query
 from api.queries._shared import PAY_ITEM_OF_PROJECT, placeholders, write_values
 from api.queries.flag_edits import flag_edit_rows_cte
+from api.queries.flag_measurements import (
+    REASON_DELETE,
+    REASON_EDIT,
+    REASON_UNDELETE,
+    remesh_ctes,
+    snapshot_intent,
+)
 
-# A flag's net area (Slice Y3a: through its measurement, fm): its part of the measurement's outer area, to the cent,
-# less its non-assessable areas and the features subtracted from it, never below 0. A solo measurement's outer area is
-# the flag's own computed_quantity and its share 1, so this is the flag's shape's area less those, as before Y3a.
-_NET = "GREATEST(round(fm.outer_area * f.area_share_fraction, 2) - naa.quantity - sub.quantity, 0)"
+# A flag's net area (Slice Y3a: through its measurement, fm): its part of the measurement's outer area less the
+# measurement's deductions (ded), to the cent, then, on a solo measurement only, less its own non-assessable areas and
+# the features subtracted from it, never below 0. A solo measurement's outer area is the flag's own computed_quantity,
+# its share 1 and its deductions none, so this is the flag's shape's area less those, as before Y3a. A bundle's
+# deductions are its members' covers (Slice Y3b), so its members' own aren't taken off again.
+_NET = ("GREATEST(round((fm.outer_area - ded.quantity) * f.area_share_fraction, 2)"
+        " - CASE WHEN fm.surveyed_is_assessable IS NULL THEN naa.quantity + sub.quantity ELSE 0 END, 0)")
 # What counts as a flag's quantity, in square feet: its override, or else its net area. Needs QUANTITY_LATERALS.
 FLAG_QUANTITY = f"COALESCE(f.reported_quantity, {_NET})"
 
 
 def quantity_laterals(measurements: str = "icid.flag_measurements") -> str:
     """
-    The joins a flag's quantity reads, for a row source named f: its measurement (fm), its areas (its live ones, and, once it is deleted, those deleted with it, at the same moment) and the live features subtracted from it.
+    The joins a flag's quantity reads, for a row source named f: its measurement (fm) and the measurement's deductions (ded), its areas (its live ones, and, once it is deleted, those deleted with it, at the same moment) and the live features subtracted from it.
     Takes where its measurement is read from: the table, or the name of a CTE of measurements the same statement writes (a statement can't read its own writes from the table).
     Returns the SQL, to follow the FROM clause that defines f.
     """
     return f"""
         JOIN {measurements} fm ON fm.measurement_id = f.measurement_id
+        CROSS JOIN LATERAL (
+            SELECT COALESCE(sum((deduction ->> 'area_sf')::numeric), 0) AS quantity
+            FROM jsonb_array_elements(fm.deductions) deduction
+        ) ded
         CROSS JOIN LATERAL (
             SELECT count(*) AS area_count, COALESCE(sum(na.computed_quantity), 0) AS quantity
             FROM icid.non_assessable_areas na
@@ -100,9 +116,8 @@ def _from(measurements: str = "icid.flag_measurements") -> str:
 
 # _from over the measurements table, for every statement that doesn't write one
 _FROM = _from()
-# Whether a flag's edit changes its solo measurement (fm): its shape, dimensions or area (f, the flag as written)
-_MEASUREMENT_CHANGED = ("(fm.outer_shape, fm.outer_dimensions, fm.outer_area)"
-                        " IS DISTINCT FROM (f.shape, f.dimensions, f.computed_quantity)")
+# _from over the measurements as a statement carrying the remesh leaves them (rm_m, remesh_ctes)
+_FROM_REMESHED = _from("rm_m")
 # The columns a write sets from the request, in the order their values are passed, each with its type (so a NULL
 # parameter is typed, not text)
 _WRITABLE_TYPES = {
@@ -249,29 +264,45 @@ def create_flag(
     return rows[0] if rows else None
 
 
-def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal, editor_uuid: UUID) -> Optional[dict[str, Any]]:
+def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal, editor_uuid: UUID,
+                target_id: Optional[UUID] = None) -> Optional[dict[str, Any]]:
     """
-    Rewrite a flag's writable columns with its merged record, and its computed quantity. Changes nothing when the pay item isn't one of its PIR's project's. A change of surveyed_is_assessable or surveyed_non_assessable_reason adds its flag_edits rows in the same statement (Slice Y1.5), and its solo measurement takes its shape, dimensions and area (Slice Y3a; stamped updated by the editor only when one of them changed).
-    Takes the flag's id, the values keyed by column (every writable column), the area computed from its shape and the editing user's uuid.
+    Rewrite a flag's writable columns with its merged record, and its computed quantity, its measurement following it in the same statement (remesh_ctes, Slice Y3b-1): on a solo measurement its shape, dimensions and area (stamped updated by the editor only when one of them changed, as in Y3a); a change of classification moves it into the bundle given, if still open to it, or out of a bundle it was in. Changes nothing when the pay item isn't one of its PIR's project's. A change of surveyed_is_assessable or surveyed_non_assessable_reason adds its flag_edits rows in the same statement (Slice Y1.5).
+    Takes the flag's id, the values keyed by column (every writable column), the area computed from its shape, the editing user's uuid and the bundle the remesh picked for it to join (None for none).
     Returns the updated flag dict, or None when no flag matches or the pay item is another project's.
     """
     assignments = ",\n                ".join(
         f"{column} = {placeholder}" for column, placeholder in zip(_WRITABLE, _PLACEHOLDERS)
     )
+    # intent names the flag by the UPDATE's own conditions, so the remesh and the write see the same flag
     # old is the flag as it was: an UPDATE's FROM reads the rows before the statement changes them
     sql = (
-        """
-        WITH f AS (
+        f"""
+        WITH intent AS (
+            SELECT flag.id AS flag_id, 'edit'::text AS event, %s::uuid AS target_id, %s::text AS new_thickness,
+                   %s::boolean AS new_assessable, %s::uuid AS new_pay_item, %s::numeric AS new_computed,
+                   %s::text AS new_shape, %s::jsonb AS new_dims, '{REASON_EDIT}'::text AS reason
+            FROM icid.flags flag
+            JOIN icid.pirs pir ON pir.id = flag.pir_id
+            JOIN icid.properties p ON p.id = pir.property_id
+            WHERE flag.id = %s AND {_PAY_ITEM_OF_PROJECT}
+        )"""
+        + remesh_ctes("%s::uuid")
+        + """,
+        f AS (
             UPDATE icid.flags flag
             SET """
         + assignments
         + """,
                 computed_quantity = %s::numeric,
+                measurement_id = rf.measurement_id,
+                area_share_fraction = rf.share,
                 updated_at = now()
             FROM icid.pirs pir
             JOIN icid.properties p ON p.id = pir.property_id
             JOIN icid.flags old ON true
-            WHERE flag.id = %s AND pir.id = flag.pir_id AND old.id = flag.id
+            JOIN rm_flags rf ON true
+            WHERE flag.id = %s AND pir.id = flag.pir_id AND old.id = flag.id AND rf.flag_id = flag.id
               AND """
         + _PAY_ITEM_OF_PROJECT
         + """
@@ -281,45 +312,45 @@ def update_flag(flag_id: UUID, data: dict[str, Any], computed_area: Decimal, edi
             """
         + flag_edit_rows_cte("f")
         + """
-        ),
-        m AS (
-            UPDATE icid.flag_measurements fm
-            SET outer_shape = f.shape, outer_dimensions = f.dimensions, outer_area = f.computed_quantity,
-                updated_at = CASE WHEN """
-        + _MEASUREMENT_CHANGED
-        + """ THEN now() ELSE fm.updated_at END,
-                updated_by = CASE WHEN """
-        + _MEASUREMENT_CHANGED
-        + """ THEN %s::uuid ELSE fm.updated_by END
-            FROM f
-            WHERE fm.measurement_id = f.measurement_id
-            RETURNING fm.*
         )
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
-        + _from("m")
+        + _FROM_REMESHED
         + "\n        CROSS JOIN (SELECT count(*) FROM edits) AS edits_written;"
     )
-    params = (*_values(data), computed_area, flag_id, data.get("pay_item_id"), data.get("pay_item_id"), None,
-              editor_uuid, editor_uuid)
+    dimensions = data.get("dimensions")
+    intent = (target_id, data.get("surveyed_thickness"), data.get("surveyed_is_assessable"), data.get("pay_item_id"),
+              computed_area, data.get("shape"), None if dimensions is None else Jsonb(dimensions), flag_id,
+              data.get("pay_item_id"), data.get("pay_item_id"))
+    params = (*intent, editor_uuid, *_values(data), computed_area, flag_id, data.get("pay_item_id"),
+              data.get("pay_item_id"), None, editor_uuid)
     rows = run_query(sql, params)
     return rows[0] if rows else None
 
 
 def soft_delete_flag(flag_id: UUID, deleted_by_uuid: UUID) -> Optional[dict[str, Any]]:
     """
-    Mark a flag deleted, with when and by whom, and its live non-assessable areas with it (the same moment, so an un-delete brings back those).
+    Mark a flag deleted, with when and by whom, and its live non-assessable areas with it (the same moment, so an un-delete brings back those). An unclaimed flag leaves a bundle it is in for a measurement of its own, in the same statement (remesh_ctes, Slice Y3b-1).
     Takes the flag's id and the uuid of the user deleting it.
     Returns the updated flag dict, or None if no flag matches or it is already deleted.
     """
     sql = (
         """
-        WITH f AS (
-            UPDATE icid.flags
-            SET deleted_at = now(), deleted_by = %s, updated_at = now()
-            WHERE id = %s AND deleted_at IS NULL
-            RETURNING *
+        WITH intent AS (
+            """
+        + snapshot_intent("delete", REASON_DELETE, "SELECT id FROM icid.flags WHERE id = %s AND deleted_at IS NULL")
+        + """
+        )"""
+        + remesh_ctes("%s::uuid")
+        + """,
+        f AS (
+            UPDATE icid.flags flag
+            SET deleted_at = now(), deleted_by = %s, updated_at = now(), measurement_id = rf.measurement_id,
+                area_share_fraction = rf.share
+            FROM rm_flags rf
+            WHERE flag.id = %s AND flag.deleted_at IS NULL AND rf.flag_id = flag.id
+            RETURNING flag.*
         ),
         areas AS (
             UPDATE icid.non_assessable_areas
@@ -330,30 +361,41 @@ def soft_delete_flag(flag_id: UUID, deleted_by_uuid: UUID) -> Optional[dict[str,
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
-        + _FROM
+        + _FROM_REMESHED
         + "\n        CROSS JOIN (SELECT count(*) FROM areas) AS areas_retired;"
     )
-    rows = run_query(sql, (deleted_by_uuid, flag_id, deleted_by_uuid))
+    rows = run_query(sql, (flag_id, deleted_by_uuid, deleted_by_uuid, flag_id, deleted_by_uuid))
     return rows[0] if rows else None
 
 
 def undelete_flag(flag_id: UUID) -> Optional[dict[str, Any]]:
     """
-    Bring a deleted flag back: clear deleted_at and deleted_by, on it and on the non-assessable areas deleted with it. Only a flag on a page that is still live comes back.
+    Bring a deleted flag back: clear deleted_at and deleted_by, on it and on the non-assessable areas deleted with it. Only a flag on a page that is still live comes back. A flag still in a bundle comes back with a measurement of its own (remesh_ctes, Slice Y3b-1), not into the bundle, which may have moved on.
     Takes the flag's id.
     Returns the updated flag dict as the statement wrote it (its areas not yet counted: read it again for them), or None if no flag matches, it isn't deleted, it has no page or its page was replaced.
     """
+    restorable = """SELECT flag.id FROM icid.flags flag
+                    JOIN icid.pir_pages page ON page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL
+                    WHERE flag.id = %s AND flag.deleted_at IS NOT NULL"""
     sql = (
         """
         WITH before AS (
             SELECT id, deleted_at FROM icid.flags WHERE id = %s
         ),
+        intent AS (
+            """
+        + snapshot_intent("undelete", REASON_UNDELETE, restorable)
+        + """
+        )"""
+        + remesh_ctes()
+        + """,
         f AS (
             UPDATE icid.flags flag
-            SET deleted_at = NULL, deleted_by = NULL, updated_at = now()
-            FROM icid.pir_pages page
+            SET deleted_at = NULL, deleted_by = NULL, updated_at = now(), measurement_id = rf.measurement_id,
+                area_share_fraction = rf.share
+            FROM icid.pir_pages page, rm_flags rf
             WHERE flag.id = %s AND flag.deleted_at IS NOT NULL
-              AND page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL
+              AND page.pir_page_id = flag.pir_page_id AND page.deleted_at IS NULL AND rf.flag_id = flag.id
             RETURNING flag.*
         ),
         areas AS (
@@ -366,8 +408,8 @@ def undelete_flag(flag_id: UUID) -> Optional[dict[str, Any]]:
         SELECT"""
         + _FLAG_COLUMNS
         + "\n        FROM f"
-        + _FROM
+        + _FROM_REMESHED
         + "\n        CROSS JOIN (SELECT count(*) FROM areas) AS areas_restored;"
     )
-    rows = run_query(sql, (flag_id, flag_id))
+    rows = run_query(sql, (flag_id, flag_id, flag_id))
     return rows[0] if rows else None

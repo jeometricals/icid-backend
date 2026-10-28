@@ -605,9 +605,18 @@ What a flag's area is measured from (Slice Y3a, migration 061). Since Y3a every 
 measurement**, one flag's own, made by 061's backfill (every flag, live and soft-deleted), by a flag's create and by the
 Smart PIR import, in the flag's own statement, and kept in step by a flag PATCH (its shape, dimensions and area, in the
 same statement). Every reader of a flag's quantity reads it through the measurement (`quantity_laterals` in
-`api/queries/flags.py`): `COALESCE(reported_quantity, GREATEST(round(outer_area x area_share_fraction, 2) - the
-flag's areas - its subtracted features, 0))`, which for a solo measurement is the net of before. Bundles of flags,
-deductions, remeasuring, and the pay item, thickness and assessment on the measurement are Y3b's.
+`api/queries/flags.py`): `COALESCE(reported_quantity, GREATEST(round((outer_area - its deductions) x
+area_share_fraction, 2) - (a solo measurement only) the flag's areas - its subtracted features, 0))`, which for a solo
+measurement is the net of before.
+
+A **bundle** (Slice Y3b, migration 062) measures several abutting flags of one classification on one page, which it
+carries (`pay_item_id`, `surveyed_thickness`, `surveyed_is_assessable`: NULL on a solo measurement, so set exactly on a
+bundle); each member takes `flags.area_share_fraction` of it, by `computed_quantity`, summing to 1.0000. Its
+`deductions` are its members' non-assessable areas and subtracted features of 1 SF or more, `[{type: non_ass_area |
+subtract_feature, area_sf, source_flag_id, source_area_id | source_feature_id}]`, which replace the members' own in the
+formula. Every write of a flag's classification, geometry or existence, and of an area or feature, carries the remesh
+in its statement (`remesh_ctes` in `api/queries/flag_measurements.py`); a bundle with a claimed member is frozen.
+Bundles are formed by Y3b-2's bundle route; until then every measurement is solo.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -620,12 +629,21 @@ deductions, remeasuring, and the pay item, thickness and assessment on the measu
 | `needs_remeasure` | BOOLEAN NOT NULL | Default false; false in Y3a |
 | `created_at`, `updated_at` | TIMESTAMPTZ NOT NULL | `now()`; the backfill copied the flag's |
 | `created_by` | UUID NOT NULL | FK → users, no action: whoever added the flag |
-| `updated_by` | UUID | FK → users, ON DELETE SET NULL: the editor of the last flag PATCH that changed its shape, dimensions or area |
+| `updated_by` | UUID | FK → users, ON DELETE SET NULL: the editor of the last flag PATCH that changed its shape, dimensions or area, or of the write that last remeshed it |
+| `pay_item_id` | UUID | FK → `contract_items.contract_item_id`, ON DELETE SET NULL (migration 062): a bundle's pay item; NULL on a solo measurement |
+| `surveyed_thickness` | TEXT | A bundle's thickness (`4in`, `7in`, `7in_as_4in`); NULL on a solo measurement. Set exactly with `surveyed_is_assessable`, and a solo measurement has no pay item (`chk_flag_measurements_classification`) |
+| `surveyed_is_assessable` | BOOLEAN | A bundle's assessment; NULL on a solo measurement: set means bundled |
+| `retired_at` | TIMESTAMPTZ | When a bundle's last member left (and a solo measurement whose flag joined a bundle); rows are never deleted |
+
+`outer_shape` also takes `component_rectangles` (062): `outer_dimensions` `{"rectangles": [{"L", "W"}, ...]}`, 1 to 3
+rectangles with lengths above 0 (`chk_flag_measurements_component_rectangles`).
 
 ### measurement_edits
 
-Each change of a measurement, shaped as `flag_edits` (Slice Y3a, migration 061). Created empty: nothing writes it in
-Y3a; Y3b's remesh is its first writer.
+Each change of a measurement, shaped as `flag_edits` (Slice Y3a, migration 061). The remesh (Slice Y3b-1) is its first
+writer, with no editor (the system's) and the write's reason: `member_flags[<flag id>]` (`{measurement_id}` before and
+after, on both measurements), `area_share_fraction[<flag id>]`, `outer_area`, `deductions`, `needs_remeasure` and
+`retired_at`.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -1103,6 +1121,7 @@ content as TEXT, linked to a report and a form template).
 | 060 | `060_assessment_clip_audits.sql` | Slice Y2 | Added the table `assessment_clip_audits` (`flag_id` → flags, no action; `idr_id` → idrs, ON DELETE CASCADE; `pre_clip_sf`, `clipped_sf` NUMERIC(10,2); `clip_reason`; `at`), UNIQUE `uq_assessment_clip_audits_flag_idr` (`flag_id`, `idr_id`), CHECKs `chk_assessment_clip_audits_amounts` (both ≥ 0, clipped ≤ pre-clip) and `chk_assessment_clip_audits_reason` (`outside_property_line`), index `idx_assessment_clip_audits_idr`. Modified no rows. |
 | 061 | `061_flag_measurements.sql` | Slice Y3a | Added the tables `flag_measurements` (`pir_id` → pirs; `outer_shape`, `outer_dimensions`, `outer_area` NUMERIC(10,2), `deductions` JSONB `[]`, `needs_remeasure`; `created_by` → users, no action; `updated_by` → users, ON DELETE SET NULL) and `measurement_edits` (shaped as `flag_edits`, on a measurement), and on `flags` `measurement_id` (→ flag_measurements, nullable until 061b), `area_share_fraction` NUMERIC(5,4) default 1.0000 and `pir_flag_no` (unique per page among live flags, `uq_flags_page_pir_flag_no`). Backfilled one solo measurement per flag, live and soft-deleted, of the flag's own shape, dimensions and area (prod: 354, of which 147 soft-deleted); refuses to run if a `computed_quantity` wouldn't fit NUMERIC(10,2) exactly. The code before Y3a runs unchanged after it. |
 | 061b | `061b_flag_measurements_not_null.sql` | Slice Y3a | Run after the Y3a deploy: a solo measurement for any flag added between 061 and the deploy, then `flags.measurement_id` NOT NULL. |
+| 062 | `062_flag_measurement_bundles.sql` | Slice Y3b-1 | Added to `flag_measurements` a bundle's classification (`pay_item_id` → contract_items, ON DELETE SET NULL; `surveyed_thickness`; `surveyed_is_assessable`; `chk_flag_measurements_classification`) and `retired_at`, and widened `outer_shape` to `component_rectangles` (`chk_flag_measurements_component_rectangles`). Additive, no backfill: every measurement stays solo; it refuses to finish if any isn't. Run before the Y3b-1 deploy. |
 | 046 | `046_pir_match_lines.sql` | R1h.1a | Created `pir_match_lines` (FK to `pir_pages`, no action; to `users` for `created_by` and, ON DELETE SET NULL, `deleted_by`: 28 → 30 FKs to `users`; CHECKs `chk_match_lines_label` and `chk_match_lines_length`; partial unique `pir_match_lines_page_label_live_uq` and `pir_match_lines_page_idx`). No existing row changed. |
 | 038 | `038_construction_report_fields.sql` | R1h | Created the enum `icid.compass_point` (`N` `NE` `E` `SE` `S` `SW` `W` `NW`) and added `pirs.north_bearing` (that type) and `pir_annotations.date_notice_issued`, `date_excavated` and `date_constructed` (DATE), all nullable. No existing row changed. |
 | 037 | `037_flag_idr_attribution.sql` | R1f | Added `idrs.task_order_id` (FK to `task_orders`, no action; `idx_idrs_task_order`), `flags.claimed_by_idr_id` (FK to `idrs`, no action; `idx_flags_claimed_by_idr`) and `flags.constructed_on` with CHECK `chk_flags_claim_consistent`, `idx_flags_scope_rollup`, and `quantities.source` (`manual`, the default every existing row got, or `from_flags`; CHECK `chk_quantities_source`). Created `idr_flag_attributions` (PK `(idr_id, flag_id)`, FKs to `idrs` and `flags` ON DELETE CASCADE, to `users` for `set_by` ON DELETE SET NULL: 26 → 27 FKs to `users`). No existing row changed meaning: no flag was constructed. |

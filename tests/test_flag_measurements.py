@@ -22,7 +22,9 @@ from api.queries.quantities import insert_flag_quantities_cte
 ROOT = Path(__file__).resolve().parent.parent
 ID = UUID("6f7a8b9c-0d1e-4f2a-8b3c-4d5e6f7a8b9c")
 MEASURED = "JOIN icid.flag_measurements fm ON fm.measurement_id = f.measurement_id"
-NET = "GREATEST(round(fm.outer_area * f.area_share_fraction, 2) - naa.quantity - sub.quantity, 0)"
+# Slice Y3b-1: less the measurement's deductions (a bundle's), and a solo measurement's flag's own covers only
+NET = ("GREATEST(round((fm.outer_area - ded.quantity) * f.area_share_fraction, 2) - CASE WHEN fm.surveyed_is_assessable "
+       "IS NULL THEN naa.quantity + sub.quantity ELSE 0 END, 0)")
 
 # Each reader, the module whose run_query it calls, and how to call it
 READERS = [
@@ -72,11 +74,12 @@ def test_no_statement_works_a_flag_net_from_its_computed_quantity_any_more():
     ("25.00", "0", "0"), ("25.00", "1.00", "0"), ("12.57", "3.14", "2.5"), ("8.73", "0", "9.00"), ("0.01", "0", "0"),
 ])
 def test_a_solo_measurement_gives_the_net_of_before(area, areas, features):
-    """For a solo measurement (outer_area the flag's computed_quantity, share 1.0000) the formula is the old net, decimal
-    places included, as the statement works it: round(outer x share, 2), less the areas and features, at least 0."""
-    outer, share = Decimal(area), Decimal("1.0000")
-    new = max((outer * share).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) - Decimal(areas) - Decimal(features),
-              Decimal(0))
+    """For a solo measurement (outer_area the flag's computed_quantity, share 1.0000, no deductions) the formula is the
+    old net, decimal places included, as the statement works it: round((outer - 0) x share, 2), less the areas and
+    features together, at least 0."""
+    outer, share, deducted = Decimal(area), Decimal("1.0000"), Decimal(0)
+    new = max(((outer - deducted) * share).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+              - (Decimal(areas) + Decimal(features)), Decimal(0))
     old = max(Decimal(area) - Decimal(areas) - Decimal(features), Decimal(0))
     assert new == old and str(new) == str(old)
 

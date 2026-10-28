@@ -12,6 +12,7 @@ from api.queries.flags import (
     undelete_flag,
     update_flag,
 )
+from api.queries.flag_measurements import list_remesh_neighbours
 from api.queries.pir_pages import list_pages_for_pir
 from api.schemas.auth import UserOut
 from api.schemas.flag import FlagCreate, FlagListResponse, FlagOut, FlagResponse, FlagUpdate
@@ -25,6 +26,7 @@ from api.services.auth import (
 )
 from api.queries.contract_items import get_project_pay_item
 from api.services.flag_area import compute_area
+from api.services.measurement_bundles import classification, join_target
 from api.services.pay_item_units import FLAG_UNITS, flag_unit
 from api.v1._shared import (
     PAGE_CHAIN,
@@ -218,7 +220,7 @@ def update_flag_record(
     flag_id: UUID, body: FlagUpdate, found: dict = Depends(_writable_flag), user: UserOut = Depends(current_user)
 ) -> FlagResponse:
     """
-    Change some of a flag. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted flag, or a flag of a soft-deleted page, PIR or property. The body is merged over the stored flag and the whole is checked as a new flag is; the area is computed again. A null clears sketch_x, sketch_y, surveyed_non_assessable_reason, pay_item_id or quantity_delta_reason; on reported_quantity it reverts to the computed quantity and clears quantity_delta_reason; on anything else it counts as not sent.
+    Change some of a flag. For a user on its project, or an admin; not a demo user. Only an admin changes a soft-deleted flag, or a flag of a soft-deleted page, PIR or property. The body is merged over the stored flag and the whole is checked as a new flag is; the area is computed again. A null clears sketch_x, sketch_y, surveyed_non_assessable_reason, pay_item_id or quantity_delta_reason; on reported_quantity it reverts to the computed quantity and clears quantity_delta_reason; on anything else it counts as not sent. Its measurement follows it in the same statement (Slice Y3b-1); a change of its thickness, assessment or pay item reads its page's flags first, for a bundle it joins.
     Takes the flag's id as a path parameter, the fields to change in the body, the flag (loaded by _writable_flag) and the user.
     Returns a FlagResponse with the flag as it now is; raises 400 when nothing is sent, the flag or its page, PIR or property is deleted (a user who isn't an admin) or the pay item is another project's, 403 for a demo user or a user who isn't on its project, 404 for an unknown flag and 422 when the merged flag breaks a rule (a new shape needs its dimensions).
     """
@@ -234,7 +236,16 @@ def update_flag_record(
     merged = validated(FlagCreate, {**{field: found[field] for field in FlagCreate.model_fields}, **changes})
     _check_flag_pay_item(found["project_id"], merged.pay_item_id, new=merged.pay_item_id != found["pay_item_id"])
 
-    row = update_flag(flag_id, merged.model_dump(), compute_area(merged.shape, merged.dimensions), user.uuid)
+    values = merged.model_dump()
+    target = None
+    if classification(values) != classification(found) and found["pir_page_id"] is not None:
+        # A new classification: the bundle it joins, if exactly one is open to it (Slice Y3b-1)
+        neighbours = list_remesh_neighbours(found["pir_page_id"])
+        if neighbours is None:
+            raise HTTPException(status_code=500, detail="Failed to read the page's flags")
+        target = join_target({**values, "id": flag_id}, neighbours)
+
+    row = update_flag(flag_id, values, compute_area(merged.shape, merged.dimensions), user.uuid, target)
 
     if row is None:
         # The pay item was deleted or moved between the check and the statement

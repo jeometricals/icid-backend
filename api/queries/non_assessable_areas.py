@@ -4,6 +4,7 @@ from uuid import UUID
 
 from api.db.runner import run_query
 from api.queries._shared import placeholders, write_values
+from api.queries.flag_measurements import REASON_COVERS, remesh_ctes, snapshot_intent
 
 # A non-assessable area as every function here returns it: its own columns, and its flag's page, PIR, property,
 # project and deleted states (what the routes check before a write). Read from a row source named na.
@@ -27,15 +28,33 @@ _WRITABLE_TYPES = {
 WRITABLE_TYPES = _WRITABLE_TYPES
 _WRITABLE = tuple(_WRITABLE_TYPES)
 _PLACEHOLDERS = placeholders(_WRITABLE_TYPES)
+# The areas a statement writes (na) as the remesh reads covers, and their flags' measurements resynced with them (Slice
+# Y3b-1: a bundle's deductions are its members' covers)
+_RESYNC = (
+    """,
+        intent AS (
+            """
+    + snapshot_intent("covers", REASON_COVERS, "SELECT flag_id FROM na")
+    + """
+        ),
+        rm_written AS (
+            SELECT flag_id, 'non_ass_area'::text AS kind, non_assessable_area_id AS source_id,
+                   computed_quantity AS area_sf, deleted_at IS NULL AS live
+            FROM na
+        )"""
+    + remesh_ctes(written="rm_written")
+)
 
 
 def _written(cte: str) -> str:
     """
-    A statement that writes areas in a CTE named na and returns them as every function here does.
+    A statement that writes areas in a CTE named na and returns them as every function here does; their flags'
+    measurements are resynced in it (_RESYNC).
     Takes the CTE's body.
     Returns the SQL.
     """
-    return "\n        WITH na AS (" + cte + "\n        )\n        SELECT" + _AREA_COLUMNS + "\n        FROM na" + _FROM + ";"
+    return ("\n        WITH na AS (" + cte + "\n        )" + _RESYNC + "\n        SELECT" + _AREA_COLUMNS + "\n        FROM na"
+            + _FROM + ";")
 
 
 def list_areas_for_flag(flag_id: UUID) -> Optional[list[dict[str, Any]]]:

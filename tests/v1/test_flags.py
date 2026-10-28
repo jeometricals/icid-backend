@@ -21,6 +21,7 @@ PIRS = "api.queries.pirs.run_query"
 PROPS = "api.queries.properties.run_query"
 PROJECTS = "api.queries.projects.run_query"
 CONTRACT = "api.queries.contract_items.run_query"
+MEASUREMENTS = "api.queries.flag_measurements.run_query"
 
 ADMIN_ID = ADMIN_USER_ROW["uuid"]
 MEMBER_ROW = {**ADMIN_USER_ROW, "uuid": UUID("b0000000-0000-4000-8000-000000000002"), "role": None}
@@ -70,6 +71,8 @@ ON_PROJECT = [{"?column?": 1}]
 # Where a write's parameters sit: the writable columns, then the computed area, then (on create) the creator
 AREA = len(_WRITABLE)
 CREATOR = AREA + 1
+# Where an update's writable values start: after the remesh's intent (10 values) and its editor (Slice Y3b-1)
+UPDATE_OFFSET = 11
 
 
 def written(run, call: int = -1) -> dict:
@@ -78,9 +81,11 @@ def written(run, call: int = -1) -> dict:
     Takes the run_query mock and which of its calls (the last by default).
     Returns them keyed by column, with the computed area under computed_quantity.
     """
-    params = run.call_args_list[call].args[1]
-    values = dict(zip(_WRITABLE, params))
-    values["computed_quantity"] = params[AREA]
+    sql, params = run.call_args_list[call].args
+    # An update's values follow the remesh's intent and its editor (Slice Y3b-1)
+    offset = UPDATE_OFFSET if "WITH intent AS" in sql else 0
+    values = dict(zip(_WRITABLE, params[offset:]))
+    values["computed_quantity"] = params[offset + AREA]
     return values
 
 
@@ -138,7 +143,7 @@ class TestCreateFlag:
         assert "WHERE page.pir_page_id = %s AND page.deleted_at IS NULL" in one_line
         assert run.call_args.args[1][CREATOR + 1] == PAGE_ID
         assert "ci.contract_item_id = %s::uuid AND ci.project_id = p.project_id" in one_line
-        assert "COALESCE(f.reported_quantity, GREATEST(round(fm.outer_area * f.area_share_fraction, 2) - naa.quantity - sub.quantity, 0)) AS quantity" in one_line
+        assert "COALESCE(f.reported_quantity, GREATEST(round((fm.outer_area - ded.quantity) * f.area_share_fraction, 2) - CASE WHEN fm.surveyed_is_assessable IS NULL THEN naa.quantity + sub.quantity ELSE 0 END, 0)) AS quantity" in one_line
         assert "%s::real" in one_line and "%s::jsonb" in one_line  # a NULL parameter is typed, not text
 
     def test_the_flag_comes_with_its_solo_measurement_in_the_same_statement(self, admin_client):
@@ -400,7 +405,7 @@ class TestUpdateFlag:
                 "old.surveyed_non_assessable_reason AS old_reason") in one_line
         assert "INSERT INTO icid.flag_edits (flag_id, field_path, old_value, new_value, reason, editor_uuid)" in one_line
         assert "WHERE v.old_value IS DISTINCT FROM v.new_value" in one_line  # only the fields that changed
-        assert params[-3:] == (None, ADMIN_USER_ROW["uuid"], ADMIN_USER_ROW["uuid"])  # no reason words; the editor
+        assert params[-2:] == (None, ADMIN_USER_ROW["uuid"])  # no reason words; the editor
 
     def test_a_patch_moves_the_solo_measurement_with_the_flag(self, admin_client):
         """Slice Y3a: the same statement gives the flag's measurement its shape, dimensions and area as written,
@@ -411,13 +416,18 @@ class TestUpdateFlag:
         sql, params = run.call_args.args
         one_line = " ".join(sql.split())
         changed = ("(fm.outer_shape, fm.outer_dimensions, fm.outer_area) IS DISTINCT FROM "
-                   "(f.shape, f.dimensions, f.computed_quantity)")
-        assert ("m AS ( UPDATE icid.flag_measurements fm SET outer_shape = f.shape, outer_dimensions = f.dimensions, "
-                f"outer_area = f.computed_quantity, updated_at = CASE WHEN {changed} THEN now() ELSE fm.updated_at END, "
-                f"updated_by = CASE WHEN {changed} THEN %s::uuid ELSE fm.updated_by END FROM f "
-                "WHERE fm.measurement_id = f.measurement_id RETURNING fm.* )") in one_line
-        assert "JOIN m fm ON fm.measurement_id = f.measurement_id" in one_line
-        assert written(run)["computed_quantity"] == Decimal("24.00") and params[-1] == ADMIN_USER_ROW["uuid"]
+                   "(s.new_shape, s.new_dims, s.new_computed)")
+        # Slice Y3b-1: the remesh carries it, a solo measurement staying with its flag as in Y3a
+        assert ("rm_solo AS ( UPDATE icid.flag_measurements fm SET outer_shape = CASE WHEN s.action = 'stay' "
+                "THEN s.new_shape ELSE fm.outer_shape END") in one_line
+        assert (f"updated_by = CASE WHEN s.action = 'join' OR {changed} THEN (SELECT uuid FROM rm_editor) "
+                "ELSE fm.updated_by END") in one_line
+        assert "JOIN rm_m fm ON fm.measurement_id = f.measurement_id" in one_line
+        assert "measurement_id = rf.measurement_id, area_share_fraction = rf.share" in one_line
+        # the intent: no bundle to join, the new area, shape and dimensions; then the editor
+        assert params[0] is None and params[4] == Decimal("24.00") and params[5] == "rectangle"
+        assert params[6].obj == {"L": 6.0, "W": 4.0} and params[10] == ADMIN_USER_ROW["uuid"]
+        assert written(run)["computed_quantity"] == Decimal("24.00")
 
     def test_a_pay_item_of_another_project_is_400(self, admin_client):
         with patch(FLAGS, return_value=[FLAG_ROW]) as run, patch(CONTRACT, return_value=[]):
@@ -485,7 +495,7 @@ class TestSoftDeleteAndUndeleteFlag:
         delete_sql, undelete_sql = (call.args[0] for call in run.call_args_list)
         assert "SET deleted_at = now(), deleted_by = %s" in delete_sql and "deleted_at IS NULL" in delete_sql
         assert "SET deleted_at = NULL, deleted_by = NULL" in undelete_sql
-        assert run.call_args_list[0].args[1] == (ADMIN_ID, FLAG_ID, ADMIN_ID)
+        assert run.call_args_list[0].args[1] == (FLAG_ID, ADMIN_ID, ADMIN_ID, FLAG_ID, ADMIN_ID)
 
     def test_deleting_it_again_changes_nothing(self, admin_client):
         with patch(FLAGS, return_value=[DELETED_ROW]) as run:
@@ -573,7 +583,7 @@ class TestMemberDelete:
         assert response.status_code == 204 and response.content == b""
         sql, params = run.call_args.args
         assert "SET deleted_at = now(), deleted_by = %s" in sql and "DELETE" not in sql
-        assert params == (MEMBER_ID, FLAG_ID, MEMBER_ID)
+        assert params == (FLAG_ID, MEMBER_ID, MEMBER_ID, FLAG_ID, MEMBER_ID)
 
     def test_deleting_it_again_changes_nothing(self, admin_client):
         with patch(FLAGS, return_value=[DELETED_ROW]) as run:
@@ -657,6 +667,47 @@ class TestDefectCodesAndReasons:
         assert written(run)["defect_codes"] == ["2"]
 
 
+class TestRemesh:
+    """Slice Y3b-1: a PATCH that changes a flag's classification reads its page's flags for the one bundle it joins,
+    and hands the pick to the statement, which checks it again."""
+
+    PLACED = {**FLAG_ROW, "sketch_x": 400.0, "sketch_y": 300.0}
+    ME = {**PLACED, "measurement_id": UUID("a1000000-0000-4000-8000-000000000001"), "scale_px_per_ft": Decimal("16"),
+          "bundled": False, "frozen": False}
+    BUNDLE_ID = UUID("b1000000-0000-4000-8000-000000000001")
+    # 7in, 80 px (5 ft) to the right: it shares the flag's right edge
+    NEIGHBOUR = {**ME, "id": UUID("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0e"), "sketch_x": 480.0, "surveyed_thickness": "7in",
+                 "measurement_id": BUNDLE_ID, "bundled": True}
+
+    def test_a_new_classification_joins_the_one_bundle_open_to_it(self, admin_client):
+        with patch(FLAGS, side_effect=[[self.PLACED], [FLAG_ROW]]) as run, \
+                patch(MEASUREMENTS, return_value=[self.ME, self.NEIGHBOUR]) as read:
+            response = admin_client.patch(URL, json={"surveyed_thickness": "7in"})
+        assert response.status_code == 200
+        assert read.call_args.args[1] == (PAGE_ID,)
+        params = run.call_args.args[1]
+        assert params[0] == self.BUNDLE_ID and params[1] == "7in"  # the pick, and the new classification
+
+    def test_none_open_and_it_goes_solo(self, admin_client):
+        with patch(FLAGS, side_effect=[[self.PLACED], [FLAG_ROW]]) as run, \
+                patch(MEASUREMENTS, return_value=[self.ME, {**self.NEIGHBOUR, "frozen": True}]):
+            admin_client.patch(URL, json={"surveyed_thickness": "7in"})
+        assert run.call_args.args[1][0] is None
+
+    def test_the_same_classification_reads_nothing(self, admin_client):
+        with patch(FLAGS, side_effect=[[self.PLACED], [FLAG_ROW]]) as run, patch(MEASUREMENTS) as read:
+            admin_client.patch(URL, json={"dimensions": {"L": 6, "W": 4}, "surveyed_non_assessable_reason": None})
+        read.assert_not_called()
+        assert run.call_args.args[1][0] is None
+
+    def test_a_failed_read_is_500_and_writes_nothing(self, admin_client):
+        with patch(FLAGS, side_effect=[[self.PLACED]]) as run, patch(MEASUREMENTS, return_value=None):
+            response = admin_client.patch(URL, json={"pay_item_id": None, "surveyed_is_assessable": False,
+                                                     "surveyed_non_assessable_reason": "tree"})
+        assert (response.status_code, response.json()["detail"]) == (500, "Failed to read the page's flags")
+        assert run.call_count == 1
+
+
 class TestNetQuantity:
     def test_a_flag_carries_its_areas_and_subtracted_features(self, admin_client):
         row = {**FLAG_ROW, "non_assessable_areas_count": 2, "non_assessable_quantity": Decimal("5.00"),
@@ -670,7 +721,7 @@ class TestNetQuantity:
         with patch(FLAGS, return_value=[]) as run:
             list_flags(PIR_ID)
         one_line = " ".join(run.call_args.args[0].split())
-        assert "GREATEST(round(fm.outer_area * f.area_share_fraction, 2) - naa.quantity - sub.quantity, 0) AS net_quantity" in one_line
+        assert "GREATEST(round((fm.outer_area - ded.quantity) * f.area_share_fraction, 2) - CASE WHEN fm.surveyed_is_assessable IS NULL THEN naa.quantity + sub.quantity ELSE 0 END, 0) AS net_quantity" in one_line
         # Slice Y3a: through the flag's measurement, which every flag has
         assert "JOIN icid.flag_measurements fm ON fm.measurement_id = f.measurement_id" in one_line
         # an area counts while live, and once its flag is deleted, if it went with the flag
@@ -695,7 +746,7 @@ class TestAreasGoWithTheirFlag:
         assert "WITH before AS ( SELECT id, deleted_at FROM icid.flags WHERE id = %s )" in one_line
         assert "na.flag_id = before.id AND na.deleted_at = before.deleted_at" in one_line
         assert "WHERE before.id IN (SELECT id FROM f)" in one_line
-        assert run.call_args.args[1] == (FLAG_ID, FLAG_ID)
+        assert run.call_args.args[1] == (FLAG_ID, FLAG_ID, FLAG_ID)
 
     def test_the_restored_flag_is_read_again_for_its_areas(self, admin_client):
         restored = {**FLAG_ROW, "non_assessable_areas_count": 1}
