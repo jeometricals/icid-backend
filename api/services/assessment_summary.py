@@ -8,8 +8,13 @@ Each flag is measured exactly as the Construction Report measures it (constructi
 property's row adds up to its PDFs. A flag's day is its property's Date Constructed (page 1's title block), or the
 day its IDR was approved when that isn't typed (counted in the tab's footer); its month is that day's. 7" assessed as
 4" counts in the 4" columns at the 4" rate, noted in Remarks. Values are written whole; the cells show two decimals.
+
+The Assessment Summary polish (ML1a-c, ML4b): the monthly workbook has a tab for every month of its range, an empty one
+a shell; both workbooks can be narrowed to a task order's properties, come as CSV too, and carry a footer on every tab
+(who compiled it and when, the project's Project Engineer, and that only approved IDRs count).
 """
 
+import csv
 import io
 import re
 from dataclasses import dataclass, field
@@ -57,6 +62,10 @@ NO_ACTIVITY = "No activity"
 EMPTY_PROJECT = "No approved IDRs in this project yet."
 EMPTY_RANGE = "No approved IDRs in the selected range."
 EMPTY_VIEW = "No constructed sites in this view."
+CSV = "text/csv; charset=utf-8"
+# A tab's footer (ML4b): the Assessment Summary reads only flags approved IDRs claimed
+APPROVED_ONLY = "Approved IDRs only"
+NOT_ASSIGNED = "not assigned"
 # The figures a row (and a totals row) sums: square feet, and the amounts, which are None without a rate
 SF_FIELDS = ("four_assessable", "four_non_assessable", "four_total", "seven_assessable", "seven_non_assessable",
              "seven_total", "outside_pl")
@@ -189,6 +198,55 @@ def _rows_by(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]], f
     return list(rows.items())
 
 
+@dataclass
+class SummaryFooter:
+    """Who compiled a download and when, and the project's Project Engineers (its REs), for every tab's footer (ML4b)."""
+
+    compiled_by: str
+    day: date
+    engineers: list[str] = field(default_factory=list)
+
+    def lines(self) -> list[str]:
+        """
+        The footer's lines.
+        Takes nothing.
+        Returns 'Compiled by: ...', 'Date: YYYY-MM-DD', 'Project Engineer: ...' (the names, comma-separated, else 'not assigned') and 'Approved IDRs only'.
+        """
+        return [f"Compiled by: {self.compiled_by}", f"Date: {self.day.isoformat()}",
+                f"Project Engineer: {', '.join(self.engineers) or NOT_ASSIGNED}", APPROVED_ONLY]
+
+
+def person_name(row: dict[str, Any]) -> str:
+    """
+    A user's name as the footer prints it: first and last name, else the email.
+    Takes a row with first_name, last_name and email.
+    Returns the name.
+    """
+    return " ".join(part for part in (row.get("first_name"), row.get("last_name")) if part) or row.get("email") or ""
+
+
+def project_engineers(roles: list[dict[str, Any]]) -> list[str]:
+    """
+    The project's Project Engineers: whoever holds its RE role, each once, in the roles' order.
+    Takes the project's roles (list_project_roles).
+    Returns their names.
+    """
+    names: list[str] = []
+    for row in roles:
+        if row.get("role") == "re" and person_name(row) not in names:
+            names.append(person_name(row))
+    return names
+
+
+def flags_on_properties(flags: list[dict[str, Any]], property_ids: Optional[set[UUID]]) -> list[dict[str, Any]]:
+    """
+    Keep the flags of some properties (a task order's bundle, ML1b).
+    Takes the flags (list_assessment_flags) and the properties' ids (None: all).
+    Returns the flags kept, in order.
+    """
+    return flags if property_ids is None else [flag for flag in flags if flag["property_id"] in property_ids]
+
+
 def _month_end(month: Optional[date]) -> Optional[date]:
     """
     A month's last day.
@@ -213,6 +271,34 @@ def summary_months(flags: list[dict[str, Any]], rates: dict[str, Optional[Decima
     for (month, _), row in sorted(rows, key=lambda item: (item[0][0], item[1].address.lower())):
         months.setdefault(month, []).append(row)
     return months
+
+
+def _next_month(month: date) -> date:
+    """
+    The month after one.
+    Takes a month's first day.
+    Returns the next month's first day.
+    """
+    return date(month.year + month.month // 12, month.month % 12 + 1, 1)
+
+
+def every_month(months: dict[date, list[SummaryRow]], first: Optional[date] = None,
+                last: Optional[date] = None) -> dict[date, list[SummaryRow]]:
+    """
+    Give the monthly workbook a tab for every month of its range (ML1a): from the month asked for, else the first with rows, to the month asked for, else the last with rows; a month without rows gets none (an empty tab).
+    Takes the months with rows (summary_months) and the months asked for (first and last, each a month's first day; None: open).
+    Returns {month: rows} for every month of the range, in order; {} when neither end is known (no range and no rows).
+    """
+    start = first or (min(months) if months else last)
+    end = last or (max(months) if months else first)
+    if start is None or end is None:
+        return {}
+    filled: dict[date, list[SummaryRow]] = {}
+    month = start
+    while month <= end:
+        filled[month] = months.get(month, [])
+        month = _next_month(month)
+    return filled
 
 
 def summary_sites(flags: list[dict[str, Any]], rates: dict[str, Optional[Decimal]], first: Optional[date] = None,
@@ -369,10 +455,36 @@ def _write_row(sheet: Worksheet, row_number: int, values: list[Any], bold: bool 
             cell.fill = TOTALS_FILL
 
 
-def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str, rows: list[SummaryRow]) -> None:
+def _footer(sheet: Worksheet, first_row: int, footer: Optional[SummaryFooter]) -> None:
     """
-    Add a tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many, and when any row has a part outside the property line, a note saying what that column is (Slice Y2). When any row takes a measurement waiting to be re-measured (Slice Y3b-2), a banner across the tab above the column titles and a fourteenth column marking those rows; otherwise neither, and the tab is as before.
-    Takes the workbook, the project row, the tab's name and label, and its rows (at least one).
+    Write a tab's footer (ML4b), a line a row from first_row down, in column A: Compiled by, Date, Project Engineer and Approved IDRs only.
+    Takes the sheet, the row it starts on and the footer (None: none).
+    Returns nothing.
+    """
+    if footer is None:
+        return
+    for offset, text in enumerate(footer.lines()):
+        sheet.cell(first_row + offset, 1, text).font = Font(bold=offset == 0)
+
+
+def _empty_total(attribute: str, project: dict[str, Any]) -> Optional[Decimal]:
+    """
+    A figure of an empty month's totals row (ML1a): 0 square feet, and $0 for an amount whose rate is set.
+    Takes the attribute and the project row (its rates).
+    Returns 0, or None for an amount without a rate.
+    """
+    if attribute in SF_FIELDS:
+        return ZERO
+    rates = {"four_amount": [project.get("cost_per_sf_4in")], "seven_amount": [project.get("cost_per_sf_7in")],
+             "grand_total": [project.get("cost_per_sf_4in"), project.get("cost_per_sf_7in")]}[attribute]
+    return ZERO if any(rate is not None for rate in rates) else None
+
+
+def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str, rows: list[SummaryRow],
+              footer: Optional[SummaryFooter] = None) -> None:
+    """
+    Add a tab: the header, a row per property, the totals row and, when any row went by its IDR's approval date, a note saying how many, and when any row has a part outside the property line, a note saying what that column is (Slice Y2). When any row takes a measurement waiting to be re-measured (Slice Y3b-2), a banner across the tab above the column titles and a fourteenth column marking those rows; otherwise neither. A month without rows (ML1a) is the column titles and a totals row of 0. The footer (ML4b) follows a blank row.
+    Takes the workbook, the project row, the tab's name and label, its rows and the footer (None: none).
     Returns nothing.
     """
     sheet = workbook.create_sheet(name)
@@ -401,10 +513,15 @@ def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str
         ] + ([PENDING if row.remeasure_pending else None] if pending else []))
 
     totals_row = first_row + len(rows)
+
+    def summed(attribute: str) -> Optional[Decimal]:
+        """A totals-row figure: the rows' sum, or an empty month's 0 (_empty_total)."""
+        return total(rows, attribute) if rows else _empty_total(attribute, project)
+
     _write_row(sheet, totals_row, [
-        "Totals", None, total(rows, "four_assessable"), total(rows, "four_non_assessable"), total(rows, "four_total"),
-        total(rows, "four_amount"), total(rows, "seven_assessable"), total(rows, "seven_non_assessable"),
-        total(rows, "seven_total"), total(rows, "seven_amount"), total(rows, "grand_total"), total(rows, "outside_pl"),
+        "Totals", None, summed("four_assessable"), summed("four_non_assessable"), summed("four_total"),
+        summed("four_amount"), summed("seven_assessable"), summed("seven_non_assessable"),
+        summed("seven_total"), summed("seven_amount"), summed("grand_total"), summed("outside_pl"),
         None,
     ] + ([PENDING] if pending else []), bold=True)
     notes = []
@@ -416,18 +533,21 @@ def _rows_tab(workbook: Workbook, project: dict[str, Any], name: str, label: str
         notes.append(OUTSIDE_PL_NOTE)
     for offset, text in enumerate(notes):
         sheet.cell(totals_row + 2 + offset, 1, text).font = Font(italic=True)
+    _footer(sheet, totals_row + 2 + len(notes) + (1 if notes else 0), footer)
 
 
-def _empty_tab(workbook: Workbook, project: dict[str, Any], name: str, message: str) -> None:
+def _empty_tab(workbook: Workbook, project: dict[str, Any], name: str, message: str,
+               footer: Optional[SummaryFooter] = None) -> None:
     """
-    Add a tab with the header and a line saying why there are no rows.
-    Takes the workbook, the project row, the tab's name (also its label) and the line.
+    Add a tab with the header and a line saying why there are no rows, then the footer (ML4b) after a blank row.
+    Takes the workbook, the project row, the tab's name (also its label), the line and the footer (None: none).
     Returns nothing.
     """
     sheet = workbook.create_sheet(name)
     _header(sheet, project, name)
     sheet["A4"] = message
     sheet["A4"].font = Font(italic=True)
+    _footer(sheet, 6, footer)
 
 
 def _saved(workbook: Workbook) -> bytes:
@@ -442,48 +562,111 @@ def _saved(workbook: Workbook) -> bytes:
 
 
 def build_workbook(project: dict[str, Any], months: dict[date, list[SummaryRow]], filtered: bool,
-                   total_rows: list[SummaryRow], total_label: str = PROJECT_TOTAL) -> bytes:
+                   total_rows: list[SummaryRow], total_label: str = PROJECT_TOTAL,
+                   footer: Optional[SummaryFooter] = None) -> bytes:
     """
-    Build the Assessment Summary workbook: one tab per month with rows (named 'Nov 2026'), or a single 'No activity' tab saying why there are none; then, always last, the Project Total tab (Slice Y3b-2): the same properties summed over the same months, or the same line saying why there are none.
-    Takes the project row, the months (summary_months), whether a month range was asked for, the Project Total's rows (summary_project_total, over the same months) and its label (project_total_label).
+    Build the Assessment Summary workbook: one tab per month (named 'Nov 2026'; every month of its range, ML1a, one without rows an empty tab), or a single 'No activity' tab saying why there are none; then, always last, the Project Total tab (Slice Y3b-2): the same properties summed over the same months, or the same line saying why there are none. Every tab ends with the footer (ML4b).
+    Takes the project row, the months (every_month over summary_months), whether a month range was asked for, the Project Total's rows (summary_project_total, over the same months), its label (project_total_label) and the footer (None: none).
     Returns the .xlsx file's bytes.
     """
     workbook = Workbook()
     workbook.remove(workbook.active)
     for month, rows in months.items():
-        _rows_tab(workbook, project, month.strftime("%b %Y"), month.strftime("%B %Y"), rows)
+        _rows_tab(workbook, project, month.strftime("%b %Y"), month.strftime("%B %Y"), rows, footer)
     empty = EMPTY_RANGE if filtered else EMPTY_PROJECT
     if not months:
-        _empty_tab(workbook, project, NO_ACTIVITY, empty)
+        _empty_tab(workbook, project, NO_ACTIVITY, empty, footer)
     if total_rows:
-        _rows_tab(workbook, project, PROJECT_TOTAL, total_label, total_rows)
+        _rows_tab(workbook, project, PROJECT_TOTAL, total_label, total_rows, footer)
     else:
-        _empty_tab(workbook, project, PROJECT_TOTAL, empty)
+        _empty_tab(workbook, project, PROJECT_TOTAL, empty, footer)
     return _saved(workbook)
 
 
 def build_tailored_workbook(project: dict[str, Any], rows: list[SummaryRow], first: Optional[date],
-                            last: Optional[date]) -> bytes:
+                            last: Optional[date], footer: Optional[SummaryFooter] = None) -> bytes:
     """
-    Build the tailored download: the rows of the page's view on one tab named for its range of days.
-    Takes the project row, the rows (summary_sites) and the range (first and last; None: open).
+    Build the tailored download: the rows of the page's view on one tab named for its range of days, ending with the footer (ML4b).
+    Takes the project row, the rows (summary_sites), the range (first and last; None: open) and the footer (None: none).
     Returns the .xlsx file's bytes; the tab says so when there are no rows.
     """
     workbook = Workbook()
     workbook.remove(workbook.active)
     name = range_label(first, last)
     if rows:
-        _rows_tab(workbook, project, name, name, rows)
+        _rows_tab(workbook, project, name, name, rows, footer)
     else:
-        _empty_tab(workbook, project, name, EMPTY_VIEW)
+        _empty_tab(workbook, project, name, EMPTY_VIEW, footer)
     return _saved(workbook)
 
 
-def summary_filename(project_id: str, now: Optional[datetime] = None, tailored: bool = False) -> str:
+# ---------------------------------------------------------------------------------------------------------------------
+# The CSVs (ML1c): the workbooks' rows, flat, for sorting and pivoting; no totals, notes or footer
+# ---------------------------------------------------------------------------------------------------------------------
+
+# Remeasure Pending always present, so the column count never changes
+CSV_COLUMNS = COLUMNS + (REMEASURE_COLUMN,)
+_CSV_FIGURES = ("four_assessable", "four_non_assessable", "four_total", "four_amount", "seven_assessable",
+                "seven_non_assessable", "seven_total", "seven_amount", "grand_total", "outside_pl")
+
+
+def _csv_number(value: Optional[Decimal]) -> str:
     """
-    The workbook's file name: the project and today's date in New York.
-    Takes the project id, for tests the moment it is (now, UTC, by default), and whether it is the tailored download.
-    Returns '<project_id>_assessment_summary_<YYYY-MM-DD>.xlsx', or '..._assessment_summary_tailored_<YYYY-MM-DD>.xlsx'.
+    A figure as the CSVs write it: to the cent, halves up, without separators.
+    Takes the figure (None: an amount without a rate).
+    Returns the text; '' for None.
+    """
+    return "" if value is None else f"{money(value):.2f}"
+
+
+def _csv_values(row: SummaryRow) -> list[str]:
+    """
+    One row's values for a CSV: the workbook's thirteen columns and Remeasure Pending ('Yes' or '').
+    Takes the row.
+    Returns the values as text.
+    """
+    return [row.address, row.community_board or "", *(_csv_number(getattr(row, name)) for name in _CSV_FIGURES),
+            "; ".join(row.remarks), "Yes" if row.remeasure_pending else ""]
+
+
+def _csv_bytes(header: list[str], lines: list[list[str]]) -> bytes:
+    """
+    Write a CSV: UTF-8 with a byte-order mark (so Excel reads its characters), CRLF line ends.
+    Takes the header and the lines.
+    Returns the file's bytes.
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(header)
+    writer.writerows(lines)
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def monthly_csv(months: dict[date, list[SummaryRow]]) -> bytes:
+    """
+    The monthly workbook as one CSV: a row per month and property, led by its Month (YYYY-MM); an empty month has none.
+    Takes the months (as build_workbook takes them).
+    Returns the file's bytes (the header alone when there are no rows).
+    """
+    return _csv_bytes(["Month", *CSV_COLUMNS],
+                      [[month.strftime("%Y-%m"), *_csv_values(row)] for month, rows in months.items() for row in rows])
+
+
+def sites_csv(rows: list[SummaryRow]) -> bytes:
+    """
+    The tailored workbook as a CSV: a row per site over its range of days.
+    Takes the rows (summary_sites).
+    Returns the file's bytes (the header alone when there are no rows).
+    """
+    return _csv_bytes(list(CSV_COLUMNS), [_csv_values(row) for row in rows])
+
+
+def summary_filename(project_id: str, now: Optional[datetime] = None, tailored: bool = False,
+                     extension: str = "xlsx") -> str:
+    """
+    The download's file name: the project and today's date in New York.
+    Takes the project id, for tests the moment it is (now, UTC, by default), whether it is the tailored download and its extension (xlsx or csv).
+    Returns '<project_id>_assessment_summary_<YYYY-MM-DD>.xlsx', '..._assessment_summary_tailored_<YYYY-MM-DD>.csv' and so on.
     """
     today = signed_date(now or datetime.now(timezone.utc))
-    return f"{project_id}_assessment_summary_{'tailored_' if tailored else ''}{today.isoformat()}.xlsx"
+    return f"{project_id}_assessment_summary_{'tailored_' if tailored else ''}{today.isoformat()}.{extension}"

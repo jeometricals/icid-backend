@@ -43,7 +43,7 @@ auth routes:
   edit, password, soft delete, un-delete, permanent delete); `/v1/admin/projects` (list, create, assessment rates,
   pay items with their CSV import)
 - **Users and signatures:** `/v1/users/`, `/v1/users/me/password`; `/v1/signatures/upload-request`, `/confirm`
-- **Projects:** `/v1/projects/` and `/{project_id}`, `/roles` (admin), `/quantities`, `/progress-rollup`, `/assessment-summary` (with `.xlsx` and `/tailored.xlsx`),
+- **Projects:** `/v1/projects/` and `/{project_id}`, `/roles` (admin), `/quantities`, `/progress-rollup`, `/assessment-summary` (with `.xlsx`, `.csv`, `/tailored.xlsx` and `/tailored.csv`),
   `/properties`, `/task-orders`; `/v1/contract_items/`
 - **Sites:** `/v1/properties/{id}` (with `/admin/soft-delete`, `/admin/undelete`, `/admin/refresh-tax-map`, `/tax-map-pdf` with `/admin/refresh-tax-map-pdf` and `/admin/tax-map-pdf/upload-request` / `upload-complete`, `/admin/re-clip-approvals`, `/pir`, `/pirs`,
   `/construction-report`, `/ped-ramp-attributes`, `/work-history`, `/pay-item-summary`); `/v1/ped-ramp-corners/{id}` (with `/inspection-report` and its
@@ -1702,6 +1702,21 @@ Any change must follow these.
     site, and writes them on one tab named for the range (`2026-10-01 to 2026-10-31`, `From …`, `Through …`, `All
     dates`; `range_label`), with the same columns and totals row as a month's; no rows is the tab with `No constructed
     sites in this view.` The monthly workbook and the per-site view share one measure (`_rows_by`).
+  - **The polish** (ML1a-c, ML4b; no migration; the brief is `Documents/ICID/slice-assessment-summary-polish.md`):
+    - **Every month** (`every_month`): the monthly workbook has a tab for every month from `from` (else the first month
+      with rows) to `to` (else the last), a month without rows its titles and a totals row of 0 ($0 where a rate is set).
+      `No activity` only when there is no range and nothing. The tailored workbook stays one tab.
+    - **A task order** (`task_order_id` on the JSON, both workbooks and both CSVs): only its live bundled properties'
+      flags (`get_task_order`'s `properties`, `flags_on_properties`), as Progress narrows; not `idrs.task_order_id`,
+      which Slice U left unreliable. 404 `Task order not found` for one that isn't a live task order of the project.
+    - **CSVs** (`monthly_csv`, `sites_csv`): `assessment-summary.csv` a row per month and property, led by `Month`
+      (`YYYY-MM`); `tailored.csv` a row per site. The 13 columns and `Remeasure Pending` (always, `Yes` or blank),
+      figures to the cent halves up, an amount without a rate blank; UTF-8 with a BOM, CRLF; no totals or footer.
+    - **The footer** (`SummaryFooter`, written by `_footer` after the notes and a blank row, on every tab of both
+      workbooks, Project Total and `No activity` included): `Compiled by: <the signed-in user>`, `Date: <today in New
+      York>`, `Project Engineer: <the project's REs, comma-separated (project_users, list_project_roles), else not
+      assigned>` and `Approved IDRs only` (the summary reads only claimed flags, so a Draft column would always be blank;
+      it was dropped). openpyxl, not the IDR export's WorkbookTemplate.
 - **Progress** (R1g; `api/v1/progress.py`, `api/services/progress_rollup.py`, `api/queries/progress.py`,
   `api/schemas/progress.py`): how much of the sidewalk work the PIR flags describe is approved, in flight or not yet
   claimed, for a project, a task order or a property. No table of its own: two reads, `list_flag_pay_items`
