@@ -76,9 +76,25 @@ def get_report_header(property_id: UUID, idr_id: UUID) -> Optional[dict[str, Any
     return rows[0] if rows else None
 
 
+# A flag's bundle (Slice Y3b-2), from its measurement (fm): NULL for a solo one, else its id, outline, outer area, how
+# many flags it measures and its deductions, each named by its area's reason or its feature's type ('what')
+_BUNDLE = """CASE WHEN fm.surveyed_is_assessable IS NOT NULL THEN jsonb_build_object(
+                'measurement_id', fm.measurement_id, 'outer_dimensions', fm.outer_dimensions,
+                'outer_area', fm.outer_area,
+                'members', (SELECT count(*) FROM icid.flags member WHERE member.measurement_id = fm.measurement_id),
+                'deductions', COALESCE((
+                    SELECT jsonb_agg(d.entry || jsonb_build_object('what', COALESCE(da.reason, df.feature_type))
+                                     ORDER BY d.n)
+                    FROM jsonb_array_elements(fm.deductions) WITH ORDINALITY AS d(entry, n)
+                    LEFT JOIN icid.non_assessable_areas da
+                           ON da.non_assessable_area_id = (d.entry ->> 'source_area_id')::uuid
+                    LEFT JOIN icid.features df ON df.feature_id = (d.entry ->> 'source_feature_id')::uuid
+                ), '[]'::jsonb)) END"""
+
+
 def list_report_flags(property_id: UUID, idr_id: UUID) -> Optional[list[dict[str, Any]]]:
     """
-    Fetch the flags an IDR claimed on a property, as the report draws and measures them: shape and place, their page's scale and rotation, thickness, whether surveyed assessable (and why not), the signed PIR's own flag number (pir_flag_no, Slice Y3a; None for none), gross area (computed_quantity) and quantity (FLAG_QUANTITY: the override, or else the net area), the part of it outside its page's sidewalk strip the IDR's approval clipped (clipped_sf, Slice Y2; 0 for none), and their non-assessable areas (live, or deleted with the flag).
+    Fetch the flags an IDR claimed on a property, as the report draws and measures them: shape and place, their page's scale and rotation, thickness, whether surveyed assessable (and why not), the signed PIR's own flag number (pir_flag_no, Slice Y3a; None for none), gross area (computed_quantity) and quantity (FLAG_QUANTITY: the override, or else the net area), the part of it outside its page's sidewalk strip the IDR's approval clipped (clipped_sf, Slice Y2; 0 for none), its bundle (_BUNDLE, Slice Y3b-2; None for a solo measurement) and their non-assessable areas (live, or deleted with the flag).
     Takes the property's id and the IDR's.
     Returns the flag dicts (areas a list of {id, display_order, reason, shape, dimensions, sketch_x, sketch_y, rotation, computed_quantity}) by drawing order; [] when the IDR claimed none there; None on failure.
     """
@@ -88,6 +104,7 @@ def list_report_flags(property_id: UUID, idr_id: UUID) -> Optional[list[dict[str
             f.dimensions, f.sketch_x, f.sketch_y, f.rotation, f.surveyed_thickness, f.surveyed_is_assessable,
             f.surveyed_non_assessable_reason, f.pir_flag_no,
             f.computed_quantity, {FLAG_QUANTITY} AS quantity, COALESCE(clip.clipped_sf, 0) AS clipped_sf,
+            {_BUNDLE} AS bundle,
             COALESCE((
                 SELECT jsonb_agg(jsonb_build_object(
                     'id', na.non_assessable_area_id, 'display_order', na.display_order, 'reason', na.reason, 'shape', na.shape, 'dimensions', na.dimensions,

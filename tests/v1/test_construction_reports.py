@@ -592,3 +592,23 @@ def test_a_flag_clipped_at_the_property_line_shows_in_the_calculations(admin_cli
     with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
         text = pdf_text(admin_client.get(URL).content)
     assert "clipped at PL 13.19" in text and "160.69 - 60.69 100.00" in text
+
+
+def test_a_bundle_prints_its_derivation_on_the_panel(admin_client, storage):
+    """Slice Y3b-2: two of a bundle's three flags in the report; its heading, its row of their own areas, its measured
+    rectangle, its deduction with its flag, its net and what this IDR's flags take."""
+    one, two = flag_row(1, "4in", "25", "24"), flag_row(2, "4in", "25", "24", x=5)
+    bundle = {"measurement_id": "b1000000-0000-4000-8000-000000000001", "outer_dimensions": {"rectangles": [{"L": 10, "W": 5}]},
+              "outer_area": 50.0, "members": 3,
+              "deductions": [{"type": "non_ass_area", "area_sf": 2.0, "source_flag_id": str(one["id"]),
+                              "source_area_id": "x", "what": "tree_pit"}]}
+    flags = [{**one, "bundle": bundle}, {**two, "bundle": bundle}, flag_row(3, "7in", "60", "40", x=12)]
+    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(flags=flags)):
+        response = admin_client.get(URL)
+    assert response.status_code == 200
+    text = pdf_text(response.content)
+    assert "Measurement M1 (Flags 1-2)" in text and "M1 Flags 1-2 50.00" in text
+    assert "10.00 x 5.00 = 50.00 SF" in text and "- Tree pit (Flag 1) 2.00 SF" in text and "Net: 48.00 SF" in text
+    assert "This IDR: Flags 1-2 = 48.00 SF" in text
+    # Box 2's 4": 50 in all, 48 assessed; the 2 the bundle takes off is the adjustment
+    assert "50.00 - 2.00 48.00" in text and "Adjustment to box 2 +2.00" in text

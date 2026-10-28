@@ -34,6 +34,24 @@ def _outline_ft(flag: dict[str, Any], scale: float) -> list[Point]:
     return [(x / scale, y / scale) for x, y in placed_outline(flag, scale)]
 
 
+def unconnected(flags: list[dict[str, Any]], scale: float) -> list[dict[str, Any]]:
+    """
+    The flags a bundle's chain doesn't reach (Slice Y3b-2): starting from the first, each flag sharing an edge with one
+    already reached (within the slab tolerance) is reached in turn.
+    Takes the flags (shape, dimensions, sketch_x, sketch_y, rotation; each placed) and their page's px/ft.
+    Returns the flags not reached, in the order given; [] when they form one chain.
+    """
+    outlines = [_outline_ft(flag, scale) for flag in flags]
+    reached, frontier = {0}, [0]
+    while frontier:
+        current = frontier.pop()
+        for index, outline in enumerate(outlines):
+            if index not in reached and abut(outlines[current], outline):
+                reached.add(index)
+                frontier.append(index)
+    return [flag for index, flag in enumerate(flags) if index not in reached]
+
+
 def join_target(flag: dict[str, Any], neighbours: list[dict[str, Any]],
                 moving: frozenset[UUID] = frozenset()) -> Optional[UUID]:
     """

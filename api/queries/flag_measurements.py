@@ -5,11 +5,15 @@ page's flags the remesh's Python picks a bundle to join from.
 
 A measurement is a bundle when it carries a classification (surveyed_is_assessable set, migration 062); a solo one
 (every flag's since Y3a) doesn't, and reads its flag's. A bundle with a claimed member is frozen: no flag joins it and no
-writer changes its figures, so an approved IDR's quantities stand.
+writer changes its figures, so an approved IDR's quantities stand. Bundles are formed and broken up by their own routes
+(Slice Y3b-2: form_bundle, unbundle) and read with get_measurement.
 """
 
+from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
+
+from psycopg.types.json import Jsonb
 
 from api.db.runner import run_query
 
@@ -27,18 +31,79 @@ BUNDLED = "fm.surveyed_is_assessable IS NOT NULL"
 _HAS_CLAIMED = "EXISTS (SELECT 1 FROM icid.flags c WHERE c.measurement_id = {id} AND c.claimed_by_idr_id IS NOT NULL)"
 
 
+# A deduction as a measurement keeps it, from a cover row named c (_covers_sql)
+_DEDUCTION = """jsonb_build_object('type', c.kind, 'area_sf', c.area_sf, 'source_flag_id', c.flag_id,
+                                          CASE c.kind WHEN 'non_ass_area' THEN 'source_area_id'
+                                                      ELSE 'source_feature_id' END, c.source_id)"""
+# The order a measurement keeps its deductions in, the same however they were written, so two lists compare
+_DEDUCTION_ORDER = "c.flag_id::text, c.kind, c.source_id::text"
+
+
+def _shares_ctes(members: str) -> str:
+    """
+    The CTEs that share measurements among their members by area: each member's computed_quantity over the members'
+    total (equally when that is 0), to 4 places by largest remainder (every member at least 0.0001), so a
+    measurement's shares sum to exactly 1.0000.
+    Takes the SELECT of the members (flag_id, measurement_id, old_share, computed); written here, never from a request.
+    Returns the CTEs rm_weights, rm_raw and rm_shares (flag_id, measurement_id, old_share, share), with no leading
+    comma.
+    """
+    return f"""
+        rm_weights AS (
+            SELECT m.flag_id, m.measurement_id, m.old_share, GREATEST(m.computed, 0) AS c,
+                   count(*) OVER w AS n, sum(GREATEST(m.computed, 0)) OVER w AS total
+            FROM ({members}) m
+            WINDOW w AS (PARTITION BY m.measurement_id)
+        ),
+        rm_raw AS (
+            SELECT w.*, (10000 - w.n) * CASE WHEN w.total > 0 THEN w.c / w.total ELSE 1.0 / w.n END AS raw
+            FROM rm_weights w
+        ),
+        rm_shares AS MATERIALIZED (
+            SELECT r.flag_id, r.measurement_id, r.old_share,
+                   ((1 + floor(r.raw)
+                     + CASE WHEN row_number() OVER (PARTITION BY r.measurement_id
+                                                    ORDER BY r.raw - floor(r.raw) DESC, r.flag_id)
+                                 <= (10000 - r.n) - sum(floor(r.raw)) OVER (PARTITION BY r.measurement_id)
+                            THEN 1 ELSE 0 END) / 10000.0)::numeric(5,4) AS share
+            FROM rm_raw r
+        )"""
+
+
+def _covers_sql(flags: str, written_ids: str = "", written_rows: str = "") -> str:
+    """
+    The covers of some flags, as a bundle deducts them: their live non-assessable areas and the live features
+    subtracted from them, each with its area (a feature's override, else its area, as _NET takes it off a solo flag).
+    Takes the SELECT of the flags' ids, and, for covers the statement writes, the filter leaving the table's rows for
+    them out ({column} for the id) and the rows standing in for them (both '' for none).
+    Returns the SELECT (flag_id, kind, source_id, area_sf).
+    """
+    return f"""SELECT na.flag_id, 'non_ass_area'::text AS kind, na.non_assessable_area_id AS source_id,
+                   na.computed_quantity AS area_sf
+            FROM icid.non_assessable_areas na
+            WHERE na.deleted_at IS NULL AND na.flag_id IN ({flags})
+              {written_ids.format(column="na.non_assessable_area_id")}
+            UNION ALL
+            SELECT ft.flag_id, 'subtract_feature', ft.feature_id, COALESCE(ft.reported_quantity, ft.computed_quantity)
+            FROM icid.features ft
+            WHERE ft.deleted_at IS NULL AND ft.area_impact = 'subtract' AND ft.flag_id IN ({flags})
+              {written_ids.format(column="ft.feature_id")}{written_rows}"""
+
+
 def list_remesh_neighbours(pir_page_id: UUID) -> Optional[list[dict[str, Any]]]:
     """
     Fetch a page's live flags as the remesh weighs them: where each lies, its classification, its measurement, whether
     that is a bundle and whether a member of it is claimed.
     Takes the page's id.
-    Returns [{id, measurement_id, shape, dimensions, sketch_x, sketch_y, rotation, surveyed_thickness,
-    surveyed_is_assessable, pay_item_id, scale_px_per_ft, bundled, frozen}], or None on failure.
+    Returns [{id, display_order, measurement_id, shape, dimensions, sketch_x, sketch_y, rotation, surveyed_thickness,
+    surveyed_is_assessable, pay_item_id, claimed_by_idr_id, claimed_by_idr_number, scale_px_per_ft, bundled, frozen}],
+    or None on failure.
     """
     sql = f"""
-        SELECT f.id, f.measurement_id, f.shape, f.dimensions, f.sketch_x, f.sketch_y, f.rotation, f.surveyed_thickness,
-               f.surveyed_is_assessable, f.pay_item_id, pg.scale_px_per_ft, {BUNDLED} AS bundled,
-               {_HAS_CLAIMED.format(id="f.measurement_id")} AS frozen
+        SELECT f.id, f.display_order, f.measurement_id, f.shape, f.dimensions, f.sketch_x, f.sketch_y, f.rotation,
+               f.surveyed_thickness, f.surveyed_is_assessable, f.pay_item_id, f.claimed_by_idr_id,
+               (SELECT i.idr_number FROM icid.idrs i WHERE i.idr_id = f.claimed_by_idr_id) AS claimed_by_idr_number,
+               pg.scale_px_per_ft, {BUNDLED} AS bundled, {_HAS_CLAIMED.format(id="f.measurement_id")} AS frozen
         FROM icid.flags f
         JOIN icid.pir_pages pg ON pg.pir_page_id = f.pir_page_id
         JOIN icid.flag_measurements fm ON fm.measurement_id = f.measurement_id
@@ -164,38 +229,11 @@ def remesh_ctes(editor: str = "NULL::uuid", written: Optional[str] = None) -> st
             JOIN rm_plan p ON p.from_id = b.measurement_id OR p.to_id = b.measurement_id
             GROUP BY b.measurement_id
         ),
-        rm_weights AS (
-            SELECT m.flag_id, m.measurement_id, m.old_share, GREATEST(m.computed, 0) AS c,
-                   count(*) OVER w AS n, sum(GREATEST(m.computed, 0)) OVER w AS total
-            FROM rm_members m
-            JOIN rm_bundles b ON b.measurement_id = m.measurement_id AND NOT b.frozen
-            JOIN rm_bundle_delta d ON d.measurement_id = m.measurement_id AND d.reshaped
-            WINDOW w AS (PARTITION BY m.measurement_id)
-        ),
-        rm_raw AS (
-            SELECT w.*, (10000 - w.n) * CASE WHEN w.total > 0 THEN w.c / w.total ELSE 1.0 / w.n END AS raw
-            FROM rm_weights w
-        ),
-        rm_shares AS MATERIALIZED (
-            SELECT r.flag_id, r.measurement_id, r.old_share,
-                   ((1 + floor(r.raw)
-                     + CASE WHEN row_number() OVER (PARTITION BY r.measurement_id
-                                                    ORDER BY r.raw - floor(r.raw) DESC, r.flag_id)
-                                 <= (10000 - r.n) - sum(floor(r.raw)) OVER (PARTITION BY r.measurement_id)
-                            THEN 1 ELSE 0 END) / 10000.0)::numeric(5,4) AS share
-            FROM rm_raw r
-        ),
+{_shares_ctes('''SELECT m.* FROM rm_members m
+                  JOIN rm_bundles b ON b.measurement_id = m.measurement_id AND NOT b.frozen
+                  JOIN rm_bundle_delta d ON d.measurement_id = m.measurement_id AND d.reshaped''')},
         rm_covers AS (
-            SELECT na.flag_id, 'non_ass_area'::text AS kind, na.non_assessable_area_id AS source_id,
-                   na.computed_quantity AS area_sf
-            FROM icid.non_assessable_areas na
-            WHERE na.deleted_at IS NULL AND na.flag_id IN (SELECT flag_id FROM rm_plan)
-              {written_ids.format(column="na.non_assessable_area_id")}
-            UNION ALL
-            SELECT ft.flag_id, 'subtract_feature', ft.feature_id, COALESCE(ft.reported_quantity, ft.computed_quantity)
-            FROM icid.features ft
-            WHERE ft.deleted_at IS NULL AND ft.area_impact = 'subtract' AND ft.flag_id IN (SELECT flag_id FROM rm_plan)
-              {written_ids.format(column="ft.feature_id")}{written_rows}
+            {_covers_sql("SELECT flag_id FROM rm_plan", written_ids, written_rows)}
         ),
         rm_deductions AS (
             SELECT b.measurement_id,
@@ -208,10 +246,7 @@ def remesh_ctes(editor: str = "NULL::uuid", written: Optional[str] = None) -> st
                 WHERE (e ->> 'source_flag_id')::uuid NOT IN (
                     SELECT flag_id FROM rm_plan WHERE from_id = b.measurement_id OR to_id = b.measurement_id)
                 UNION ALL
-                SELECT jsonb_build_object('type', c.kind, 'area_sf', c.area_sf, 'source_flag_id', c.flag_id,
-                                          CASE c.kind WHEN 'non_ass_area' THEN 'source_area_id'
-                                                      ELSE 'source_feature_id' END, c.source_id),
-                       c.source_id::text
+                SELECT {_DEDUCTION}, c.source_id::text
                 FROM rm_covers c
                 JOIN rm_plan p ON p.flag_id = c.flag_id AND p.to_id = b.measurement_id AND p.action IN ('stay', 'join')
                 WHERE c.area_sf >= {MIN_DEDUCTION_SF}
@@ -329,3 +364,195 @@ def remesh_ctes(editor: str = "NULL::uuid", written: Optional[str] = None) -> st
             WHERE e.old_value IS DISTINCT FROM e.new_value
             RETURNING edit_id
         )"""
+
+
+# What a bundle's own writes say in measurement_edits
+REASON_BUNDLE = "bundle formed"
+REASON_UNBUNDLE = "bundle broken up"
+
+
+def form_bundle(pir_page_id: UUID, flag_ids: list[UUID], classification: tuple[Any, Any, Any],
+                rectangles: list[dict[str, Any]], outer_area: Decimal, editor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Bundle flags into one measurement, in one statement (Slice Y3b-2): a new measurement of the outer dimensions measured
+    (component_rectangles, outer_area their sum, needs_remeasure false), carrying the flags' classification and as
+    deductions their covers of MIN_DEDUCTION_SF or more; the flags take it, shared by area (_shares_ctes); their solo
+    measurements are retired; every move is a measurement_edits row by the editor. Writes nothing unless every flag is
+    still live, on the page, unclaimed, in a live solo measurement and of the classification given.
+    Takes the page's id, the flags' ids (each once), their classification (thickness, assessable, pay item id), the
+    rectangles ([{L, W}], 1 to 3), their total area and the editing user's uuid.
+    Returns [{measurement_id}] for the bundle formed, [] when the flags changed meanwhile, or None on failure.
+    """
+    thickness, assessable, pay_item = classification
+    sql = f"""
+        WITH bd_editor AS (
+            SELECT %s::uuid AS uuid
+        ),
+        bd_members AS MATERIALIZED (
+            SELECT x.id AS flag_id, x.measurement_id AS from_id, x.computed_quantity AS computed,
+                   x.area_share_fraction AS old_share, x.pir_id
+            FROM icid.flags x
+            JOIN icid.flag_measurements src ON src.measurement_id = x.measurement_id
+            WHERE x.id = ANY(%s::uuid[]) AND x.pir_page_id = %s AND x.deleted_at IS NULL
+              AND x.claimed_by_idr_id IS NULL AND src.surveyed_is_assessable IS NULL AND src.retired_at IS NULL
+              AND (x.surveyed_thickness, x.surveyed_is_assessable, x.pay_item_id)
+                  IS NOT DISTINCT FROM (%s::text, %s::boolean, %s::uuid)
+        ),
+        bd_ok AS MATERIALIZED (
+            SELECT gen_random_uuid() AS measurement_id, (array_agg(pir_id))[1] AS pir_id
+            FROM bd_members
+            HAVING count(*) = cardinality(%s::uuid[])
+        ),
+        bd_flags AS MATERIALIZED (
+            SELECT m.flag_id, o.measurement_id, m.old_share, m.computed, m.from_id
+            FROM bd_members m CROSS JOIN bd_ok o
+        ),{_shares_ctes("SELECT flag_id, measurement_id, old_share, computed FROM bd_flags")},
+        bd_covers AS (
+            {_covers_sql("SELECT flag_id FROM bd_flags")}
+        ),
+        bd_new AS (
+            INSERT INTO icid.flag_measurements (measurement_id, pir_id, outer_shape, outer_dimensions, outer_area,
+                                                deductions, pay_item_id, surveyed_thickness, surveyed_is_assessable,
+                                                created_by)
+            SELECT o.measurement_id, o.pir_id, 'component_rectangles', %s::jsonb, %s::numeric,
+                   COALESCE((SELECT jsonb_agg({_DEDUCTION} ORDER BY {_DEDUCTION_ORDER})
+                             FROM bd_covers c WHERE c.area_sf >= {MIN_DEDUCTION_SF}), '[]'::jsonb),
+                   %s::uuid, %s::text, %s::boolean, (SELECT uuid FROM bd_editor)
+            FROM bd_ok o
+            RETURNING measurement_id
+        ),
+        bd_moved AS (
+            UPDATE icid.flags x
+            SET measurement_id = s.measurement_id, area_share_fraction = s.share
+            FROM rm_shares s
+            WHERE x.id = s.flag_id
+            RETURNING x.id
+        ),
+        bd_retired AS (
+            UPDATE icid.flag_measurements fm
+            SET retired_at = now(), updated_at = now(), updated_by = (SELECT uuid FROM bd_editor)
+            FROM bd_flags b
+            WHERE fm.measurement_id = b.from_id
+            RETURNING fm.measurement_id
+        ),
+        bd_edits AS (
+            INSERT INTO icid.measurement_edits (measurement_id, field_path, old_value, new_value, reason, editor_uuid)
+            SELECT side.measurement_id, 'member_flags[' || b.flag_id || ']', jsonb_build_object('measurement_id', b.from_id),
+                   jsonb_build_object('measurement_id', b.measurement_id), '{REASON_BUNDLE}', (SELECT uuid FROM bd_editor)
+            FROM bd_flags b
+            CROSS JOIN LATERAL (VALUES (b.from_id), (b.measurement_id)) AS side(measurement_id)
+            UNION ALL
+            SELECT b.from_id, 'retired_at', 'null'::jsonb, to_jsonb(now()), '{REASON_BUNDLE}', (SELECT uuid FROM bd_editor)
+            FROM bd_flags b
+            RETURNING edit_id
+        )
+        SELECT n.measurement_id
+        FROM bd_new n
+        CROSS JOIN (SELECT count(*) FROM bd_moved) AS moved
+        CROSS JOIN (SELECT count(*) FROM bd_retired) AS retired
+        CROSS JOIN (SELECT count(*) FROM bd_edits) AS edits;
+    """
+    ids = list(flag_ids)
+    params = (editor_uuid, ids, pir_page_id, thickness, assessable, pay_item, ids, Jsonb({"rectangles": rectangles}),
+              outer_area, pay_item, thickness, assessable)
+    return run_query(sql, params)
+
+
+def unbundle(measurement_id: UUID, editor_uuid: UUID) -> Optional[list[dict[str, Any]]]:
+    """
+    Break a bundle up, in one statement (Slice Y3b-2): each member takes a new solo measurement of its own shape,
+    dimensions and area (needs_remeasure false, share 1.0000), and the bundle is retired as it stood (its figures kept
+    for the record); every move is a measurement_edits row by the editor. Writes nothing unless it is still a live
+    bundle with no member claimed.
+    Takes the bundle's id and the editing user's uuid.
+    Returns [{retired, members}] (retired 0 when nothing was written), or None on failure.
+    """
+    sql = f"""
+        WITH ub_editor AS (
+            SELECT %s::uuid AS uuid
+        ),
+        ub AS MATERIALIZED (
+            SELECT fm.measurement_id
+            FROM icid.flag_measurements fm
+            WHERE fm.measurement_id = %s AND {BUNDLED} AND fm.retired_at IS NULL
+              AND NOT {_HAS_CLAIMED.format(id="fm.measurement_id")}
+        ),
+        ub_flags AS MATERIALIZED (
+            SELECT x.id AS flag_id, x.pir_id, x.shape, x.dimensions, x.computed_quantity, x.created_by,
+                   ub.measurement_id AS from_id, gen_random_uuid() AS to_id
+            FROM icid.flags x
+            JOIN ub ON ub.measurement_id = x.measurement_id
+        ),
+        ub_fresh AS (
+            INSERT INTO icid.flag_measurements (measurement_id, pir_id, outer_shape, outer_dimensions, outer_area,
+                                                created_by)
+            SELECT u.to_id, u.pir_id, u.shape, u.dimensions, u.computed_quantity,
+                   COALESCE((SELECT uuid FROM ub_editor), u.created_by)
+            FROM ub_flags u
+            RETURNING measurement_id
+        ),
+        ub_moved AS (
+            UPDATE icid.flags x
+            SET measurement_id = u.to_id, area_share_fraction = 1
+            FROM ub_flags u
+            WHERE x.id = u.flag_id
+            RETURNING x.id
+        ),
+        ub_retired AS (
+            UPDATE icid.flag_measurements fm
+            SET retired_at = now(), updated_at = now(), updated_by = (SELECT uuid FROM ub_editor)
+            FROM ub
+            WHERE fm.measurement_id = ub.measurement_id
+            RETURNING fm.measurement_id
+        ),
+        ub_edits AS (
+            INSERT INTO icid.measurement_edits (measurement_id, field_path, old_value, new_value, reason, editor_uuid)
+            SELECT side.measurement_id, 'member_flags[' || u.flag_id || ']', jsonb_build_object('measurement_id', u.from_id),
+                   jsonb_build_object('measurement_id', u.to_id), '{REASON_UNBUNDLE}', (SELECT uuid FROM ub_editor)
+            FROM ub_flags u
+            CROSS JOIN LATERAL (VALUES (u.from_id), (u.to_id)) AS side(measurement_id)
+            UNION ALL
+            SELECT ub.measurement_id, 'retired_at', 'null'::jsonb, to_jsonb(now()), '{REASON_UNBUNDLE}',
+                   (SELECT uuid FROM ub_editor)
+            FROM ub
+            RETURNING edit_id
+        )
+        SELECT (SELECT count(*) FROM ub_retired) AS retired, (SELECT count(*) FROM ub_moved) AS members,
+               (SELECT count(*) FROM ub_fresh) AS fresh, (SELECT count(*) FROM ub_edits) AS edits;
+    """
+    return run_query(sql, (editor_uuid, measurement_id))
+
+
+def get_measurement(measurement_id: UUID) -> Optional[dict[str, Any]]:
+    """
+    Fetch one measurement as the measurement routes show it (Slice Y3b-2): its own columns, its PIR's property and
+    project, whether it is a bundle and frozen (a member claimed, and by which IDR), and its members with their shares
+    and quantities (FLAG_QUANTITY), live or deleted.
+    Takes the measurement's id.
+    Returns the measurement dict (members a list of {flag_id, display_order, pir_page_id, area_share_fraction,
+    computed_quantity, quantity, claimed_by_idr_id, deleted_at}), or None if none matches.
+    """
+    # api.queries.flags reads this module's remesh, so its quantity SQL is imported when this runs
+    from api.queries.flags import FLAG_QUANTITY, QUANTITY_LATERALS
+
+    sql = f"""
+        SELECT me.*, pir.property_id, p.project_id, me.surveyed_is_assessable IS NOT NULL AS bundled,
+               {_HAS_CLAIMED.format(id="me.measurement_id")} AS frozen,
+               (SELECT i.idr_number FROM icid.flags c JOIN icid.idrs i ON i.idr_id = c.claimed_by_idr_id
+                WHERE c.measurement_id = me.measurement_id ORDER BY i.idr_number LIMIT 1) AS claimed_by_idr_number,
+               COALESCE((
+                   SELECT jsonb_agg(jsonb_build_object(
+                       'flag_id', f.id, 'display_order', f.display_order, 'pir_page_id', f.pir_page_id,
+                       'area_share_fraction', f.area_share_fraction, 'computed_quantity', f.computed_quantity,
+                       'quantity', {FLAG_QUANTITY}, 'claimed_by_idr_id', f.claimed_by_idr_id,
+                       'deleted_at', f.deleted_at) ORDER BY f.display_order, f.created_at)
+                   FROM icid.flags f{QUANTITY_LATERALS}
+                   WHERE f.measurement_id = me.measurement_id
+               ), '[]'::jsonb) AS members
+        FROM icid.flag_measurements me
+        JOIN icid.pirs pir ON pir.id = me.pir_id
+        JOIN icid.properties p ON p.id = pir.property_id
+        WHERE me.measurement_id = %s;
+    """
+    rows = run_query(sql, (measurement_id,))
+    return rows[0] if rows else None

@@ -60,7 +60,7 @@ class TestAssessmentSummary:
         assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         disposition = response.headers["content-disposition"]
         assert disposition.startswith('attachment; filename="SE384_assessment_summary_') and disposition.endswith('.xlsx"')
-        assert book(response).sheetnames == ["Oct 2026"]
+        assert book(response).sheetnames == ["Oct 2026", "Project Total"]
         sql, params = run.call_args.args
         assert params == ("SE384",)
         assert "i.status = 'approved' AND i.deleted_at IS NULL" in sql
@@ -68,10 +68,10 @@ class TestAssessmentSummary:
 
     def test_a_range_keeps_its_months(self, admin_client):
         with patch(PROJECTS, side_effect=projects_for()), patch(SUMMARY, return_value=[FLAG]):
-            assert book(admin_client.get(URL, params={"from": "2026-10", "to": "2026-10"})).sheetnames == ["Oct 2026"]
+            assert book(admin_client.get(URL, params={"from": "2026-10", "to": "2026-10"})).sheetnames == ["Oct 2026", "Project Total"]
             later = book(admin_client.get(URL, params={"from": "2026-11"}))
             earlier = book(admin_client.get(URL, params={"to": "2026-09"}))
-        assert later.sheetnames == ["No activity"] and earlier.sheetnames == ["No activity"]
+        assert later.sheetnames == earlier.sheetnames == ["No activity", "Project Total"]
         assert later["No activity"]["A4"].value == "No approved IDRs in the selected range."
 
     def test_a_project_with_nothing_approved_is_a_no_activity_workbook(self, admin_client):
