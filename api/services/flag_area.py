@@ -8,6 +8,8 @@ import math
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from api.services.corner_quadrant import corner_quadrant
+
 # Areas are stored to the cent of a square foot
 _CENTS = Decimal("0.01")
 
@@ -35,7 +37,8 @@ def polygon_area(vertices: list[dict[str, Any]]) -> Decimal:
 def compute_area(shape: str, dimensions: dict[str, Any]) -> Decimal:
     """
     Compute a shape's area: rectangle L x W; trapezoid (a + b) / 2 x w; right triangle a x b / 2; polygon by the
-    shoelace formula; arc the circular segment r^2 / 2 x (theta - sin theta); circle pi r^2 (features only).
+    shoelace formula; arc the circular segment r^2 / 2 x (theta - sin theta); circle pi r^2 (features only); a corner
+    quadrant Coef(H/C) x H x C + R1 x R2 / 2 - A x B (flags only, Slice Y5).
     Takes the shape and its dimensions (already checked).
     Returns the area in square feet, rounded to 2 decimal places, halves up; raises ValueError for an unknown shape.
     """
@@ -53,6 +56,8 @@ def compute_area(shape: str, dimensions: dict[str, Any]) -> Decimal:
     elif shape == "circle":
         r = float(dimensions["r"])
         area = Decimal(repr(math.pi * r * r))
+    elif shape == "corner_quadrant":
+        area = corner_quadrant(dimensions).area
     else:
         raise ValueError(f"Unknown shape: {shape}")
     return area.quantize(_CENTS, rounding=ROUND_HALF_UP)

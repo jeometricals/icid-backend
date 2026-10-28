@@ -126,7 +126,8 @@ class TestCreateArea:
         {"display_order": 0},
         {"reason": "tree"},
         {"shape": "circle", "dimensions": {"r": 1}},
-    ], ids=["wrong-keys", "zero-length", "order-0", "flag-reason", "circle"])
+        {"shape": "corner_quadrant", "dimensions": {"H": 5.66, "C": 18, "R1": 12.58, "R2": 12, "A": 4.83, "B": 3.83}},
+    ], ids=["wrong-keys", "zero-length", "order-0", "flag-reason", "circle", "corner-quadrant"])
     def test_an_area_that_breaks_a_rule_is_422(self, admin_client, changes):
         with patch(FLAGS, return_value=[FLAG_ROW]), patch(AREAS) as run:
             response = admin_client.post(FLAG_AREAS_URL, json={**BODY, **changes})

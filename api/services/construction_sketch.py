@@ -18,6 +18,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+from api.services.corner_quadrant import corner_quadrant_outline
+
 Point = tuple[float, float]
 
 # Points sampled along an arc's curve, and around a circle (as the frontend samples them)
@@ -65,7 +67,7 @@ class SketchError(Exception):
 
 def shape_outline(shape: Optional[str], dimensions: Optional[dict[str, Any]]) -> list[Point]:
     """
-    A shape's outline in feet, in its own frame (x right, y down), before centring, as lib/flagGeometry.js draws it: rectangle {L, W}; trapezoid {a, b, w}, both parallel sides centred; triangle {a, b}, the right angle at the bottom left; polygon {vertices}; arc {r, theta}, the chord at the bottom; circle {r}.
+    A shape's outline in feet, in its own frame (x right, y down), before centring, as lib/flagGeometry.js draws it: rectangle {L, W}; trapezoid {a, b, w}, both parallel sides centred; triangle {a, b}, the right angle at the bottom left; polygon {vertices}; arc {r, theta}, the chord at the bottom; circle {r}; corner quadrant {H, C, R1, R2, A, B} (corner_quadrant_outline).
     Takes the shape and its dimensions.
     Returns the points; [] for an unknown shape or no dimensions.
     """
@@ -91,6 +93,8 @@ def shape_outline(shape: Optional[str], dimensions: Optional[dict[str, Any]]) ->
         r = dimensions["r"]
         angles = (2 * math.pi * step / ARC_STEPS for step in range(ARC_STEPS))
         return [(r * math.cos(angle), r * math.sin(angle)) for angle in angles]
+    if shape == "corner_quadrant":
+        return corner_quadrant_outline(dimensions)
     return []
 
 
