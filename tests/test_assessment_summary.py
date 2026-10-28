@@ -11,10 +11,14 @@ from api.services.assessment_summary import (
     EMPTY_RANGE,
     MonthError,
     EMPTY_VIEW,
+    SummaryFooter,
     build_tailored_workbook,
     build_workbook,
+    every_month,
+    flags_on_properties,
     REMEASURE_BANNER,
     parse_month,
+    project_engineers,
     project_total_label,
     range_label,
     summary_filename,
@@ -361,3 +365,44 @@ class TestRemeasureAndProjectTotal:
         rows = summary_sites([self.pending(flag(MAIN, "4in", "25", "25"))], RATES)
         sheet = openpyxl.load_workbook(io.BytesIO(build_tailored_workbook(PROJECT, rows, None, None))).active
         assert sheet["A3"].value == REMEASURE_BANNER and sheet.cell(5, 14).value == "⚠"
+
+
+class TestPolishHelpers:
+    """The Assessment Summary polish's helpers (ML1a, ML1b, ML4b)."""
+
+    def test_every_month_fills_the_gaps_and_the_ends_asked_for(self):
+        rows = {date(2026, 10, 1): ["oct"], date(2026, 12, 1): ["dec"]}
+        assert every_month(rows) == {date(2026, 10, 1): ["oct"], date(2026, 11, 1): [], date(2026, 12, 1): ["dec"]}
+        assert list(every_month(rows, date(2026, 9, 1))) == [date(2026, 9, 1), date(2026, 10, 1), date(2026, 11, 1),
+                                                             date(2026, 12, 1)]
+        assert list(every_month({}, None, date(2026, 2, 1))) == [date(2026, 2, 1)]
+        assert every_month({}) == {}
+
+    def test_the_project_engineers_are_its_res_each_once(self):
+        roles = [{"role": "re", "first_name": "Jane", "last_name": "Doe", "email": "jd@x.com"},
+                 {"role": "oe", "first_name": "Jane", "last_name": "Doe", "email": "jd@x.com"},
+                 {"role": "re", "first_name": None, "last_name": None, "email": "sam@x.com"},
+                 {"role": "re", "first_name": "Jane", "last_name": "Doe", "email": "jd@x.com"}]
+        assert project_engineers(roles) == ["Jane Doe", "sam@x.com"]
+        assert project_engineers([]) == []
+
+    def test_the_footer_says_not_assigned_without_an_re(self):
+        footer = SummaryFooter("Reza Mousavian", date(2026, 10, 28))
+        assert footer.lines() == ["Compiled by: Reza Mousavian", "Date: 2026-10-28", "Project Engineer: not assigned",
+                                  "Approved IDRs only"]
+
+    def test_a_task_order_keeps_its_properties_flags(self):
+        flags = [{"property_id": MAIN}, {"property_id": UUID("20000000-0000-4000-8000-0000000000ff")}]
+        assert flags_on_properties(flags, {MAIN}) == [{"property_id": MAIN}]
+        assert flags_on_properties(flags, None) is flags
+        assert flags_on_properties(flags, set()) == []
+
+    def test_without_a_footer_a_tab_is_as_before(self):
+        rows = summary_sites([flag(MAIN, "4in", "25", "25")], RATES)
+        plain = openpyxl.load_workbook(io.BytesIO(build_tailored_workbook(PROJECT, rows, None, None))).active
+        assert plain.max_row == 7  # the header, the titles, the row, the totals and the approval-date note; no footer
+        footed = openpyxl.load_workbook(io.BytesIO(build_tailored_workbook(
+            PROJECT, rows, None, None, SummaryFooter("A B", date(2026, 10, 28), ["C D"])))).active
+        assert footed["A8"].value is None
+        assert [footed.cell(row, 1).value for row in range(9, 13)] == [
+            "Compiled by: A B", "Date: 2026-10-28", "Project Engineer: C D", "Approved IDRs only"]
