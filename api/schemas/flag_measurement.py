@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -27,6 +27,15 @@ class BundleIn(BaseModel):
 
     flag_ids: list[UUID]
     outer_dimensions: OuterDimensions
+
+    model_config = {"extra": "forbid"}
+
+
+class MeasurementPatch(BaseModel):
+    """PATCH /v1/measurements/{measurement_id} (Slice Y4a): mark a bundle re-measured, with its new outline or not."""
+
+    needs_remeasure: Optional[Literal[False]] = None
+    outer_dimensions: Optional[OuterDimensions] = None
 
     model_config = {"extra": "forbid"}
 
@@ -65,6 +74,7 @@ class MeasurementOut(BaseModel):
     retired_at: Optional[datetime] = None
     created_at: datetime
     created_by: UUID
+    created_by_name: Optional[str] = None
     updated_at: datetime
     updated_by: Optional[UUID] = None
     members: list[MeasurementMember]

@@ -67,7 +67,7 @@ def measurement_row(**changes) -> dict:
             **changes}
 
 
-def measurements(page=(A, B, C), formed=None, found=None, broken=None):
+def measurements(page=(A, B, C), formed=None, found=None, broken=None, updated=None):
     """
     Answer the measurement statements: the page's flags, the bundle formed, the measurement read (one dict, or a list
     answered in turn), the break-up's counts.
@@ -77,6 +77,8 @@ def measurements(page=(A, B, C), formed=None, found=None, broken=None):
     def answer(sql, params=None):
         if "bd_new AS" in sql:
             return [{"measurement_id": BUNDLE_ID}] if formed is None else formed
+        if "me_new AS" in sql:
+            return [{"measurement_id": BUNDLE_ID}] if updated is None else updated
         if "ub_retired AS" in sql:
             return [{"retired": 1, "members": 2, "fresh": 2, "edits": 5}] if broken is None else broken
         if "FROM icid.flag_measurements me" in sql:
@@ -247,3 +249,77 @@ class TestUnbundle:
                 patch(PROJECTS, side_effect=roles()):
             assert demo_client.delete(MEASUREMENT_URL).status_code == 403
         assert not any("ub_retired AS" in call.args[0] for call in run.call_args_list)
+
+
+class TestRemeasure:
+    """PATCH /v1/measurements/{id} (Slice Y4a): mark a bundle re-measured, with a new outline or not."""
+
+    def patch_call(self, run):
+        """The update statement's parameters."""
+        return next(call.args[1] for call in run.call_args_list if "me_new AS" in call.args[0])
+
+    def test_mark_re_measured_clears_the_flag_and_keeps_the_outline(self, admin_client):
+        found = [measurement_row(needs_remeasure=True), measurement_row()]
+        with patch(MEASUREMENTS, side_effect=measurements(found=found)) as run:
+            response = admin_client.patch(MEASUREMENT_URL, json={"needs_remeasure": False})
+        assert (response.status_code, response.json()["message"]) == (200, "Bundle marked re-measured")
+        assert response.json()["data"]["needs_remeasure"] is False
+        assert self.patch_call(run) == (ADMIN_ID, BUNDLE_ID, None, None, None, None)
+
+    def test_a_new_outline_is_the_re_measurement(self, admin_client):
+        with patch(MEASUREMENTS, side_effect=measurements()) as run:
+            response = admin_client.patch(MEASUREMENT_URL, json={"outer_dimensions": {
+                "rectangles": [{"L": 12, "W": 5}, {"L": 2.5, "W": 3.3}]}})
+        assert (response.status_code, response.json()["message"]) == (200, "Bundle re-measured")
+        params = self.patch_call(run)
+        assert params[2].obj == {"rectangles": [{"L": 12.0, "W": 5.0}, {"L": 2.5, "W": 3.3}]}
+        assert params[5] == Decimal("68.25")
+
+    def test_the_statement_clears_needs_remeasure_and_logs_each_change(self, admin_client):
+        with patch(MEASUREMENTS, side_effect=measurements()) as run:
+            admin_client.patch(MEASUREMENT_URL, json={"needs_remeasure": False})
+        sql = " ".join(next(call.args[0] for call in run.call_args_list if "me_new AS" in call.args[0]).split())
+        assert "needs_remeasure = false" in sql and "fm.retired_at IS NULL" in sql
+        assert "(%s::jsonb IS NULL OR NOT EXISTS (SELECT 1 FROM icid.flags c" in sql  # a new outline: not frozen
+        assert "('outer_dimensions', me.outer_dimensions, n.outer_dimensions)" in sql and "'re-measured'" in sql
+
+    @pytest.mark.parametrize("found, body, status, detail", [
+        (measurement_row(bundled=False, surveyed_is_assessable=None, surveyed_thickness=None), {"needs_remeasure": False},
+         400, "Not a bundle"),
+        (measurement_row(retired_at=NOW), {"needs_remeasure": False}, 404, "Bundle is already retired"),
+        (measurement_row(frozen=True, claimed_by_idr_number="Y15"), {"outer_dimensions": OUTLINE}, 409,
+         "A member is claimed by IDR Y15: the bundle is frozen, its outline can't change"),
+        (measurement_row(), {}, 400, "Send needs_remeasure: false, outer_dimensions, or both"),
+    ], ids=["solo", "retired", "frozen-outline", "empty"])
+    def test_what_cant_be_re_measured_is_refused(self, admin_client, found, body, status, detail):
+        with patch(MEASUREMENTS, side_effect=measurements(found=found)) as run:
+            response = admin_client.patch(MEASUREMENT_URL, json=body)
+        assert (response.status_code, response.json()["detail"]) == (status, detail)
+        assert not any("me_new AS" in call.args[0] for call in run.call_args_list)
+
+    def test_a_frozen_bundle_can_still_be_marked_re_measured(self, admin_client):
+        frozen = measurement_row(frozen=True, claimed_by_idr_number="Y15", needs_remeasure=True)
+        with patch(MEASUREMENTS, side_effect=measurements(found=[frozen, {**frozen, "needs_remeasure": False}])):
+            assert admin_client.patch(MEASUREMENT_URL, json={"needs_remeasure": False}).status_code == 200
+
+    @pytest.mark.parametrize("body", [{"needs_remeasure": True}, {"outer_area": 5}, {"outer_dimensions": {"rectangles": []}}],
+                             ids=["true", "other-field", "no-rectangles"])
+    def test_a_malformed_body_is_422(self, admin_client, body):
+        with patch(MEASUREMENTS, side_effect=measurements()):
+            assert admin_client.patch(MEASUREMENT_URL, json=body).status_code == 422
+
+    def test_retired_meanwhile_is_answered_as_it_now_is(self, admin_client):
+        found = [measurement_row(), measurement_row(retired_at=NOW)]
+        with patch(MEASUREMENTS, side_effect=measurements(found=found, updated=[])):
+            assert admin_client.patch(MEASUREMENT_URL, json={"needs_remeasure": False}).status_code == 404
+
+    def test_an_inspector_is_refused(self):
+        with signed_in(MEMBER_ROW) as inspector, patch(PROJECTS, side_effect=roles("inspector")), \
+                patch(MEASUREMENTS, side_effect=measurements()) as run:
+            assert inspector.patch(MEASUREMENT_URL, json={"needs_remeasure": False}).status_code == 403
+        assert not any("me_new AS" in call.args[0] for call in run.call_args_list)
+
+    def test_the_creator_is_named(self, admin_client):
+        with patch(MEASUREMENTS, side_effect=measurements(found=measurement_row(created_by_name="Reza Mousavian"))) as run:
+            assert admin_client.get(MEASUREMENT_URL).json()["data"]["created_by_name"] == "Reza Mousavian"
+        assert "AS created_by_name" in run.call_args.args[0]

@@ -95,7 +95,7 @@ _FLAG_COLUMNS = (
     + """) AS quantity,
             (f.reported_quantity IS NOT NULL) AS is_overridden,
             f.quantity_delta_reason, f.created_at, f.updated_at, f.created_by, f.deleted_at, f.deleted_by,
-            f.claimed_by_idr_id, f.constructed_on,
+            f.claimed_by_idr_id, f.constructed_on, f.measurement_id, fm.surveyed_is_assessable IS NOT NULL AS bundled,
             (SELECT claimer.idr_number FROM icid.idrs claimer WHERE claimer.idr_id = f.claimed_by_idr_id)
                 AS claimed_by_idr_number,
             pg.deleted_at AS page_deleted_at, pir.deleted_at AS pir_deleted_at, p.deleted_at AS property_deleted_at"""

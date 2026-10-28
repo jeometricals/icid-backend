@@ -4,10 +4,16 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from api.queries.flag_measurements import form_bundle, get_measurement, list_remesh_neighbours, unbundle
+from api.queries.flag_measurements import (
+    form_bundle,
+    get_measurement,
+    list_remesh_neighbours,
+    unbundle,
+    update_measurement,
+)
 from api.queries.flags import get_flag
 from api.schemas.auth import UserOut
-from api.schemas.flag_measurement import BundleIn, MeasurementOut, MeasurementResponse
+from api.schemas.flag_measurement import BundleIn, MeasurementOut, MeasurementPatch, MeasurementResponse
 from api.services.auth import current_user, measurement_member, no_demo_pir_writes, pir_page_member
 from api.services.construction_sketch import placed_outline
 from api.services.measurement_bundles import classification, unconnected
@@ -85,6 +91,21 @@ def _refuse_unless_open(found: dict[str, Any]) -> None:
                             detail=f"A member is claimed by IDR {found['claimed_by_idr_number']}: the bundle is frozen")
 
 
+def _refuse_unless_changeable(found: dict[str, Any], new_outline: bool) -> None:
+    """
+    Refuse a re-measurement of what isn't a live bundle, or a new outline of a frozen one (Slice Y4a).
+    Takes the measurement (get_measurement) and whether a new outline is asked for.
+    Returns nothing; raises 400 for a solo measurement, 404 for a retired bundle and 409 for a new outline of a frozen one.
+    """
+    if not found["bundled"]:
+        raise HTTPException(status_code=400, detail="Not a bundle")
+    if found["retired_at"] is not None:
+        raise HTTPException(status_code=404, detail="Bundle is already retired")
+    if new_outline and found["frozen"]:
+        raise HTTPException(status_code=409, detail=f"A member is claimed by IDR {found['claimed_by_idr_number']}: "
+                                                    "the bundle is frozen, its outline can't change")
+
+
 @page_router.post("/{pir_page_id}/measurements/bundle", response_model=MeasurementResponse, status_code=201)
 def bundle_flags(pir_page_id: UUID, body: BundleIn, page: dict = Depends(_page_writer),
                  user: UserOut = Depends(current_user)) -> MeasurementResponse:
@@ -156,6 +177,33 @@ def get_measurement_record(found: dict = Depends(_measurement_user)) -> Measurem
     Returns a MeasurementResponse; raises 403 for a demo user or a user without the role and 404 for an unknown measurement.
     """
     return _out(found, "Measurement retrieved")
+
+
+@router.patch("/{measurement_id}", response_model=MeasurementResponse)
+def update_measurement_record(measurement_id: UUID, body: MeasurementPatch, found: dict = Depends(_measurement_user),
+                              user: UserOut = Depends(current_user)) -> MeasurementResponse:
+    """
+    Mark a bundle re-measured (Slice Y4a): {needs_remeasure: false}, and/or a new outline the OE measured ({outer_dimensions: {rectangles}}, outer_area their sum); either way needs_remeasure is cleared, since a new outline is the re-measurement. In one statement, each change a measurement_edits row by the user. A frozen bundle (a member claimed) can be marked re-measured but its outline can't change. For an OE or RE on its project, or an admin; not a demo user.
+    Takes the measurement's id as a path parameter, the fields in the body, the measurement (loaded by _measurement_user) and the user.
+    Returns a MeasurementResponse with the bundle as it now is; raises 400 for an empty body or a solo measurement, 403 for a demo user or a user without the role, 404 for an unknown or retired one, 409 for a new outline on a frozen bundle (also when it changed meanwhile) and 422 for a malformed body.
+    """
+    if body.needs_remeasure is None and body.outer_dimensions is None:
+        raise HTTPException(status_code=400, detail="Send needs_remeasure: false, outer_dimensions, or both")
+    rectangles = None if body.outer_dimensions is None else [r.model_dump() for r in body.outer_dimensions.rectangles]
+    _refuse_unless_changeable(found, rectangles is not None)
+    rows = update_measurement(measurement_id, rectangles, None if rectangles is None else outer_area(rectangles),
+                              user.uuid)
+    if rows is None:
+        raise HTTPException(status_code=500, detail="Failed to update the measurement")
+    latest = get_measurement(measurement_id)
+    if not rows:
+        # Retired, or claimed, meanwhile
+        if latest is not None:
+            _refuse_unless_changeable(latest, rectangles is not None)
+        raise HTTPException(status_code=409, detail="The bundle changed meanwhile; read it again")
+    if latest is None:
+        raise HTTPException(status_code=500, detail="Failed to read the measurement")
+    return _out(latest, "Bundle re-measured" if rectangles is not None else "Bundle marked re-measured")
 
 
 @router.delete("/{measurement_id}", status_code=204, response_class=Response)
