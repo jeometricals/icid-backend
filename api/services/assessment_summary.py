@@ -14,7 +14,6 @@ a shell; both workbooks can be narrowed to a task order's properties, come as CS
 (who compiled it and when, the project's Project Engineer, and that only approved IDRs count).
 """
 
-import csv
 import io
 import re
 from dataclasses import dataclass, field
@@ -30,6 +29,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from api.schemas.property import display_address_of
 from api.services.budget_rollup import money
 from api.services.construction_measure import ZERO, flag_areas
+from api.services.csv_files import csv_bytes
 from api.services.export_common import signed_date
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -62,7 +62,6 @@ NO_ACTIVITY = "No activity"
 EMPTY_PROJECT = "No approved IDRs in this project yet."
 EMPTY_RANGE = "No approved IDRs in the selected range."
 EMPTY_VIEW = "No constructed sites in this view."
-CSV = "text/csv; charset=utf-8"
 # A tab's footer (ML4b): the Assessment Summary reads only flags approved IDRs claimed
 APPROVED_ONLY = "Approved IDRs only"
 NOT_ASSIGNED = "not assigned"
@@ -629,26 +628,13 @@ def _csv_values(row: SummaryRow) -> list[str]:
             "; ".join(row.remarks), "Yes" if row.remeasure_pending else ""]
 
 
-def _csv_bytes(header: list[str], lines: list[list[str]]) -> bytes:
-    """
-    Write a CSV: UTF-8 with a byte-order mark (so Excel reads its characters), CRLF line ends.
-    Takes the header and the lines.
-    Returns the file's bytes.
-    """
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\r\n")
-    writer.writerow(header)
-    writer.writerows(lines)
-    return buffer.getvalue().encode("utf-8-sig")
-
-
 def monthly_csv(months: dict[date, list[SummaryRow]]) -> bytes:
     """
     The monthly workbook as one CSV: a row per month and property, led by its Month (YYYY-MM); an empty month has none.
     Takes the months (as build_workbook takes them).
     Returns the file's bytes (the header alone when there are no rows).
     """
-    return _csv_bytes(["Month", *CSV_COLUMNS],
+    return csv_bytes(["Month", *CSV_COLUMNS],
                       [[month.strftime("%Y-%m"), *_csv_values(row)] for month, rows in months.items() for row in rows])
 
 
@@ -658,7 +644,7 @@ def sites_csv(rows: list[SummaryRow]) -> bytes:
     Takes the rows (summary_sites).
     Returns the file's bytes (the header alone when there are no rows).
     """
-    return _csv_bytes(list(CSV_COLUMNS), [_csv_values(row) for row in rows])
+    return csv_bytes(list(CSV_COLUMNS), [_csv_values(row) for row in rows])
 
 
 def summary_filename(project_id: str, now: Optional[datetime] = None, tailored: bool = False,

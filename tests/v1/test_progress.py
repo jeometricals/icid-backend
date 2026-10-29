@@ -1,3 +1,5 @@
+import csv
+import io
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
@@ -326,3 +328,103 @@ class TestTaskOrderRollup:
         with patch(PROJECTS, return_value=[]), patch(TASKS, return_value=[TASK_ORDER_ROW]), patch(PROGRESS) as run:
             assert demo_client.get(TO_URL).status_code == 404
         run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# The Progress CSVs (Slice ML2): GET .../progress-rollup.csv on both routes
+# ---------------------------------------------------------------------------
+
+CSV_URL = f"/v1/projects/{PROJECT_ID}/progress-rollup.csv"
+TO_CSV_URL = f"/v1/task-orders/{TASK_ORDER_ID}/progress-rollup.csv"
+CSV_HEADER = ["Scope", "Item No", "Budget Code", "Unit", "Description", "Approved Qty", "Approved Count", "In Flight Qty",
+              "In Flight Count", "Unclaimed Qty", "Unclaimed Count", "Live Total Qty", "Live Total Count", "% Approved"]
+# Half the sidewalk approved, a third of it in flight; nothing live on the concrete base
+MIXED = [flags(MAIN_ST, SIDEWALK, "approved", 3, "75.005"), flags(MAIN_ST, SIDEWALK, "in_flight", 2, "50"),
+         flags(ELM_ST, SIDEWALK, "unclaimed", 1, "25")]
+
+
+def csv_rows(response) -> list[list[str]]:
+    """
+    Read a CSV response back.
+    Takes the response.
+    Returns its rows, the header first.
+    """
+    return list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"), newline="")))
+
+
+class TestProgressCsv:
+    def test_the_project_csv_is_the_table_verbatim_under_its_scope(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
+                patch(PROGRESS, return_value=MIXED):
+            response = admin_client.get(CSV_URL)
+            data = admin_client.get(URL).json()["data"]
+        assert response.status_code == 200 and response.headers["content-type"].startswith("text/csv")
+        disposition = response.headers["content-disposition"]
+        assert disposition.startswith(f'attachment; filename="{PROJECT_ID}_progress_20') and disposition.endswith('.csv"')
+        assert response.content.startswith(b"\xef\xbb\xbf") and b"\r\n" in response.content
+        header, *rows = csv_rows(response)
+        assert header == CSV_HEADER
+        assert rows == [[PROJECT_ID, "4.13 AAS", "SE384-CONS", "SF", 'Sidewalk 4"', "75.01", "3", "50.00", "2",
+                         "25.00", "1", "150.01", "6", "50.0"]]
+        sidewalk = line(data, "4.13 AAS")
+        assert rows[0][13] == f"{sidewalk['approved_pct']:.1f}"
+
+    def test_include_empty_lists_every_pay_item_a_null_percent_blank(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
+                patch(PROGRESS, return_value=WALKTHROUGH[:1]):
+            _, *rows = csv_rows(admin_client.get(CSV_URL, params={"include_empty": "true"}))
+        assert [row[1] for row in rows] == ["4.13 AAS", "73.21AC"]
+        assert rows[1][5:] == ["0.00", "0", "0.00", "0", "0.00", "0", "0.00", "0", ""]
+
+    def test_a_task_order_or_a_site_names_the_scope_and_the_file(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
+                patch(TASKS, return_value=[TASK_ORDER_ROW]), patch(PROPS, return_value=[PROPERTY_ROW]), \
+                patch(PROGRESS, return_value=WALKTHROUGH[:1]):
+            by_order = admin_client.get(CSV_URL, params={"task_order_id": str(TASK_ORDER_ID)})
+            by_site = admin_client.get(CSV_URL, params={"property_id": str(MAIN_ST)})
+            both = admin_client.get(CSV_URL, params={"task_order_id": str(TASK_ORDER_ID), "property_id": str(MAIN_ST)})
+        assert csv_rows(by_order)[1][0] == "TO-002"
+        assert f'filename="{PROJECT_ID}_progress_TO-002_' in by_order.headers["content-disposition"]
+        assert csv_rows(by_site)[1][0] == csv_rows(both)[1][0] == "138-22 227 Street"
+        assert f'filename="{PROJECT_ID}_progress_site_' in by_site.headers["content-disposition"]
+
+    def test_nothing_is_the_header_alone(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
+                patch(PROGRESS, return_value=[]):
+            assert csv_rows(admin_client.get(CSV_URL)) == [CSV_HEADER]
+
+    def test_the_task_order_csv_is_its_rows_then_each_sites(self, admin_client):
+        with patch(TASKS, return_value=[TASK_ORDER_ROW]), patch(CONTRACT_ITEMS, return_value=PAY_ITEMS), \
+                patch(PROGRESS, return_value=WALKTHROUGH):
+            response = admin_client.get(TO_CSV_URL)
+        assert response.status_code == 200
+        assert f'filename="{PROJECT_ID}_progress_TO-002_' in response.headers["content-disposition"]
+        header, *rows = csv_rows(response)
+        assert header == CSV_HEADER
+        assert [(row[0], row[1]) for row in rows] == [
+            ("TO-002", "4.13 AAS"), ("TO-002", "73.21AC"), ("138-22 227 Street", "4.13 AAS"), ("350 Main St", "73.21AC")]
+        assert rows[0][5:7] == ["383.44", "10"] and rows[0][13] == "100.0"
+
+    def test_filters_that_arent_the_projects_are_404_as_on_the_page(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(TASKS, return_value=[]), patch(PROGRESS) as run:
+            response = admin_client.get(CSV_URL, params={"task_order_id": str(TASK_ORDER_ID)})
+        assert response.status_code == 404 and response.json()["detail"] == "Task order not found"
+        run.assert_not_called()
+        with patch(TASKS, return_value=[]), patch(PROGRESS) as run:
+            assert admin_client.get(TO_CSV_URL).status_code == 404
+        run.assert_not_called()
+
+    def test_who_reads_them_is_who_reads_the_page(self, demo_client):
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, return_value=[]), \
+                patch(TASKS, return_value=[TASK_ORDER_ROW]), patch(PROGRESS) as run:
+            assert inspector.get(TO_CSV_URL).status_code == 403
+        run.assert_not_called()
+        with signed_in(INSPECTOR_ROW) as inspector, patch(PROJECTS, side_effect=OFF_PROJECT):
+            assert inspector.get(CSV_URL).status_code == 403
+        with patch(PROJECTS, return_value=[]), patch(TASKS, return_value=[TASK_ORDER_ROW]):
+            assert demo_client.get(TO_CSV_URL).status_code == 404
+
+    def test_a_failed_read_is_500(self, admin_client):
+        with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(CONTRACT_ITEMS, return_value=None), \
+                patch(PROGRESS, return_value=[]):
+            assert admin_client.get(CSV_URL).status_code == 500

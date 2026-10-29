@@ -18,7 +18,7 @@ from api.services.budget_rollup import money, percent
 STATES = ("approved", "in_flight", "unclaimed")
 
 
-def _address(row: dict[str, Any]) -> str:
+def property_label(row: dict[str, Any]) -> str:
     """
     Label a property from a row carrying its kind and address fields (property_kind or kind).
     Takes the row.
@@ -90,7 +90,7 @@ def _unmapped_by_property(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if row["state"] != "unmapped":
             continue
         entry = found.setdefault(row["property_id"], {
-            "property_id": row["property_id"], "display_address": _address(row), "flag_count": 0})
+            "property_id": row["property_id"], "display_address": property_label(row), "flag_count": 0})
         entry["flag_count"] += row["flag_count"]
     return sorted(found.values(), key=lambda entry: entry["display_address"])
 
@@ -112,7 +112,7 @@ def compute_progress(
     for prop in properties:
         property_id = UUID(str(prop["id"]))
         own = [row for row in rows if row["property_id"] == property_id]
-        drilled.append({"property_id": property_id, "display_address": _address(prop), **_rollup(pay_items, own, include_empty)})
+        drilled.append({"property_id": property_id, "display_address": property_label(prop), **_rollup(pay_items, own, include_empty)})
     started = {row["property_id"] for row in rows if row["state"] == "approved" and row["flag_count"]}
     return {
         **result,
