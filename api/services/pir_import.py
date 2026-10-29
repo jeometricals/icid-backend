@@ -90,13 +90,15 @@ class _Importer:
                  flag_pay_item_ids: Optional[set[UUID]] = None,
                  page_scales: Optional[dict[int, Any]] = None,
                  live_labels: Optional[dict[str, set[int]]] = None,
-                 live_flag_nos: Optional[dict[int, set[str]]] = None) -> None:
+                 live_flag_nos: Optional[dict[int, set[str]]] = None,
+                 default_pay_items: Optional[dict[str, UUID]] = None) -> None:
         """
         Start with nothing prepared.
-        Takes the PIR's live pages' ids by page number, the ids of its project's pay items, those of them in a unit a flag can be measured in (all of them when None), the live pages' scales by page number (for checking each area lies within its flag), the pages each of its live match lines' labels is on, and the PIR flag numbers its live flags have, by page number (Slice Y3a).
+        Takes the PIR's live pages' ids by page number, the ids of its project's pay items, those of them in a unit a flag can be measured in (all of them when None), the live pages' scales by page number (for checking each area lies within its flag), the pages each of its live match lines' labels is on, the PIR flag numbers its live flags have, by page number (Slice Y3a), and the pay item a non-assessable flag without one takes, by thickness (pilot sweep #2's default_pay_items).
         Returns nothing.
         """
         self.page_ids, self.pay_item_ids = page_ids, pay_item_ids
+        self.default_pay_items = default_pay_items or {}
         self.live_labels = live_labels or {}
         self.live_flag_nos = live_flag_nos or {}
         # The match lines that passed their own checks, before the pages-per-label check: (page number, index, row)
@@ -162,6 +164,9 @@ class _Importer:
             if flag is None:
                 self.drop("flag", entry.page_number, index, reason)
                 continue
+            if not flag.surveyed_is_assessable and "pay_item_id" not in flag.model_fields_set:
+                # A non-assessable flag the file gives no pay item takes its thickness's (pilot sweep #2)
+                flag = flag.model_copy(update={"pay_item_id": self.default_pay_items.get(flag.surveyed_thickness)})
             if not self.pay_item_ok(flag.pay_item_id):
                 self.drop("flag", entry.page_number, index, PAY_ITEM_ELSEWHERE)
                 continue
@@ -325,13 +330,15 @@ def prepare_import(body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids
                    flag_pay_item_ids: Optional[set[UUID]] = None,
                    page_scales: Optional[dict[int, Any]] = None,
                    live_labels: Optional[dict[str, set[int]]] = None,
-                   live_flag_nos: Optional[dict[int, set[str]]] = None) -> PreparedImport:
+                   live_flag_nos: Optional[dict[int, set[str]]] = None,
+                   default_pay_items: Optional[dict[str, UUID]] = None) -> PreparedImport:
     """
-    Check a Smart PIR import item by item and turn what passes into the rows the import statement writes. The file's own annotations go to page 1, unless page 1's entry brings its own.
-    Takes the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None), the live pages' scales by page number, the pages each of the PIR's live match line labels is on and the PIR flag numbers its live flags have, by page number.
+    Check a Smart PIR import item by item and turn what passes into the rows the import statement writes. The file's own annotations go to page 1, unless page 1's entry brings its own. A non-assessable flag the file gives no pay_item_id takes its thickness's default.
+    Takes the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None), the live pages' scales by page number, the pages each of the PIR's live match line labels is on, the PIR flag numbers its live flags have, by page number, and the default pay items by thickness (default_pay_items; none when None).
     Returns the PreparedImport: the rows, and every item dropped with why.
     """
-    importer = _Importer(page_ids, pay_item_ids, flag_pay_item_ids, page_scales, live_labels, live_flag_nos)
+    importer = _Importer(page_ids, pay_item_ids, flag_pay_item_ids, page_scales, live_labels, live_flag_nos,
+                         default_pay_items)
     seen: set[int] = set()
     for entry in body.pages:
         importer.page(entry, seen)
@@ -353,14 +360,15 @@ def run_import(
     pir_id: UUID, created_by: UUID, body: SmartPirImport, page_ids: dict[int, UUID], pay_item_ids: set[UUID],
     flag_pay_item_ids: Optional[set[UUID]] = None, page_scales: Optional[dict[int, Any]] = None,
     live_labels: Optional[dict[str, set[int]]] = None, live_flag_nos: Optional[dict[int, set[str]]] = None,
+    default_pay_items: Optional[dict[str, UUID]] = None,
 ) -> Optional[PirImportResult]:
     """
     Import a Smart PIR file: check it, then write what passed in one statement. An item the statement couldn't write (its page replaced, its pay item deleted or its PIR flag number taken meanwhile) is counted as dropped.
-    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None), the live pages' scales by page number, the pages each of the PIR's live match line labels is on and the PIR flag numbers its live flags have, by page number.
+    Takes the PIR's id, the importing user's uuid, the parsed file, the PIR's live pages' ids by page number, the ids of its project's pay items, those of them a flag can be measured in (all of them when None), the live pages' scales by page number, the pages each of the PIR's live match line labels is on, the PIR flag numbers its live flags have, by page number, and the default pay items by thickness.
     Returns the PirImportResult, or None if the statement failed.
     """
     prepared = prepare_import(body, page_ids, pay_item_ids, flag_pay_item_ids, page_scales, live_labels,
-                              live_flag_nos)
+                              live_flag_nos, default_pay_items)
     wanted = prepared.counts()
 
     if not (prepared.pages or prepared.flags or prepared.features or prepared.segments or prepared.annotations

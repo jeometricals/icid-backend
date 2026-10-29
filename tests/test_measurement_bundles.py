@@ -269,8 +269,9 @@ class TestEveryWriterCarriesTheRemesh:
         assert run.call_args.args[1][0] == BUNDLE
         with patch("api.queries.sidewalk_strip.run_query", return_value=[]) as run:
             set_sidewalk_strip(PAGE_ID, [], ADMIN_ID, [flag_id(1), flag_id(2)], {flag_id(2): BUNDLE})
-        assert run.call_args.args[1][3:7] == ([flag_id(1), flag_id(2)], [None, BUNDLE], [flag_id(1), flag_id(2)],
-                                               [flag_id(1), flag_id(2)])
+        # the flags, their picks, their default pay items (none given: pilot sweep #2), then the flags again
+        assert run.call_args.args[1][3:8] == ([flag_id(1), flag_id(2)], [None, BUNDLE], [None, None],
+                                               [flag_id(1), flag_id(2)], [flag_id(1), flag_id(2)])
 
     def test_a_new_flag_starts_solo_without_the_remesh(self):
         """A flag's create and the Smart PIR import give each new flag its own measurement (Y3a): nothing to remesh."""

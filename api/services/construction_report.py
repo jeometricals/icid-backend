@@ -69,7 +69,6 @@ from api.services.construction_sketch import (
 )
 from api.services.construction_slabs import edge_runs, group_bounds, slab_groups
 from api.services.export_common import signed_date
-from api.services.field_edits import initials
 from api.services.mappluto import source_display
 from api.services.property_line import effective_frontage
 from api.services.signatures import fetch_signature_file
@@ -92,17 +91,23 @@ CALC_TOO_LONG_MESSAGE = ("This property has too many pieces for one sheet's calc
                          "across PIR pages with a match line.")
 # A match line on a sheet: its dash, its weight, and its end circles' radius
 MATCH_LINE_DASH = (7, 4)
-# A page's sidewalk strip (Slice Y2): dashed red, labelled; its FRONTAGE dimension stands this far above the TAX MAP's
+# A page's sidewalk strip (Slice Y2): dashed red, labelled; its FRONTAGE dimension stands this far above the PLs' line
 STRIP_DASH = (4, 2)
 STRIP_RGB = (0.8, 0.1, 0.1)
 STRIP_LABEL_TEXT = "Sidewalk strip"
 FRONTAGE_RISE = 20.0
 MATCH_LINE_WIDTH = 1.6
 MATCH_LINE_RADIUS = 5.0
+MATCH_CAPTION_PT = 6.0
 # A label printed inside a shape, and a number's circle
 LABEL_PT = 6.5
-# A dimension's note, after its text: the TAX MAP's source (Slice Y1)
+# A note after a text in smaller italics: the tax map's source (Slice Y1), the strip's
 NOTE_PT = 5
+# The corner block, "Tax Map: W' × D'" at the sketch's top right (pilot sweep #2): its size, its baseline below the
+# band's top (the fit's pane gives up as much), and its inset from the sketch's right edge
+CORNER_PT = 7.0
+CORNER_RISE = 10.0
+CORNER_INSET = 6.0
 MARK_RADIUS = 4.5
 # A strap dimension: its text, and how far its line sits from the slab
 STRAP_PT = 6.0
@@ -112,10 +117,16 @@ STRAP_LANE = STRAP_GAP + STRAP_PT + 3
 # The curb segments CC (the curb along the frontage) counts: every kind of curb, as DOT's sheets total it (HWS2014Q:
 # CC= 34.25 is 17.16 depressed + 17.09 concrete)
 CC_SEGMENT_TYPES = ("curb_concrete", "curb_concrete_depressed", "curb_steel_faced", "curb_steel_faced_corner", "curb_granite")
-# The certification strip's Print Sign Date cell, at its right end
-SIGN_CELL_WIDTH = 210.0
-# The widest the inspector's signature prints (about 1.3 in), as DOT's sign-date box holds it
-SIGNATURE_MAX_WIDTH = 94.0
+# The certification strip, as DOT's sheet lays it out (BLK_13140_LOT_49F, pilot sweep #2): its bottom and height (two
+# rows of half that), the Inspected By block's left edge from the strip's, where its name and IR line start in it, the
+# signature's box in it (x, bottom, width, height, from the block's left edge and the strip's bottom: right of the
+# name, across both rows) and the Print Sign Date cell's width at the right end
+CERT_Y, CERT_H = 20.0, 36.0
+INSPECTED_X = 430.0
+INSPECTED_TEXT_X = 84.5
+SIGNATURE_BOX = (162.5, 13.0, 99.0, 23.0)
+SIGNATURE_MAX_WIDTH = SIGNATURE_BOX[2]
+PRINT_CELL_WIDTH = 28.0
 # The class printed above the title, by property_type; a property without one (a ped ramp) is city property
 PROPERTY_CLASS_LABELS = {"1_3_family": "1-3 FAMILY", "4_plus_family": "4+ FAMILY", "expedited": "EXPEDITED"}
 CITY_PROPERTY = "CITY PROPERTY"
@@ -326,7 +337,7 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
     rates = {"cost_per_sf_4in": header["cost_per_sf_4in"], "cost_per_sf_7in": header["cost_per_sf_7in"]}
     measure = compute_measure(flags, rates)
     numbers = bundle_numbers(flags, labels)
-    min_width = max(_width_ft(header.get("tb_tax_map_width_ft")), _width_ft(header.get("tb_cc_curb_to_curb_ft")))
+    min_width = _width_ft(header.get("tb_cc_curb_to_curb_ft"))
     sheets = []
     for index, (number, page_flags, items) in enumerate(per_page):
         groups = calc_groups(page_flags, compute_measure(page_flags, rates) if many else measure, labels, numbers)
@@ -339,7 +350,8 @@ def _render(property_id: UUID, idr_id: UUID) -> ReportFile:
             raise SketchError(CALC_TOO_LONG_MESSAGE if not many else
                               f"PIR page {number} has too many pieces for one sheet's calculations panel; split its "
                               "flags across pages with a match line.")
-        pane = layout.pane
+        # The corner block's line at the top of the sketch (pilot sweep #2)
+        pane = (layout.pane[0], layout.pane[1], layout.pane[2], layout.pane[3] - CORNER_RISE)
         if any(item.kind == "strip" for item in items):
             # Room above the TAX MAP line for the strip's FRONTAGE
             pane = (pane[0], pane[1], pane[2], pane[3] - FRONTAGE_RISE)
@@ -459,6 +471,32 @@ def _width_ft(value: Optional[Decimal]) -> float:
     Returns it, 0 when not set.
     """
     return float(value) if value else 0.0
+
+
+def tax_map_block(header: dict[str, Any]) -> Optional[tuple[str, Optional[str]]]:
+    """
+    The corner block's words (pilot sweep #2): the lot's tax-map width and depth, both always, an em-dash for one not
+    known, and where they came from. The width is page 1's title block's (a manual one wins), else the property's
+    MapPLUTO frontage when the title block has none; the depth is only ever the property's (a title block has none), so
+    two sources print as "(Manual / MapPLUTO 26v2)".
+    Takes the header row (tb_tax_map_width_ft and tb_tax_map_source; the property's tax_map_frontage_ft,
+    tax_map_depth_ft and tax_map_source; property_kind).
+    Returns ("Tax Map: 16.67' × 100.17'", "(MapPLUTO 26v2)" or None without a source), or None for a ped ramp.
+    """
+    if header.get("property_kind", "sidewalk") != "sidewalk":
+        return None
+    if header.get("tb_tax_map_width_ft") is not None or header.get("tb_tax_map_source") is not None:
+        width, width_source = header.get("tb_tax_map_width_ft"), header.get("tb_tax_map_source")
+    else:
+        width, width_source = header.get("tax_map_frontage_ft"), header.get("tax_map_source")
+    depth = header.get("tax_map_depth_ft")
+    sources = []
+    for value, source in ((width, width_source), (depth, header.get("tax_map_source"))):
+        words = source_display(source) if value is not None else None
+        if words and words not in sources:
+            sources.append(words)
+    text = "Tax Map: " + " × ".join(width_text(value) if value is not None else "—" for value in (width, depth))
+    return text, f"({' / '.join(sources)})" if sources else None
 
 
 def width_text(value: Decimal) -> str:
@@ -950,6 +988,7 @@ def label_fits(text: str, points: list[tuple[float, float]]) -> bool:
 
 
 Box = tuple[float, float, float, float]
+Point = tuple[float, float]
 
 
 def _overlaps(box: Box, others: list[Box]) -> bool:
@@ -1213,7 +1252,7 @@ def _strip(c: Canvas, item: SketchItem, fit: Fit) -> None:
 
 def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, sketch_width: float) -> list[Box]:
     """
-    Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at each end, the tax map's width at scale between them when known, else the drawing's ends; above it, the page's sidewalk strip's FRONTAGE across its first edge, Slice Y2), the curb along the bottom (CC: its curb segments' length, every kind, under the stretch they span; else the title block's cc_curb_to_curb_ft at scale, as a manual figure), the frontage street under it and the cross streets up the sides.
+    Draw what lies round the drawing, as DOT's sheets have it: the property line along the top (PL at the drawing's ends; above it, the page's sidewalk strip's FRONTAGE across its first edge, Slice Y2), the curb along the bottom (CC: its curb segments' length, every kind, under the stretch they span; else the title block's cc_curb_to_curb_ft at scale, as a manual figure), the frontage street under it and the cross streets up the sides.
     Takes the canvas, the header row (tb_ streets and widths), the items, their Fit and the sketch's width.
     Returns the boxes its dimensions and PLs take, for the straps to keep clear of.
     """
@@ -1222,18 +1261,12 @@ def _perimeter(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: 
     min_x, min_y, max_x, max_y = bounds_of(fit.place(point) for item in items if item.kind in ("flag", "area")
                                            for point in item.points)
     middle = (min_x + max_x) / 2
-    tax_map, curb = header.get("tb_tax_map_width_ft"), header.get("tb_cc_curb_to_curb_ft")
-    # The overall dimensions stand a strap's lane off the drawing, so a slab's strap can sit between them
+    curb = header.get("tb_cc_curb_to_curb_ft")
+    # The overall dimensions stand a strap's lane off the drawing, so a slab's strap can sit between them. The tax map's
+    # width is in the corner block (_tax_map_corner), not between the PLs (pilot sweep #2)
     line_y = max_y + STRAP_LANE + 6
-    taken: list[Box] = [(min(min_x, middle - float(tax_map or 0) * fit.points_per_foot / 2) - 8, line_y - 4,
-                         max(max_x, middle + float(tax_map or 0) * fit.points_per_foot / 2) + 8, line_y + 16)]
-    if tax_map:
-        half = float(tax_map) * fit.points_per_foot / 2
-        ends = (middle - half, middle + half)
-        source = source_display(header.get("tb_tax_map_source"))
-        _dimension(c, ends[0], ends[1], line_y, f"TAX MAP {width_text(tax_map)}", f"({source})" if source else None)
-    else:
-        ends = (min_x, max_x)
+    taken: list[Box] = [(min_x - 8, line_y - 4, max_x + 8, line_y + 16)]
+    ends = (min_x, max_x)
     c.setLineWidth(0.4)
     for x in ends:
         c.line(x, max_y + 2, x, line_y + 6)
@@ -1322,11 +1355,57 @@ def _straps(c: Canvas, slabs: list[list[SketchItem]], fit: Fit, taken: list[Box]
                 break
 
 
-def _match_line(c: Canvas, item: SketchItem, fit: Fit) -> None:
+def caption_placement(start: Point, end: Point, caption: str, centre: Point, room: Box,
+                      size: float = MATCH_CAPTION_PT) -> tuple[float, float, float, float, Box]:
     """
-    Draw a match line at its endpoints as its page places them: a heavy dashed line, a circle with its letter at each end, and its caption along it, on the side away from the drawing.
-    Takes the canvas, the line (its source carries label and caption) and the sheet's Fit.
-    Returns nothing.
+    Where a match line's caption goes (pilot sweep #6): along the line, at its middle, on the side away from the
+    drawing. A line taller than it is wide (as on the sheet) carries it turned 90 degrees, reading bottom to top, as
+    drawings letter a vertical line; any other reads left to right along its slope. The caption slides along the line to
+    stay inside the room, and is shrunk (down to 4 pt) when the room is shorter than it along the line.
+    Takes the line's two ends on the sheet, the caption, the drawing's centre (the pane's middle), the room it must stay
+    in (x0, y0, x1, y1) and its size.
+    Returns (baseline x, baseline y, angle in degrees, size, the box it takes on the sheet).
+    """
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    vertical = abs(dy) > abs(dx)
+    # Point the line up (a vertical one) or right (any other), so the caption reads bottom to top, or left to right
+    if (vertical and dy < 0) or (not vertical and dx < 0):
+        dx, dy = -dx, -dy
+    angle = math.degrees(math.atan2(dy, dx))
+    run = math.hypot(dx, dy) or 1.0
+    along, up = (dx / run, dy / run), (-dy / run, dx / run)
+    # The room's length along the line, and the caption shrunk to fit it
+    span = (room[3] - room[1]) if vertical else (room[2] - room[0])
+    span = span / max(abs(along[1] if vertical else along[0]), 1e-9) - 4
+    while size > 4 and stringWidth(caption, BOLD, size) > span:
+        size -= 0.25
+    half = stringWidth(caption, BOLD, size) / 2
+    middle = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+    # Below the line (in the caption's own frame) when its "up" points at the drawing, else above
+    towards = up[0] * (centre[0] - middle[0]) + up[1] * (centre[1] - middle[1])
+    offset = -(size + 5) if towards > 0 else size * 7 / 6
+    corners = [(middle[0] + along[0] * a + up[0] * b, middle[1] + along[1] * a + up[1] * b)
+               for a in (-half, half) for b in (offset - 2, offset + size)]
+    # Slide along the line until every corner is in the room (as far as it can go both ways when it can't)
+    low, high = -math.inf, math.inf
+    for axis in (0, 1):
+        if abs(along[axis]) < 1e-9:
+            continue
+        least, most = min(p[axis] for p in corners), max(p[axis] for p in corners)
+        bounds = sorted(((room[axis] - least) / along[axis], (room[axis + 2] - most) / along[axis]))
+        low, high = max(low, bounds[0]), min(high, bounds[1])
+    shift = min(max(0.0, low), high) if low <= high else (low + high) / 2
+    x = middle[0] + along[0] * shift + up[0] * offset
+    y = middle[1] + along[1] * shift + up[1] * offset
+    moved = [(px + along[0] * shift, py + along[1] * shift) for px, py in corners]
+    return x, y, angle, size, bounds_of(moved)
+
+
+def _match_line(c: Canvas, item: SketchItem, fit: Fit, room: Box) -> list[Box]:
+    """
+    Draw a match line at its endpoints as its page places them: a heavy dashed line, a circle with its letter at each end, and its caption along it, on the side away from the drawing (caption_placement: a vertical line's reading bottom to top, kept inside the room).
+    Takes the canvas, the line (its source carries label and caption), the sheet's Fit and the room its caption stays in.
+    Returns the boxes the line and its caption take, for the labels and straps to keep clear of.
     """
     (x1, y1), (x2, y2) = (fit.place(point) for point in item.points)
     label, caption = item.source["label"], item.source.get("caption") or f'MATCH LINE "{item.source["label"]}"'
@@ -1343,19 +1422,37 @@ def _match_line(c: Canvas, item: SketchItem, fit: Fit) -> None:
         c.circle(x, y, MATCH_LINE_RADIUS, stroke=1, fill=1)
         c.setFillColorRGB(0, 0, 0)
         _text(c, x, y - 2.2, label, 6.5, BOLD, align="centre")
-    # The caption along the line, reading left to right, on the side away from the drawing (the pane's middle)
-    angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
-    if angle > 90 or angle <= -90:
-        angle += 180
-    middle_x, middle_y = (x1 + x2) / 2, (y1 + y2) / 2
     pane_x, pane_y, pane_w, pane_h = fit.pane
-    radians = math.radians(angle)
-    # The caption's own "up" on the sheet; when it points at the drawing, the caption goes below the line instead
-    towards = (-math.sin(radians)) * (pane_x + pane_w / 2 - middle_x) + math.cos(radians) * (pane_y + pane_h / 2 - middle_y)
-    c.translate(middle_x, middle_y)
+    x, y, angle, size, taken = caption_placement((x1, y1), (x2, y2), caption, (pane_x + pane_w / 2, pane_y + pane_h / 2),
+                                                 room)
+    c.translate(x, y)
     c.rotate(angle)
-    _text(c, 0, -11 if towards > 0 else 7, caption, 6, BOLD, align="centre")
+    _text(c, 0, 0, caption, size, BOLD, align="centre")
     c.restoreState()
+    ends = MATCH_LINE_RADIUS + 1
+    return [(min(x1, x2) - ends, min(y1, y2) - ends, max(x1, x2) + ends, max(y1, y2) + ends), taken]
+
+
+def _tax_map_corner(c: Canvas, header: dict[str, Any], sketch_width: float) -> list[Box]:
+    """
+    Draw the corner block at the top right of the sketch (pilot sweep #2): "Tax Map: 16.67' × 100.17'" and its source
+    in smaller italics (tax_map_block), right-aligned; the OE picks which of the two the sidewalk on the sheet runs along.
+    Takes the canvas, the header row and the sketch's width.
+    Returns the box it takes (none for a ped ramp), for the labels and straps to keep clear of.
+    """
+    block = tax_map_block(header)
+    if block is None:
+        return []
+    text, note = block
+    x, y, _, h = BAND
+    right, baseline = x + sketch_width - CORNER_INSET, y + h - CORNER_RISE
+    note = f" {note}" if note else ""
+    left = right - stringWidth(text, FONT, CORNER_PT) - stringWidth(note, ITALIC, NOTE_PT)
+    c.setFillColorRGB(0, 0, 0)
+    _text(c, left, baseline, text, CORNER_PT)
+    if note:
+        _text(c, left + stringWidth(text, FONT, CORNER_PT), baseline, note, NOTE_PT, ITALIC)
+    return [(left - 2, baseline - 3, right + 2, baseline + CORNER_PT + 1)]
 
 
 def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit, north: Optional[float],
@@ -1378,24 +1475,24 @@ def _sketch(c: Canvas, header: dict[str, Any], items: list[SketchItem], fit: Fit
         for item in items:
             if item.kind == kind:
                 _draw_item(c, item, fit)
+    # A match line and its caption keep the labels and straps away
+    lines: list[Box] = []
     for item in items:
         if item.kind == "match_line":
-            _match_line(c, item, fit)
+            lines += _match_line(c, item, fit, (x + 3, y + 3, x + sketch_width - 3, y + h - 3))
         elif item.kind == "strip":
             _strip(c, item, fit)
-    taken = _perimeter(c, header, items, fit, sketch_width)
-    # A match line and its caption, on either side, keep the straps away
-    taken += [(min(xs) - 14, min(ys) - 4, max(xs) + 14, max(ys) + 4)
-              for xs, ys in ([[fit.place(point)[0] for point in item.points], [fit.place(point)[1] for point in item.points]]
-                             for item in items if item.kind == "match_line")]
+    taken = _perimeter(c, header, items, fit, sketch_width) + lines
     pieces = [(item, [fit.place(point) for point in item.points]) for item in items if item.kind in ("flag", "area")]
     spots = label_spots(slabs, [item for item in items if item.kind == "area"], fit.place)
     _draw_labels(c, pieces, labels, spots, taken)
     taken += [bounds_of(points) for _, points in pieces]
+    taken += _tax_map_corner(c, header, sketch_width)
     _straps(c, slabs, fit, taken, (x + 22, y + 16, x + sketch_width - 22, y + h - 4))
     c.restoreState()
     if north is not None:
-        draw_north(c, x + sketch_width - 40, y + h - 22, north)
+        # Under the corner block
+        draw_north(c, x + sketch_width - 40, y + h - 22 - CORNER_RISE, north)
 
 
 # The calculations tables' columns, as shares of the panel's width: Area, Length, x, Width, Sub-Total
@@ -1527,41 +1624,57 @@ def _key(c: Canvas) -> None:
 
 def _certification(c: Canvas, header: dict[str, Any], signature: Optional[ImageReader]) -> None:
     """
-    Draw the certification strip: the attestation, who inspected it and the IR #, and the IDR inspector's signature, initials and the day the IDR was approved.
-    Takes the canvas, the header row and the signature image (None: a blank line).
+    Draw the certification strip as DOT's sheet lays it out (pilot sweep #2): two rows, the attestation on the left
+    (DIFFERENCES FROM PRELIMINARY INSPECTION over the certification); the Inspected By block (the IDR's inspector over
+    its IR line, ir_line, and their signature right of them, signature_box); and the Print Sign Date cell.
+    Takes the canvas, the header row and the signature image (None: the box left blank).
     Returns nothing.
     """
-    x, y, w, h = LEFT, 14.0, RIGHT - LEFT, 48.0
+    x, y, w, h = LEFT, CERT_Y, RIGHT - LEFT, CERT_H
     _box(c, x, y, w, h)
-    cell_x = x + w - SIGN_CELL_WIDTH
-    _text(c, x + 6, y + h - 10, "DIFFERENCES FROM PRELIMINARY INSPECTION", 7, BOLD)
-    _text(c, x + 6, y + h - 20, CERTIFICATION, 6.5, ITALIC, width=cell_x - x - 12)
-    inspector = _name(header.get("reporter_first_name"), header.get("reporter_last_name"))
-    _text(c, x + 6, y + 8, "Inspected By", 7, BOLD)
-    _text(c, x + 62, y + 8, inspector, 7.5, width=170)
-    _text(c, x + 250, y + 8, "IR #", 7, BOLD)
-    _text(c, x + 272, y + 8, header.get("idr_number") or "", 7.5, width=60)
+    block_x, cell_x = x + INSPECTED_X, x + w - PRINT_CELL_WIDTH
+    box = signature_box(block_x, y)
     c.setLineWidth(0.6)
+    c.line(block_x, y, block_x, y + h)
     c.line(cell_x, y, cell_x, y + h)
-    c.setLineWidth(0.4)
-    c.line(cell_x + 4, y + 10, x + w - 4, y + 10)
-    box = signature_box(cell_x, y, h)
+    # The rows' rule, but under the signature
+    c.line(x, y + h / 2, box[0], y + h / 2)
+    _text(c, x + 5, y + h / 2 + 3.5, "DIFFERENCES FROM PRELIMINARY INSPECTION", 11, BOLD, width=INSPECTED_X - 10)
+    _text(c, x + 5, y + 6, CERTIFICATION, 8, BOLD, width=INSPECTED_X - 10)
+    _text(c, block_x + 5, y + h / 2 + 2.5, "Inspected By:", 12, BOLD, width=INSPECTED_TEXT_X - 8)
+    text_x = block_x + INSPECTED_TEXT_X
+    inspector = _name(header.get("reporter_first_name"), header.get("reporter_last_name"))
+    _text(c, text_x, y + h / 2 + 1.5, inspector, 8.25, width=box[0] - text_x - 3)
+    _text(c, text_x, y + 4.5, ir_line(header), 8.25, width=cell_x - text_x - 3)
     if signature is not None:
         c.drawImage(signature, *box, preserveAspectRatio=True, anchor="c", mask="auto")
-    _text(c, cell_x + 4, y + 3, "Print Sign Date", 5.5, ITALIC)
-    stamp = " ".join(part for part in (initials(header.get("reporter_first_name"), header.get("reporter_last_name")),
-                                       iso_day(header.get("re_signed_at"))) if part)
-    _text(c, x + w - 5, y + 3, stamp, 7, BOLD, align="right")
+    for line, words in enumerate(("Print", "Sign", "Date")):
+        _text(c, cell_x + PRINT_CELL_WIDTH / 2, y + h - 11 - line * 10, words, 8, BOLD, PRINT_CELL_WIDTH - 2, "centre")
 
 
-def signature_box(cell_x: float, y: float, h: float) -> tuple[float, float, float, float]:
+def ir_line(header: dict[str, Any]) -> str:
     """
-    Where the signature is fitted: the Print Sign Date cell above its line, a margin round it, at most SIGNATURE_MAX_WIDTH wide and centred across the cell. The image keeps its proportions and is centred in it.
-    Takes the cell's left edge, the strip's bottom and its height.
+    The Inspected By block's second line, as DOT's sheet prints it: the IR number, an en dash and the day the work was
+    constructed (the title block's Date Constructed, else the IDR's work date), m/d/yyyy: "IR # 34C – 12/04/2014".
+    Takes the header row (idr_number, tb_date_constructed, report_date).
+    Returns the line; without a number or a day, only what there is ("IR #" alone for neither).
+    """
+    day = header.get("tb_date_constructed") or header.get("report_date")
+    parts = [f"IR # {header.get('idr_number') or ''}".rstrip()]
+    if day is not None:
+        parts.append(f"{day.month:02d}/{day.day:02d}/{day.year}")
+    return " – ".join(parts)
+
+
+def signature_box(block_x: float, y: float) -> tuple[float, float, float, float]:
+    """
+    Where the signature is fitted, as DOT's sheet has its box: in the Inspected By block, right of the inspector's name
+    and IR line and across both rows (SIGNATURE_BOX, 99 x 23 pt). The image keeps its proportions and is centred in it.
+    Takes the block's left edge and the strip's bottom.
     Returns (x, bottom y, width, height).
     """
-    width = min(SIGN_CELL_WIDTH - 12, SIGNATURE_MAX_WIDTH)
-    return cell_x + (SIGN_CELL_WIDTH - width) / 2, y + 11.5, width, h - 15
+    dx, dy, width, height = SIGNATURE_BOX
+    return block_x + dx, y + dy, width, height
 
 
 def draw_report(header: dict[str, Any], measure: Measure, sheets: list[Sheet], signature: Optional[ImageReader],

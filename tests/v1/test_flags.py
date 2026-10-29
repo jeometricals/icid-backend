@@ -842,6 +842,81 @@ class TestFlagPayItemUnits:
         assert "f.claimed_by_idr_id, f.constructed_on" in sql and "AS claimed_by_idr_number" in sql
 
 
+NOT_ASSESSABLE_BODY = {**BODY, "surveyed_is_assessable": False, "surveyed_non_assessable_reason": "tree"}
+NOT_ASSESSABLE = {"surveyed_is_assessable": False, "surveyed_non_assessable_reason": "tree"}
+AAS_ROW = {**PAY_ITEM_ROW, "pay_item_ref": "4.13 AAS", "budget_code": "HW-200(S)"}
+
+
+def by_number_calls(contract) -> list:
+    """
+    Pick out the default pay item's lookups among the contract-items mock's calls.
+    Takes the mock.
+    Returns each lookup's parameters (project id, item number).
+    """
+    return [call.args[1] for call in contract.call_args_list if "ORDER BY ci.budget_code" in call.args[0]]
+
+
+class TestDefaultPayItem:
+    """Pilot sweep #2: a non-assessable flag without a pay item takes its thickness's, when the project has exactly one."""
+
+    @pytest.mark.parametrize("thickness,item_no", [("4in", "4.13 AAS"), ("7in", "4.13 BAS"), ("7in_as_4in", "4.13 AAS")])
+    def test_a_new_non_assessable_flag_takes_its_thicknesss_item(self, admin_client, thickness, item_no):
+        row = {**AAS_ROW, "pay_item_ref": item_no}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[row]) as contract, \
+                patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(FLAGS_URL, json={**NOT_ASSESSABLE_BODY, "surveyed_thickness": thickness})
+        assert response.status_code == 201
+        assert by_number_calls(contract) == [("HWS0023", item_no)]
+        assert written(run)["pay_item_id"] == PAY_ITEM_ID
+
+    @pytest.mark.parametrize("rows", [
+        [],  # the project has no such item
+        [AAS_ROW, {**AAS_ROW, "pay_item_uuid": UUID("7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4f"), "budget_code": "SE02"}],
+        [{**AAS_ROW, "unit": "LF"}],  # one a flag can't be measured in
+        None,  # it can't be read
+    ])
+    def test_none_or_several_leave_it_without_one(self, admin_client, rows):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=rows), \
+                patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            response = admin_client.post(FLAGS_URL, json=NOT_ASSESSABLE_BODY)
+        assert response.status_code == 201 and written(run)["pay_item_id"] is None
+
+    def test_a_null_sent_stays_null_and_an_assessable_flag_takes_none(self, admin_client):
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[AAS_ROW]) as contract, \
+                patch(FLAGS, return_value=[FLAG_ROW]) as run:
+            admin_client.post(FLAGS_URL, json={**NOT_ASSESSABLE_BODY, "pay_item_id": None})
+            assert written(run)["pay_item_id"] is None
+            admin_client.post(FLAGS_URL, json=BODY)
+            assert written(run)["pay_item_id"] is None
+        contract.assert_not_called()
+
+    def test_marking_a_flag_non_assessable_gives_it_one(self, admin_client):
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW]]) as run, \
+                patch(MEASUREMENTS, return_value=[]), patch(CONTRACT, return_value=[AAS_ROW]) as contract:
+            response = admin_client.patch(URL, json=NOT_ASSESSABLE)
+        assert response.status_code == 200
+        assert by_number_calls(contract) == [("HWS0023", "4.13 AAS")]
+        assert written(run)["pay_item_id"] == PAY_ITEM_ID
+
+    def test_marking_it_non_assessable_keeps_the_one_it_has(self, admin_client):
+        mapped = {**FLAG_ROW, "pay_item_id": UUID("7a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4f")}
+        with patch(FLAGS, side_effect=[[mapped], [mapped]]) as run, patch(MEASUREMENTS, return_value=[]), \
+                patch(CONTRACT, return_value=[AAS_ROW]) as contract:
+            admin_client.patch(URL, json=NOT_ASSESSABLE)
+        assert by_number_calls(contract) == []
+        assert written(run)["pay_item_id"] == mapped["pay_item_id"]
+
+    def test_a_null_sent_with_it_or_a_flag_already_non_assessable_takes_none(self, admin_client):
+        not_assessable = {**FLAG_ROW, **NOT_ASSESSABLE}
+        with patch(FLAGS, side_effect=[[FLAG_ROW], [FLAG_ROW], [not_assessable], [not_assessable]]) as run, \
+                patch(MEASUREMENTS, return_value=[]), patch(CONTRACT, return_value=[AAS_ROW]) as contract:
+            admin_client.patch(URL, json={**NOT_ASSESSABLE, "pay_item_id": None})
+            assert written(run)["pay_item_id"] is None
+            admin_client.patch(URL, json={"display_order": 2})
+            assert written(run)["pay_item_id"] is None
+        assert by_number_calls(contract) == []
+
+
 class TestFlagPlacement:
     def test_it_reads_the_flags_shape_and_place_and_its_pages_scale(self):
         row = {"shape": "rectangle", "dimensions": {"L": 5, "W": 4}, "sketch_x": 10.0, "sketch_y": 12.0,

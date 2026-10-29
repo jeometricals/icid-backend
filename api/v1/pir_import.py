@@ -10,6 +10,7 @@ from api.schemas.auth import UserOut
 from api.schemas.pir_import import PirImportResponse, SmartPirImport
 from api.services.auth import current_user
 from api.services.pay_item_units import flag_unit
+from api.services.flag_pay_items import default_pay_items
 from api.services.pir_import import run_import
 from api.v1._shared import refuse_deleted_pir_for_member, writable_pir
 
@@ -48,6 +49,7 @@ def import_pir(
         {item["pay_item_uuid"] for item in pay_items},
         {item["pay_item_uuid"] for item in pay_items if flag_unit(item["unit"]) is not None},
         {page["page_number"]: page.get("scale_px_per_ft") for page in pages}, live_labels, live_flag_nos,
+        default_pay_items(pay_items),
     )
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to import the PIR")

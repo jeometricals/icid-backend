@@ -86,6 +86,29 @@ def post(client, payload: dict, counts: dict = COUNTS, pir: dict = PIR_ROW):
     return response, pages, items, run
 
 
+class TestDefaultPayItem:
+    def test_a_non_assessable_flag_takes_the_projects_one_sidewalk_item(self, admin_client):
+        """Pilot sweep #2: the project's pay items, read once, give a non-assessable flag without one its thickness's."""
+        aas = {**PAY_ITEM_ROWS[0], "pay_item_uuid": UUID("c1000000-0000-4000-8000-000000000002"),
+               "pay_item_ref": "4.13 AAS", "budget_code": "HW-200(S)"}
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PAGES, return_value=PAGE_ROWS), \
+                patch(CONTRACT, return_value=[*PAY_ITEM_ROWS, aas]) as items, \
+                patch(IMPORT, return_value=[COUNTS]) as run:
+            assert admin_client.post(URL, json=body()).status_code == 200
+        assert items.call_count == 1  # no lookup of its own
+        flags = run.call_args.args[1][3].obj
+        assert flags[2]["pay_item_id"] == str(aas["pay_item_uuid"])  # the sample's non-assessable 4" flag
+        assert flags[0]["pay_item_id"] is None  # an assessable one takes none
+
+    def test_two_rows_for_the_item_give_none(self, admin_client):
+        aas = {**PAY_ITEM_ROWS[0], "pay_item_ref": "4.13 AAS"}
+        other = {**aas, "pay_item_uuid": UUID("c1000000-0000-4000-8000-000000000009"), "budget_code": "SE02"}
+        with patch(PIRS, return_value=[PIR_ROW]), patch(PAGES, return_value=PAGE_ROWS), \
+                patch(CONTRACT, return_value=[aas, other]), patch(IMPORT, return_value=[COUNTS]) as run:
+            assert admin_client.post(URL, json=body()).status_code == 200
+        assert run.call_args.args[1][3].obj[2]["pay_item_id"] is None
+
+
 class TestImport:
     def test_an_admin_imports_the_sample(self, admin_client):
         response, pages, items, run = post(admin_client, body())

@@ -19,6 +19,12 @@ FLAGS = "api.queries.flags.run_query"
 STRIPS = "api.queries.sidewalk_strip.run_query"
 PROJECTS = "api.queries.projects.run_query"
 MEASUREMENTS = "api.queries.flag_measurements.run_query"
+CONTRACT = "api.queries.contract_items.run_query"
+# A flag's pay item, and the sidewalk item a flag without one takes (pilot sweep #2)
+MAPPED = UUID("c1000000-0000-4000-8000-000000000001")
+AAS = UUID("c1000000-0000-4000-8000-000000000002")
+AAS_ROW = {"pay_item_uuid": AAS, "pay_item_ref": "4.13 AAS", "description": "Sidewalk", "unit": "SF",
+           "quantity": Decimal("9500"), "unit_price": Decimal("14.50"), "budget_code": "HW-200(S)", "spec_section": None}
 BUNDLE_ID = UUID("b1000000-0000-4000-8000-000000000001")
 
 ADMIN_ID = ADMIN_USER_ROW["uuid"]
@@ -38,11 +44,13 @@ PAGE_ROW = {"pir_page_id": PAGE_ID, "pir_id": PIR_ID, "property_id": UUID("e0000
 STRIP = [{"x": 300, "y": 250}, {"x": 460, "y": 250}, {"x": 460, "y": 450}, {"x": 300, "y": 450}]
 
 
-def flag_row(n: int, x: float, y: float, assessable: bool = True, claimed: UUID | None = None) -> dict:
-    """A 5 x 5 ft flag on the page, as the page's flag list returns it."""
+def flag_row(n: int, x: float, y: float, assessable: bool = True, claimed: UUID | None = None,
+             pay_item: UUID | None = MAPPED) -> dict:
+    """A 5 x 5 ft, 4" flag on the page, as the page's flag list returns it."""
     return {"id": UUID(f"e3000000-0000-4000-8000-00000000000{n}"), "display_order": n, "shape": "rectangle",
             "dimensions": {"L": 5, "W": 5}, "sketch_x": x, "sketch_y": y, "rotation": 0,
-            "surveyed_is_assessable": assessable, "claimed_by_idr_id": claimed}
+            "surveyed_is_assessable": assessable, "claimed_by_idr_id": claimed, "surveyed_thickness": "4in",
+            "pay_item_id": pay_item}
 
 
 INSIDE, CROSSING, OUTSIDE = flag_row(1, 400, 300), flag_row(4, 450, 450), flag_row(3, 700, 300)
@@ -79,8 +87,9 @@ class TestDraw:
         assert [(f["display_order"], f["claimed_by_idr_id"]) for f in data["outside_claimed"]] == [(5, str(IDR_ID))]
         sql, params = run.call_args.args
         assert params[0].obj == STRIP and params[1:4] == (ADMIN_ID, PAGE_ID, [OUTSIDE["id"]])
-        # Slice Y3b-1: no bundle picked for it (none on the page), then the flags again for the remesh and the flip
-        assert params[4:] == ([None], [OUTSIDE["id"]], [OUTSIDE["id"]], FLIP_REASON, None)  # the edits: no editor
+        # Slice Y3b-1: no bundle picked for it (none on the page); no pay item to give it (it has one: sweep #2); then
+        # the flags again for the remesh and the flip
+        assert params[4:] == ([None], [None], [OUTSIDE["id"]], [OUTSIDE["id"]], FLIP_REASON, None)  # no editor
 
     def test_the_one_statement_writes_the_strip_flips_and_their_edits(self, admin_client):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=PAGE_FLAGS), \
@@ -112,12 +121,36 @@ class TestDraw:
         bundle = {**flag_row(6, 780, 300, assessable=False), "surveyed_thickness": "4in", "pay_item_id": None,
                   "measurement_id": BUNDLE_ID, "scale_px_per_ft": Decimal("16"), "bundled": True, "frozen": False}
         with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[INSIDE, outside]), \
-                patch(MEASUREMENTS, return_value=[me, bundle]) as read, \
+                patch(MEASUREMENTS, return_value=[me, bundle]) as read, patch(CONTRACT, return_value=[]), \
                 patch(STRIPS, return_value=[strip_row()]) as run:
             response = admin_client.put(URL, json={"points": STRIP})
         assert response.status_code == 200
         assert read.call_args.args[1] == (PAGE_ID,)
         assert run.call_args.args[1][3:5] == ([OUTSIDE["id"]], [BUNDLE_ID])
+
+    def test_a_flipped_flag_without_a_pay_item_takes_its_thicknesss(self, admin_client):
+        """Pilot sweep #2: the same default as a flag's PATCH; the statement writes it with the flip (COALESCE, so a
+        pay item given meanwhile stands), and a flag with one keeps it."""
+        bare = {**OUTSIDE, "pay_item_id": None}
+        bare_2 = {**flag_row(6, 780, 300, pay_item=None)}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[INSIDE, bare, bare_2]), \
+                patch(MEASUREMENTS, return_value=[]), patch(CONTRACT, return_value=[AAS_ROW]) as contract, \
+                patch(STRIPS, return_value=[strip_row()]) as run:
+            assert admin_client.put(URL, json={"points": STRIP}).status_code == 200
+        assert [call.args[1] for call in contract.call_args_list] == [("HWS0023", "4.13 AAS")]  # once per thickness
+        sql, params = run.call_args.args
+        assert params[3] == [OUTSIDE["id"], bare_2["id"]] and params[5] == [AAS, AAS]
+        one_line = " ".join(sql.split())
+        assert "COALESCE(f.pay_item_id, t.pay_item_id) AS new_pay_item" in one_line
+        assert "pay_item_id = i.new_pay_item" in one_line
+
+    def test_a_project_without_exactly_one_item_gives_none(self, admin_client):
+        bare = {**OUTSIDE, "pay_item_id": None}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[bare]), \
+                patch(MEASUREMENTS, return_value=[]), patch(CONTRACT, return_value=[AAS_ROW, AAS_ROW]), \
+                patch(STRIPS, return_value=[strip_row()]) as run:
+            assert admin_client.put(URL, json={"points": STRIP}).status_code == 200
+        assert run.call_args.args[1][5] == [None]
 
     def test_nothing_to_flip_reads_no_flags_for_the_remesh(self, admin_client):
         with patch(PAGES, return_value=[PAGE_ROW]), patch(FLAGS, return_value=[INSIDE]), patch(MEASUREMENTS) as read, \

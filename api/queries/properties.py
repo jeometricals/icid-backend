@@ -12,7 +12,7 @@ _PROPERTY_COLUMNS = """
             p.violation_no, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
             p.facing_street::text AS facing_street, p.ramp_type::text AS ramp_type, p.corner_id, p.community_board, p.notes,
             p.created_at, p.updated_at, p.created_by, p.deleted_at, p.deleted_by,
-            p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at,
+            p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at, p.tax_map_depth_ft,
             p.tax_map_pdf_path, p.tax_map_pdf_source, p.tax_map_pdf_map_id, p.tax_map_pdf_effective_date,
             p.tax_map_pdf_fetched_at, p.tax_map_pdf_uploaded_by"""
 # What properties are ordered by: a sidewalk's address, a ped ramp's intersection (then its quadrant)
@@ -179,6 +179,7 @@ def update_property(property_id: UUID, data: dict[str, Any]) -> Optional[dict[st
             tax_map_frontage_ft = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_frontage_ft END,
             tax_map_source = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_source END,
             tax_map_fetched_at = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_fetched_at END,
+            tax_map_depth_ft = CASE WHEN """ + _SAME_TAX_LOT + """ THEN p.tax_map_depth_ft END,
             """ + "".join(f"{column} = CASE WHEN {_SAME_TAX_BLOCK} THEN p.{column} END,\n            "
                           for column in _TAX_MAP_PDF_COLUMNS) + """updated_at = now()
         FROM (SELECT %s::icid.boro AS boro, %s::text AS block, %s::text AS lot) AS new_lot
@@ -262,20 +263,39 @@ def undelete_property(property_id: UUID) -> Optional[dict[str, Any]]:
 
 
 def set_property_tax_map(
-    property_id: UUID, boro: str, block: str, lot: str, frontage_ft: Decimal, source: str
+    property_id: UUID, boro: str, block: str, lot: str, frontage_ft: Decimal, source: str,
+    depth_ft: Optional[Decimal] = None,
 ) -> Optional[list[dict[str, Any]]]:
     """
-    Cache a sidewalk's MapPLUTO frontage (Slice Y1), fetched now, while it is still at the lot it was fetched for.
-    Takes the property's id, the borough, block and lot the frontage was fetched for, the frontage in feet and its source label.
+    Cache a sidewalk's MapPLUTO frontage (Slice Y1) and depth (pilot sweep #2), fetched now, while it is still at the lot they were fetched for.
+    Takes the property's id, the borough, block and lot they were fetched for, the frontage in feet, its source label and the depth in feet (None for none).
     Returns [{id}] when it was written, [] when the property is gone, not a sidewalk or now at another lot, or None on failure.
     """
     sql = """
         UPDATE icid.properties p
-        SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()
+        SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now(), tax_map_depth_ft = %s
         WHERE p.id = %s AND p.kind = 'sidewalk' AND p.boro = %s::icid.boro AND p.block = %s AND p.lot = %s
         RETURNING p.id;
     """
-    return run_query(sql, (frontage_ft, source, property_id, boro, block, lot))
+    return run_query(sql, (frontage_ft, source, depth_ft, property_id, boro, block, lot))
+
+
+def set_property_tax_map_depth(
+    property_id: UUID, boro: str, block: str, lot: str, depth_ft: Decimal
+) -> Optional[list[dict[str, Any]]]:
+    """
+    Fill in a sidewalk's MapPLUTO depth alone (pilot sweep #2's backfill), beside the frontage it has, while it is still at the lot it was fetched for; the frontage, its source and its title blocks are left as they are.
+    Takes the property's id, the borough, block and lot the depth was fetched for, and the depth in feet.
+    Returns [{id}] when it was written, [] when the property is gone, not a sidewalk, without a frontage or now at another lot, or None on failure.
+    """
+    sql = """
+        UPDATE icid.properties p
+        SET tax_map_depth_ft = %s
+        WHERE p.id = %s AND p.kind = 'sidewalk' AND p.tax_map_frontage_ft IS NOT NULL
+          AND p.boro = %s::icid.boro AND p.block = %s AND p.lot = %s
+        RETURNING p.id;
+    """
+    return run_query(sql, (depth_ft, property_id, boro, block, lot))
 
 
 def list_sidewalks_without_tax_map() -> Optional[list[dict[str, Any]]]:
@@ -297,6 +317,22 @@ def list_sidewalks_without_tax_map() -> Optional[list[dict[str, Any]]]:
     return run_query(sql)
 
 
+def list_sidewalks_without_tax_map_depth() -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch every live sidewalk, of every project, that has a MapPLUTO frontage but no depth (pilot sweep #2's backfill).
+    Takes nothing.
+    Returns [{id, project_id, address, boro, block, lot, frontage_ft}] by project then address, or None on failure.
+    """
+    sql = """
+        SELECT p.id, p.project_id, p.address, p.boro::text AS boro, p.block, p.lot, p.tax_map_frontage_ft AS frontage_ft
+        FROM icid.properties p
+        WHERE p.kind = 'sidewalk' AND p.deleted_at IS NULL
+          AND p.tax_map_frontage_ft IS NOT NULL AND p.tax_map_depth_ft IS NULL
+        ORDER BY p.project_id, p.address;
+    """
+    return run_query(sql)
+
+
 def list_sidewalks_without_tax_map_pdf() -> Optional[list[dict[str, Any]]]:
     """
     Fetch every live sidewalk, of every project, that has no DOF tax-map PDF yet (Slice Y1.5's backfill).
@@ -313,21 +349,22 @@ def list_sidewalks_without_tax_map_pdf() -> Optional[list[dict[str, Any]]]:
 
 
 def refresh_property_tax_map(
-    property_id: UUID, boro: str, block: str, lot: str, frontage_ft: Decimal, source: str
+    property_id: UUID, boro: str, block: str, lot: str, frontage_ft: Decimal, source: str,
+    depth_ft: Optional[Decimal] = None,
 ) -> Optional[dict[str, Any]]:
     """
     Write a sidewalk's freshly fetched MapPLUTO frontage (Slice Y1) in one statement: onto the property, and onto the title block of every live page of its live PIR whose width wasn't typed by hand (source manual), page 1 getting a title block if it has none.
-    Takes the property's id, the borough, block and lot the frontage was fetched for, the frontage in feet and its source label.
-    Returns {tax_map_frontage_ft, tax_map_source, tax_map_fetched_at, old_frontage_ft, pages_updated}, or None when the property is gone, not a sidewalk or now at another lot (nothing written).
+    Takes the property's id, the borough, block and lot the frontage was fetched for, the frontage in feet, its source label and the depth in feet (None for none; onto the property only, a title block having no depth).
+    Returns {tax_map_frontage_ft, tax_map_source, tax_map_fetched_at, tax_map_depth_ft, old_frontage_ft, pages_updated}, or None when the property is gone, not a sidewalk or now at another lot (nothing written).
     """
     sql = """
         WITH prop AS (
             UPDATE icid.properties p
-            SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()
+            SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now(), tax_map_depth_ft = %s
             FROM icid.properties old
             WHERE p.id = %s AND old.id = p.id
               AND p.kind = 'sidewalk' AND p.boro = %s::icid.boro AND p.block = %s AND p.lot = %s
-            RETURNING p.id, p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at,
+            RETURNING p.id, p.tax_map_frontage_ft, p.tax_map_source, p.tax_map_fetched_at, p.tax_map_depth_ft,
                       old.tax_map_frontage_ft AS old_frontage_ft
         ),
         pages AS (
@@ -348,11 +385,12 @@ def refresh_property_tax_map(
                 WHERE a.tax_map_source IS DISTINCT FROM 'manual'
             RETURNING a.pir_page_id
         )
-        SELECT prop.tax_map_frontage_ft, prop.tax_map_source, prop.tax_map_fetched_at, prop.old_frontage_ft,
+        SELECT prop.tax_map_frontage_ft, prop.tax_map_source, prop.tax_map_fetched_at, prop.tax_map_depth_ft,
+               prop.old_frontage_ft,
                (SELECT count(*) FROM written) AS pages_updated
         FROM prop;
     """
-    rows = run_query(sql, (frontage_ft, source, property_id, boro, block, lot))
+    rows = run_query(sql, (frontage_ft, source, depth_ft, property_id, boro, block, lot))
     return rows[0] if rows else None
 
 

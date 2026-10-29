@@ -181,7 +181,9 @@ class TestPropertyReport:
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
             content = admin_client.get(URL).content
         text = pdf_text(content)
-        assert "Inspected By Reza Mousavian" in text and "IR # 001" in text and "RM 2026-10-15" in text
+        # DOT's layout (pilot sweep #2): the name over the IR line (its en dash doesn't extract), no initials stamp
+        assert "Inspected By: Reza Mousavian IR # 001" in text and "10/03/2026 Print Sign Date" in text
+        assert "RM 2026-10-15" not in text
         storage.assert_called_once_with(f"idrs/{IDR_ID}/inspector_abc.png", "signatures")
         assert image_count(content) == 1
 
@@ -304,11 +306,12 @@ class TestPropertyReport:
         assert "250.94 - 137.75 113.19" in text and "Adjustment to box 2 +47.50" in text
         assert "171.81 - 77.67 94.14" in text
 
-    def test_the_perimeter_prints_the_property_line_the_tax_map_and_the_concrete_curb(self, admin_client, storage):
+    def test_the_perimeter_prints_the_property_line_and_the_concrete_curb(self, admin_client, storage):
         with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
             text = pdf_text(admin_client.get(URL).content)
-        # CC from the page's concrete curb segment: 800 px at 24 px/ft
-        assert text.count("PL") >= 2 and "TAX MAP 40.00'" in text and "CC= 33.33'" in text
+        # CC from the page's concrete curb segment: 800 px at 24 px/ft; the tax map is in the corner block (sweep #2)
+        assert text.count("PL") >= 2 and "CC= 33.33'" in text and "TAX MAP" not in text
+        assert "Tax Map: 40.00' × —" in text
         assert "139 AVENUE" in text and "138 AVENUE" in text and "227 STREET" in text
 
     def test_without_the_widths_only_the_property_line_prints(self, admin_client, storage):
@@ -316,7 +319,7 @@ class TestPropertyReport:
         no_curb = {"features": [], "segments": []}
         with patch(PROPS, return_value=[PROPERTY_ROW]),                 patch(REPORT, side_effect=report_query(header=header, drawings=no_curb)):
             text = pdf_text(admin_client.get(URL).content)
-        assert "PL" in text and "TAX MAP" not in text and "CC=" not in text
+        assert "PL" in text and "Tax Map: — × —" in text and "CC=" not in text
 
     def test_each_material_is_filled_its_own_way(self, admin_client, storage):
         fills = {"4in": MagicMock(), "7in": MagicMock(), "non_assessable": MagicMock()}
@@ -551,21 +554,36 @@ class TestIdrReports:
         assert IDR_ROW["reporter_uuid"] != DEMO_USER_ROW["uuid"]
 
 
-@pytest.mark.parametrize("source,label", [("mappluto_26v2", "TAX MAP 40.00' (MapPLUTO 26v2)"),
-                                          ("manual", "TAX MAP 40.00' (Manual)")])
-def test_the_tax_map_prints_its_source(admin_client, storage, source, label):
-    """Slice Y1: the TAX MAP dimension says where its width came from."""
-    header = {**HEADER, "tb_tax_map_source": source}
-    with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(header=header)):
+# Pilot sweep #2: the property's MapPLUTO frontage, depth and their source, as get_report_header reads them
+MAPPLUTO = {"tax_map_frontage_ft": Decimal("16.67"), "tax_map_depth_ft": Decimal("100.17"),
+            "tax_map_source": "mappluto_26v2"}
+
+
+@pytest.mark.parametrize("header,label", [
+    # page 1's width and the property's depth, both MapPLUTO's: one source
+    ({"tb_tax_map_width_ft": Decimal("16.67"), "tb_tax_map_source": "mappluto_26v2", **MAPPLUTO},
+     "Tax Map: 16.67' × 100.17' (MapPLUTO 26v2)"),
+    # a width typed by hand beside MapPLUTO's depth: both sources
+    ({"tb_tax_map_source": "manual", **MAPPLUTO}, "Tax Map: 40.00' × 100.17' (Manual / MapPLUTO 26v2)"),
+    # no depth: an em-dash
+    ({"tb_tax_map_source": "mappluto_26v2", **MAPPLUTO, "tax_map_depth_ft": None},
+     "Tax Map: 40.00' × — (MapPLUTO 26v2)"),
+    # a title block without a width or a source: the property's frontage
+    ({"tb_tax_map_width_ft": None, **MAPPLUTO}, "Tax Map: 16.67' × 100.17' (MapPLUTO 26v2)"),
+])
+def test_the_corner_block_prints_both_dimensions_and_their_source(admin_client, storage, header, label):
+    """Pilot sweep #2 (#5a): the tax map's width and depth at the sketch's top right, not between the PLs."""
+    with patch(PROPS, return_value=[PROPERTY_ROW]), \
+            patch(REPORT, side_effect=report_query(header={**HEADER, **header})):
         text = pdf_text(admin_client.get(URL).content)
-    assert label in text
+    assert label in text and "TAX MAP" not in text
 
 
-def test_a_tax_map_without_a_source_prints_as_before(admin_client, storage):
+def test_a_tax_map_without_a_source_prints_no_note(admin_client, storage):
     """Slice Y1: a width with no source (none recorded) prints without a note."""
     with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query()):
         text = pdf_text(admin_client.get(URL).content)
-    assert "TAX MAP 40.00'" in text and "(MapPLUTO" not in text and "(Manual)" not in text
+    assert "Tax Map: 40.00' × —" in text and "(MapPLUTO" not in text and "(Manual)" not in text
 
 
 # Slice Y2: a page's sidewalk strip, its first edge (the property line) 720 px = 30.00 ft at 24 px/ft
@@ -573,11 +591,11 @@ STRIP = [{"x": 100, "y": 100}, {"x": 820, "y": 100}, {"x": 820, "y": 280}, {"x":
 
 
 def test_a_pages_sidewalk_strip_prints_with_its_frontage_beside_the_tax_map(admin_client, storage):
-    """Slice Y2: the strip is drawn and labelled, and its FRONTAGE prints as well as the TAX MAP."""
+    """Slice Y2: the strip is drawn and labelled, and its FRONTAGE prints as well as the tax map's corner block."""
     drawings = {**DRAWINGS, "strips": [{"points": STRIP}]}
     with patch(PROPS, return_value=[PROPERTY_ROW]), patch(REPORT, side_effect=report_query(drawings=drawings)):
         text = pdf_text(admin_client.get(URL).content)
-    assert "Sidewalk strip" in text and "FRONTAGE 30.00' (Sidewalk strip)" in text and "TAX MAP 40.00'" in text
+    assert "Sidewalk strip" in text and "FRONTAGE 30.00' (Sidewalk strip)" in text and "Tax Map: 40.00'" in text
 
 
 def test_without_a_strip_no_frontage_prints(admin_client, storage):
