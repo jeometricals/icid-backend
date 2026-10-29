@@ -910,7 +910,8 @@ Any change must follow these.
   - **The auto-flip**: in the route, Python finds the page's flags wholly outside the strip (`outside_flags`: the flag's
     `placed_outline` overlaps it by `OUTSIDE_TOLERANCE_SF` or less, through R1h.4's `overlap_area`; no PostGIS, no Shapely;
     an unplaced flag isn't tested), then one statement writes the strip and marks those still live, assessable and
-    **unclaimed** non-assessable, reason `outside_property_line`, with their `flag_edits` rows. **Claimed flags are never
+    **unclaimed** non-assessable, reason `outside_property_line`, with their `flag_edits` rows; one without a pay item
+    takes its thickness's (pilot sweep #2, see "Flags"). **Claimed flags are never
     flipped**: they come back as `outside_claimed` for an admin to review. Crossing flags are Y2's. Clearing the strip
     flips nothing back; redrawing flips the newly outside.
   - **What a flip changes:** the homeowner's assessment (the Construction Report's measure and the Assessment Summary
@@ -1282,10 +1283,13 @@ Any change must follow these.
     record whole.
   - **Pay items.** `pay_item_id` is a contract item of the PIR's project: the route checks it (400 `Pay item
     belongs to a different project`, an unknown id included) and the INSERT and UPDATE match only when it
-    holds. **A non-assessable flag bills too** (pilot sweep #2): one created without `pay_item_id` sent, or one a PATCH
-    marks non-assessable while it has none (and sends none), takes its thickness's sidewalk item (`default_pay_item_id`
-    in `api/services/flag_pay_items.py`: 4in and 7in_as_4in `4.13 AAS`, 7in `4.13 BAS`) when the project has exactly one
-    contract item under that number, any budget code, in a flag unit; none or several (SE384's four budget codes) and it
+    holds. **A non-assessable flag bills too** (pilot sweep #2): every way a flag becomes non-assessable without a pay item gives
+    it its thickness's sidewalk item: its create without `pay_item_id` sent, a PATCH marking it non-assessable while it
+    has none (and sends none), the Smart PIR import (a non-assessable flag the file gives no `pay_item_id`; from the
+    project's pay items it already reads, `default_pay_items`) and the sidewalk strip's auto-flip (one lookup per
+    thickness, written in the flip's statement, `COALESCE` over a pay item given meanwhile). One rule for all
+    four (`sole_pay_item` in `api/services/flag_pay_items.py`): the item of its thickness (4in and 7in_as_4in `4.13 AAS`,
+    7in `4.13 BAS`), when the project has exactly one contract item under that number, any budget code, in a flag unit; none or several (SE384's four budget codes) and it
     stays unmapped, which Progress counts for the OE. Marking a flag non-assessable never clears its pay item; an explicit
     null does. Migration 064 did the same for the flags drawn before. Billing never reads `surveyed_is_assessable`; the
     homeowner's side (Construction Report, Assessment Summary, the clip) never reads the pay item. A deleted pay item leaves its flags unmapped

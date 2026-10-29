@@ -9,6 +9,7 @@ from api.queries.sidewalk_strip import clear_sidewalk_strip, set_sidewalk_strip
 from api.schemas.auth import UserOut
 from api.schemas.sidewalk_strip import SidewalkStrip, SidewalkStripIn, SidewalkStripResponse, StripFlag
 from api.services.auth import current_user, no_demo_pir_writes, pir_page_member
+from api.services.flag_pay_items import default_pay_item_id
 from api.services.measurement_bundles import join_target
 from api.services.property_line import StripError, check_strip, outside_flags, strip_frontage_ft, strip_points
 from api.v1._shared import PAGE_CHAIN, PAGE_DELETED, refuse_deleted_chain, require_roles
@@ -100,18 +101,29 @@ def put_sidewalk_strip(
     claimed = [flag for flag in outside if flag["claimed_by_idr_id"] is not None]
     to_flip = [flag["id"] for flag in outside if flag["claimed_by_idr_id"] is None]
 
-    targets = {}
+    targets, pay_items = {}, {}
     if to_flip:
+        # A flipped flag without a pay item takes its thickness's (pilot sweep #2), one lookup per thickness
+        defaults: dict[Any, Any] = {}
+        for flag in outside:
+            if flag["id"] in to_flip and flag["pay_item_id"] is None:
+                thickness = flag["surveyed_thickness"]
+                if thickness not in defaults:
+                    defaults[thickness] = default_pay_item_id(page["project_id"], thickness)
+                if defaults[thickness] is not None:
+                    pay_items[flag["id"]] = defaults[thickness]
         # Each flag flipped is reclassified: the bundle it joins, if exactly one is open to it (Slice Y3b-1)
         neighbours = list_remesh_neighbours(pir_page_id)
         if neighbours is None:
             raise HTTPException(status_code=500, detail="Failed to read the page's flags")
         moving = frozenset(to_flip)
         flipping = [flag for flag in outside if flag["id"] in moving]
-        targets = {flag["id"]: join_target({**flag, "surveyed_is_assessable": False}, neighbours, moving - {flag["id"]})
+        targets = {flag["id"]: join_target({**flag, "surveyed_is_assessable": False,
+                                            "pay_item_id": flag["pay_item_id"] or pay_items.get(flag["id"])},
+                                           neighbours, moving - {flag["id"]})
                    for flag in flipping}
 
-    row = set_sidewalk_strip(pir_page_id, raw, user.uuid, to_flip, targets)
+    row = set_sidewalk_strip(pir_page_id, raw, user.uuid, to_flip, targets, pay_items)
     if row is None:
         # Replaced between the read and the statement
         raise HTTPException(status_code=400, detail=PAGE_DELETED)

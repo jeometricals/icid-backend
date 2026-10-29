@@ -101,6 +101,41 @@ class TestTheSample:
         assert block["pir_page_id"] == PAGE_1 and block["boro"] == "Queens" and block["violation_not_removed_due_to"] == ["tree"]
 
 
+class TestDefaultPayItem:
+    """Pilot sweep #2: a non-assessable flag the file gives no pay item takes its thickness's, as a flag's create does."""
+
+    AAS = UUID("c1000000-0000-4000-8000-000000000002")
+    BAS = UUID("c1000000-0000-4000-8000-000000000003")
+
+    def defaulted(self, raw: dict):
+        """Check a file with the project's defaults: 4.13 AAS for 4", 4.13 BAS for 7" (none for 7" as 4")."""
+        return prepare_import(SmartPirImport.model_validate(raw), PAGE_IDS, {PAY_ITEM, self.AAS, self.BAS},
+                              default_pay_items={"4in": self.AAS, "7in": self.BAS})
+
+    def test_the_samples_non_assessable_flag_takes_its_thicknesss(self):
+        flags = self.defaulted(sample()).flags
+        # Flag 3 (index 2) is non-assessable, 4", with no pay_item_id; the assessable ones take none
+        assert flags[2]["pay_item_id"] == self.AAS
+        assert [flag["pay_item_id"] for index, flag in enumerate(flags) if index != 2] == [None, None, None, None]
+
+    def test_a_7in_one_takes_the_7in_item_and_a_thickness_without_one_none(self):
+        raw = sample()
+        page_one(raw)["flags"][2]["surveyed_thickness"] = "7in"
+        assert self.defaulted(raw).flags[2]["pay_item_id"] == self.BAS
+        page_one(raw)["flags"][2]["surveyed_thickness"] = "7in_as_4in"
+        assert self.defaulted(raw).flags[2]["pay_item_id"] is None
+
+    def test_a_pay_item_or_a_null_the_file_gives_stands(self):
+        raw = sample()
+        page_one(raw)["flags"][2]["pay_item_id"] = str(PAY_ITEM)
+        assert self.defaulted(raw).flags[2]["pay_item_id"] == PAY_ITEM
+        page_one(raw)["flags"][2]["pay_item_id"] = None
+        assert self.defaulted(raw).flags[2]["pay_item_id"] is None
+
+    def test_without_defaults_nothing_is_given(self):
+        assert prepared(sample()).flags[2]["pay_item_id"] is None
+
+
 class TestDrops:
     def test_an_invalid_shape(self):
         raw = sample()

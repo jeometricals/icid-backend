@@ -861,7 +861,8 @@ class TestDefaultPayItem:
 
     @pytest.mark.parametrize("thickness,item_no", [("4in", "4.13 AAS"), ("7in", "4.13 BAS"), ("7in_as_4in", "4.13 AAS")])
     def test_a_new_non_assessable_flag_takes_its_thicknesss_item(self, admin_client, thickness, item_no):
-        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[AAS_ROW]) as contract, \
+        row = {**AAS_ROW, "pay_item_ref": item_no}
+        with patch(PAGES, return_value=[PAGE_ROW]), patch(CONTRACT, return_value=[row]) as contract, \
                 patch(FLAGS, return_value=[FLAG_ROW]) as run:
             response = admin_client.post(FLAGS_URL, json={**NOT_ASSESSABLE_BODY, "surveyed_thickness": thickness})
         assert response.status_code == 201
