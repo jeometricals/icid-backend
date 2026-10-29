@@ -124,6 +124,16 @@ def get_project_pay_item(project_id: str, pay_item_uuid: UUID) -> Optional[dict[
     return rows[0] if rows else None
 
 
+def list_project_pay_items_by_number(project_id: str, item_no: str) -> Optional[list[dict[str, Any]]]:
+    """
+    Fetch every pay item a project has under an item number, whatever its budget code, matched exactly.
+    Takes the project id and the item number.
+    Returns the pay item dicts (as list_project_pay_items returns them) by budget code, empty when none, or None on failure.
+    """
+    sql = _PAY_ITEM_SELECT + "        WHERE ci.project_id = %s AND ci.item_no = %s\n        ORDER BY ci.budget_code;"
+    return run_query(sql, (project_id, item_no))
+
+
 def get_project_pay_item_by_key(project_id: str, item_no: str, budget_code: str) -> Optional[dict[str, Any]]:
     """
     Fetch the pay item a project has under an item number and budget code, matched exactly.

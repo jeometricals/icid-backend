@@ -1,4 +1,5 @@
 import math
+from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
@@ -15,7 +16,15 @@ from api.services.construction_measure import (
 from api.services.construction_report import (
     CALC_WIDTH,
     CALC_WIDTH_TWO,
+    CERT_H,
+    CERT_Y,
+    INSPECTED_X,
+    LEFT,
+    PRINT_CELL_WIDTH,
+    RIGHT,
     calc_lines,
+    caption_placement,
+    ir_line,
     label_fits,
     SIGNATURE_MAX_WIDTH,
     material_label,
@@ -23,6 +32,7 @@ from api.services.construction_report import (
     reason_text,
     report_layout,
     signature_box,
+    tax_map_block,
 )
 from api.services.construction_sketch import (
     MIN_POINTS_PER_FOOT,
@@ -462,11 +472,61 @@ class TestLayout:
         assert [[group.thickness for group in column] for column in report_layout(groups).columns] == [
             ["4in", "7in_as_4in"], ["7in"]]
 
-    def test_the_signature_fits_its_cell_above_the_line_at_most_1_3_inches_wide(self):
-        x, y, w, h = signature_box(546.0, 14.0, 48.0)
-        assert w == SIGNATURE_MAX_WIDTH == 94.0 and y == 25.5 and y + h <= 14 + 48
-        # Centred across the 210 pt cell
-        assert x == 546 + (210 - 94) / 2 and x + w <= 546 + 210
+    def test_the_signature_takes_dots_box_right_of_the_inspected_by_block(self):
+        """Pilot sweep #2: BLK_13140_LOT_49F's box, 99 x 23 pt, from 631 to 730 across x and 33.6 to 56.5 up the strip
+        (36 to 756 on our sheet against DOT's 38.8 to 759.9: the same, 3 pt to the left)."""
+        x, y, w, h = signature_box(LEFT + INSPECTED_X, CERT_Y)
+        assert (w, h) == (SIGNATURE_MAX_WIDTH, 23.0) and SIGNATURE_MAX_WIDTH == 99.0
+        assert (x, y) == (628.5, 33.0) and y + h <= CERT_Y + CERT_H
+        assert x + w <= RIGHT - PRINT_CELL_WIDTH  # clear of the Print Sign Date cell
+
+    @pytest.mark.parametrize("header,line", [
+        ({"idr_number": "34C", "tb_date_constructed": date(2014, 12, 4), "report_date": date(2014, 12, 2)},
+         "IR # 34C – 12/04/2014"),
+        ({"idr_number": "001", "tb_date_constructed": None, "report_date": date(2026, 10, 3)}, "IR # 001 – 10/03/2026"),
+        ({"idr_number": None, "tb_date_constructed": None, "report_date": None}, "IR #"),
+    ])
+    def test_the_ir_line_is_the_number_and_the_day_constructed_else_the_work_date(self, header, line):
+        assert ir_line(header) == line
+
+    # Pilot sweep #2 (#6): a match line's caption
+    ROOM = (36.0, 98.0, 516.0, 386.0)
+    CAPTION = 'MATCH LINE "A" — SEE SHEET 2 OF 2'
+
+    @pytest.mark.parametrize("start,end", [((300, 150), (300, 330)), ((300, 330), (300, 150)),
+                                           ((300, 150), (297, 330)), ((297, 330), (300, 150))])
+    def test_a_vertical_lines_caption_runs_along_it_bottom_to_top(self, start, end):
+        _, _, angle, _, _ = caption_placement(start, end, self.CAPTION, (200, 240), self.ROOM)
+        assert 80 < angle < 100  # turned to run up the line, whichever way it was drawn or leans
+
+    @pytest.mark.parametrize("start,end", [((100, 200), (400, 200)), ((400, 200), (100, 200)), ((100, 200), (400, 210))])
+    def test_any_other_reads_left_to_right(self, start, end):
+        _, _, angle, _, _ = caption_placement(start, end, self.CAPTION, (250, 300), self.ROOM)
+        assert -10 < angle < 10
+
+    def test_it_sits_on_the_side_away_from_the_drawing(self):
+        # A vertical line right of the drawing: its caption to the right of the line
+        _, _, _, _, box = caption_placement((450, 150), (450, 330), self.CAPTION, (250, 240), self.ROOM)
+        assert box[0] > 450
+        _, _, _, _, box = caption_placement((60, 150), (60, 330), self.CAPTION, (250, 240), self.ROOM)
+        assert box[2] < 60
+
+    def test_a_caption_that_would_run_off_the_sheet_slides_along_its_line(self):
+        # A short vertical line at the top of the room: the caption, longer than it, would overrun the top
+        x, y, _, size, box = caption_placement((450, 360), (450, 384), self.CAPTION, (250, 240), self.ROOM)
+        assert size == 6.0 and self.ROOM[1] <= box[1] and box[3] <= self.ROOM[3]
+        # and a horizontal one at the right edge stays inside it too
+        _, _, _, _, box = caption_placement((480, 300), (514, 300), self.CAPTION, (250, 240), self.ROOM)
+        assert self.ROOM[0] <= box[0] and box[2] <= self.ROOM[2]
+
+    def test_a_room_shorter_than_the_caption_shrinks_it(self):
+        room = (36.0, 98.0, 136.0, 386.0)  # 100 pt across
+        _, _, _, size, box = caption_placement((40, 300), (130, 300), self.CAPTION, (86, 200), room)
+        assert size < 6.0 and room[0] <= box[0] and box[2] <= room[2]
+
+    def test_a_ped_ramp_has_no_tax_map_block(self):
+        assert tax_map_block({"property_kind": "ped_ramp", "tb_tax_map_width_ft": None}) is None
+        assert tax_map_block({"property_kind": "sidewalk"}) == ("Tax Map: — × —", None)
 
     @pytest.mark.parametrize("property_type, label", [
         ("1_3_family", "1-3 FAMILY"), ("4_plus_family", "4+ FAMILY"), ("expedited", "EXPEDITED"),

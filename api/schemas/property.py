@@ -143,6 +143,8 @@ class PropertyOut(BaseModel):
     tax_map_frontage_ft: Optional[float] = None
     tax_map_source: Optional[str] = None
     tax_map_fetched_at: Optional[datetime] = None
+    # Its lot depth from MapPLUTO, fetched with the frontage (pilot sweep #2); None without one or when it was suspect
+    tax_map_depth_ft: Optional[float] = None
     # A sidewalk's DOF tax-map PDF (Slice Y1.5): where it came from (dof_map_library or upload), DOF's map id and its
     # effective date (a fetch's), when it was fetched or uploaded, and by whom (an upload's); all None without one. The
     # file's path stays internal: GET /v1/properties/{id}/tax-map-pdf hands out a signed URL
@@ -245,12 +247,14 @@ class PropertyConflict(BaseModel):
 class TaxMapRefresh(BaseModel):
     """
     A sidewalk's tax-map frontage as an admin's refresh from MapPLUTO left it (Slice Y1): the frontage in feet, its
-    source, when it was fetched, and how many of its PIR's title blocks took it (those typed by hand don't).
+    source, when it was fetched, and how many of its PIR's title blocks took it (those typed by hand don't); and the
+    lot's depth (pilot sweep #2), None when MapPLUTO's was suspect.
     """
 
     frontage_ft: float
     source: str
     fetched_at: datetime
+    depth_ft: Optional[float] = None
     pages_updated: int
 
 

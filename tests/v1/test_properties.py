@@ -764,17 +764,18 @@ FETCHED = datetime(2026, 11, 5, 14, 0, tzinfo=timezone.utc)
 CACHED_ROW = {**PROPERTY_ROW, "tax_map_frontage_ft": Decimal("40.00"), "tax_map_source": "mappluto_26v2",
               "tax_map_fetched_at": FETCHED}
 REFRESHED = {"tax_map_frontage_ft": Decimal("42.50"), "tax_map_source": "mappluto_26v2", "tax_map_fetched_at": FETCHED,
-             "old_frontage_ft": Decimal("40.00"), "pages_updated": 2}
+             "tax_map_depth_ft": Decimal("100.00"), "old_frontage_ft": Decimal("40.00"), "pages_updated": 2}
 
 
-def mappluto(front: object, version: str = "26v2") -> MagicMock:
+def mappluto(front: object, version: str = "26v2", depth: object = 100) -> MagicMock:
     """
     Build MapPLUTO's answer for one lot.
-    Takes its LotFront and Version.
+    Takes its LotFront, Version and LotDepth.
     Returns the mock response.
     """
     response = MagicMock()
-    response.json.return_value = {"features": [{"attributes": {"LotFront": front, "Version": version}}]}
+    attributes = {"LotFront": front, "LotDepth": depth, "Version": version}
+    response.json.return_value = {"features": [{"attributes": attributes}]}
     return response
 
 
@@ -788,8 +789,8 @@ class TestTaxMapFrontageFetched:
         assert (data["tax_map_frontage_ft"], data["tax_map_source"], data["tax_map_fetched_at"]) == (None, None, None)
         assert get.call_args_list[0].kwargs["params"]["where"] == "BBL=4012340056"
         sql, params = run.call_args.args
-        assert "SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()" in sql
-        assert params == (Decimal("40.00"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "56")
+        assert "SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now(), tax_map_depth_ft = %s" in sql
+        assert params == (Decimal("40.00"), "mappluto_26v2", Decimal("100.00"), PROPERTY_ID, "Queens", "1234", "56")
 
     def test_a_fetch_that_fails_leaves_the_sidewalk_created_without_one(self, admin_client):
         with patch(PROJECTS, return_value=[PROJECT_ROW]), patch(GET, side_effect=httpx.ConnectError("down")), \
@@ -807,6 +808,7 @@ class TestTaxMapFrontageFetched:
         with patch(PROPS, return_value=[CACHED_ROW]):
             data = admin_client.get(URL).json()["data"]
         assert (data["tax_map_frontage_ft"], data["tax_map_source"]) == (40.0, "mappluto_26v2")
+        assert data["tax_map_depth_ft"] is None  # none fetched with it
         assert data["tax_map_fetched_at"].startswith("2026-11-05T14:00:00")
 
     def test_a_move_to_another_lot_clears_it_and_fetches_the_new_lots(self, admin_client):
@@ -819,10 +821,13 @@ class TestTaxMapFrontageFetched:
         one_line = " ".join(update_sql.split())
         assert ("tax_map_frontage_ft = CASE WHEN (p.boro = new_lot.boro AND p.block IS NOT DISTINCT FROM new_lot.block "
                 "AND p.lot IS NOT DISTINCT FROM new_lot.lot) THEN p.tax_map_frontage_ft END") in one_line
+        assert ("tax_map_depth_ft = CASE WHEN (p.boro = new_lot.boro AND p.block IS NOT DISTINCT FROM new_lot.block "
+                "AND p.lot IS NOT DISTINCT FROM new_lot.lot) THEN p.tax_map_depth_ft END") in one_line
         assert "FROM (SELECT %s::icid.boro AS boro, %s::text AS block, %s::text AS lot) AS new_lot" in one_line
         assert update_params[-7:] == ("Queens", "1234", "57", PROPERTY_ID, "Queens", "1234", "57")
         assert get.call_args.kwargs["params"]["where"] == "BBL=4012340057"
-        assert run.call_args.args[1] == (Decimal("25.00"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "57")
+        assert run.call_args.args[1] == (Decimal("25.00"), "mappluto_26v2", Decimal("100.00"), PROPERTY_ID, "Queens",
+                                         "1234", "57")
 
     def test_an_edit_that_keeps_the_lot_fetches_nothing(self, admin_client):
         with patch(GET) as get, patch(PROPS, return_value=[CACHED_ROW]):
@@ -840,10 +845,11 @@ class TestRefreshTaxMap:
             response = admin_client.post(self.REFRESH)
         assert response.status_code == 200
         assert response.json()["data"] == {"frontage_ft": 42.5, "source": "mappluto_26v2",
-                                           "fetched_at": "2026-11-05T14:00:00Z", "pages_updated": 2}
+                                           "fetched_at": "2026-11-05T14:00:00Z", "depth_ft": 100.0, "pages_updated": 2}
         sql, params = run.call_args.args
         one_line = " ".join(sql.split())
-        assert params == (Decimal("42.50"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "56")
+        assert params == (Decimal("42.50"), "mappluto_26v2", Decimal("100.00"), PROPERTY_ID, "Queens", "1234", "56")
+        assert "tax_map_fetched_at = now(), tax_map_depth_ft = %s" in one_line
         assert "JOIN icid.pirs pir ON pir.property_id = prop.id AND pir.deleted_at IS NULL" in one_line
         assert "WHERE a.tax_map_source IS DISTINCT FROM 'manual'" in one_line
         assert "WHERE pages.page_number = 1 OR EXISTS" in one_line

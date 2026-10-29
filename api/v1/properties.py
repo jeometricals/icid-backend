@@ -360,7 +360,7 @@ def undelete_property_record(
 @router.post("/{property_id}/admin/refresh-tax-map", response_model=TaxMapRefreshResponse)
 def refresh_tax_map(property_id: UUID, admin: UserOut = Depends(current_admin)) -> TaxMapRefreshResponse:
     """
-    Fetch a sidewalk's tax-map frontage from MapPLUTO again, now (Slice Y1), and write it onto the property and onto the title blocks of its live PIR's pages, but those whose width was typed by hand; page 1 gets a title block if it has none. Admins only, a soft-deleted property included. Logged, as the record of it.
+    Fetch a sidewalk's tax-map frontage (and its lot depth, pilot sweep #2) from MapPLUTO again, now (Slice Y1), and write them onto the property (the depth there only) and onto the title blocks of its live PIR's pages, but those whose width was typed by hand; page 1 gets a title block if it has none. Admins only, a soft-deleted property included. Logged, as the record of it.
     Takes the property's id as a path parameter and the signed-in admin.
     Returns a TaxMapRefreshResponse; raises 400 for a ped ramp, 403 for a user who isn't an admin, 404 for an unknown property, 409 when the property moved to another lot meanwhile, 422 when MapPLUTO has no usable frontage for its lot and 503 when MapPLUTO can't be reached (nothing is written for any of them).
     """
@@ -390,7 +390,8 @@ def refresh_tax_map(property_id: UUID, admin: UserOut = Depends(current_admin)) 
         admin.uuid, datetime.now(timezone.utc).isoformat(),
     )
     data = TaxMapRefresh(frontage_ft=row["tax_map_frontage_ft"], source=row["tax_map_source"],
-                         fetched_at=row["tax_map_fetched_at"], pages_updated=row["pages_updated"])
+                         fetched_at=row["tax_map_fetched_at"], depth_ft=row["tax_map_depth_ft"],
+                         pages_updated=row["pages_updated"])
     return TaxMapRefreshResponse(status="success", message=f"Tax-map frontage refreshed; {row['pages_updated']} title block(s) updated", data=data)
 
 

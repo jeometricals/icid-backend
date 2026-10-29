@@ -1,9 +1,9 @@
 """
 A sidewalk's tax-map frontage from DCP's MapPLUTO (Slice Y1): the lot's LotFront, in feet, asked for by its BBL, and
-the release it came from as the source label (mappluto_26v2).
+the release it came from as the source label (mappluto_26v2); and its depth, LotDepth (pilot sweep #2), fetched with it.
 
 One call, no retry. A lot MapPLUTO doesn't have, or whose frontage is suspect (0 or less, 1000 or more), is None; a
-service that can't be reached or answers with an error raises MapPlutoUnavailable.
+suspect depth is only left out. A service that can't be reached or answers with an error raises MapPlutoUnavailable.
 """
 
 import logging
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # DCP's borough codes, the BBL's first digit
 BORO_CODES = {"Manhattan": "1", "Bronx": "2", "Brooklyn": "3", "Queens": "4", "Staten Island": "5"}
-# A frontage outside these is taken as a bad record, not a lot (decision 12)
+# A frontage (or depth) outside these is taken as a bad record, not a lot (decision 12)
 MIN_FRONTAGE = Decimal("0")
 MAX_FRONTAGE = Decimal("1000")
 CENT = Decimal("0.01")
@@ -67,11 +67,11 @@ def source_display(source: Optional[str]) -> Optional[str]:
 
 def _query(lot_bbl: str) -> list[dict[str, Any]]:
     """
-    Ask MapPLUTO for one lot's frontage and version.
+    Ask MapPLUTO for one lot's frontage, depth and version.
     Takes the BBL.
     Returns the features' attributes (none, or one); raises MapPlutoUnavailable when the call fails.
     """
-    params = {"where": f"BBL={lot_bbl}", "outFields": "BBL,LotFront,Version,Address", "returnGeometry": "false",
+    params = {"where": f"BBL={lot_bbl}", "outFields": "BBL,LotFront,LotDepth,Version,Address", "returnGeometry": "false",
               "f": "json"}
     try:
         response = httpx.get(MAPPLUTO_QUERY_URL, params=params, timeout=MAPPLUTO_TIMEOUT_SECONDS)
@@ -85,13 +85,26 @@ def _query(lot_bbl: str) -> list[dict[str, Any]]:
     return [feature.get("attributes") or {} for feature in body["features"]]
 
 
+def _feet(value: Any) -> Optional[Decimal]:
+    """
+    Read one of MapPLUTO's lengths (LotFront, LotDepth) to the cent.
+    Takes the attribute as MapPLUTO gives it.
+    Returns the feet, or None when it is suspect (0 or less, 1000 or more, not a number).
+    """
+    try:
+        feet = Decimal(str(value)).quantize(CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
+    return feet if feet.is_finite() and MIN_FRONTAGE < feet < MAX_FRONTAGE else None
+
+
 def lookup_lot(boro: str, block: str, lot: str) -> Optional[dict[str, Any]]:
     """
-    Look a lot up in MapPLUTO: its frontage, source label and address, the frontage None when it is suspect (0 or
-    less, 1000 or more, not a number) and the source None for a version not in DCP's form (both logged).
+    Look a lot up in MapPLUTO: its frontage, depth, source label and address, the frontage or the depth None when it is
+    suspect (0 or less, 1000 or more, not a number) and the source None for a version not in DCP's form (logged).
     Takes the borough spelled out, and the block and lot as stored.
-    Returns {frontage_ft, source, address}, or None when MapPLUTO has no such lot (logged); raises MapPlutoUnavailable
-    when MapPLUTO can't be asked.
+    Returns {frontage_ft, depth_ft, source, address}, or None when MapPLUTO has no such lot (logged); raises
+    MapPlutoUnavailable when MapPLUTO can't be asked.
     """
     lot_bbl = bbl(boro, block, lot)
     features = _query(lot_bbl)
@@ -101,35 +114,34 @@ def lookup_lot(boro: str, block: str, lot: str) -> Optional[dict[str, Any]]:
     if len(features) > 1:
         logger.warning("MapPLUTO has %d records for lot %s; using the first", len(features), lot_bbl)
     attributes = features[0]
-    try:
-        frontage = Decimal(str(attributes.get("LotFront"))).quantize(CENT, rounding=ROUND_HALF_UP)
-    except InvalidOperation:
-        frontage = None
-    if frontage is not None and not (frontage.is_finite() and MIN_FRONTAGE < frontage < MAX_FRONTAGE):
-        frontage = None
+    frontage = _feet(attributes.get("LotFront"))
+    depth = _feet(attributes.get("LotDepth"))
     source = source_label(attributes.get("Version"))
     if frontage is None or source is None:
         logger.warning("MapPLUTO's record for lot %s is suspect: LotFront=%r Version=%r", lot_bbl,
                        attributes.get("LotFront"), attributes.get("Version"))
-    return {"frontage_ft": frontage, "source": source, "address": (attributes.get("Address") or "").strip() or None}
+    elif depth is None:
+        logger.warning("MapPLUTO's depth for lot %s is suspect: LotDepth=%r", lot_bbl, attributes.get("LotDepth"))
+    return {"frontage_ft": frontage, "depth_ft": depth, "source": source, "address": (attributes.get("Address") or "").strip() or None}
 
 
-def fetch_frontage_by_bbl(boro: str, block: str, lot: str) -> Optional[tuple[Decimal, str]]:
+def fetch_frontage_by_bbl(boro: str, block: str, lot: str) -> Optional[tuple[Decimal, str, Optional[Decimal]]]:
     """
-    Look a lot's tax-map frontage up in MapPLUTO.
+    Look a lot's tax-map frontage and depth up in MapPLUTO.
     Takes the borough spelled out, and the block and lot as stored.
-    Returns (the frontage in feet to the cent, its source label), or None when MapPLUTO has no such lot or its record
-    is suspect (logged); raises MapPlutoUnavailable when MapPLUTO can't be asked.
+    Returns (the frontage in feet to the cent, its source label, the depth in feet to the cent or None when it is
+    suspect), or None when MapPLUTO has no such lot or its frontage or version is suspect (logged); raises
+    MapPlutoUnavailable when MapPLUTO can't be asked.
     """
     found = lookup_lot(boro, block, lot)
     if found is None or found["frontage_ft"] is None or found["source"] is None:
         return None
-    return found["frontage_ft"], found["source"]
+    return found["frontage_ft"], found["source"], found["depth_ft"]
 
 
 def cache_frontage(property_id: UUID, boro: str, block: Optional[str], lot: Optional[str]) -> None:
     """
-    Fetch a new or moved sidewalk's frontage and cache it on the property, after its response has gone (a background
+    Fetch a new or moved sidewalk's frontage and depth and cache them on the property, after its response has gone (a background
     task). Nothing is raised: a lot MapPLUTO doesn't have, a suspect record, a service that can't be reached and a
     write that fails are logged, and the property keeps no frontage (an admin's refresh is the way back).
     Takes the property's id and the borough, block and lot it was saved at (a ped ramp's None, and then nothing is fetched).

@@ -428,6 +428,8 @@ CREATE TABLE icid.properties (
     tax_map_frontage_ft    NUMERIC(10,2),
     tax_map_source         TEXT,
     tax_map_fetched_at     TIMESTAMPTZ,
+    -- and its depth (LotDepth, pilot sweep #2, migration 065), fetched with it: only beside a frontage, maybe not with one
+    tax_map_depth_ft       NUMERIC(10,2),
     CONSTRAINT chk_properties_tax_map_source
         CHECK (tax_map_source IS NULL OR tax_map_source ~ '^(mappluto_\d{2}v\d+(\.\d+)?|manual|pip_scrape|r1k)$'),
     CONSTRAINT chk_properties_tax_map_frontage
@@ -435,6 +437,9 @@ CREATE TABLE icid.properties (
     CONSTRAINT chk_properties_tax_map_cache
         CHECK ((tax_map_frontage_ft IS NULL) = (tax_map_source IS NULL)
                AND (tax_map_source IS NULL) = (tax_map_fetched_at IS NULL)),
+    CONSTRAINT chk_properties_tax_map_depth
+        CHECK (tax_map_depth_ft IS NULL
+               OR (tax_map_depth_ft > 0 AND tax_map_depth_ft < 1000 AND tax_map_frontage_ft IS NOT NULL)),
     -- A sidewalk's DOF Digital Tax Map PDF, its block's current sheet (Slice Y1.5, migration 059), in bucket tax-maps:
     -- fetched from DOF's map library (with DOF's map id and effective date) or uploaded by an admin
     tax_map_pdf_path            TEXT,

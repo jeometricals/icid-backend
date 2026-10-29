@@ -44,7 +44,7 @@ def find_report_idr(property_id: UUID, idr_id: Optional[UUID] = None) -> Optiona
 
 def get_report_header(property_id: UUID, idr_id: UUID) -> Optional[dict[str, Any]]:
     """
-    Fetch what a Construction Report prints around its sketch: the property, its project's name and DOT rates, its live PIR (with who digitized it and its north bearing), page 1's title block, and the IDR (its number, signature copy and dates, its inspector and its RE).
+    Fetch what a Construction Report prints around its sketch: the property (with its MapPLUTO frontage, depth and their source), its project's name and DOT rates, its live PIR (with who digitized it and its north bearing), page 1's title block, and the IDR (its number, signature copy and dates, its inspector and its RE).
     Takes the property's id and the IDR's.
     Returns the row (title block fields as tb_<field>, NULL without a PIR or a title block), or None when the property or the IDR doesn't exist.
     """
@@ -53,6 +53,7 @@ def get_report_header(property_id: UUID, idr_id: UUID) -> Optional[dict[str, Any
             p.id AS property_id, p.project_id, p.kind::text AS property_kind, p.boro::text AS boro, p.block, p.lot,
             p.property_type, p.address, p.intersection_street_1, p.intersection_street_2, p.quadrant::text AS quadrant,
             p.facing_street::text AS facing_street,
+            p.tax_map_frontage_ft, p.tax_map_depth_ft, p.tax_map_source,
             pr.project_name, pr.cost_per_sf_4in, pr.cost_per_sf_7in,
             pir.id AS pir_id, pir.inspector_initials, pir.inspector_sign_date, pir.digitized_at,
             pir.north_bearing::text AS north_bearing,

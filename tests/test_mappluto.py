@@ -36,13 +36,14 @@ def answer(body: object) -> MagicMock:
     return response
 
 
-def lot(front: object, version: object = "26v2") -> MagicMock:
+def lot(front: object, version: object = "26v2", depth: object = None) -> MagicMock:
     """
     Build MapPLUTO's response for one lot.
-    Takes its LotFront and Version.
+    Takes its LotFront, Version and LotDepth.
     Returns the mock response.
     """
-    return answer({"features": [{"attributes": {"BBL": 1008350041, "LotFront": front, "Version": version}}]})
+    attributes = {"BBL": 1008350041, "LotFront": front, "LotDepth": depth, "Version": version}
+    return answer({"features": [{"attributes": attributes}]})
 
 
 class TestBbl:
@@ -74,7 +75,7 @@ class TestSourceLabel:
 class TestFetchFrontage:
     def test_a_known_lot_gives_its_frontage_and_version(self):
         with patch(GET, return_value=lot(197.5)) as get:
-            assert fetch_frontage_by_bbl("Manhattan", "835", "41") == (Decimal("197.50"), "mappluto_26v2")
+            assert fetch_frontage_by_bbl("Manhattan", "835", "41") == (Decimal("197.50"), "mappluto_26v2", None)
         params = get.call_args.kwargs["params"]
         assert params["where"] == "BBL=1008350041" and params["returnGeometry"] == "false"
         assert get.call_args.kwargs["timeout"] == 10
@@ -100,7 +101,18 @@ class TestFetchFrontage:
         body = {"features": [{"attributes": {"LotFront": 40, "Version": "26v2"}},
                              {"attributes": {"LotFront": 50, "Version": "26v2"}}]}
         with patch(GET, return_value=answer(body)):
-            assert fetch_frontage_by_bbl("Queens", "1", "1") == (Decimal("40.00"), "mappluto_26v2")
+            assert fetch_frontage_by_bbl("Queens", "1", "1") == (Decimal("40.00"), "mappluto_26v2", None)
+
+    def test_the_depth_comes_with_it_to_the_cent(self):
+        """Pilot sweep #2: LotDepth, as 313 38 Street's"""
+        with patch(GET, return_value=lot(16.67, depth=100.17)):
+            assert fetch_frontage_by_bbl("Brooklyn", "700", "62") == (Decimal("16.67"), "mappluto_26v2",
+                                                                       Decimal("100.17"))
+
+    @pytest.mark.parametrize("depth", [0, -5, 1000, None, "NaN", "abc"])
+    def test_a_suspect_depth_is_left_out_and_the_frontage_kept(self, depth):
+        with patch(GET, return_value=lot(40, depth=depth)):
+            assert fetch_frontage_by_bbl("Queens", "1", "1") == (Decimal("40.00"), "mappluto_26v2", None)
 
     @pytest.mark.parametrize("failure", [httpx.ConnectTimeout("slow"), httpx.ConnectError("down")])
     def test_a_service_that_cant_be_reached_raises(self, failure):
@@ -127,12 +139,13 @@ class TestFetchFrontage:
 
 class TestCacheFrontage:
     def test_a_frontage_found_is_written_for_the_lot_it_was_fetched_for(self):
-        with patch(GET, return_value=lot(40)), patch(PROPS, return_value=[{"id": PROPERTY_ID}]) as run:
+        with patch(GET, return_value=lot(40, depth=100)), patch(PROPS, return_value=[{"id": PROPERTY_ID}]) as run:
             cache_frontage(PROPERTY_ID, "Queens", "1234", "56")
         sql, params = run.call_args.args
-        assert "SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now()" in sql
+        assert ("SET tax_map_frontage_ft = %s, tax_map_source = %s, tax_map_fetched_at = now(), tax_map_depth_ft = %s"
+                in sql)
         assert "p.kind = 'sidewalk' AND p.boro = %s::icid.boro AND p.block = %s AND p.lot = %s" in sql
-        assert params == (Decimal("40.00"), "mappluto_26v2", PROPERTY_ID, "Queens", "1234", "56")
+        assert params == (Decimal("40.00"), "mappluto_26v2", Decimal("100.00"), PROPERTY_ID, "Queens", "1234", "56")
 
     def test_no_lot_writes_nothing(self):
         with patch(GET, return_value=answer({"features": []})), patch(PROPS) as run:
@@ -156,11 +169,12 @@ class TestCacheFrontage:
 
 class TestLookupLot:
     def test_it_gives_the_lots_address_too(self):
-        body = {"features": [{"attributes": {"LotFront": 16.67, "Version": "26v2", "Address": " 313 38 STREET "}}]}
+        body = {"features": [{"attributes": {"LotFront": 16.67, "LotDepth": 100.17, "Version": "26v2",
+                                             "Address": " 313 38 STREET "}}]}
         with patch(GET, return_value=answer(body)) as get:
-            assert lookup_lot("Brooklyn", "700", "62") == {"frontage_ft": Decimal("16.67"), "source": "mappluto_26v2",
-                                                           "address": "313 38 STREET"}
-        assert get.call_args.kwargs["params"]["outFields"] == "BBL,LotFront,Version,Address"
+            assert lookup_lot("Brooklyn", "700", "62") == {"frontage_ft": Decimal("16.67"), "depth_ft": Decimal("100.17"),
+                                                           "source": "mappluto_26v2", "address": "313 38 STREET"}
+        assert get.call_args.kwargs["params"]["outFields"] == "BBL,LotFront,LotDepth,Version,Address"
 
     def test_a_suspect_frontage_is_none_with_the_address_kept(self):
         body = {"features": [{"attributes": {"LotFront": 0, "Version": "26v2", "Address": "1 MAIN STREET"}}]}
